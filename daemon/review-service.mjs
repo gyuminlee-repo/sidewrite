@@ -116,6 +116,9 @@ export function resolveUnknownOverrides(rev, snapshot) {
   return { revision: next, resolved };
 }
 
+// What a ledger check result depends on: the rule, not its last result.
+const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
+
 export function createReviewService({
   getContext,
   callTool,
@@ -506,6 +509,7 @@ export function createReviewService({
       const rev = await load(key);
       const wanted = Array.isArray(msg.ids) && msg.ids.length ? new Set(msg.ids) : null;
       const items = rev.ledger.filter((i) => !wanted || wanted.has(i.id));
+      const started = new Map(items.map((i) => [i.id, ruleFingerprint(i)]));
       const paragraphs = msg.snapshot?.paragraphs ?? [];
       // L10: changed paragraphs only unless msg.full (the "Full check" button).
       const decisions = [];
@@ -539,6 +543,26 @@ export function createReviewService({
       const revision = await update(key, (x) => {
         let next = x;
         for (const r of outcomes) {
+          // The rule may have been edited or removed while the check ran: its
+          // result then belongs to the old rule and is dropped, and the item
+          // is left unchecked so the next check reads every paragraph.
+          const now = x.ledger.find((i) => i.id === r.id);
+          if (!now || ruleFingerprint(now) !== started.get(r.id)) {
+            log(
+              `[review] ledger check ${r.id} dropped: rule ${now ? "changed" : "removed"} during the check`,
+            );
+            if (now) {
+              next = updateLedgerItem(next, r.id, {
+                status: "unchecked",
+                violation_count: 0,
+                checked_at: null,
+                violations: [],
+                unsure: [],
+                checked_hashes: null,
+              });
+            }
+            continue;
+          }
           next = updateLedgerItem(next, r.id, {
             status: r.status,
             violation_count: r.violations.length,

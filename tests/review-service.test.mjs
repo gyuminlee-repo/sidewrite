@@ -1049,3 +1049,67 @@ test("receipts: a failed LLM ledger batch is an error verdict; a failed write on
     await t.cleanup();
   }
 });
+
+// A rule edited while an LLM check of it waits: the old verdict and its
+// checked_hashes must not land on the new rule, or the next incremental
+// check skips every paragraph and misses the new rule's violations.
+test("ledger_check drops the result of a rule edited during the check; the next incremental check runs in full", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const t = await setup({
+    oneshot: async () => {
+      await gate;
+      return { ok: true, json: { violations: [], unsure: [] } };
+    },
+  });
+  try {
+    await t.ask("ledger_add", { item: { kind: "forbid", text: "t", check: { type: "llm" } } });
+    const paras = [para(0, "a novel substrate"), para(1, "grown in flasks")];
+    const pending = t.ask("ledger_check", { snapshot: { paragraphs: paras } });
+    await new Promise((r) => setImmediate(r));
+    await t.ask("ledger_update", {
+      id: "L1",
+      patch: { text: NOVEL.text, check: NOVEL.check },
+    });
+    release();
+    const first = await pending;
+    assert.equal(first.ok, true);
+    const item = first.revision.ledger[0];
+    assert.deepEqual([item.status, item.checked_hashes], ["unchecked", null]);
+    assert.ok(t.lines.includes("[review] ledger check L1 dropped: rule changed during the check"));
+    const next = await t.ask("ledger_check", { snapshot: { paragraphs: paras } });
+    assert.equal(next.revision.ledger[0].status, "violations");
+    assert.ok(t.lines.includes("[review] ledger scope L1 mode=full paragraphs=2/2"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("ledger_check skips an item removed during the check and still saves the others", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const t = await setup({
+    oneshot: async () => {
+      await gate;
+      return { ok: true, json: { violations: [], unsure: [] } };
+    },
+  });
+  try {
+    await t.ask("ledger_add", { item: IN_VITRO });
+    await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
+    const paras = [para(0, "measured in-vitro")];
+    const pending = t.ask("ledger_check", { snapshot: { paragraphs: paras } });
+    await new Promise((r) => setImmediate(r));
+    await t.ask("ledger_remove", { id: "L2" });
+    release();
+    const r = await pending;
+    assert.equal(r.ok, true);
+    assert.deepEqual(
+      r.revision.ledger.map((i) => [i.id, i.status]),
+      [["L1", "violations"]],
+    );
+    assert.ok(t.lines.includes("[review] ledger check L2 dropped: rule removed during the check"));
+  } finally {
+    await t.cleanup();
+  }
+});
