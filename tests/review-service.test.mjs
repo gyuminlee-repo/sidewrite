@@ -14,6 +14,7 @@ async function setup({ env = ENV, oneshot = null, callResult, callImpl = null, .
   const dir = await mkdtemp(join(tmpdir(), "review-svc-"));
   const doc = join(dir, "paper.docx");
   const events = [];
+  const jobWaiters = new Map(); // job_id -> resolve, for ask()
   const lines = [];
   const pushed = [];
   const calls = [];
@@ -28,15 +29,24 @@ async function setup({ env = ENV, oneshot = null, callResult, callImpl = null, .
     },
     pushTurn: (key, host, text, turn) => pushed.push({ key, host, text, turn }),
     oneshot,
-    sendEvent: (key, obj) => events.push(obj),
+    sendEvent: (key, obj) => {
+      events.push(obj);
+      if (obj.event === "job_done") jobWaiters.get(obj.job_id)?.(obj);
+    },
     log: (s) => lines.push(s),
     env,
     ...more,
   });
+  // A long job (ledger_check, review_split) answers { accepted, job_id } and
+  // sends its result in a job_done event; ask() resolves with that result.
   const ask = (type, payload = {}) =>
-    new Promise((resolve) =>
-      svc.handlers[type]({ type, request_id: "q1", ...payload }, resolve, "k", "word"),
-    );
+    new Promise((resolve) => {
+      const reply = (r) => {
+        if (!r.accepted) return resolve(r);
+        jobWaiters.set(r.job_id, (e) => resolve({ request_id: r.request_id, ...e.result }));
+      };
+      svc.handlers[type]({ type, request_id: "q1", ...payload }, reply, "k", "word");
+    });
   return {
     dir,
     doc,
@@ -1282,6 +1292,73 @@ test("ledger_check: an older check that ends last does not replace the latest re
   overlappingChecks("old-last"));
 test("ledger_check: an older check that ends first is replaced by the latest result", () =>
   overlappingChecks("old-first"));
+
+// Codex review 8: a long LLM job used to answer only when done, and the task
+// pane stopped waiting after 120 s. The request now answers at once with a
+// job id and the result comes in a job_done event, however long it takes.
+// Waits for a condition the job reaches after its file writes.
+async function until(pred, ms = 5000) {
+  for (const end = Date.now() + ms; !pred(); ) {
+    if (Date.now() > end) throw new Error("condition not reached");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test("ledger_check and review_split answer with a job id at once and send the result in job_done", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const t = await setup({
+    oneshot: async () => {
+      await gate;
+      return { ok: true, json: { violations: [], unsure: [] } };
+    },
+  });
+  try {
+    await t.ask("ledger_add", { item: { kind: "forbid", text: "t", check: { type: "llm" } } });
+    const replies = [];
+    const msg = {
+      type: "ledger_check",
+      request_id: "q9",
+      snapshot: { paragraphs: [para(0, "a")] },
+    };
+    await t.svc.handlers.ledger_check(msg, (r) => replies.push(r), "k", "word");
+    assert.equal(replies.length, 1, "answered while the model still works");
+    const { job_id, ...rest } = replies[0];
+    assert.equal(typeof job_id, "string");
+    assert.deepEqual(rest, {
+      type: "ledger_check_result",
+      request_id: "q9",
+      ok: true,
+      accepted: true,
+    });
+    assert.ok(!t.events.some((e) => e.event === "job_done"), "no result before the model answers");
+    release();
+    await until(() => t.events.some((e) => e.event === "job_done"));
+    const done = t.events.find((e) => e.event === "job_done");
+    assert.equal(done.type, "review_event");
+    assert.equal(done.job_id, job_id);
+    assert.equal(done.result.ok, true);
+    assert.deepEqual(
+      done.result.outcomes.map((o) => [o.id, o.status]),
+      [["L1", "ok"]],
+    );
+
+    const split = [];
+    await t.svc.handlers.review_split(
+      { type: "review_split", request_id: "q10", text: "" },
+      (r) => split.push(r),
+      "k",
+      "word",
+    );
+    assert.equal(split[0].accepted, true);
+    await until(() => t.events.filter((e) => e.event === "job_done").length >= 2);
+    const failed = t.events.filter((e) => e.event === "job_done")[1];
+    assert.equal(failed.job_id, split[0].job_id);
+    assert.equal(typeof failed.result.ok, "boolean");
+  } finally {
+    await t.cleanup();
+  }
+});
 
 // A comment list saved while work on a comment is still open (a review turn,
 // a tracked edit waiting for Word, an edit whose answer may come late, an

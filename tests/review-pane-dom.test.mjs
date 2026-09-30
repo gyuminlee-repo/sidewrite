@@ -430,15 +430,24 @@ test("Propose changes follows the running turn: chat re-render disables, chat en
 test("Save shows the daemon's warning about comments it kept", async () => {
   const revision = { comments: [], ledger: [] };
   const warning = "Not removed because work on it is in progress: R1.1";
-  const t = await setup({
+  let t = null;
+  t = await setup({
     revision,
     respond: {
-      review_split: () => ({
-        ok: true,
-        method: "regex",
-        warnings: [],
-        comments: [{ ref: "R1.3", reviewer: 1, text: "Rename it." }],
-      }),
+      review_split: () => {
+        t.pane.onEvent({
+          type: "review_event",
+          event: "job_done",
+          job_id: "j1",
+          result: {
+            ok: true,
+            method: "regex",
+            warnings: [],
+            comments: [{ ref: "R1.3", reviewer: 1, text: "Rename it." }],
+          },
+        });
+        return { ok: true, accepted: true, job_id: "j1" };
+      },
       review_save_comments: () => ({ ok: true, revision, warnings: [warning] }),
     },
   });
@@ -650,4 +659,75 @@ test("propose: a double click sends one review_propose and keeps the chat input 
   } finally {
     await pane.reload();
   }
+});
+
+// Codex review 8: review_split and ledger_check answer at once with a job id
+// and send the result later in a job_done review_event, so a model that
+// takes longer than any request timeout still shows its result. The event
+// may also come before the answer.
+const SPLIT_RESULT = {
+  ok: true,
+  method: "llm",
+  comments: [{ ref: "R1.1", reviewer: 1, text: "State the unit.", requirements: [] }],
+  warnings: [],
+};
+for (const order of ["answer-first", "event-first"]) {
+  test(`split and ledger check: the result comes in job_done (${order})`, async () => {
+    let t = null;
+    const later = [];
+    const job = (id, result) => () => {
+      const ev = { type: "review_event", event: "job_done", job_id: id, result };
+      if (order === "event-first") t.pane.onEvent(ev);
+      else later.push(ev);
+      return { ok: true, accepted: true, job_id: id };
+    };
+    const revision = {
+      comments: [],
+      ledger: [{ id: "L1", kind: "forbid", text: "t", check: { type: "llm" } }],
+    };
+    t = await setup({
+      revision,
+      word: { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) },
+      respond: {
+        review_split: job("j1", SPLIT_RESULT),
+        ledger_check: job("j2", {
+          ok: true,
+          outcomes: [
+            { id: "L1", status: "violations", violations: [{ paragraph_index: 3, match: "x" }] },
+          ],
+          revision,
+        }),
+      },
+    });
+    const split = t.$("review-split").click();
+    const check = t.$("review-check-all").click();
+    for (let i = 0; i < 20; i++) await null;
+    if (order === "answer-first") {
+      assert.equal(t.$("review-draft-actions").hidden, true, "nothing before job_done");
+      for (const ev of later.reverse()) t.pane.onEvent(ev);
+    }
+    await split;
+    await check;
+    assert.equal(t.$("review-draft-actions").hidden, false, `${order}: split shown`);
+    assert.match(t.$("review-message").textContent, /Split by llm: 1 comment/);
+    assert.deepEqual(
+      t.$("review-violations").children.map((b) => b.textContent),
+      ['L1: paragraph 3 "x"'],
+    );
+    for (const r of t.requests.filter((q) => ["review_split", "ledger_check"].includes(q.type))) {
+      assert.equal(r.opts, undefined, `${r.type}: default request timeout`);
+    }
+  });
+}
+
+test("a job still waiting when the daemon connection restarts ends with an error", async () => {
+  const t = await setup({
+    revision: { comments: [], ledger: [] },
+    respond: { review_split: () => ({ ok: true, accepted: true, job_id: "j9" }) },
+  });
+  const split = t.$("review-split").click();
+  for (let i = 0; i < 20; i++) await null;
+  await t.pane.reload();
+  await split;
+  assert.match(t.$("review-message").textContent, /connection/i);
 });

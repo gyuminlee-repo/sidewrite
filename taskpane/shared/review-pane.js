@@ -29,10 +29,12 @@ import {
 
 const UNKNOWN_HINT =
   "Word did not answer; this exception may already be applied. Refresh status, then check the paragraph.";
-const LONG = 120_000; // LLM split and LLM ledger checks exceed the 10 s default
 // An override waits for the Word tool, which may take up to the daemon's 60 s
-// tool timeout (bridge.mjs TOOL_TIMEOUT_MS); LONG covers it.
-const OVERRIDE_WAIT = LONG;
+// tool timeout (bridge.mjs TOOL_TIMEOUT_MS). A split or a ledger check is a
+// job instead (askJob): no request timeout covers its model calls.
+const OVERRIDE_WAIT = 120_000;
+const CONNECTION_LOST =
+  "The connection to the daemon was lost before the result came. Run it again.";
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 
 export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
@@ -52,6 +54,8 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     turn: null, // L9: { ref, startedAt } of the running review turn
     turnsDone: 0, // turn_done events seen, to spot one that beats its review_propose answer
     timer: null,
+    jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
+    jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
   };
 
   function el(tag, props = {}, ...kids) {
@@ -75,6 +79,29 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     if (!r.ok) throw new Error(r.error || `${type} failed`);
     if (r.revision) state.revision = r.revision;
     return r;
+  }
+  // review_split and ledger_check answer { accepted, job_id } at once; the
+  // result comes in a job_done review_event, possibly before the answer.
+  async function askJob(type, payload) {
+    const { job_id } = await ask(type, payload);
+    let result = state.jobsDone.get(job_id);
+    state.jobsDone.delete(job_id);
+    result ??= await new Promise((resolve, reject) => state.jobs.set(job_id, { resolve, reject }));
+    if (!result.ok) throw new Error(result.error || `${type} failed`);
+    if (result.revision) state.revision = result.revision;
+    return result;
+  }
+  function jobDone(msg) {
+    const w = state.jobs.get(msg.job_id);
+    if (!w) return state.jobsDone.set(msg.job_id, msg.result);
+    state.jobs.delete(msg.job_id);
+    w.resolve(msg.result);
+  }
+  // A new connection never brings the job_done of the old one.
+  function dropJobs() {
+    for (const w of state.jobs.values()) w.reject(new Error(CONNECTION_LOST));
+    state.jobs.clear();
+    state.jobsDone.clear();
   }
   const guard =
     (fn) =>
@@ -543,7 +570,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   // L10: changed paragraphs only unless full.
   async function runLedgerCheck(ids, full = false) {
     const snapshot = await word.collectReviewSnapshot();
-    const r = await ask("ledger_check", { ids, snapshot, full }, LONG);
+    const r = await askJob("ledger_check", { ids, snapshot, full });
     const box = $("review-violations");
     box.replaceChildren();
     for (const res of r.outcomes) {
@@ -568,7 +595,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   $("review-split").addEventListener(
     "click",
     guard(async () => {
-      const r = await ask("review_split", { text: $("review-input").value }, LONG);
+      const r = await askJob("review_split", { text: $("review-input").value });
       state.draft = r.comments.map((c) => ({
         ...c,
         requirementsText: (c.requirements ?? []).map((q) => q.text).join("\n"),
@@ -710,7 +737,9 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
 
   return {
     onEvent(msg) {
-      if (msg.event === "turn_done") {
+      if (msg.event === "job_done") {
+        jobDone(msg);
+      } else if (msg.event === "turn_done") {
         state.turnsDone += 1;
         stopProgress();
         load()
@@ -735,6 +764,8 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     },
     // A new connection (welcome) means no turn of this pane is running any
     // more: a daemon restart never sends turn_done, so clear the progress line.
-    reload: () => (stopProgress(), load()).catch((e) => say(e.message, true)).finally(render),
+    // Jobs of the old connection are ended with an error first.
+    reload: () =>
+      (dropJobs(), stopProgress(), load()).catch((e) => say(e.message, true)).finally(render),
   };
 }
