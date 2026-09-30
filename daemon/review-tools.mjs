@@ -10,6 +10,7 @@
 import { z } from "zod";
 import { forbidHits } from "./ledger-check.mjs";
 import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
+import { changeContext } from "./revision-classify.mjs";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
 
@@ -234,6 +235,11 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     lost_facts: lost,
     unsourced_terms: unsourced,
     narrowed_from: narrowed ? { find: args.find, text: newText } : null,
+    // Words around the range the task pane changed (revision-classify.mjs).
+    context: changeContext(r.before, args.find, {
+      kind,
+      narrowFind: narrowed ? narrow.find : null,
+    }),
   };
   const saved = await deps.onEdit?.({ ref: turn.ref, change });
   const id = saved?.id ?? "?";

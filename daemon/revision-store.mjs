@@ -56,6 +56,10 @@ export const ChangeSchema = z.object({
   unsourced_terms: z.array(z.string()).default([]),
   // L3: the find/replace the model asked for, when the applied range is smaller.
   narrowed_from: z.object({ find: z.string(), text: z.string() }).nullable().default(null),
+  // Up to 3 words before and after the changed range at edit time, so one
+  // change can be judged apart from others in the same paragraph. null for
+  // changes recorded before this field (whole-paragraph rule).
+  context: z.object({ left: z.string(), right: z.string() }).nullable().default(null),
   created_at: z.string(),
   state: z.enum(["pending", "accepted", "rejected", "user_edited", "unlocated"]).default("pending"),
   checked_at: z.string().nullable().default(null),

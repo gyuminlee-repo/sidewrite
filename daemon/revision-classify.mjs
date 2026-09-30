@@ -66,6 +66,98 @@ export function locateParagraph(change, snapshot) {
   return { index: null, method: "not_found" };
 }
 
+// ---- per-change context -----------------------------------------------------
+//
+// One paragraph can hold several tool changes, so the whole paragraph text
+// says little about one of them. At record time the daemon keeps `context`:
+// up to CONTEXT_WORDS words right before and right after the range the task
+// pane changed (for an insertion, around the insertion point). A change is
+// then judged by which form of its own range is in the paragraph now
+// (L = left, R = right, D = change.find, I = change.text):
+//   replace  pending L+I+D+R (Word shows inserted then deleted text),
+//            accepted L+I+R, rejected L+D+R
+//   insert   L+I+R present (pending while revision marks remain, else
+//            accepted), L+R present: rejected
+//   delete   L+D+R present (pending while marks remain, else rejected),
+//            L+R present: accepted
+// A sibling change can alter the context words, so the check is repeated
+// with fewer context words (3, 2, 1, 0) until one form alone matches. For a
+// pure insertion or deletion the pending text equals the accepted or the
+// rejected text, so the paragraph's revision marks still decide pending;
+// such a change next to a pending sibling reads pending.
+
+export const CONTEXT_WORDS = 3;
+
+const collapse = (s) =>
+  String(s ?? "")
+    .replace(/\u0005/g, "")
+    .replace(/\s+/g, " ");
+
+function tailWords(s, k) {
+  return k > 0 ? (s.match(/\S+\s*/g) ?? []).slice(-k).join("") : "";
+}
+
+function headWords(s, k) {
+  return k > 0 ? (s.match(/\s*\S+/g) ?? []).slice(0, k).join("") : "";
+}
+
+// before: the paragraph text the task pane saw; find: the find of the tool
+// call (unique in that paragraph); narrowFind: the part of find the task
+// pane actually replaced (L3), if it narrowed. Returns { left, right } or
+// null when find is not exactly once in before.
+export function changeContext(before, find, { kind = "replace", narrowFind = null } = {}) {
+  const b = normalizeParaText(before);
+  const f = collapse(find);
+  const i = f.trim() ? b.indexOf(f) : -1;
+  if (i === -1 || b.indexOf(f, i + 1) !== -1) return null;
+  let start = i;
+  let end = i + f.length;
+  if (kind === "insert") {
+    start = end;
+  } else if (narrowFind) {
+    const j = f.indexOf(collapse(narrowFind));
+    if (j === -1) return null;
+    start = i + j;
+    end = start + collapse(narrowFind).length;
+  }
+  return {
+    left: tailWords(b.slice(0, start), CONTEXT_WORDS),
+    right: headWords(b.slice(end), CONTEXT_WORDS),
+  };
+}
+
+function classifyByContext(change, t, revisions) {
+  const { left, right } = change.context;
+  const I = collapse(change.text);
+  const D = collapse(change.find);
+  const has = (form) => {
+    const x = normalizeParaText(form);
+    return x !== "" && t.includes(x);
+  };
+  for (let k = CONTEXT_WORDS; k >= 0; k--) {
+    const L = tailWords(left, k);
+    const R = headWords(right, k);
+    if (change.kind === "replace") {
+      if (has(L + I + D + R)) return "pending";
+      const a = has(L + I + R);
+      const b = has(L + D + R);
+      if (a && !b) return "accepted";
+      if (b && !a) return "rejected";
+    } else if (change.kind === "insert") {
+      const a = has(L + I + R);
+      const b = has(L + R);
+      if (a && !b) return revisions > 0 ? "pending" : "accepted";
+      if (b && !a) return "rejected";
+    } else {
+      const a = has(L + R);
+      const b = has(L + D + R);
+      if (b && !a) return revisions > 0 ? "pending" : "rejected";
+      if (a && !b) return "accepted";
+    }
+  }
+  return null;
+}
+
 export function classifyChange(change, snapshot) {
   const loc = locateParagraph(change, snapshot);
   const commentIds = new Set((snapshot.comments ?? []).map((c) => String(c.id)));
@@ -85,6 +177,13 @@ export function classifyChange(change, snapshot) {
   const after = normalizeParaText(change.after);
   const out = (state) => ({ state, paragraph_index: loc.index, method: loc.method });
   const revisions = (p.w_ins ?? 0) + (p.w_del ?? 0);
+  // Changes recorded with context are judged on their own range; changes
+  // recorded before context existed, or no single form matched, fall
+  // through to the whole-paragraph rule below.
+  if (change.context) {
+    const state = classifyByContext(change, t, revisions);
+    if (state) return out(state);
+  }
   if (revisions > 0) {
     // A pending replace reads as inserted+deleted text, i.e. neither side.
     // A pending pure insertion reads as "after" and a pending pure deletion

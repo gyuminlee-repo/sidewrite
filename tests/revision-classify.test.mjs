@@ -7,6 +7,7 @@ import {
   classifyRevision,
   summarizeStates,
 } from "../daemon/revision-classify.mjs";
+import * as classify from "../daemon/revision-classify.mjs";
 
 // Measured in Word on 2026-09-30 (session f2748a6f, office_spike_* outputs:
 // comment_on_tracked x3, revision_state before and after the user acted).
@@ -273,4 +274,176 @@ test("classifyRevision and summarizeStates cover every change", () => {
     user_edited: 1,
     unlocated: 0,
   });
+});
+
+// ---- per-change context (several tool changes in one paragraph) ------------
+//
+// A change recorded with `context` (a few words either side of the range the
+// task pane changed) is judged on its own range, not on the whole paragraph.
+const withContext = (ch, find, text, extra = {}) => ({
+  ...ch,
+  find,
+  text,
+  context: classify.changeContext(ch.before, find, { kind: ch.kind, ...extra }),
+});
+
+test("changeContext: words around the applied range, narrowed range, insertion point", () => {
+  const before = "the incubation temperature was held at 30 degrees for a day";
+  assert.deepEqual(classify.changeContext(before, "held at 30", { kind: "replace" }), {
+    left: "incubation temperature was ",
+    right: " degrees for a",
+  });
+  // Narrowed (L3): the task pane changed only "held" inside "was held at".
+  assert.deepEqual(
+    classify.changeContext(before, "was held at", { kind: "replace", narrowFind: "held" }),
+    { left: "incubation temperature was ", right: " at 30 degrees" },
+  );
+  // Insertion: the new text goes right after `find`.
+  assert.deepEqual(classify.changeContext(before, "30 degrees", { kind: "insert" }), {
+    left: "at 30 degrees",
+    right: " for a day",
+  });
+  assert.deepEqual(classify.changeContext("A crude extract was prepared by", "A crude", {}), {
+    left: "",
+    right: " extract was prepared",
+  });
+  assert.equal(classify.changeContext(before, "absent words", {}), null);
+  assert.equal(classify.changeContext("a b a b", "a b", {}), null, "ambiguous find");
+});
+
+test("measured Word fixtures give the same states through the context rule", () => {
+  const c9 = withContext(change9, OLD9, NEW9);
+  const c14 = withContext(
+    change14,
+    "A crude extract was prepared",
+    "A soluble extract was prepared",
+  );
+  const c22 = withContext(change22, "The crude extract showed", "The soluble extract showed");
+  for (const ch of [c9, c14, c22]) {
+    assert.ok(ch.context, ch.id);
+    assert.equal(classifyChange(ch, pendingSnapshot).state, "pending", ch.id);
+  }
+  assert.equal(classifyChange(c9, settledSnapshot).state, "accepted");
+  assert.equal(classifyChange(c14, settledSnapshot).state, "rejected");
+  assert.equal(classifyChange(c22, settledSnapshot).state, "user_edited");
+});
+
+test("insertion and deletion fixtures give the same states through the context rule", () => {
+  const ins = withContext(insertChange, "four days", " (optical density at 600 nm)");
+  const para = (text, w_ins = 0, w_del = 0) => ({ index: 18, id: null, text, w_ins, w_del });
+  const snap = (p, comments = [{ id: "777", paragraph_index: 18 }]) => ({
+    paragraphs: [p],
+    comments,
+  });
+  assert.equal(classifyChange(ins, snap(para(insertChange.after + A, 1))).state, "pending");
+  assert.equal(classifyChange(ins, snap(para(insertChange.after))).state, "accepted");
+  assert.equal(classifyChange(ins, snap(para(insertChange.before), [])).state, "rejected");
+  assert.equal(
+    classifyChange(ins, snap(para("Growth plateaued after four days."), [])).state,
+    "rejected",
+  );
+  const del = withContext(
+    {
+      id: "R1.2-1",
+      kind: "delete",
+      word_comment_id: "55",
+      paragraph_index: 18,
+      paragraph_id: null,
+      before: "Keep this. Drop this sentence.",
+      after: "Keep this.",
+    },
+    " Drop this sentence.",
+    "",
+  );
+  assert.equal(
+    classifyChange(
+      del,
+      snap(para("Keep this. Drop this sentence." + A, 0, 1), [{ id: "55", paragraph_index: 18 }]),
+    ).state,
+    "pending",
+  );
+  assert.equal(
+    classifyChange(del, snap(para("Keep this." + A), [{ id: "55", paragraph_index: 18 }])).state,
+    "accepted",
+  );
+  assert.equal(
+    classifyChange(
+      del,
+      snap(para("Keep this. Drop this sentence."), [{ id: "55", paragraph_index: 18 }]),
+    ).state,
+    "rejected",
+  );
+});
+
+// Two tool changes three words apart in one paragraph. B was recorded while A
+// was pending, so the paragraph text B saw holds A's inserted and deleted
+// text back to back (the measured pending form).
+const P0 =
+  "Cells were grown at 30 degrees in a mineral medium with shaking and were harvested after two days.";
+const A_OLD = "30 degrees";
+const A_NEW = "30 °C";
+const B_OLD = "mineral medium";
+const B_NEW = "defined medium";
+const pendingA = P0.replace(A_OLD, A_NEW + A_OLD);
+const twoA = () =>
+  withContext(
+    {
+      id: "R1.1-1",
+      kind: "replace",
+      word_comment_id: "a",
+      paragraph_index: 5,
+      paragraph_id: null,
+      before: P0,
+      after: P0.replace(A_OLD, A_NEW),
+    },
+    A_OLD,
+    A_NEW,
+  );
+const twoB = () =>
+  withContext(
+    {
+      id: "R1.2-1",
+      kind: "replace",
+      word_comment_id: "b",
+      paragraph_index: 5,
+      paragraph_id: null,
+      before: pendingA,
+      after: pendingA.replace(B_OLD, B_NEW),
+    },
+    B_OLD,
+    B_NEW,
+  );
+const onePara = (text, marks = 0) => ({
+  paragraphs: [{ index: 5, id: null, text, w_ins: marks, w_del: marks }],
+  comments: [
+    { id: "a", paragraph_index: 5 },
+    { id: "b", paragraph_index: 5 },
+  ],
+});
+const states = (snap) => [classifyChange(twoA(), snap).state, classifyChange(twoB(), snap).state];
+
+test("two changes in one paragraph: both accepted", () => {
+  const t = P0.replace(A_OLD, A_NEW).replace(B_OLD, B_NEW);
+  assert.deepEqual(states(onePara(t)), ["accepted", "accepted"]);
+});
+
+test("two changes in one paragraph: A accepted while B is still pending", () => {
+  const t = P0.replace(A_OLD, A_NEW).replace(B_OLD, B_NEW + A + B_OLD + A);
+  assert.deepEqual(states(onePara(t, 1)), ["accepted", "pending"]);
+});
+
+test("two changes in one paragraph: A rejected, B accepted", () => {
+  const t = P0.replace(B_OLD, B_NEW);
+  assert.deepEqual(states(onePara(t)), ["rejected", "accepted"]);
+});
+
+test("two changes in one paragraph: both accepted, then the author rewrote B only", () => {
+  const t = P0.replace(A_OLD, A_NEW).replace(B_OLD, "synthetic broth");
+  assert.deepEqual(states(onePara(t)), ["accepted", "user_edited"]);
+});
+
+test("a change recorded without context keeps the whole-paragraph rule", () => {
+  const t = P0.replace(A_OLD, A_NEW).replace(B_OLD, B_NEW);
+  const oldA = { ...twoA(), context: null };
+  assert.equal(classifyChange(oldA, onePara(t)).state, "user_edited");
 });

@@ -165,6 +165,8 @@ test("replace: applied once, comment text composed, change recorded", async () =
     [change.kind, change.text, change.before, change.after, change.paragraph_id],
     ["replace", "30 °C", "held at 30 degrees", "held at 30 °C", "P9"],
   );
+  // Words around the changed range, for judging this change on its own.
+  assert.deepEqual(change.context, { left: "held at ", right: "" });
   assert.match(
     d.lines[0],
     /^\[review\] change recorded R1\.1-1 kind=replace comment=123 paragraph=9 narrowed=0 lost=0 unsourced=0$/,
@@ -293,7 +295,7 @@ test("L2 new words found in neither the snapshot nor the comment are reported", 
 });
 
 test("L3 narrowed range: recorded find, text and kind follow what the task pane applied", async () => {
-  let d = deps({ narrowed: true });
+  let d = deps({ narrowed: true, before: "the red big dog" });
   await applyTrackedEdit(
     d,
     { comment_ref: "R1.2", find: "the red big dog", replace: "the big dog", rationale: R },
@@ -305,6 +307,7 @@ test("L3 narrowed range: recorded find, text and kind follow what the task pane 
     [ch.kind, ch.find, ch.text, ch.narrowed_from],
     ["delete", "red ", "", { find: "the red big dog", text: "the big dog" }],
   );
+  assert.deepEqual(ch.context, { left: "the ", right: "big dog" });
   d = deps(); // the task pane could not narrow: full range recorded
   await applyTrackedEdit(
     d,
