@@ -13,6 +13,7 @@ import { getSessionId, saveSessionId, touchFolder } from "./sessions.mjs";
 import { readTranscript } from "./transcript.mjs";
 import { diag } from "./diag.mjs";
 import { getContextEntries, setContextEntries } from "./context.mjs";
+import { buildQueryOptions, formatUsageLine, resolveSettingSources, userMcpEnabled } from "./query-options.mjs";
 import { stat } from "node:fs/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -732,13 +733,17 @@ const WORD_MCP_DISALLOWED = [
   "mcp__word-mcp__word_undo_last_edit",
 ];
 
-const userMcpServers = await loadUserMcpServers();
+const userMcpServers = userMcpEnabled() ? await loadUserMcpServers() : {};
 const userMcpNames = Object.keys(userMcpServers);
 if (userMcpNames.length > 0) {
   console.log(
     `[daemon] Loaded ${userMcpNames.length} MCP server(s) from ~/.claude.json: ${userMcpNames.join(", ")}`,
   );
 }
+console.log(
+  `[daemon] settingSources: ${JSON.stringify(resolveSettingSources() ?? "all")}; ` +
+    `user MCP from ~/.claude.json: ${userMcpEnabled() ? "on" : "off (CC_OFFICE_LOAD_USER_MCP=1 to load)"}`,
+);
 
 // Preflight HTTP MCP servers. The SDK will silently drop any server whose
 // initial handshake fails, with no retry for the lifetime of the session
@@ -1038,24 +1043,18 @@ async function startSessionForFolder(
     try {
       for await (const msg of query({
         prompt: userMessageStream(key, session),
-        options: {
+        options: buildQueryOptions({
           cwd,
-          systemPrompt: {
-            type: "preset",
-            preset: "claude_code",
-            append,
-          },
-          mcpServers: { ...userMcpServers, office: officeMcp },
+          append,
+          officeMcp,
+          userMcpServers,
           disallowedTools: WORD_MCP_DISALLOWED,
           canUseTool: customPermissionHandler,
-          includePartialMessages: true,
           // User-chosen model (composer dropdown); always explicit.
           model: modelArgFor(key),
           abortController,
-          // Surface the SDK CLI's stderr (MCP connect failures, internal
-          // warnings, etc.) in our daemon log. Also sniff it for
-          // usage-limit phrasing so we can show the user a clear message
-          // instead of a silently stuck "Working…".
+          // Surface the SDK CLI's stderr in the daemon log and sniff it for
+          // usage-limit phrasing (see RATE_LIMIT_RE above).
           stderr: (data) => {
             for (const line of String(data).split(/\r?\n/)) {
               if (!line.trim()) continue;
@@ -1063,8 +1062,8 @@ async function startSessionForFolder(
               if (!rateLimitHint && RATE_LIMIT_RE.test(line)) rateLimitHint = line.trim();
             }
           },
-          ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-        },
+          resume: resumeSessionId,
+        }),
       })) {
         if (sessionFor(key) !== session) break; // this pane's loop was restarted
         if (msg.type === "result") sawResult = true;
@@ -1247,6 +1246,7 @@ function handleAgentMessage(msg, session) {
       console.log(
         `[agent] turn complete (${msg.subtype}) slash=${!!session?.slashCommandPending} output=${!!session?.turnProducedOutput}`,
       );
+      console.log(formatUsageLine(msg.usage));
       // A slash command that emitted neither assistant text nor a tool call
       // (terminal-only built-ins: /help, /context, /clear, …) would
       // otherwise complete silently and look broken. Surface a note.
