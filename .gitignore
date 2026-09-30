@@ -23,6 +23,7 @@ dist/
 
 # Review sidecars written next to a manuscript (only if a test manuscript sits here)
 tests/fixtures/*.revision.json
+tests/fixtures/*.decisions.jsonl
 tests/fixtures/*.comments_backup*.json
 .codex-review-attempt
 __pycache__/

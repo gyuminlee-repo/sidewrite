@@ -15,6 +15,7 @@ import { access } from "node:fs/promises";
 import {
   localDocPath,
   revisionPathFor,
+  decisionsPathFor,
   commentsBackupPathFor,
   loadRevision,
   withRevision,
@@ -49,6 +50,7 @@ import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental } from "./ledger-check.mjs";
 import { snapshotTexts, outsideChanges } from "./doc-diff.mjs";
 import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
+import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
 
 async function exists(p) {
   try {
@@ -119,6 +121,10 @@ export function createReviewService({
   callTool,
   pushTurn,
   oneshot = null,
+  // Model names for decision receipts: the one-shot model, and the model of
+  // the drafting session of a pane (getModel(key)). null when unknown.
+  oneshotModel = null,
+  getModel = () => null,
   sendEvent = () => {},
   log = console.log,
   env = process.env,
@@ -156,6 +162,17 @@ export function createReviewService({
     return withRevision(path, doc, fn);
   };
 
+  // Decision receipts (decision-log.mjs). A receipt never stops the feature
+  // it records: a failure only logs.
+  async function receipt(key, records) {
+    if (!records.length) return;
+    try {
+      await appendDecisions(decisionsPathFor(docFor(key).doc), records);
+    } catch (e) {
+      log(`[review] decision log failed: ${e?.message ?? e}`);
+    }
+  }
+
   // Overrides this daemon is running, per review file: "<ref>\0<blocked id>".
   // An applying item not in here was left by a daemon that stopped.
   const applying = new Map();
@@ -184,11 +201,30 @@ export function createReviewService({
       },
       onEdit: async ({ ref, change }) => {
         let saved = null;
+        let comment = null;
         await update(key, (rev) => {
           const r = addChange(rev, ref, change);
           saved = r.change;
+          comment = findComment(rev, ref);
           return r.revision;
         });
+        await receipt(key, [
+          decisionRecord({
+            kind: "requirement_link",
+            input: {
+              comment: comment?.text ?? "",
+              requirements: comment?.requirements ?? [],
+              find: saved.find,
+              text: saved.text,
+            },
+            model: getModel(key),
+            output: {
+              change_id: saved.id,
+              comment_ref: ref,
+              requirement_ids: saved.rationale?.requirement_ids ?? [],
+            },
+          }),
+        ]);
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
         return saved;
       },
@@ -270,8 +306,32 @@ export function createReviewService({
       const { path } = docFor(key);
       return { path, revision: await update(key, (rev) => clearStale(key, rev)) };
     },
-    async review_split(msg) {
-      return splitReview(String(msg.text ?? ""), { patterns: msg.patterns, oneshot });
+    async review_split(msg, key) {
+      const text = String(msg.text ?? "");
+      // A receipt only when the model was asked (a regex split is no LLM decision).
+      let asked = false;
+      const ask =
+        oneshot &&
+        ((req) => {
+          asked = true;
+          return oneshot(req);
+        });
+      const r = await splitReview(text, { patterns: msg.patterns, oneshot: ask });
+      if (asked) {
+        await receipt(key, [
+          decisionRecord({
+            kind: "comment_split",
+            input: text,
+            model: oneshotModel,
+            output: {
+              method: r.method,
+              refs: r.comments.map((c) => c.ref),
+              warnings: r.warnings.map(redactQuotes),
+            },
+          }),
+        ]);
+      }
+      return r;
     },
     async review_save_comments(msg, key) {
       const incoming = Array.isArray(msg.comments) ? msg.comments : [];
@@ -448,10 +508,26 @@ export function createReviewService({
       const items = rev.ledger.filter((i) => !wanted || wanted.has(i.id));
       const paragraphs = msg.snapshot?.paragraphs ?? [];
       // L10: changed paragraphs only unless msg.full (the "Full check" button).
+      const decisions = [];
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
         oneshot,
         full: msg.full === true,
+        onDecision: (d) =>
+          decisions.push(
+            decisionRecord({
+              kind: "ledger_check",
+              input: { instruction: d.instruction, paragraph: d.paragraph },
+              model: oneshotModel,
+              output: {
+                item_id: d.item_id,
+                paragraph_index: d.paragraph_index,
+                verdict: d.verdict,
+                ...(d.error ? { error: String(d.error).slice(0, 200) } : {}),
+              },
+            }),
+          ),
       });
+      await receipt(key, decisions);
       const at = new Date().toISOString();
       for (const r of outcomes) {
         const unsure = r.unsure.length ? ` unsure=${r.unsure.length}` : "";

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createReviewService } from "../daemon/review-service.mjs";
@@ -8,7 +8,7 @@ import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 
-async function setup({ env = ENV, oneshot = null, callResult, callImpl = null } = {}) {
+async function setup({ env = ENV, oneshot = null, callResult, callImpl = null, ...more } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "review-svc-"));
   const doc = join(dir, "paper.docx");
   const events = [];
@@ -29,6 +29,7 @@ async function setup({ env = ENV, oneshot = null, callResult, callImpl = null } 
     sendEvent: (key, obj) => events.push(obj),
     log: (s) => lines.push(s),
     env,
+    ...more,
   });
   const ask = (type, payload = {}) =>
     new Promise((resolve) =>
@@ -921,6 +922,129 @@ test("ledger_check stores an unsure LLM verdict on the item", async () => {
     const item = r.revision.ledger[0];
     assert.deepEqual([item.status, item.unsure.length, item.checked_hashes], ["unsure", 1, []]);
     assert.ok(t.lines.includes("[review] ledger check L1 status=unsure violations=0 unsure=1"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+const readDecisions = async (dir) =>
+  (await readFile(join(dir, "paper.decisions.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+
+test("receipts: an LLM split, LLM ledger verdicts and requirement links land in <stem>.decisions.jsonl", async () => {
+  const REVIEW = 'Please say how "secret growth phrase" was followed.';
+  let call = 0;
+  const t = await setup({
+    oneshotModel: "haiku",
+    getModel: () => "sonnet",
+    oneshot: async () => {
+      call += 1;
+      if (call === 1)
+        return { ok: true, json: { comments: [{ reviewer: 1, number: 1, text: REVIEW }] } };
+      return {
+        ok: true,
+        json: {
+          violations: [{ paragraph_index: 3, quote: "hidden words", reason: "r" }],
+          unsure: [{ paragraph_index: 4, reason: "?" }],
+        },
+      };
+    },
+  });
+  try {
+    await t.ask("review_split", { text: REVIEW });
+    await t.ask("ledger_add", {
+      item: { kind: "instruction", text: "secret rule", check: { type: "llm" } },
+    });
+    await t.ask("ledger_check", {
+      snapshot: {
+        paragraphs: [
+          { index: 3, text: "some hidden words", reviewed_text: "some hidden words" },
+          { index: 4, text: "maybe", reviewed_text: "maybe" },
+          { index: 5, text: "fine", reviewed_text: "fine" },
+        ],
+      },
+    });
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("review_set_requirements", { ref: "R1.1", requirements: ["use Celsius"] });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({
+        ok: true,
+        word_comment_id: 4,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+      }),
+    };
+    await applyTrackedEdit(
+      deps,
+      {
+        comment_ref: "R1.1",
+        find: "30 degrees",
+        replace: "30 °C",
+        rationale: { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] },
+      },
+      { ref: "R1.1" },
+    );
+    const raw = await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8");
+    for (const secret of ["secret growth phrase", "secret rule", "hidden words", "30 degrees"])
+      assert.ok(!raw.includes(secret), secret);
+    const rows = await readDecisions(t.dir);
+    assert.deepEqual(
+      rows.map((r) => [r.kind, r.model, r.expected]),
+      [
+        ["comment_split", "haiku", null],
+        ["ledger_check", "haiku", null],
+        ["ledger_check", "haiku", null],
+        ["ledger_check", "haiku", null],
+        ["requirement_link", "sonnet", null],
+      ],
+    );
+    for (const r of rows) {
+      assert.match(r.input_fingerprint, /^[0-9a-f]{64}$/);
+      assert.ok(!Number.isNaN(Date.parse(r.ts)));
+    }
+    assert.deepEqual(rows[0].output.refs, ["R1.1"]);
+    assert.equal(rows[0].output.method, "llm");
+    assert.deepEqual(
+      rows.slice(1, 4).map((r) => [r.output.item_id, r.output.paragraph_index, r.output.verdict]),
+      [
+        ["L1", 3, "violation"],
+        ["L1", 4, "unsure"],
+        ["L1", 5, "ok"],
+      ],
+    );
+    assert.deepEqual(rows[4].output, {
+      change_id: "R1.1-1",
+      comment_ref: "R1.1",
+      requirement_ids: ["q1"],
+    });
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("receipts: a failed LLM ledger batch is an error verdict; a failed write only logs", async () => {
+  const t = await setup({ oneshot: async () => ({ ok: false, error: "limit" }) });
+  try {
+    await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
+    const r = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 2, text: "a", reviewed_text: "a" }] },
+    });
+    assert.equal(r.revision.ledger[0].status, "error");
+    const [row] = await readDecisions(t.dir);
+    assert.deepEqual([row.output.verdict, row.output.error, row.model], ["error", "limit", null]);
+    // A directory where the receipt file should be: the append fails.
+    await rm(join(t.dir, "paper.decisions.jsonl"));
+    await mkdir(join(t.dir, "paper.decisions.jsonl"));
+    const again = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 2, text: "a", reviewed_text: "a" }] },
+      full: true,
+    });
+    assert.equal(again.ok, true);
+    assert.ok(t.lines.some((l) => l.startsWith("[review] decision log failed")));
   } finally {
     await t.cleanup();
   }

@@ -25,7 +25,7 @@ import {
   noteMessage,
 } from "./limit-detect.mjs";
 import { createReviewService } from "./review-service.mjs";
-import { makeOneshot } from "./oneshot.mjs";
+import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
 import {
   buildQueryOptions,
   formatUsageLine,
@@ -528,6 +528,8 @@ const review = createReviewService({
     bridge.pushUserMessage(text, key);
   },
   oneshot: makeOneshot(),
+  oneshotModel: ONESHOT_MODEL,
+  getModel: (key) => modelArgFor(key),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
 });
 

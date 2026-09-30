@@ -125,10 +125,14 @@ export function llmReplyProblem(json) {
   return null;
 }
 
+// onDecision (optional): called once per paragraph the model judged, with
+// { item_id, paragraph_index, instruction, paragraph, verdict, error? };
+// verdict is violation, ok, unsure, or error (failed or malformed reply).
+// It carries the texts so the caller can fingerprint them (decision-log.mjs).
 export async function checkLlmItem(
   item,
   paragraphs,
-  { oneshot, maxChars = 6000, maxBatches = 20 } = {},
+  { oneshot, maxChars = 6000, maxBatches = 20, onDecision = null } = {},
 ) {
   if (!oneshot)
     return { id: item.id, status: "error", error: "no one-shot runner", violations: [] };
@@ -143,18 +147,31 @@ export async function checkLlmItem(
   }
   const violations = [];
   const unsure = [];
+  const decide = (batch, verdictOf, error) => {
+    for (const p of batch) {
+      onDecision?.({
+        item_id: item.id,
+        paragraph_index: p.index,
+        instruction: item.text,
+        paragraph: viewText(p),
+        verdict: verdictOf(p.index),
+        ...(error ? { error } : {}),
+      });
+    }
+  };
   for (const batch of batches) {
     const r = await oneshot({ system: LEDGER_SYSTEM, prompt: ledgerPrompt(item, batch) });
-    if (!r.ok) return { id: item.id, status: "error", error: r.error, violations, unsure };
+    if (!r.ok) {
+      decide(batch, () => "error", r.error);
+      return { id: item.id, status: "error", error: r.error, violations, unsure };
+    }
     const problem = llmReplyProblem(r.json);
-    if (problem)
-      return {
-        id: item.id,
-        status: "error",
-        error: `malformed LLM reply: ${problem}`,
-        violations,
-        unsure,
-      };
+    if (problem) {
+      const error = `malformed LLM reply: ${problem}`;
+      decide(batch, () => "error", error);
+      return { id: item.id, status: "error", error, violations, unsure };
+    }
+    const before = { violations: violations.length, unsure: unsure.length };
     for (const v of r.json.violations) {
       const para = batch.find((p) => p.index === Number(v?.paragraph_index));
       if (!para) continue;
@@ -172,6 +189,9 @@ export async function checkLlmItem(
       const para = batch.find((p) => p.index === Number(u.paragraph_index));
       if (para) unsure.push({ paragraph_index: para.index, reason: u.reason });
     }
+    const hit = new Set(violations.slice(before.violations).map((v) => v.paragraph_index));
+    const open = new Set(unsure.slice(before.unsure).map((u) => u.paragraph_index));
+    decide(batch, (i) => (hit.has(i) ? "violation" : open.has(i) ? "unsure" : "ok"));
   }
   return { id: item.id, status: llmStatus(violations, unsure), violations, unsure };
 }

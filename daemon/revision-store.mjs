@@ -199,6 +199,8 @@ export function sidecarPath(docPath, suffix) {
 
 export const revisionPathFor = (docPath) => sidecarPath(docPath, ".revision.json");
 export const commentsBackupPathFor = (docPath) => sidecarPath(docPath, ".comments_backup.json");
+// LLM decision receipts (decision-log.mjs), append only.
+export const decisionsPathFor = (docPath) => sidecarPath(docPath, ".decisions.jsonl");
 
 // ---- load / save ------------------------------------------------------------
 
