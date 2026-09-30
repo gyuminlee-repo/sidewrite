@@ -1235,6 +1235,54 @@ test("ledger_check: a stale check that ends after a newer one leaves the newer r
   }
 });
 
+// Codex review 8: two checks of the same rule on two snapshots overlap. The
+// rule fingerprint is the same, so only the check generation tells which one
+// is the latest: the result of the check started last is kept, in either
+// order of completion.
+async function overlappingChecks(order) {
+  const gates = { old: null, fresh: null };
+  const opened = { old: new Promise((r) => (gates.old = r)), fresh: null };
+  opened.fresh = new Promise((r) => (gates.fresh = r));
+  const t = await setup({
+    oneshot: async (req) => {
+      if (req.prompt.includes("novel")) {
+        await opened.old;
+        return {
+          ok: true,
+          json: { violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }], unsure: [] },
+        };
+      }
+      await opened.fresh;
+      return { ok: true, json: { violations: [], unsure: [] } };
+    },
+  });
+  try {
+    await t.ask("ledger_add", { item: { kind: "forbid", text: "t", check: { type: "llm" } } });
+    const old = t.ask("ledger_check", { snapshot: { paragraphs: [para(0, "a novel substrate")] } });
+    await new Promise((r) => setImmediate(r));
+    const fresh = t.ask("ledger_check", {
+      snapshot: { paragraphs: [para(0, "a known substrate")] },
+    });
+    await new Promise((r) => setImmediate(r));
+    const [first, second] = order === "old-last" ? ["fresh", "old"] : ["old", "fresh"];
+    gates[first]();
+    await (first === "old" ? old : fresh);
+    gates[second]();
+    await (second === "old" ? old : fresh);
+    const saved = (await t.ask("review_load")).revision.ledger[0];
+    assert.deepEqual([saved.status, saved.violation_count], ["ok", 0], `${order}: latest kept`);
+    if (order === "old-last") {
+      assert.ok(t.lines.includes("[review] ledger check L1 dropped: a newer check started"));
+    }
+  } finally {
+    await t.cleanup();
+  }
+}
+test("ledger_check: an older check that ends last does not replace the latest result", () =>
+  overlappingChecks("old-last"));
+test("ledger_check: an older check that ends first is replaced by the latest result", () =>
+  overlappingChecks("old-first"));
+
 // A comment list saved while work on a comment is still open (a review turn,
 // a tracked edit waiting for Word, an edit whose answer may come late, an
 // exception applying or unanswered) keeps that comment and says so. A change

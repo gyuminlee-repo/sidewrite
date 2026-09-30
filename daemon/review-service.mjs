@@ -198,6 +198,12 @@ export function createReviewService({
     return restoreComment(rev, ref, remembered(docFor(key).path, ref));
   }
   const turnHolds = new Map(); // pane key -> release of its review turn hold
+  // Ledger check generation by revision file and item id: each check of an
+  // item takes the next one and only the check started last saves its
+  // result. Two checks of one rule on two snapshots share a fingerprint, so
+  // the fingerprint alone lets the older one win when it ends last.
+  const checkGen = new Map();
+  let lastCheckGen = 0;
 
   function docFor(key) {
     const doc = localDocPath(getContext(key)?.activeDoc, env);
@@ -614,9 +620,17 @@ export function createReviewService({
       return { revision: await update(key, (rev) => removeLedgerItem(rev, msg.id)) };
     },
     async ledger_check(msg, key) {
+      // Taken on arrival, before the file read: a check that reads the file
+      // later is still the older one. An older check never lowers the mark.
+      const gen = ++lastCheckGen;
       const rev = await load(key);
       const wanted = Array.isArray(msg.ids) && msg.ids.length ? new Set(msg.ids) : null;
       const items = rev.ledger.filter((i) => !wanted || wanted.has(i.id));
+      const { path } = docFor(key);
+      const genKey = (id) => `${path}\0${id}`;
+      for (const i of items) {
+        if ((checkGen.get(genKey(i.id)) ?? 0) < gen) checkGen.set(genKey(i.id), gen);
+      }
       const started = new Map(items.map((i) => [i.id, ruleFingerprint(i)]));
       const paragraphs = msg.snapshot?.paragraphs ?? [];
       // L10: changed paragraphs only unless msg.full (the "Full check" button).
@@ -661,6 +675,11 @@ export function createReviewService({
             log(
               `[review] ledger check ${r.id} dropped: rule ${now ? "changed" : "removed"} during the check`,
             );
+            continue;
+          }
+          // A check of the same rule started later owns the item's result.
+          if (checkGen.get(genKey(r.id)) !== gen) {
+            log(`[review] ledger check ${r.id} dropped: a newer check started`);
             continue;
           }
           next = updateLedgerItem(next, r.id, {
