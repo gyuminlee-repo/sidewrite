@@ -9,6 +9,7 @@
 
 import { readFile, writeFile, stat } from "node:fs/promises";
 import { join, resolve as resolvePath, relative, isAbsolute } from "node:path";
+import { toLocalPath } from "./workspace.mjs";
 
 // Store a context entry path workspace-RELATIVE when it lives inside the
 // workspace; absolute only when it's genuinely elsewhere. This keeps the
@@ -88,7 +89,11 @@ async function validate(entries, cwd) {
       errors.push({ path: e?.path ?? "", error: "Path is required" });
       continue;
     }
-    const raw = e.path.trim();
+    const raw = toLocalPath(e.path.trim());
+    if (raw === null) {
+      errors.push({ path: e.path.trim(), error: "Not reachable from WSL" });
+      continue;
+    }
     // A stored/round-tripped relative path resolves against the
     // workspace; an absolute path is taken as-is.
     const abs = isAbsolute(raw) ? resolvePath(raw) : resolvePath(cwd, raw);
