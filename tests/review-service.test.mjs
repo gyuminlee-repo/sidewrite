@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createReviewService } from "../daemon/review-service.mjs";
@@ -755,9 +755,12 @@ test("refresh that finds the override pending records it and releases the item",
 // first after its request timeout and the user approved again) apply it once.
 test("overlapping overrides of one blocked edit call the tool once; the second is told it is applying", async () => {
   let release;
+  let started;
   const gate = new Promise((r) => (release = r));
+  const calling = new Promise((r) => (started = r));
   const t = await setup({
     callImpl: async () => {
+      started();
       await gate;
       return { ok: true, word_comment_id: 3, paragraph_index: 1, before: "b", after: "a" };
     },
@@ -774,7 +777,7 @@ test("overlapping overrides of one blocked edit call the tool once; the second i
     );
     const first = t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
     const second = t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1", force: true });
-    await new Promise((r) => setTimeout(r, 50));
+    await calling;
     const during = (await t.ask("review_load")).revision.comments[1].blocked[0];
     release();
     const [r1, r2] = await Promise.all([first, second]);
@@ -826,7 +829,14 @@ test("an override the tool refuses or that throws goes back to blocked", async (
 // A daemon that stopped mid-override leaves "applying" in the file. The next
 // daemon did not send it, so load and refresh turn it into outcome_unknown.
 test("an applying item left by a stopped daemon becomes outcome_unknown on load and refresh", async () => {
-  const t = await setup({ callImpl: () => new Promise(() => {}) });
+  let started;
+  const calling = new Promise((r) => (started = r));
+  const t = await setup({
+    callImpl: () => {
+      started();
+      return new Promise(() => {});
+    },
+  });
   try {
     await t.ask("review_save_comments", { comments: COMMENTS });
     await t.ask("ledger_add", { item: NOVEL });
@@ -838,7 +848,7 @@ test("an applying item left by a stopped daemon becomes outcome_unknown on load 
       { ref: "R1.3" },
     );
     t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" }); // never answers
-    await new Promise((r) => setTimeout(r, 50));
+    await calling;
     const stuck = (await t.ask("review_load")).revision.comments[1].blocked[0];
     assert.equal(stuck.state, "applying"); // this daemon is still applying it
 
@@ -853,8 +863,21 @@ test("an applying item left by a stopped daemon becomes outcome_unknown on load 
       new Promise((resolve) =>
         next.handlers[type]({ type, request_id: "q2", ...payload }, resolve, "k", "word"),
       );
+    // An override sent before any load gets the Refresh hint, not "applying".
+    const early = await ask2("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.equal(early.ok, false);
+    assert.match(early.error, /Refresh status/);
     const loaded = await ask2("review_load");
     assert.equal(loaded.revision.comments[1].blocked[0].state, "outcome_unknown");
+    // The same through refresh: put applying back in the file, then refresh.
+    const saved = JSON.parse(await readFile(loaded.path, "utf8"));
+    saved.comments[1].blocked[0].state = "applying";
+    await writeFile(loaded.path, JSON.stringify(saved));
+    const refreshed = await ask2("review_refresh", {
+      snapshot: { paragraphs: [{ index: 0, id: "p0", text: "Title" }], comments: [] },
+    });
+    assert.equal(refreshed.ok, true);
+    assert.equal(refreshed.revision.comments[1].blocked[0].state, "outcome_unknown");
     const plain = await ask2("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
     assert.equal(plain.ok, false);
     assert.match(plain.error, /Refresh status/);

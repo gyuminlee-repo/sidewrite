@@ -361,15 +361,26 @@ export function createReviewService({
     async review_override(msg, key) {
       // Claimed inside the revision chain: an overlapping override of the
       // same item finds it applying and is refused before Word is called.
+      // An applying item left by a stopped daemon is taken as outcome_unknown
+      // first, so it gets the Refresh hint, not "already being applied".
+      // The id joins `active` in the same step, before any other request of
+      // the chain can read the file.
       let blocked = null;
-      await update(key, (rev) => {
-        const r = claimBlocked(rev, msg.ref, msg.blocked_id, { force: msg.force === true });
-        blocked = r.blocked;
-        return r.revision;
-      });
       const active = activeFor(key);
-      const held = applyingKey(msg.ref, blocked.id);
-      active.add(held);
+      const held = applyingKey(msg.ref, msg.blocked_id);
+      try {
+        await update(key, (rev) => {
+          const r = claimBlocked(clearStale(key, rev) ?? rev, msg.ref, msg.blocked_id, {
+            force: msg.force === true,
+          });
+          blocked = r.blocked;
+          active.add(held);
+          return r.revision;
+        });
+      } catch (e) {
+        if (blocked) active.delete(held); // claimed, then the save failed
+        throw e;
+      }
       const restore = () =>
         update(key, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state));
       try {
