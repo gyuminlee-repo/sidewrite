@@ -7,8 +7,12 @@ margin line numbers for scripts/pdf-line-map.py.
 
 All text is invented filler. It names no real study, person, or institution.
 
-Usage: python3 scripts/make-test-manuscript.py [output.docx]
+Usage: python3 scripts/make-test-manuscript.py [--variant review] [output.docx]
 Default output: tests/fixtures/spike_manuscript.docx
+(--variant review: tests/fixtures/review_manuscript.docx)
+
+The review variant is the same text with ledger violations planted for the
+stage-2 acceptance test (see PLANTS) and one comment by the author.
 """
 
 import datetime
@@ -20,7 +24,31 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
-DEFAULT_OUT = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "spike_manuscript.docx"
+FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+DEFAULT_OUT = FIXTURES / "spike_manuscript.docx"
+REVIEW_OUT = FIXTURES / "review_manuscript.docx"
+
+# Review variant: (section number in SECTIONS, paragraph position, sentence
+# appended to the first copy). Planted: "in-vitro" twice (ledger L1 violations), "in
+# vitro" once written correctly (must not be flagged), "novel" once (forbid
+# list L2). The "No correction for multiple comparisons" sentence (ledger L3,
+# must stay) is already in the base text. Lesson checks: the flask sentence
+# is what fake review comment 4 asks to delete (lost facts "catalogue 4411",
+# "250 mL"); the replicate range sentence is what the author deletes by hand
+# in Word (outside change, lost facts "0.82", "0.91").
+PLANTS = [
+    (0, 1, " Earlier reports measured this activity in-vitro only."),
+    (0, 0, " This is a novel use of the organism."),
+    (2, 1, " The same decline was seen in-vitro with purified protein."),
+    (0, 2, " The flasks came from a local glassware supplier (catalogue 4411) and each held 250 mL of medium."),
+    (2, 2, " Across the replicates the plateau optical density ranged from 0.82 to 0.91."),
+]
+# (section number, position, old, new): an in-text replacement in the first copy.
+REWRITES = [
+    (1, 2, "Enzyme activity was measured spectrophotometrically",
+     "Enzyme activity was measured in vitro spectrophotometrically"),
+]
+AUTHOR_COMMENT = ("Growth on the synthetic carbon source", "Check the lag time against the raw data.")
 FIXED_TIME = datetime.datetime(2026, 1, 1, 0, 0, 0)
 
 TITLE = "Growth response of a model bacterium to a synthetic carbon source"
@@ -101,7 +129,7 @@ def enable_line_numbers(section):
     sect_pr.append(ln)
 
 
-def build(out_path):
+def build(out_path, variant="spike"):
     doc = Document()
     normal = doc.styles["Normal"]
     normal.font.name = "Times New Roman"
@@ -117,16 +145,28 @@ def build(out_path):
     cp.revision = 1
 
     doc.add_paragraph(TITLE, style="Title")
-    for heading, paras in SECTIONS:
+    comment_run = None
+    for sec, (heading, paras) in enumerate(SECTIONS):
         doc.add_paragraph(heading, style="Heading 1")
         for rep in range(BODY_REPEATS):
-            for text in paras:
+            for pos, text in enumerate(paras):
                 # Keep the target phrases unique: only the first copy carries them.
                 if rep > 0:
                     text = (text.replace("the incubation temperature was held at 30 degrees",
                                          "the incubation temperature was kept constant")
                                 .replace("cell-free extract", "crude extract"))
-                doc.add_paragraph(text)
+                elif variant == "review":
+                    for s_, i, old, new in REWRITES:
+                        if s_ == sec and i == pos:
+                            text = text.replace(old, new)
+                    for s_, i, extra in PLANTS:
+                        if s_ == sec and i == pos:
+                            text = text + extra
+                para = doc.add_paragraph(text)
+                if variant == "review" and rep == 0 and text.startswith(AUTHOR_COMMENT[0]):
+                    comment_run = para.runs[0]
+    if comment_run is not None:
+        doc.add_comment(comment_run, text=AUTHOR_COMMENT[1], author="Author", initials="AU")
 
     enable_line_numbers(doc.sections[0])
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,8 +175,12 @@ def build(out_path):
 
 
 def main(argv):
-    out = Path(argv[1]) if len(argv) > 1 else DEFAULT_OUT
-    print(build(out))
+    args = argv[1:]
+    variant = "spike"
+    if args[:2] == ["--variant", "review"]:
+        variant, args = "review", args[2:]
+    out = Path(args[0]) if args else (REVIEW_OUT if variant == "review" else DEFAULT_OUT)
+    print(build(out, variant))
 
 
 if __name__ == "__main__":

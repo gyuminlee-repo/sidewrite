@@ -1,0 +1,38 @@
+{
+  "note": "Ledger items for the stage-2 acceptance test. Enter them in the Review tab in this order so they get L1, L2, L3.",
+  "items": [
+    {
+      "kind": "instruction",
+      "text": "in vitro, in vivo, in situ are written without a hyphen (text proxy for the italic Latin-term rule)",
+      "scope": "manuscript",
+      "check": {
+        "type": "regex",
+        "pattern": "\\bin-(?:vitro|vivo|situ)\\b",
+        "flags": "i",
+        "expect": "absent"
+      }
+    },
+    {
+      "kind": "forbid",
+      "text": "Do not call the approach or the substrate novel (decided in the previous round)",
+      "scope": "manuscript",
+      "check": {
+        "type": "regex",
+        "pattern": "\\bnovel(?:ty)?\\b",
+        "flags": "i",
+        "expect": "absent"
+      }
+    },
+    {
+      "kind": "instruction",
+      "text": "Do not delete the sentence on multiple comparisons",
+      "scope": "manuscript",
+      "check": {
+        "type": "regex",
+        "pattern": "No correction for multiple comparisons was applied",
+        "flags": "",
+        "expect": "present"
+      }
+    }
+  ]
+}
