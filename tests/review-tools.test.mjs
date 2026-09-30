@@ -351,3 +351,7 @@ test("L5 requirement ids: unknown ids are refused, known ids go into the comment
   assert.equal(d.calls[0][1].comment_text, "[R1.3] 무엇 / 왜 / 어디 [q1]");
   assert.deepEqual(d.edits[0][1].rationale.requirement_ids, ["q1"]);
 });
+
+test("office_tracked_edit is registered with the Word tools", async () => {
+  assert.ok((await registeredWordTools()).includes(REVIEW_WRITE_TOOL));
+});
