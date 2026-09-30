@@ -64,6 +64,7 @@ test("settingSources values are case-insensitive, unknown names warn", () => {
 test("user MCP from ~/.claude.json is off by default", () => {
   assert.equal(userMcpEnabled({}), false);
   assert.deepEqual(Object.keys(buildQueryOptions(base, {}).mcpServers), ["office"]);
+  assert.equal(buildQueryOptions(base, {}).strictMcpConfig, true);
 });
 
 test("CC_OFFICE_LOAD_USER_MCP=1 merges user servers, office wins", () => {
@@ -71,6 +72,7 @@ test("CC_OFFICE_LOAD_USER_MCP=1 merges user servers, office wins", () => {
   const opts = buildQueryOptions(base, env);
   assert.deepEqual(Object.keys(opts.mcpServers).sort(), ["office", "visio"]);
   assert.equal(opts.mcpServers.office, base.officeMcp);
+  assert.equal(opts.strictMcpConfig, undefined);
 });
 
 test("resume only when a session id is given", () => {
