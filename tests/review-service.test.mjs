@@ -8,7 +8,7 @@ import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 
-async function setup({ env = ENV, oneshot = null, callResult } = {}) {
+async function setup({ env = ENV, oneshot = null, callResult, callImpl = null } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "review-svc-"));
   const doc = join(dir, "paper.docx");
   const events = [];
@@ -19,6 +19,7 @@ async function setup({ env = ENV, oneshot = null, callResult } = {}) {
     getContext: () => ({ activeDoc: doc }),
     callTool: async (name, args) => {
       calls.push([name, args]);
+      if (callImpl) return callImpl(name, args, calls.length);
       return (
         callResult ?? { ok: true, word_comment_id: 5, paragraph_index: 2, before: "b", after: "a" }
       );
@@ -557,6 +558,158 @@ test("a late applied result of a timed-out tracked edit is recorded once; not ap
       t.events.map((e) => e.event),
       ["change_recorded", "late_result_recorded"],
     );
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// review_override whose call got no answer: the edit may be in Word. The
+// blocked item turns outcome_unknown and a plain second override is refused.
+async function unknownOverride(t) {
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  await t.ask("ledger_add", { item: NOVEL });
+  await t.ask("review_refresh", {
+    snapshot: {
+      paragraphs: [
+        { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0 },
+        { index: 1, id: "p1", text: "Cells grew on the substrate at 30 C.", w_ins: 0, w_del: 0 },
+      ],
+      comments: [],
+    },
+  });
+  const deps = { ...t.svc.trackedEditDeps("k"), call: async () => ({ ok: true }) };
+  const R = { what: "w", why: "y", addresses: "a" };
+  await applyTrackedEdit(
+    deps,
+    { comment_ref: "R1.3", find: "the substrate", replace: "the novel substrate", rationale: R },
+    { ref: "R1.3" },
+  );
+  return t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+}
+
+test("override with no answer marks the item outcome_unknown and refuses a second override", async () => {
+  const t = await setup({
+    callImpl: (name, args, n) => {
+      if (n === 1) throw noAnswer("x1");
+      return { ok: true, word_comment_id: 3, paragraph_index: 1, before: "b", after: "a" };
+    },
+  });
+  try {
+    const r = await unknownOverride(t);
+    assert.deepEqual([r.ok, r.applied, r.outcome_unknown], [true, false, true]);
+    const b = r.revision.comments[1].blocked[0];
+    assert.equal(b.state, "outcome_unknown");
+    assert.equal(b.attempt.tool_call_id, "x1");
+    assert.ok(t.lines.includes("[review] override outcome unknown R1.3-b1 id=x1"));
+
+    const again = await t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.equal(again.ok, false);
+    assert.match(again.error, /Refresh status/);
+    assert.equal(t.calls.length, 1);
+
+    // The explicit re-apply (pressed twice in the task pane) goes through.
+    const forced = await t.ask("review_override", {
+      ref: "R1.3",
+      blocked_id: "R1.3-b1",
+      force: true,
+    });
+    assert.deepEqual([forced.ok, forced.applied], [true, true]);
+    assert.equal(t.calls.length, 2);
+    assert.equal(forced.revision.comments[1].blocked.length, 0);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a late applied result of an unknown override records the change and releases the item", async () => {
+  const t = await setup({
+    callImpl: () => {
+      throw noAnswer("x1");
+    },
+  });
+  try {
+    await unknownOverride(t);
+    await t.svc.lateToolResult("k", {
+      id: "x1",
+      name: "office_tracked_edit",
+      ok: true,
+      result: { ok: true, word_comment_id: 8, paragraph_index: 1, before: "b", after: "a" },
+    });
+    const rev = (await t.ask("review_load")).revision;
+    assert.equal(rev.comments[1].blocked.length, 0);
+    assert.equal(rev.comments[1].changes.length, 1);
+    assert.deepEqual(rev.comments[1].changes[0].override_of, ["L1"]);
+    assert.ok(t.lines.includes("[review] late result recorded x1"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("refresh that finds the override applied records it once and releases the item", async () => {
+  const t = await setup({
+    callImpl: () => {
+      throw noAnswer("x1");
+    },
+  });
+  try {
+    await unknownOverride(t);
+    const comment = "[R1.3] w / y (금지 규칙 L1 예외 승인) / a";
+    const r = await t.ask("review_refresh", {
+      snapshot: {
+        paragraphs: [
+          { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0 },
+          {
+            index: 1,
+            id: "p1",
+            text: "Cells grew on the novel substrate at 30 C.\u0005\u0005",
+            w_ins: 0,
+            w_del: 0,
+          },
+        ],
+        comments: [{ id: "12", paragraph_index: 1, content: comment }],
+      },
+    });
+    const c = r.revision.comments[1];
+    assert.equal(c.blocked.length, 0);
+    assert.equal(c.changes.length, 1);
+    assert.equal(c.changes[0].word_comment_id, "12");
+    assert.deepEqual(c.changes[0].override_of, ["L1"]);
+    assert.equal(c.changes[0].state, "accepted");
+    assert.deepEqual(r.external, []);
+    // The late answer of the same call comes afterwards: not recorded again.
+    await t.svc.lateToolResult("k", {
+      id: "x1",
+      name: "office_tracked_edit",
+      ok: true,
+      result: { ok: true, word_comment_id: 12, paragraph_index: 1, before: "b", after: "a" },
+    });
+    const rev = (await t.ask("review_load")).revision;
+    assert.equal(rev.comments[1].changes.length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("refresh that does not find the override applied keeps the item outcome_unknown", async () => {
+  const t = await setup({
+    callImpl: () => {
+      throw noAnswer("x1");
+    },
+  });
+  try {
+    await unknownOverride(t);
+    const r = await t.ask("review_refresh", {
+      snapshot: {
+        paragraphs: [
+          { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0 },
+          { index: 1, id: "p1", text: "Cells grew on the substrate at 30 C.", w_ins: 0, w_del: 0 },
+        ],
+        comments: [],
+      },
+    });
+    const c = r.revision.comments[1];
+    assert.equal(c.blocked[0].state, "outcome_unknown");
+    assert.equal(c.changes.length, 0);
   } finally {
     await t.cleanup();
   }

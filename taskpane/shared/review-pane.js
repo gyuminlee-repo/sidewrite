@@ -27,6 +27,8 @@ import {
   progressText,
 } from "./review-view.js";
 
+const UNKNOWN_HINT =
+  "Word did not answer; this exception may already be applied. Refresh status, then check the paragraph.";
 const LONG = 120_000; // LLM split and LLM ledger checks exceed the 10 s default
 
 export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
@@ -41,6 +43,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     editingLedger: null, // L6: id of the ledger item loaded into the form
     confirmDone: null, // L5: ref whose "Done" was asked once with open requirements
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
+    armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
     turn: null, // L9: { ref, startedAt } of the running review turn
     timer: null,
   };
@@ -181,15 +184,44 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         }
         state.armedBlocked.delete(b.id);
         const r = await ask("review_override", { ref, blocked_id: b.id });
+        if (r.outcome_unknown) throw new Error(UNKNOWN_HINT);
         if (!r.applied) throw new Error(r.result?.message || "Not applied");
       }),
     );
     const newText = b.args.replace ?? b.args.insert_after ?? "";
+    const label = el("span", { text: `Blocked by ${b.blocked_by.join(", ")}: "${newText}" ` });
+    if (b.state !== "outcome_unknown") {
+      return el("div", { class: "review-blocked" }, label, allow);
+    }
+    // Word did not answer the exception, so it may already be applied: a
+    // plain second Allow could apply it twice. The daemon refuses it too.
+    allow.disabled = true;
+    const armedAgain = state.armedReapply.has(b.id);
+    const reapply = el("button", {
+      type: "button",
+      class: "btn-secondary btn-small",
+      text: armedAgain ? "Re-apply anyway? It may apply twice. Press again" : "Re-apply anyway",
+    });
+    reapply.addEventListener(
+      "click",
+      guard(async () => {
+        if (!state.armedReapply.has(b.id)) {
+          state.armedReapply.add(b.id);
+          return;
+        }
+        state.armedReapply.delete(b.id);
+        const r = await ask("review_override", { ref, blocked_id: b.id, force: true });
+        if (r.outcome_unknown) throw new Error(UNKNOWN_HINT);
+        if (!r.applied) throw new Error(r.result?.message || "Not applied");
+      }),
+    );
     return el(
       "div",
       { class: "review-blocked" },
-      el("span", { text: `Blocked by ${b.blocked_by.join(", ")}: "${newText}" ` }),
+      label,
+      el("span", { class: "review-unknown", text: UNKNOWN_HINT + " " }),
       allow,
+      reapply,
     );
   }
 

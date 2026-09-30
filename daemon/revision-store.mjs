@@ -69,11 +69,25 @@ export const ChangeSchema = z.object({
   checked_at: z.string().nullable().default(null),
 });
 
+// An approved exception whose tracked edit got no answer from the task pane
+// (OutcomeUnknown): the change it would record and the document form it
+// expects, so a late answer or a status refresh can record it once.
+const Attempt = z.object({
+  tool_call_id: z.string().nullable(),
+  unknown_at: z.string(),
+  comment_text: z.string(),
+  change: z.record(z.string(), z.unknown()),
+});
+
 const Blocked = z.object({
   id: z.string(),
   args: z.record(z.string(), z.unknown()),
   blocked_by: z.array(z.string()).min(1),
   created_at: z.string(),
+  // outcome_unknown: an override was sent and not answered; it may be in the
+  // document, so a plain second override is refused (review-service.mjs).
+  state: z.enum(["blocked", "outcome_unknown"]).default("blocked"),
+  attempt: Attempt.nullable().default(null),
 });
 
 // L5: one thing the reviewer asks for, e.g. { id: "q1", text: "state the unit" }.
@@ -363,6 +377,15 @@ export function addBlocked(rev, ref, { args, blocked_by }, now = new Date()) {
   const row = { id, args: clone(args), blocked_by: [...blocked_by], created_at: now.toISOString() };
   c.blocked.push(row);
   return { revision: next, blocked: row };
+}
+
+export function markBlockedUnknown(rev, ref, blockedId, attempt) {
+  const next = clone(rev);
+  const b = requireComment(next, ref).blocked.find((x) => x.id === blockedId);
+  if (!b) throw new Error(`No blocked edit ${blockedId} under ${ref}`);
+  b.state = "outcome_unknown";
+  b.attempt = Attempt.parse(clone(attempt));
+  return next;
 }
 
 export function takeBlocked(rev, ref, blockedId) {

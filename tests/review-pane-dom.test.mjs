@@ -253,3 +253,43 @@ test("Allow exception: the second press sends one review_override", async () => 
   assert.equal(overrides.length, 1);
   assert.deepEqual(overrides[0].payload, { ref: "R1.1", blocked_id: "R1.1-b1" });
 });
+
+test("outcome unknown: Allow exception is disabled; re-apply needs two presses and sends force", async () => {
+  const blocked = {
+    id: "R1.1-b1",
+    args: { find: "held at 30 degrees", replace: "as suggested by the reviewer, held at 30 °C" },
+    blocked_by: ["L2"],
+    created_at: "2026-01-01T00:00:00Z",
+    state: "outcome_unknown",
+    attempt: null,
+  };
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [],
+        blocked: [blocked],
+      },
+    ],
+    ledger: [],
+  };
+  const respond = { review_override: () => ({ ok: true, applied: true, revision }) };
+  const t = await setup({ revision, respond });
+  const find = (re) => findAll(t.$("review-comments"), (n) => re.test(n.textContent));
+  const overrides = () => t.requests.filter((r) => r.type === "review_override");
+
+  const allow = find(/^Allow exception$/);
+  assert.equal(allow.length, 1);
+  assert.equal(allow[0].disabled, true);
+  assert.equal(find(/Refresh status/).length, 1);
+
+  await find(/Re-apply anyway/)[0].click();
+  assert.equal(overrides().length, 0);
+  await find(/Re-apply anyway/)[0].click();
+  assert.equal(overrides().length, 1);
+  assert.deepEqual(overrides()[0].payload, { ref: "R1.1", blocked_id: "R1.1-b1", force: true });
+});

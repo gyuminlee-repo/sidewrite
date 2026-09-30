@@ -10,7 +10,7 @@
 import { z } from "zod";
 import { forbidHits } from "./ledger-check.mjs";
 import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
-import { changeContext } from "./revision-classify.mjs";
+import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
 
@@ -147,7 +147,8 @@ function fail(message, extra = {}) {
 //         onBlocked({ref, args, blocked_by}), onOutcomeUnknown({id, ref, record}), log }
 // onOutcomeUnknown: the task pane did not answer. `id` is the bridge call id
 // a late tool_result will carry; `record(result)` records that result the
-// same way as an answer in time (review-service.mjs lateToolResult).
+// same way as an answer in time (review-service.mjs lateToolResult);
+// `attempt` is the change as it would read in the document (unknownAttempt).
 // getReviewContext returns { requirements, comment_text, paragraphs } for the
 // L2 sources (manuscript snapshot texts and the comment) and the L5 ids.
 // turn: { ref } of the current review turn, or null.
@@ -236,6 +237,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     });
   };
 
+  const commentText = formatRationaleComment(turn.ref, rationale, { lost });
   let r;
   try {
     r = await deps.call(REVIEW_WRITE_TOOL, {
@@ -243,7 +245,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       ...(hasReplace ? { replace: args.replace } : { insert_after: args.insert_after }),
       ...(args.paragraph_hint ? { paragraph_hint: args.paragraph_hint } : {}),
       ...(narrow ? { narrow } : {}),
-      comment_text: formatRationaleComment(turn.ref, rationale, { lost }),
+      comment_text: commentText,
     });
   } catch (e) {
     // No answer (bridge.mjs timeout or pane disconnect): the edit may be in
@@ -251,13 +253,58 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     if (!NO_ANSWER_CODES.has(e?.code)) throw e;
     const id = e.toolCallId ?? null;
     deps.log?.(`[review] outcome unknown ${turn.ref} code=${e.code} id=${id}`);
-    await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record });
+    const attempt = {
+      tool_call_id: id,
+      unknown_at: new Date().toISOString(),
+      comment_text: commentText,
+      change: unknownAttempt(texts, {
+        kind,
+        find: args.find,
+        text: newText,
+        rationale,
+        override_of: excepted,
+        lost_facts: lost,
+        unsourced_terms: unsourced,
+      }),
+    };
+    await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt });
     return fail(
       `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
       { code: "OutcomeUnknown", tool_call_id: id },
     );
   }
   return record(r);
+}
+
+// The change an unanswered tracked edit would have recorded, with the
+// paragraph text it expects before and after, taken from the last status
+// refresh (texts). Without one paragraph that holds `find` once, before and
+// after stay empty and context null: a refresh then cannot tell whether the
+// edit is in the document (review-service.mjs resolveUnknownOverrides).
+export function unknownAttempt(texts, change) {
+  const hits = texts
+    .map((t, index) => ({ index, t, ctx: changeContext(t, change.find, { kind: change.kind }) }))
+    .filter((x) => x.ctx);
+  const one = hits.length === 1 ? hits[0] : null;
+  let after = "";
+  if (one) {
+    const f = String(change.find)
+      .replace(/\u0005/g, "")
+      .replace(/\s+/g, " ");
+    const i = one.t.indexOf(f);
+    const cut = change.kind === "insert" ? i + f.length : i;
+    after = normalizeParaText(one.t.slice(0, cut) + change.text + one.t.slice(i + f.length));
+  }
+  return {
+    ...change,
+    word_comment_id: null,
+    paragraph_index: one ? one.index : null,
+    paragraph_id: null,
+    before: one ? one.t : "",
+    after,
+    narrowed_from: null,
+    context: one ? one.ctx : null,
+  };
 }
 
 // Record a result the task pane reported as applied (ok, or applied without
