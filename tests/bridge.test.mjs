@@ -37,3 +37,17 @@ test("WS bridge binds to loopback (127.0.0.1), not all interfaces", async () => 
 test("createBridge requires a token", () => {
   assert.throws(() => createBridge({ port: 0 }), /requires a token/);
 });
+
+test("pushUserMessage queues a daemon-originated turn with the pane context", async () => {
+  const bridge = createBridge({ port: 0, token: "t", allowedOrigins: [] });
+  try {
+    await waitForListening(bridge);
+    const key = "word";
+    bridge.pushUserMessage("[Review turn R1.1]", key);
+    const m = await bridge.nextUserMessage(key);
+    assert.equal(m.text, "[Review turn R1.1]");
+    assert.equal(m.context.host, "word");
+  } finally {
+    await bridge.close();
+  }
+});
