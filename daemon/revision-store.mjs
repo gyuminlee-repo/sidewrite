@@ -61,7 +61,8 @@ export const ChangeSchema = z.object({
   // changes recorded before this field (whole-paragraph rule).
   context: z.object({ left: z.string(), right: z.string() }).nullable().default(null),
   // The edit was applied but its rationale comment was not anchored: the
-  // task pane error code (CommentAnchorMissing). word_comment_id is then null.
+  // task pane error code (CommentAnchorMissing or CommentInsertFailed).
+  // word_comment_id is then null.
   comment_missing: z.string().nullable().default(null),
   created_at: z.string(),
   state: z.enum(["pending", "accepted", "rejected", "user_edited", "unlocated"]).default("pending"),

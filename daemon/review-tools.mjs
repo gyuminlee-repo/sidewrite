@@ -231,7 +231,8 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   }
   if (!r) return fail("empty result from the task pane");
   // applied:true with ok:false: the task pane changed the document but could
-  // not anchor the rationale comment (CommentAnchorMissing). The change is
+  // not add the rationale comment (CommentAnchorMissing: no range to anchor
+  // it; CommentInsertFailed: a step after the edit threw). The change is
   // still recorded, with no comment id, so the change list and the
   // "changes == rationale comments" check show it instead of losing it.
   const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
