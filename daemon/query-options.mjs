@@ -66,6 +66,9 @@ export function buildQueryOptions(
     mcpServers: userMcpEnabled(env)
       ? { ...userMcpServers, office: officeMcp }
       : { office: officeMcp },
+    // Without this the CLI also auto-loads claude.ai connectors for the
+    // signed-in account, bypassing the office-only MCP default.
+    ...(userMcpEnabled(env) ? {} : { strictMcpConfig: true }),
     disallowedTools,
     canUseTool,
     includePartialMessages: true,
