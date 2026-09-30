@@ -1117,10 +1117,15 @@ Office.onReady((info) => {
     reviewPane = initReviewPane({
       sendRequest,
       isTurnInFlight: () => turn.inFlight,
+      // Called before review_propose is sent; the returned release ends
+      // this turn if the request fails and no later turn has begun.
       onTurnStarted: (note) => {
         appendNotice(note);
-        beginTurn();
+        const id = beginTurn();
         setAgentStatus("working", "Proposing changes…");
+        return () => {
+          if (turn.endIf(id)) setAgentStatus("idle", "Ready");
+        };
       },
       word: {
         collectReviewSnapshot,

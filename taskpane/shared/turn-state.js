@@ -12,6 +12,7 @@ export function createTurnState({
   getReviewPane = () => null,
 } = {}) {
   let inFlight = false;
+  let current = 0; // id of the last turn begin() took
   const set = (v) => {
     inFlight = v;
     setComposerDisabled(v);
@@ -21,8 +22,19 @@ export function createTurnState({
     get inFlight() {
       return inFlight;
     },
-    begin: () => set(true),
+    // Returns the id of the turn, for endIf.
+    begin: () => {
+      set(true);
+      return ++current;
+    },
     end: () => set(false),
+    // Ends turn `id` only while it is still the running one: a later turn
+    // or an end event that came first is not undone. Returns whether it ended.
+    endIf(id) {
+      if (!inFlight || id !== current) return false;
+      set(false);
+      return true;
+    },
     onAssistantEvent(msg) {
       if (TURN_END_EVENTS.has(msg?.event)) set(false);
     },

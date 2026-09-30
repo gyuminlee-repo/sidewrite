@@ -50,6 +50,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
     applyingBlocked: new Set(), // ids of blocked edits whose override request is in flight
     turn: null, // L9: { ref, startedAt } of the running review turn
+    turnsDone: 0, // turn_done events seen, to spot one that beats its review_propose answer
     timer: null,
   };
 
@@ -300,9 +301,22 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           // A fresh snapshot first: outside changes are caught before the turn
           // (L4) and the new words of the turn are checked against it (L2).
           await refresh();
-          const r = await ask("review_propose", { ref: c.ref, paragraphs });
-          startProgress(c.ref, r.started_at);
-          onTurnStarted(`Review ${c.ref}: proposing changes (tracked, one comment per change)...`);
+          // The turn is taken before the request: the daemon queues the agent
+          // message before it answers, so turn_complete and turn_done may
+          // arrive first (Codex review 7). onTurnStarted returns a release
+          // for a request that fails.
+          const release = onTurnStarted(
+            `Review ${c.ref}: proposing changes (tracked, one comment per change)...`,
+          );
+          const done = state.turnsDone;
+          let r;
+          try {
+            r = await ask("review_propose", { ref: c.ref, paragraphs });
+          } catch (e) {
+            release?.();
+            throw e;
+          }
+          if (state.turnsDone === done && isTurnInFlight()) startProgress(c.ref, r.started_at);
         }),
       );
       const preview = el("button", {
@@ -688,6 +702,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   return {
     onEvent(msg) {
       if (msg.event === "turn_done") {
+        state.turnsDone += 1;
         stopProgress();
         load()
           .then(refresh)

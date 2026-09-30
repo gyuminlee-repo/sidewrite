@@ -442,3 +442,109 @@ test("Save shows the daemon's warning about comments it kept", async () => {
   assert.equal(t.$("review-message").textContent, warning);
   assert.equal(t.$("review-message").hidden, false);
 });
+
+// Codex review 7: review_propose answers after the agent message is queued
+// and the revision file is written, so turn_complete and turn_done can come
+// first. The turn is taken before the request and a turn that already ended
+// is not started again when the answer arrives.
+async function proposeRace(order) {
+  const { createTurnState } = await import("../taskpane/shared/turn-state.js");
+  globalThis.document = fakeDocument();
+  const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "pending",
+        changes: [],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  let answer;
+  const answered = new Promise((r) => (answer = r));
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  let composerDisabled = false;
+  let pane = null;
+  const turn = createTurnState({
+    setComposerDisabled: (v) => (composerDisabled = v),
+    getReviewPane: () => pane,
+  });
+  const sendRequest = async (type) => {
+    if (type === "review_refresh") return { ok: true, rows: [], counts, external: [], revision };
+    if (type === "review_propose") return answered;
+    return { ok: true, revision };
+  };
+  pane = initReviewPane({
+    sendRequest,
+    word: { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) },
+    // taskpane.js: take the turn, return its release.
+    onTurnStarted() {
+      const id = turn.begin();
+      return () => turn.endIf(id);
+    },
+    isTurnInFlight: () => turn.inFlight,
+  });
+  await pane.reload();
+  const propose = () =>
+    findAll(document.getElementById("review-comments"), (n) => n.textContent === "Propose changes");
+  const ends = () => {
+    turn.onAssistantEvent({ event: "turn_complete" });
+    pane.onEvent({ event: "turn_done", ref: "R1.1" });
+  };
+  try {
+    const click = propose()[0].click();
+    for (let i = 0; i < 5; i++) await null; // the handler reaches review_propose
+    if (order === "answer-first") {
+      answer({
+        ok: true,
+        started: true,
+        ref: "R1.1",
+        started_at: "2026-09-30T00:00:00Z",
+        revision,
+      });
+      await click;
+      assert.equal(turn.inFlight, true, "running after the answer");
+      assert.deepEqual(
+        propose().map((b) => b.disabled),
+        [true],
+      );
+      ends();
+    } else if (order === "end-first") {
+      ends();
+      answer({
+        ok: true,
+        started: true,
+        ref: "R1.1",
+        started_at: "2026-09-30T00:00:00Z",
+        revision,
+      });
+      await click;
+    } else {
+      answer({ ok: false, error: "No such comment" });
+      await click;
+      assert.match(document.getElementById("review-message").textContent, /No such comment/);
+    }
+    for (let i = 0; i < 20; i++) await null; // turn_done reload settles
+    assert.equal(turn.inFlight, false, `${order}: turn ended`);
+    assert.equal(composerDisabled, false, `${order}: chat input enabled`);
+    assert.deepEqual(
+      propose().map((b) => b.disabled),
+      [false],
+      `${order}: Propose changes enabled`,
+    );
+    assert.equal(document.getElementById("review-progress").hidden, true, `${order}: no progress`);
+  } finally {
+    await pane.reload(); // stops a progress timer a failed check left running
+  }
+}
+
+test("propose: answer then turn end leaves the buttons and the chat input enabled", () =>
+  proposeRace("answer-first"));
+test("propose: turn end before the answer does not start the turn again", () =>
+  proposeRace("end-first"));
+test("propose: a failed request releases the turn it took", () => proposeRace("failed"));
