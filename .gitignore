@@ -17,3 +17,11 @@ dist/
 
 # Office lock/owner temp files (~$foo.docx)
 ~$*
+
+# Stage-2 spike: PDFs rendered by office_spike_export_pdf
+*.render.pdf
+
+# Review sidecars written next to a manuscript (only if a test manuscript sits here)
+tests/fixtures/*.revision.json
+tests/fixtures/*.comments_backup*.json
+.codex-review-attempt
