@@ -13,9 +13,11 @@
 // thing that overrides it is the user explicitly choosing a folder in the
 // picker; ensureWorkspaceMarker then drops a CLAUDE.md there.
 //
-// The single guard: never auto-select $HOME itself or an OS-managed $HOME
-// child (~/Library, …). A doc loose in ~ shouldn't make all of home the
-// workspace; the user can pick a real folder instead.
+// The guard: never auto-select $HOME itself, an OS-managed $HOME child
+// (~/Library, …) or a filesystem root. A doc loose in ~ shouldn't make all
+// of home the workspace; the user can pick a real folder instead. Under WSL
+// the same applies to the Windows side: a drive root (<mount root>/d) and a
+// Windows profile folder (<mount root>/c/Users/<name>) are never picked.
 
 import { writeFile, stat } from "node:fs/promises";
 import { homedir, release } from "node:os";
@@ -40,7 +42,9 @@ const HOME = homedir();
 // hands us Windows paths. Translate them to the Linux view:
 //   D:\a\b.docx, D:/a/b.docx, file:///D:/a/b.docx -> <mount root>/d/a/b.docx
 //   \\wsl.localhost\<distro>\home\a, \\wsl$\<distro>\home\a -> /home/a
+//     (null when WSL_DISTRO_NAME is set and names another distro)
 //   any other UNC share -> null (not addressable from WSL)
+// UNC forms accept "/" as well as "\" (//wsl.localhost/<distro>/home/a).
 // CC_OFFICE_WSL_PATHS "1" forces on, "0" forces off, unset = auto (Linux
 // kernel release mentions microsoft). CC_OFFICE_WSL_MOUNT_ROOT overrides
 // the drive mount root (default /mnt). Read per call so tests can switch.
@@ -50,11 +54,15 @@ export function wslPathsEnabled(env = process.env) {
   return process.platform === "linux" && /microsoft/i.test(release());
 }
 
+function wslMountRoot(env = process.env) {
+  return (env.CC_OFFICE_WSL_MOUNT_ROOT || "/mnt").replace(/\/+$/, "");
+}
+
 // undefined: not a Windows-form path, or translation is off (caller keeps
 // its own handling). null: Windows-form but unreachable from WSL.
 export function windowsPathToWsl(p, env = process.env) {
   if (typeof p !== "string" || !wslPathsEnabled(env)) return undefined;
-  const root = (env.CC_OFFICE_WSL_MOUNT_ROOT || "/mnt").replace(/\/+$/, "");
+  const root = wslMountRoot(env);
   let m = /^file:\/\/\/([a-zA-Z]):[\\/](.*)$/i.exec(p);
   if (m) {
     let rest;
@@ -67,9 +75,13 @@ export function windowsPathToWsl(p, env = process.env) {
   }
   m = /^([a-zA-Z]):[\\/](.*)$/.exec(p);
   if (m) return `${root}/${m[1].toLowerCase()}/${m[2].replace(/\\/g, "/")}`;
-  m = /^\\\\(?:wsl\.localhost|wsl\$)\\[^\\]+(\\.*)?$/i.exec(p);
-  if (m) return (m[1] || "\\").replace(/\\/g, "/");
-  if (/^\\\\[^\\]/.test(p)) return null;
+  m = /^[\\/]{2}(?:wsl\.localhost|wsl\$)[\\/]([^\\/]+)([\\/].*)?$/i.exec(p);
+  if (m) {
+    const distro = env.WSL_DISTRO_NAME;
+    if (distro && distro.toLowerCase() !== m[1].toLowerCase()) return null;
+    return (m[2] || "/").replace(/\\/g, "/");
+  }
+  if (/^[\\/]{2}[^\\/]/.test(p)) return null;
   return undefined;
 }
 
@@ -122,15 +134,30 @@ async function docDirOf(p) {
 // The workspace for a document: the folder that directly contains it.
 // Returns that folder, or null if the doc is unaddressable (cloud URL) or
 // its folder isn't a sane cwd ($HOME itself / an OS-managed $HOME child /
-// the filesystem root).
+// the filesystem root / under WSL a Windows drive root or profile folder).
 export async function resolveWorkspaceRoot(docPath) {
   const p = normalizeDocPath(docPath);
   if (!p) return null;
   const docDir = await docDirOf(p);
-  if (docDir === HOME || isSystemHomeChild(docDir) || isFilesystemRoot(docDir)) {
+  if (
+    docDir === HOME ||
+    isSystemHomeChild(docDir) ||
+    isFilesystemRoot(docDir) ||
+    isWindowsSideRoot(docDir)
+  ) {
     return null;
   }
   return docDir;
+}
+
+// Under WSL: <mount root>/d (a drive) and <mount root>/c/Users/<name> (a
+// Windows profile) are the Windows equivalents of "/" and $HOME.
+function isWindowsSideRoot(p) {
+  if (!wslPathsEnabled()) return false;
+  const root = wslMountRoot();
+  if (!p.startsWith(root + "/")) return false;
+  const rest = p.slice(root.length);
+  return /^\/[a-z]$/i.test(rest) || /^\/[a-z]\/users\/[^/]+$/i.test(rest);
 }
 
 // `dirname(p) === p` is the classic "p is a root" test, but on Windows it

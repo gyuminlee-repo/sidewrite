@@ -2,8 +2,9 @@
 //
 // New model: the workspace is simply the folder that directly contains the
 // open document — no walking up the tree, no marker search, no folder-name
-// heuristic. The single guard is "never $HOME / an OS-managed $HOME child /
-// the filesystem root". ensureWorkspaceMarker still drops a seed CLAUDE.md
+// heuristic. The guard is "never $HOME / an OS-managed $HOME child / the
+// filesystem root", plus under WSL "never a Windows drive root or profile
+// folder". ensureWorkspaceMarker still drops a seed CLAUDE.md
 // on explicit user pick. Tests use a fresh tmpdir per test.
 
 import { test } from "node:test";
@@ -99,7 +100,11 @@ async function withEnv(vars, fn) {
     }
   }
 }
-const WSL_ON = { CC_OFFICE_WSL_PATHS: "1", CC_OFFICE_WSL_MOUNT_ROOT: undefined };
+const WSL_ON = {
+  CC_OFFICE_WSL_PATHS: "1",
+  CC_OFFICE_WSL_MOUNT_ROOT: undefined,
+  WSL_DISTRO_NAME: undefined,
+};
 const WSL_OFF = { CC_OFFICE_WSL_PATHS: "0" };
 const posixOnly = { skip: process.platform === "win32" };
 
@@ -135,6 +140,50 @@ test("WSL mode: \\\\wsl.localhost and \\\\wsl$ shares map to Linux paths", posix
       "/home/a",
     );
     assert.equal(await resolveWorkspaceRoot("\\\\wsl$\\Ubuntu\\home\\a\\b.docx"), "/home/a");
+  }),
+);
+
+test("WSL mode: a Windows drive root or profile folder is never the workspace", posixOnly, () =>
+  withEnv(WSL_ON, async () => {
+    assert.equal(await resolveWorkspaceRoot("D:\\x.docx"), null);
+    assert.equal(await resolveWorkspaceRoot("C:\\Users\\me\\x.docx"), null);
+    assert.equal(await resolveWorkspaceRoot("c:/users/me/x.docx"), null);
+    assert.equal(await resolveWorkspaceRoot("D:\\proj\\x.docx"), "/mnt/d/proj");
+  }),
+);
+
+test("WSL mode: drive-root guard follows the mount root override", posixOnly, () =>
+  withEnv({ ...WSL_ON, CC_OFFICE_WSL_MOUNT_ROOT: "/x/" }, async () => {
+    assert.equal(await resolveWorkspaceRoot("D:\\x.docx"), null);
+    assert.equal(await resolveWorkspaceRoot("C:\\Users\\me\\x.docx"), null);
+    assert.equal(await resolveWorkspaceRoot("D:\\proj\\x.docx"), "/x/d/proj");
+  }),
+);
+
+test("non-WSL mode: no drive-root guard on /mnt paths", posixOnly, () =>
+  withEnv(WSL_OFF, async () => {
+    assert.equal(await resolveWorkspaceRoot("/mnt/d/x.docx"), "/mnt/d");
+  }),
+);
+
+test("WSL mode: forward-slash UNC forms behave like backslash forms", posixOnly, () =>
+  withEnv(WSL_ON, async () => {
+    assert.equal(windowsPathToWsl("//wsl.localhost/Ubuntu/home/a/b.docx"), "/home/a/b.docx");
+    assert.equal(windowsPathToWsl("//wsl$/Ubuntu/home/a"), "/home/a");
+    assert.equal(windowsPathToWsl("//wsl.localhost/Ubuntu"), "/");
+    assert.equal(windowsPathToWsl("//server/share/b.docx"), null);
+    assert.equal(await resolveWorkspaceRoot("//wsl.localhost/Ubuntu/home/a/b.docx"), "/home/a");
+    assert.equal(await resolveWorkspaceRoot("//server/share/b.docx"), null);
+  }),
+);
+
+test("WSL mode: \\\\wsl.localhost paths of another distro are unaddressable", posixOnly, () =>
+  withEnv({ ...WSL_ON, WSL_DISTRO_NAME: "Ubuntu" }, async () => {
+    assert.equal(windowsPathToWsl("\\\\wsl.localhost\\ubuntu\\home\\a"), "/home/a");
+    assert.equal(windowsPathToWsl("\\\\wsl$\\UBUNTU\\home\\a"), "/home/a");
+    assert.equal(windowsPathToWsl("\\\\wsl.localhost\\Debian\\home\\a"), null);
+    assert.equal(windowsPathToWsl("//wsl$/Debian/home/a"), null);
+    assert.equal(await resolveWorkspaceRoot("\\\\wsl$\\Debian\\home\\a\\b.docx"), null);
   }),
 );
 

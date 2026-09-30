@@ -39,7 +39,10 @@ export function summarizeSessionJsonl(text) {
     } catch {
       continue;
     }
-    if (line.includes('"hookEvent"')) hookEvents += 1;
+    // Hook records are attachment lines ({type:"attachment", attachment:
+    // {hookEvent:…}}). Match the field, not the substring, so user text that
+    // quotes "hookEvent" is not counted.
+    if (typeof o.attachment?.hookEvent === "string") hookEvents += 1;
     if (!version && typeof o.version === "string") version = o.version;
     if (!usage && o.type === "assistant" && o.message?.usage) {
       usage = o.message.usage;
@@ -76,7 +79,14 @@ export function runProbe({
     const out = { sessionId: null, model: null, cwd: null, toolCalls: 0, text: "" };
     let sent = false;
     const ws = new WebSocket(url, { origin });
-    const timer = setTimeout(() => finish(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
+    const timer = setTimeout(() => {
+      // Abort the daemon's turn so it does not keep running after we leave.
+      try {
+        if (ws.readyState === WebSocket.OPEN)
+          send({ type: "stop_agent", request_id: randomUUID() });
+      } catch {}
+      finish(new Error(`timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
     function finish(err) {
       clearTimeout(timer);
       try {
@@ -174,7 +184,7 @@ async function waitForSummary(sessionId, tries = 20) {
   throw new Error(`no assistant usage found for session ${sessionId}`);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const a = {
     text: "hi",
     model: "sonnet",
@@ -183,16 +193,23 @@ function parseArgs(argv) {
     maxTotal: null,
     maxHooks: null,
   };
+  const num = (k, v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) throw new Error(`${k} needs a number, got "${v}"`);
+    return n;
+  };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
-    const v = argv[i + 1];
-    if (k === "--jsonl") ((a.jsonl = v), i++);
-    else if (k === "--text") ((a.text = v), i++);
-    else if (k === "--model") ((a.model = v), i++);
-    else if (k === "--timeout") ((a.timeout = Number(v)), i++);
-    else if (k === "--max-total") ((a.maxTotal = Number(v)), i++);
-    else if (k === "--max-hooks") ((a.maxHooks = Number(v)), i++);
-    else throw new Error(`unknown argument ${k}`);
+    const known = ["--jsonl", "--text", "--model", "--timeout", "--max-total", "--max-hooks"];
+    if (!known.includes(k)) throw new Error(`unknown argument ${k}`);
+    const v = argv[++i];
+    if (v === undefined) throw new Error(`${k} needs a value`);
+    if (k === "--jsonl") a.jsonl = v;
+    else if (k === "--text") a.text = v;
+    else if (k === "--model") a.model = v;
+    else if (k === "--timeout") a.timeout = num(k, v);
+    else if (k === "--max-total") a.maxTotal = num(k, v);
+    else if (k === "--max-hooks") a.maxHooks = num(k, v);
   }
   return a;
 }

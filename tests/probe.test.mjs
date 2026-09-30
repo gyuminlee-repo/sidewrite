@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createBridge } from "../daemon/bridge.mjs";
-import { summarizeSessionJsonl, runProbe } from "../scripts/probe-hi.mjs";
+import { summarizeSessionJsonl, runProbe, parseArgs } from "../scripts/probe-hi.mjs";
 
 const ORIGIN = "http://127.0.0.1:47834";
 
@@ -40,6 +40,75 @@ test("summarizeSessionJsonl sums the first assistant usage and counts hook lines
   assert.equal(s.version, "2.1.141");
   assert.equal(s.model, "claude-sonnet-4-6");
   assert.equal(s.hasAssistant, true);
+});
+
+test("summarizeSessionJsonl ignores the word hookEvent inside user text", () => {
+  const lines = [
+    { type: "attachment", attachment: { type: "hook_success", hookEvent: "SessionStart" } },
+    { type: "user", message: { role: "user", content: 'the field is "hookEvent": "Stop"' } },
+    {
+      type: "assistant",
+      message: { content: [{ type: "text", text: '{"hookEvent":"x"}' }], usage: {} },
+    },
+  ].map((o) => JSON.stringify(o));
+  assert.equal(summarizeSessionJsonl(lines.join("\n")).hookEvents, 1);
+});
+
+test("parseArgs rejects missing values and non-numeric numbers", () => {
+  assert.deepEqual(parseArgs(["--timeout", "5", "--max-hooks", "0"]), {
+    text: "hi",
+    model: "sonnet",
+    timeout: 5,
+    jsonl: null,
+    maxTotal: null,
+    maxHooks: 0,
+  });
+  assert.throws(() => parseArgs(["--timeout", "abc"]), /--timeout needs a number/);
+  assert.throws(() => parseArgs(["--timeout"]), /--timeout needs a value/);
+  assert.throws(() => parseArgs(["--jsonl"]), /--jsonl needs a value/);
+  assert.throws(() => parseArgs(["--max-total"]), /--max-total needs a value/);
+  assert.throws(() => parseArgs(["--max-hooks", "Infinity"]), /needs a number/);
+  assert.throws(() => parseArgs(["--bogus"]), /unknown argument --bogus/);
+});
+
+test("runProbe sends stop_agent before closing on timeout", async () => {
+  const seen = { stop: 0 };
+  let bridge;
+  bridge = createBridge({
+    port: 0,
+    token: "t",
+    allowedOrigins: [ORIGIN],
+    onHello: (key) =>
+      bridge.sendToTaskpane(
+        { type: "transcript_replay", session_id: null, truncated: false, events: [] },
+        key,
+      ),
+    extraHandlers: {
+      set_model: async (msg, reply) =>
+        reply({ type: "set_model_result", ok: true, model: msg.model, request_id: msg.request_id }),
+      stop_agent: async () => {
+        seen.stop += 1;
+      },
+    },
+  });
+  try {
+    await waitForListening(bridge);
+    await assert.rejects(
+      runProbe({
+        url: `ws://127.0.0.1:${bridge.address().port}`,
+        origin: ORIGIN,
+        token: "t",
+        doc: "/tmp/p/x.docx",
+        timeoutMs: 300,
+      }),
+      /timed out/,
+    );
+    const deadline = Date.now() + 2000;
+    while (seen.stop === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(seen.stop, 1);
+  } finally {
+    await bridge.close();
+  }
 });
 
 test("runProbe speaks the taskpane protocol against the real bridge", async () => {

@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   resolveSettingSources,
@@ -33,11 +33,32 @@ test("settingSources=all omits the key (SDK loads every source, upstream behavio
 });
 
 test("settingSources empty string means isolation, list is filtered", () => {
-  assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "" }), []);
-  assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "user, project,bogus" }), [
-    "user",
-    "project",
-  ]);
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "" }), []);
+    assert.equal(warn.mock.callCount(), 0);
+    assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "user, project,bogus" }), [
+      "user",
+      "project",
+    ]);
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("settingSources values are case-insensitive, unknown names warn", () => {
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    assert.equal(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "ALL" }), undefined);
+    assert.equal(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: " All " }), undefined);
+    assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "Project" }), ["project"]);
+    assert.equal(warn.mock.callCount(), 0);
+    assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "projects" }), []);
+    assert.equal(warn.mock.callCount(), 1);
+    assert.match(warn.mock.calls[0].arguments[0], /projects/);
+  } finally {
+    warn.mock.restore();
+  }
 });
 
 test("user MCP from ~/.claude.json is off by default", () => {

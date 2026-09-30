@@ -6,7 +6,9 @@
 //                              .claude/settings.json only). "all": key
 //                              omitted, the SDK loads user+project+local
 //                              (upstream behavior). "": [] (isolation).
-//                              Otherwise a comma list of user,project,local.
+//                              Otherwise a comma list of user,project,local
+//                              (case-insensitive; unknown names are dropped
+//                              with a warning).
 //   CC_OFFICE_LOAD_USER_MCP    "1": merge ~/.claude.json mcpServers into the
 //                              session (upstream behavior). Default off.
 //   CC_OFFICE_CLAUDE_PATH      absolute path to a local claude executable
@@ -18,11 +20,18 @@ const VALID_SOURCES = new Set(["user", "project", "local"]);
 export function resolveSettingSources(env = process.env) {
   const raw = env.CC_OFFICE_SETTING_SOURCES;
   if (raw === undefined) return ["project"];
-  if (raw.trim() === "all") return undefined;
-  return raw
+  if (raw.trim().toLowerCase() === "all") return undefined;
+  const items = raw
     .split(",")
-    .map((s) => s.trim())
-    .filter((s) => VALID_SOURCES.has(s));
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const unknown = items.filter((s) => !VALID_SOURCES.has(s));
+  if (unknown.length > 0) {
+    console.warn(
+      `[daemon] CC_OFFICE_SETTING_SOURCES: ignoring unknown source(s): ${unknown.join(", ")}`,
+    );
+  }
+  return items.filter((s) => VALID_SOURCES.has(s));
 }
 
 export function userMcpEnabled(env = process.env) {
