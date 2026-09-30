@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit } from "../daemon/review-tools.mjs";
+import { loadRevision, saveRevision } from "../daemon/revision-store.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 
@@ -1144,6 +1145,136 @@ test("ledger_check: a stale check that ends after a newer one leaves the newer r
       [r.revision.ledger[0].status, r.revision.ledger[0].violation_count],
       ["violations", 1],
     );
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// A comment list saved while work on a comment is still open (a review turn,
+// a tracked edit waiting for Word, an edit whose answer may come late, an
+// exception applying or unanswered) keeps that comment and says so. A change
+// Word applies afterwards is recorded under it.
+const KEPT = (refs) => `Not removed because work on it is in progress: ${refs}`;
+const APPLIED = { ok: true, word_comment_id: 44, paragraph_index: 9, before: "b", after: "a" };
+const R_ = { what: "w", why: "y", addresses: "a" };
+const EDIT = { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R_ };
+const refsOf = (rev) => rev.comments.map((c) => c.ref);
+
+test("comment list saved while a tracked edit waits for Word: comment kept, edit recorded", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    let answer, called;
+    const waiting = new Promise((r) => (answer = r));
+    const inWord = new Promise((r) => (called = r));
+    const call = () => (called(), waiting);
+    const deps = { ...t.svc.trackedEditDeps("k"), call };
+    const edit = applyTrackedEdit(deps, EDIT, { ref: "R1.1" }).catch((e) => e);
+    await inWord; // Word has the edit and has not answered
+    const saved = await t.ask("review_save_comments", { comments: [COMMENTS[1]] });
+    assert.equal(saved.ok, true);
+    assert.deepEqual(refsOf(saved.revision), ["R1.3", "R1.1"]);
+    assert.deepEqual(saved.warnings, [KEPT("R1.1")]);
+    answer(APPLIED);
+    const r = await edit;
+    assert.equal(r.change_id, "R1.1-1");
+    const rev = (await t.ask("review_load")).revision;
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").changes.length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("comment list saved during a review turn keeps its comment until the turn ends", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("review_propose", { ref: "R1.1" });
+    const during = await t.ask("review_save_comments", { comments: [COMMENTS[1]] });
+    assert.deepEqual(refsOf(during.revision), ["R1.3", "R1.1"]);
+    assert.deepEqual(during.warnings, [KEPT("R1.1")]);
+    t.svc.turnEnded("k", { ref: "R1.1" });
+    const after = await t.ask("review_save_comments", { comments: [COMMENTS[1]] });
+    assert.deepEqual(refsOf(after.revision), ["R1.3"]);
+    assert.deepEqual(after.warnings, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("comment list saved while a timed-out edit may still answer: comment kept, late result recorded", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => {
+        throw noAnswer("x1");
+      },
+    };
+    await applyTrackedEdit(deps, EDIT, { ref: "R1.1" });
+    const saved = await t.ask("review_save_comments", { comments: [COMMENTS[1]] });
+    assert.deepEqual(saved.warnings, [KEPT("R1.1")]);
+    const out = await t.svc.lateToolResult("k", {
+      id: "x1",
+      name: "office_tracked_edit",
+      ok: true,
+      result: APPLIED,
+    });
+    assert.equal(out.change_id, "R1.1-1");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("comment list saved with an unanswered exception on file keeps that comment", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const path = join(t.dir, "paper.revision.json");
+    const rev = await loadRevision(path, t.doc);
+    rev.comments[1].blocked.push({
+      id: "R1.3-b1",
+      args: { comment_ref: "R1.3", find: "x", replace: "novel x", rationale: R_ },
+      blocked_by: ["L1"],
+      created_at: "2026-01-01T00:00:00Z",
+      state: "outcome_unknown",
+    });
+    await saveRevision(path, rev);
+    const saved = await t.ask("review_save_comments", { comments: [COMMENTS[0]] });
+    assert.deepEqual(refsOf(saved.revision), ["R1.1", "R1.3"]);
+    assert.deepEqual(saved.warnings, [KEPT("R1.3")]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Last line of defense: the comment is gone from the file anyway (written by
+// hand, or by a path the protection does not see). The applied change and a
+// blocked edit are recorded under a restored comment, never thrown away.
+test("an edit whose comment is gone restores the comment: ref only, or the text the turn had", async () => {
+  const t = await setup();
+  try {
+    const path = join(t.dir, "paper.revision.json");
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("review_propose", { ref: "R1.1" });
+    await saveRevision(path, { ...(await loadRevision(path, t.doc)), comments: [] });
+    const deps = { ...t.svc.trackedEditDeps("k"), call: async () => APPLIED };
+    const r = await applyTrackedEdit(deps, EDIT, { ref: "R1.1" });
+    assert.equal(r.change_id, "R1.1-1");
+    const blocked = await applyTrackedEdit(
+      { ...deps, getLedger: async () => [{ ...NOVEL, id: "L1", scope: "manuscript" }] },
+      { ...EDIT, comment_ref: "R2.4", replace: "novel" },
+      { ref: "R2.4" },
+    );
+    assert.equal(blocked.blocked_id, "R2.4-b1");
+    const rev = await loadRevision(path, t.doc);
+    const r11 = rev.comments.find((c) => c.ref === "R1.1");
+    assert.deepEqual([r11.text, r11.reviewer, r11.changes.length], ["Use Celsius.", 1, 1]);
+    const r24 = rev.comments.find((c) => c.ref === "R2.4");
+    assert.deepEqual([r24.text, r24.reviewer, r24.blocked.length], ["", 2, 1]);
+    assert.ok(t.lines.includes("[review] comment R1.1 was missing; restored to keep the change"));
+    assert.ok(t.lines.includes("[review] comment R2.4 was missing; restored to keep the change"));
   } finally {
     await t.cleanup();
   }

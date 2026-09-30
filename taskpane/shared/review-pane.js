@@ -576,8 +576,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           requirements: requirementsFromText(c.requirementsText),
         };
       });
-      await ask("review_save_comments", { comments });
+      const r = await ask("review_save_comments", { comments });
       state.draft = [];
+      // Comments a running turn or an open edit still uses are not removed.
+      if (r.warnings?.length) say(r.warnings.join(" "));
     }),
   );
   $("review-refresh").addEventListener("click", guard(refresh));

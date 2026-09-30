@@ -20,6 +20,7 @@ import {
   loadRevision,
   withRevision,
   replaceComments,
+  restoreComment,
   setCommentStatus,
   addChange,
   applyStates,
@@ -117,6 +118,10 @@ export function resolveUnknownOverrides(rev, snapshot) {
 }
 
 // What a ledger check result depends on: the rule, not its last result.
+// review_save_comments: comments work still points at are not removed.
+export const keptWarning = (refs) =>
+  `Not removed because work on it is in progress: ${refs.join(", ")}`;
+
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
 
 export function createReviewService({
@@ -144,8 +149,54 @@ export function createReviewService({
     if (!p) return null;
     clearTimeout(p.timer);
     pendingLate.delete(id);
+    p.release();
     return p;
   }
+
+  // Work still open on a comment, by token: { path, ref, comment }. Held by
+  // a review turn (review_propose .. turnEnded), a tracked edit waiting for
+  // Word (holdRef), and an unanswered edit whose answer may come late
+  // (pendingLate). comment: { reviewer, text, requirements } when known, so
+  // a comment removed anyway can be restored with its text (onEdit).
+  const inflight = new Map();
+  let lastToken = 0;
+  function hold(key, ref, comment = null) {
+    let path;
+    try {
+      path = docFor(key).path;
+    } catch {
+      return () => {};
+    }
+    const token = ++lastToken;
+    inflight.set(token, { path, ref, comment: comment ?? remembered(path, ref) });
+    return () => inflight.delete(token);
+  }
+  function remembered(path, ref) {
+    for (const e of inflight.values()) {
+      if (e.path === path && e.ref === ref && e.comment) return e.comment;
+    }
+    return null;
+  }
+  // Refs a comment-list save must keep: held above, or with an exception
+  // being applied or unanswered in the file (Blocked.state).
+  function heldRefs(path, rev) {
+    const refs = new Set();
+    for (const e of inflight.values()) if (e.path === path) refs.add(e.ref);
+    for (const c of rev.comments) {
+      if (c.blocked.some((b) => b.state === "applying" || b.state === "outcome_unknown")) {
+        refs.add(c.ref);
+      }
+    }
+    return refs;
+  }
+  // The comment a change lands under; restored when it was removed anyway,
+  // so an edit Word applied is never thrown away.
+  function withComment(key, rev, ref) {
+    if (findComment(rev, ref)) return rev;
+    log(`[review] comment ${ref} was missing; restored to keep the change`);
+    return restoreComment(rev, ref, remembered(docFor(key).path, ref));
+  }
+  const turnHolds = new Map(); // pane key -> release of its review turn hold
 
   function docFor(key) {
     const doc = localDocPath(getContext(key)?.activeDoc, env);
@@ -206,9 +257,10 @@ export function createReviewService({
         let saved = null;
         let comment = null;
         await update(key, (rev) => {
-          const r = addChange(rev, ref, change);
+          const base = withComment(key, rev, ref);
+          const r = addChange(base, ref, change);
           saved = r.change;
-          comment = findComment(rev, ref);
+          comment = findComment(base, ref);
           return r.revision;
         });
         await receipt(key, [
@@ -233,14 +285,15 @@ export function createReviewService({
       },
       onOutcomeUnknown: ({ id, ref, record, blocked_id = null }) => {
         if (!id) return;
-        const timer = setTimeout(() => pendingLate.delete(id), lateResultTtlMs);
+        const timer = setTimeout(() => forgetLate(id), lateResultTtlMs);
         timer.unref?.();
-        pendingLate.set(id, { key, ref, record, blocked_id, timer });
+        pendingLate.set(id, { key, ref, record, blocked_id, timer, release: hold(key, ref) });
       },
+      holdRef: (ref) => hold(key, ref),
       onBlocked: async ({ ref, args, blocked_by }) => {
         let saved = null;
         await update(key, (rev) => {
-          const r = addBlocked(rev, ref, { args, blocked_by });
+          const r = addBlocked(withComment(key, rev, ref), ref, { args, blocked_by });
           saved = r.blocked;
           return r.revision;
         });
@@ -254,6 +307,16 @@ export function createReviewService({
   // Applied (ok, or applied without its comment): recorded like an answer in
   // time. Anything else only logs.
   async function lateToolResult(key, entry) {
+    // Held until the result is recorded, so a save in between keeps the comment.
+    const p = pendingLate.get(entry.id);
+    const held = p ? hold(p.key, p.ref) : () => {};
+    try {
+      return await recordLate(entry);
+    } finally {
+      held();
+    }
+  }
+  async function recordLate(entry) {
     const p = forgetLate(entry.id);
     if (!p) {
       log(`[review] late result dropped ${entry.id}: no pending tracked edit`);
@@ -285,6 +348,8 @@ export function createReviewService({
   }
 
   function turnEnded(key, turn) {
+    turnHolds.get(key)?.();
+    turnHolds.delete(key);
     log(`[review] turn done ${turn.ref}`);
     sendEvent(key, { type: "review_event", event: "turn_done", ref: turn.ref });
   }
@@ -338,7 +403,17 @@ export function createReviewService({
     },
     async review_save_comments(msg, key) {
       const incoming = Array.isArray(msg.comments) ? msg.comments : [];
-      return { revision: await update(key, (rev) => replaceComments(rev, incoming)) };
+      const { path } = docFor(key);
+      const listed = new Set(incoming.map((c) => c?.ref));
+      let kept = [];
+      // Read inside the chain: what is held when the save runs, not when asked.
+      const revision = await update(key, (rev) => {
+        const held = heldRefs(path, rev);
+        kept = rev.comments.map((c) => c.ref).filter((r) => !listed.has(r) && held.has(r));
+        return replaceComments(rev, incoming, held);
+      });
+      if (kept.length) log(`[review] comments kept, work in progress: ${kept.join(",")}`);
+      return { revision, warnings: kept.length ? [keptWarning(kept)] : [] };
     },
     async review_set_status(msg, key) {
       return { revision: await update(key, (rev) => setCommentStatus(rev, msg.ref, msg.status)) };
@@ -355,8 +430,17 @@ export function createReviewService({
       return { prompt: built.text };
     },
     async review_propose(msg, key, host) {
-      const { built } = await buildFor(key, msg.ref, msg.paragraphs);
+      const { built, comment } = await buildFor(key, msg.ref, msg.paragraphs);
       pushTurn(key, host, built.text, { ref: msg.ref });
+      turnHolds.get(key)?.();
+      turnHolds.set(
+        key,
+        hold(key, msg.ref, {
+          reviewer: comment.reviewer,
+          text: comment.text,
+          requirements: comment.requirements,
+        }),
+      );
       log(formatPromptLog(msg.ref, built, { paragraphs: msg.paragraphs?.length ?? 0 }));
       const revision = await update(key, (rev) =>
         findComment(rev, msg.ref).status === "pending"

@@ -421,3 +421,24 @@ test("Propose changes follows the running turn: chat re-render disables, chat en
   turn.end(); // connection dropped (ws.onclose)
   assert.deepEqual(states(), [false, false]);
 });
+
+test("Save shows the daemon's warning about comments it kept", async () => {
+  const revision = { comments: [], ledger: [] };
+  const warning = "Not removed because work on it is in progress: R1.1";
+  const t = await setup({
+    revision,
+    respond: {
+      review_split: () => ({
+        ok: true,
+        method: "regex",
+        warnings: [],
+        comments: [{ ref: "R1.3", reviewer: 1, text: "Rename it." }],
+      }),
+      review_save_comments: () => ({ ok: true, revision, warnings: [warning] }),
+    },
+  });
+  await t.$("review-split").click();
+  await t.$("review-save").click();
+  assert.equal(t.$("review-message").textContent, warning);
+  assert.equal(t.$("review-message").hidden, false);
+});

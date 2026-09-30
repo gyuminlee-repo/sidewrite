@@ -277,8 +277,10 @@ function requireComment(rev, ref) {
 
 // Replace the comment list with the user-edited one. Changes, blocked edits
 // and status of a ref that survives are kept. Dropping a ref that already
-// has changes is refused: its edits are in the document.
-export function replaceComments(rev, incoming) {
+// has changes is refused: its edits are in the document. A dropped ref in
+// `keep` (work on it is still open, review-service.mjs heldRefs) stays, after
+// the listed ones.
+export function replaceComments(rev, incoming, keep = new Set()) {
   const next = clone(rev);
   const seen = new Set();
   const list = [];
@@ -299,11 +301,32 @@ export function replaceComments(rev, incoming) {
     });
   }
   for (const old of rev.comments) {
-    if (!seen.has(old.ref) && old.changes.length > 0) {
+    if (seen.has(old.ref)) continue;
+    if (old.changes.length > 0) {
       throw new Error(`Comment ${old.ref} has ${old.changes.length} recorded change(s); keep it`);
     }
+    if (keep.has(old.ref)) list.push(clone(old));
   }
   next.comments = list;
+  return next;
+}
+
+// Put a comment back so a change or blocked edit can be recorded under it
+// when the comment was removed anyway. from: { reviewer, text, requirements }
+// the daemon still holds, or null for the ref alone.
+export function restoreComment(rev, ref, from = null) {
+  const m = /^(?:R(\d+)|E)\.\d+$/.exec(ref);
+  if (!m) throw new Error(`Bad comment ref ${ref}`);
+  const next = clone(rev);
+  next.comments.push(
+    Comment.parse({
+      ref,
+      reviewer: from?.reviewer ?? (m[1] ? Number(m[1]) : 0),
+      text: from?.text ?? "",
+      requirements: clone(from?.requirements ?? []),
+      status: "in_progress",
+    }),
+  );
   return next;
 }
 

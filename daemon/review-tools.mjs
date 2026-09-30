@@ -144,7 +144,10 @@ function fail(message, extra = {}) {
 }
 
 // deps: { call(name, args), getLedger(), getReviewContext(ref), onEdit({ref, change}),
-//         onBlocked({ref, args, blocked_by}), onOutcomeUnknown({id, ref, record}), log }
+//         onBlocked({ref, args, blocked_by}), onOutcomeUnknown({id, ref, record}),
+//         holdRef(ref) -> release, log }
+// holdRef (optional): marks the comment as in use while Word is called, so a
+// comment-list save does not drop it; the returned function ends that.
 // onOutcomeUnknown: the task pane did not answer. `id` is the bridge call id
 // a late tool_result will carry; `record(result)` records that result the
 // same way as an answer in time (review-service.mjs lateToolResult);
@@ -238,42 +241,49 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   };
 
   const commentText = formatRationaleComment(turn.ref, rationale, { lost });
-  let r;
+  // The comment stays in the list until the answer is recorded (or handed
+  // to onOutcomeUnknown, which holds it on its own).
+  const release = deps.holdRef?.(turn.ref);
   try {
-    r = await deps.call(REVIEW_WRITE_TOOL, {
-      find: args.find,
-      ...(hasReplace ? { replace: args.replace } : { insert_after: args.insert_after }),
-      ...(args.paragraph_hint ? { paragraph_hint: args.paragraph_hint } : {}),
-      ...(narrow ? { narrow } : {}),
-      comment_text: commentText,
-    });
-  } catch (e) {
-    // No answer (bridge.mjs timeout or pane disconnect): the edit may be in
-    // the document with nothing recorded. A retry could apply it twice.
-    if (!NO_ANSWER_CODES.has(e?.code)) throw e;
-    const id = e.toolCallId ?? null;
-    deps.log?.(`[review] outcome unknown ${turn.ref} code=${e.code} id=${id}`);
-    const attempt = {
-      tool_call_id: id,
-      unknown_at: new Date().toISOString(),
-      comment_text: commentText,
-      change: unknownAttempt(texts, {
-        kind,
+    let r;
+    try {
+      r = await deps.call(REVIEW_WRITE_TOOL, {
         find: args.find,
-        text: newText,
-        rationale,
-        override_of: excepted,
-        lost_facts: lost,
-        unsourced_terms: unsourced,
-      }),
-    };
-    await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt });
-    return fail(
-      `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
-      { code: "OutcomeUnknown", tool_call_id: id },
-    );
+        ...(hasReplace ? { replace: args.replace } : { insert_after: args.insert_after }),
+        ...(args.paragraph_hint ? { paragraph_hint: args.paragraph_hint } : {}),
+        ...(narrow ? { narrow } : {}),
+        comment_text: commentText,
+      });
+    } catch (e) {
+      // No answer (bridge.mjs timeout or pane disconnect): the edit may be in
+      // the document with nothing recorded. A retry could apply it twice.
+      if (!NO_ANSWER_CODES.has(e?.code)) throw e;
+      const id = e.toolCallId ?? null;
+      deps.log?.(`[review] outcome unknown ${turn.ref} code=${e.code} id=${id}`);
+      const attempt = {
+        tool_call_id: id,
+        unknown_at: new Date().toISOString(),
+        comment_text: commentText,
+        change: unknownAttempt(texts, {
+          kind,
+          find: args.find,
+          text: newText,
+          rationale,
+          override_of: excepted,
+          lost_facts: lost,
+          unsourced_terms: unsourced,
+        }),
+      };
+      await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt });
+      return fail(
+        `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
+        { code: "OutcomeUnknown", tool_call_id: id },
+      );
+    }
+    return await record(r);
+  } finally {
+    release?.();
   }
-  return record(r);
 }
 
 // The change an unanswered tracked edit would have recorded, with the
