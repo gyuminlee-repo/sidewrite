@@ -19,6 +19,12 @@ import { readTranscript } from "./transcript.mjs";
 import { diag } from "./diag.mjs";
 import { getContextEntries, setContextEntries } from "./context.mjs";
 import {
+  detectUsageLimit,
+  turnCompleteEvents,
+  emptyTurnStats,
+  noteMessage,
+} from "./limit-detect.mjs";
+import {
   buildQueryOptions,
   formatUsageLine,
   resolveSettingSources,
@@ -1078,6 +1084,12 @@ async function startSessionForFolder(
       })) {
         if (sessionFor(key) !== session) break; // this pane's loop was restarted
         if (msg.type === "result") sawResult = true;
+        const limit = detectUsageLimit(msg);
+        if (limit.limited && !session.usageLimit) {
+          session.usageLimit = limit;
+          console.log(`[agent] ${limit.kind} detected (${limit.reason})`);
+        }
+        noteMessage((session.turnStats ??= emptyTurnStats()), msg);
         handleAgentMessage(msg, session);
       }
       // A turn that produced a `result` means the loop is healthy again —
@@ -1254,8 +1266,16 @@ function handleAgentMessage(msg, session) {
       break;
     }
     case "result": {
+      // A usage limit, a refusal, an API error or an empty turn can arrive as
+      // subtype "success"; turnCompleteEvents turns those into
+      // usage_limit / refusal / api_error / empty + error.
+      const events = turnCompleteEvents(msg, session?.usageLimit ?? null, session?.turnStats);
+      if (session) {
+        session.usageLimit = null;
+        session.turnStats = null;
+      }
       console.log(
-        `[agent] turn complete (${msg.subtype}) slash=${!!session?.slashCommandPending} output=${!!session?.turnProducedOutput}`,
+        `[agent] turn complete (${events[0].subtype}) slash=${!!session?.slashCommandPending} output=${!!session?.turnProducedOutput}`,
       );
       console.log(formatUsageLine(msg.usage));
       // A slash command that emitted neither assistant text nor a tool call
@@ -1276,7 +1296,7 @@ function handleAgentMessage(msg, session) {
         session.slashCommandPending = false;
         session.turnProducedOutput = false;
       }
-      bridge.sendAssistantEvent({ event: "turn_complete", subtype: msg.subtype }, session?.key);
+      for (const ev of events) bridge.sendAssistantEvent(ev, session?.key);
       break;
     }
     case "user": {
