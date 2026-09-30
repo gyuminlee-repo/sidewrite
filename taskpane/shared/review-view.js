@@ -96,6 +96,39 @@ export function buildCommentsBackup(comments, { manuscript = null, now = new Dat
   };
 }
 
+// "Delete ALL comments" shows a list on the first press and deletes on the
+// second. Before deleting, the pane reads the comments again and compares:
+// any comment added, removed, or changed (text, author, resolved, anchor,
+// replies) since the list was shown means no delete and a new confirmation.
+function commentKey(c) {
+  return JSON.stringify([
+    c.author ?? null,
+    c.content ?? "",
+    !!c.resolved,
+    c.anchor_text ?? "",
+    (c.replies ?? []).map((r) => [r.author ?? null, r.content ?? ""]),
+  ]);
+}
+
+export function compareCommentLists(shown, current) {
+  const before = new Map((shown ?? []).map((c) => [String(c.id), commentKey(c)]));
+  const now = new Map((current ?? []).map((c) => [String(c.id), commentKey(c)]));
+  let added = 0;
+  let edited = 0;
+  for (const [id, key] of now) {
+    if (!before.has(id)) added += 1;
+    else if (before.get(id) !== key) edited += 1;
+  }
+  let removed = 0;
+  for (const id of before.keys()) if (!now.has(id)) removed += 1;
+  const same = added + removed + edited === 0;
+  const parts = [];
+  if (added) parts.push(`${added} added`);
+  if (removed) parts.push(`${removed} removed`);
+  if (edited) parts.push(`${edited} changed`);
+  return { same, added, removed, edited, text: parts.join(", ") };
+}
+
 // Verdict for "Delete ALL comments": backup count and deleted count must both
 // equal the count shown to the user, and nothing may remain.
 export function deleteAllReport({ shown, backedUp, deleted, remaining }) {

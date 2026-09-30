@@ -10,6 +10,7 @@ import {
   countComments,
   cleanupReport,
   buildCommentsBackup,
+  compareCommentLists,
   deleteAllReport,
   invariantReport,
   ledgerItemFromForm,
@@ -555,31 +556,45 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       say(rep.text, !rep.ok);
     }),
   );
-  // Delete ALL comments: first press shows the counts, second press backs up
-  // and deletes. window.confirm is unreliable in Office panes (taskpane.js
-  // context-error note), so the confirmation is inline.
+  // Delete ALL comments: first press shows the counts, second press reads
+  // the comments again, backs up that fresh list and deletes. If the list
+  // changed since it was shown, nothing is deleted and the new count is
+  // shown for another press. window.confirm is unreliable in Office panes
+  // (taskpane.js context-error note), so the confirmation is inline.
   $("review-delete-all").addEventListener(
     "click",
     guard(async () => {
       const btn = $("review-delete-all");
-      if (!state.backupShown) {
-        const comments = await word.readAllComments();
+      const offer = (comments) => {
         const n = countComments(comments);
         state.backupShown = { comments, n };
         btn.textContent = `Back up and delete ${n.total} comments (tool ${n.tool}, yours ${n.user})`;
+        return n;
+      };
+      if (!state.backupShown) {
+        offer(await word.readAllComments());
         return;
       }
-      const { comments, n } = state.backupShown;
+      const current = await word.readAllComments();
+      const diff = compareCommentLists(state.backupShown.comments, current);
+      if (!diff.same) {
+        const n = offer(current);
+        throw new Error(
+          `Comments changed since the count was shown (${diff.text}). Nothing deleted. Press again to back up and delete ${n.total}.`,
+        );
+      }
       state.backupShown = null;
       btn.textContent = "Delete ALL comments...";
-      const backup = buildCommentsBackup(comments, { manuscript: state.path });
+      const backup = buildCommentsBackup(current, { manuscript: state.path });
       const b = await ask("comments_backup", { backup });
-      if (b.count !== n.total)
-        throw new Error(`Backup holds ${b.count}, expected ${n.total}. Nothing deleted.`);
+      if (b.count !== current.length || b.reply_count !== backup.reply_count)
+        throw new Error(
+          `Backup holds ${b.count} comments and ${b.reply_count} replies, expected ${current.length} and ${backup.reply_count}. Nothing deleted.`,
+        );
       const cleared = await word.clearAllComments();
       const left = await word.listComments();
       const rep = deleteAllReport({
-        shown: n.total,
+        shown: current.length,
         backedUp: b.count,
         deleted: cleared.cleared_comments,
         remaining: left.comment_count,

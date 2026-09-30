@@ -152,6 +152,32 @@ test("buildCommentsBackup keeps the replies of every thread", () => {
   assert.deepEqual(b.comments[1].replies, []);
 });
 
+test("compareCommentLists: the second Delete ALL press deletes only what was shown", () => {
+  const shown = [
+    { id: "1", author: "A", content: "Check units", resolved: false, anchor_text: "t" },
+    { id: "2", author: "A", content: "[R1.1] a / b / c", resolved: false, anchor_text: "u" },
+  ];
+  const same = view.compareCommentLists(shown, structuredClone(shown));
+  assert.deepEqual([same.same, same.text], [true, ""]);
+  const added = view.compareCommentLists(shown, [...shown, { id: "3", content: "new" }]);
+  assert.deepEqual([added.same, added.added, added.removed, added.edited], [false, 1, 0, 0]);
+  const edited = view.compareCommentLists(shown, [
+    { ...shown[0], content: "Check units twice" },
+    shown[1],
+  ]);
+  assert.deepEqual([edited.same, edited.edited], [false, 1]);
+  const resolved = view.compareCommentLists(shown, [{ ...shown[0], resolved: true }, shown[1]]);
+  assert.equal(resolved.same, false);
+  const replied = view.compareCommentLists(shown, [
+    { ...shown[0], replies: [{ author: "B", content: "ok" }] },
+    shown[1],
+  ]);
+  assert.deepEqual([replied.same, replied.edited], [false, 1]);
+  const removed = view.compareCommentLists(shown, [shown[1]]);
+  assert.deepEqual([removed.same, removed.removed], [false, 1]);
+  assert.match(added.text, /1 added/);
+});
+
 test("deleteAllReport needs backup == deleted == shown and nothing left", () => {
   assert.equal(view.deleteAllReport({ shown: 3, backedUp: 3, deleted: 3, remaining: 0 }).ok, true);
   assert.equal(view.deleteAllReport({ shown: 3, backedUp: 2, deleted: 3, remaining: 0 }).ok, false);
