@@ -144,7 +144,10 @@ function fail(message, extra = {}) {
 }
 
 // deps: { call(name, args), getLedger(), getReviewContext(ref), onEdit({ref, change}),
-//         onBlocked({ref, args, blocked_by}), log }
+//         onBlocked({ref, args, blocked_by}), onOutcomeUnknown({id, ref, record}), log }
+// onOutcomeUnknown: the task pane did not answer. `id` is the bridge call id
+// a late tool_result will carry; `record(result)` records that result the
+// same way as an answer in time (review-service.mjs lateToolResult).
 // getReviewContext returns { requirements, comment_text, paragraphs } for the
 // L2 sources (manuscript snapshot texts and the comment) and the L5 ids.
 // turn: { ref } of the current review turn, or null.
@@ -210,6 +213,29 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     kind === "delete" ? [] : unsourcedTerms(newText, [...texts, ctx.comment_text ?? "", args.find]);
   const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
 
+  // The answer of the task pane, now or late: record it (or return its error).
+  const record = async (r) => {
+    if (!r) return fail("empty result from the task pane");
+    // applied:true with ok:false: the task pane changed the document but could
+    // not add the rationale comment (CommentAnchorMissing: no range to anchor
+    // it; CommentInsertFailed: a step after the edit threw). The change is
+    // still recorded, with no comment id, so the change list and the
+    // "changes == rationale comments" check show it instead of losing it.
+    const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
+    if (r.ok === false && !commentMissing) return r;
+    return recordApplied(deps, turn.ref, r, {
+      kind,
+      newText,
+      narrow,
+      rationale,
+      excepted,
+      lost,
+      unsourced,
+      find: args.find,
+      commentMissing,
+    });
+  };
+
   let r;
   try {
     r = await deps.call(REVIEW_WRITE_TOOL, {
@@ -223,21 +249,25 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     // No answer (bridge.mjs timeout or pane disconnect): the edit may be in
     // the document with nothing recorded. A retry could apply it twice.
     if (!NO_ANSWER_CODES.has(e?.code)) throw e;
-    deps.log?.(`[review] outcome unknown ${turn.ref} code=${e.code}`);
+    const id = e.toolCallId ?? null;
+    deps.log?.(`[review] outcome unknown ${turn.ref} code=${e.code} id=${id}`);
+    await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record });
     return fail(
       `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
-      { code: "OutcomeUnknown" },
+      { code: "OutcomeUnknown", tool_call_id: id },
     );
   }
-  if (!r) return fail("empty result from the task pane");
-  // applied:true with ok:false: the task pane changed the document but could
-  // not add the rationale comment (CommentAnchorMissing: no range to anchor
-  // it; CommentInsertFailed: a step after the edit threw). The change is
-  // still recorded, with no comment id, so the change list and the
-  // "changes == rationale comments" check show it instead of losing it.
-  const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
-  if (r.ok === false && !commentMissing) return r;
+  return record(r);
+}
 
+// Record a result the task pane reported as applied (ok, or applied without
+// its rationale comment) and build the tool answer.
+async function recordApplied(
+  deps,
+  ref,
+  r,
+  { kind, newText, narrow, rationale, excepted, lost, unsourced, find, commentMissing },
+) {
   // The task pane reports whether it could apply the narrowed range (the cut
   // find must occur once inside the located hit); otherwise the full range.
   const narrowed = !!(narrow && r.narrowed === true);
@@ -247,7 +277,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     paragraph_index: r.paragraph_index ?? null,
     paragraph_id: r.paragraph_id ?? null,
     kind: appliedKind,
-    find: narrowed ? narrow.find : args.find,
+    find: narrowed ? narrow.find : find,
     text: narrowed ? narrow.replace : newText,
     before: r.before ?? "",
     after: r.after ?? "",
@@ -255,15 +285,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     override_of: excepted,
     lost_facts: lost,
     unsourced_terms: unsourced,
-    narrowed_from: narrowed ? { find: args.find, text: newText } : null,
+    narrowed_from: narrowed ? { find: find, text: newText } : null,
     comment_missing: commentMissing,
     // Words around the range the task pane changed (revision-classify.mjs).
-    context: changeContext(r.before, args.find, {
+    context: changeContext(r.before, find, {
       kind,
       narrowFind: narrowed ? narrow.find : null,
     }),
   };
-  const saved = await deps.onEdit?.({ ref: turn.ref, change });
+  const saved = await deps.onEdit?.({ ref: ref, change });
   const id = saved?.id ?? "?";
   deps.log?.(
     `[review] change recorded ${id} kind=${appliedKind} comment=${change.word_comment_id} paragraph=${change.paragraph_index}` +

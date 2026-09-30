@@ -517,3 +517,47 @@ test("L10 ledger_check reads changed paragraphs only; full:true reads all", asyn
     await t.cleanup();
   }
 });
+
+const noAnswer = (id, code = "ToolTimeout") =>
+  Object.assign(new Error(`Tool office_tracked_edit timed out`), { code, toolCallId: id });
+
+// A tracked edit whose call timed out may still be in Word. When its result
+// arrives late (bridge onLateToolResult) the change is recorded once.
+test("a late applied result of a timed-out tracked edit is recorded once; not applied or unknown ids are not", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const R = { what: "w", why: "y", addresses: "a" };
+    let n = 0;
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => {
+        throw noAnswer(`x${++n}`);
+      },
+    };
+    const edit = { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R };
+    const r1 = await applyTrackedEdit(deps, edit, { ref: "R1.1" });
+    assert.deepEqual([r1.ok, r1.code, r1.tool_call_id], [false, "OutcomeUnknown", "x1"]);
+    await applyTrackedEdit(deps, edit, { ref: "R1.1" });
+
+    const applied = { ok: true, word_comment_id: 44, paragraph_index: 9, before: "b", after: "a" };
+    const late = (id, extra) =>
+      t.svc.lateToolResult("k", { id, name: "office_tracked_edit", ok: true, ...extra });
+    await late("x1", { result: applied });
+    await late("x1", { result: applied }); // a second copy
+    await late("x2", { result: { ok: false, code: "FindNotFound" } });
+    await late("x9", { result: applied });
+
+    const rev = (await t.ask("review_load")).revision;
+    assert.equal(rev.comments[0].changes.length, 1);
+    assert.equal(rev.comments[0].changes[0].word_comment_id, "44");
+    assert.ok(t.lines.includes("[review] late result recorded x1"));
+    assert.ok(t.lines.some((l) => l.startsWith("[review] late result not applied x2")));
+    assert.deepEqual(
+      t.events.map((e) => e.event),
+      ["change_recorded", "late_result_recorded"],
+    );
+  } finally {
+    await t.cleanup();
+  }
+});

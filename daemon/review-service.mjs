@@ -8,7 +8,8 @@
 //   review_external_dismiss, review_override, ledger_add, ledger_update,
 //   ledger_remove, ledger_check, comments_backup
 // Push (daemon -> task pane, no request_id):
-//   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done", ... }
+//   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
+//     | "late_result_recorded", ... }
 
 import { access } from "node:fs/promises";
 import {
@@ -57,7 +58,21 @@ export function createReviewService({
   sendEvent = () => {},
   log = console.log,
   env = process.env,
+  lateResultTtlMs = 10 * 60_000,
 }) {
+  // Tracked edits the task pane did not answer, by bridge call id:
+  // { key, ref, record, timer }. A late tool_result (bridge.mjs
+  // onLateToolResult) is recorded through `record` once; the entry goes away
+  // on first use or after lateResultTtlMs, like the bridge's own copy.
+  const pendingLate = new Map();
+  function forgetLate(id) {
+    const p = pendingLate.get(id);
+    if (!p) return null;
+    clearTimeout(p.timer);
+    pendingLate.delete(id);
+    return p;
+  }
+
   function docFor(key) {
     const doc = localDocPath(getContext(key)?.activeDoc, env);
     if (!doc) {
@@ -100,6 +115,12 @@ export function createReviewService({
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
         return saved;
       },
+      onOutcomeUnknown: ({ id, ref, record }) => {
+        if (!id) return;
+        const timer = setTimeout(() => pendingLate.delete(id), lateResultTtlMs);
+        timer.unref?.();
+        pendingLate.set(id, { key, ref, record, timer });
+      },
       onBlocked: async ({ ref, args, blocked_by }) => {
         let saved = null;
         await update(key, (rev) => {
@@ -111,6 +132,31 @@ export function createReviewService({
         return saved;
       },
     };
+  }
+
+  // entry: { id, ok, result, error } from bridge.mjs onLateToolResult.
+  // Applied (ok, or applied without its comment): recorded like an answer in
+  // time. Anything else only logs.
+  async function lateToolResult(key, entry) {
+    const p = forgetLate(entry.id);
+    if (!p) {
+      log(`[review] late result dropped ${entry.id}: no pending tracked edit`);
+      return null;
+    }
+    const out = entry.ok ? await p.record(entry.result) : null;
+    if (!out?.ok) {
+      const why = entry.ok ? (out?.code ?? out?.message ?? "not applied") : entry.error;
+      log(`[review] late result not applied ${entry.id}: ${why}`);
+      return null;
+    }
+    log(`[review] late result recorded ${entry.id}`);
+    sendEvent(p.key, {
+      type: "review_event",
+      event: "late_result_recorded",
+      ref: p.ref,
+      change_id: out.change_id,
+    });
+    return out;
   }
 
   function turnEnded(key, turn) {
@@ -325,5 +371,5 @@ export function createReviewService({
       }
     };
   }
-  return { handlers, trackedEditDeps, turnEnded };
+  return { handlers, trackedEditDeps, turnEnded, lateToolResult };
 }

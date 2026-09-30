@@ -554,6 +554,8 @@ const bridge = createBridge({
     return ensureLoopForMessage(key, host);
   },
   onClose: (key) => onPaneClose(key),
+  // A tracked edit answered after its timeout or disconnect: record it.
+  onLateToolResult: (e) => review.lateToolResult(e.key, e),
   extraHandlers: {
     ...review.handlers,
     pick_path: async (msg, reply) => {

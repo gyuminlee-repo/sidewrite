@@ -624,6 +624,12 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           .then(refresh)
           .catch((e) => say(e.message, true))
           .finally(render);
+      } else if (msg.event === "late_result_recorded") {
+        // A tracked edit that timed out was applied after all and is now recorded.
+        say(`${msg.ref}: an edit that timed out was applied; recorded as ${msg.change_id}.`);
+        load()
+          .catch((e) => say(e.message, true))
+          .finally(render);
       } else if (msg.event === "change_recorded" || msg.event === "edit_blocked") {
         load()
           .catch((e) => say(e.message, true))
