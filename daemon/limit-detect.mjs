@@ -12,7 +12,7 @@
 // assistant messages, is_error result messages), never on a normal model answer,
 // so a manuscript sentence about a "rate limit" cannot trip it.
 //
-// L8 (lesson note 260930_원고교정_리비전세션_교훈): a refusal and a turn that
+// L8 (earlier revision sessions): a refusal and a turn that
 // ends with no answer at all are errors too. Refusal fields, SDK 0.3.285
 // sdk.d.ts: SDKModelRefusalNoFallbackMessage (system/model_refusal_no_fallback,
 // 5392), result stop_reason (5618, 5713). model_refusal_fallback (5355) retries

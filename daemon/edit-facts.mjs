@@ -1,6 +1,5 @@
 // What an office_tracked_edit removes, adds, and how small it can be.
-// Pure: no Office.js, no I/O. Lessons L1-L3 of earlier revision sessions
-// (vault note 260930_원고교정_리비전세션_교훈):
+// Pure: no Office.js, no I/O. Lessons L1-L3 of earlier revision sessions:
 //   L1 lostFacts: numbers (with units), versions, text in parentheses and
 //      capitalized name candidates that are in the deleted text and not in
 //      the replacement.
