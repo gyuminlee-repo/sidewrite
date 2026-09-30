@@ -9,6 +9,9 @@
 //                              Otherwise a comma list of user,project,local.
 //   CC_OFFICE_LOAD_USER_MCP    "1": merge ~/.claude.json mcpServers into the
 //                              session (upstream behavior). Default off.
+//   CC_OFFICE_CLAUDE_PATH      absolute path to a local claude executable
+//                              (pathToClaudeCodeExecutable). Default: the
+//                              SDK's bundled CLI.
 
 const VALID_SOURCES = new Set(["user", "project", "local"]);
 
@@ -24,6 +27,11 @@ export function resolveSettingSources(env = process.env) {
 
 export function userMcpEnabled(env = process.env) {
   return env.CC_OFFICE_LOAD_USER_MCP === "1";
+}
+
+export function claudeExecutablePath(env = process.env) {
+  const p = env.CC_OFFICE_CLAUDE_PATH?.trim();
+  return p ? p : undefined;
 }
 
 export function buildQueryOptions(
@@ -42,6 +50,7 @@ export function buildQueryOptions(
   env = process.env,
 ) {
   const settingSources = resolveSettingSources(env);
+  const executable = claudeExecutablePath(env);
   return {
     cwd,
     systemPrompt: { type: "preset", preset: "claude_code", append },
@@ -55,6 +64,7 @@ export function buildQueryOptions(
     abortController,
     stderr,
     ...(settingSources ? { settingSources } : {}),
+    ...(executable ? { pathToClaudeCodeExecutable: executable } : {}),
     ...(resume ? { resume } : {}),
   };
 }

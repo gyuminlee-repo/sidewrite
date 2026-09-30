@@ -4,6 +4,7 @@ import {
   resolveSettingSources,
   userMcpEnabled,
   buildQueryOptions,
+  claudeExecutablePath,
   formatUsageLine,
 } from "../daemon/query-options.mjs";
 
@@ -81,5 +82,15 @@ test("formatUsageLine prints the four usage fields", () => {
   assert.equal(
     formatUsageLine(undefined),
     "[agent] usage input=0 cache_creation=0 cache_read=0 output=0 (turn total)",
+  );
+});
+
+test("CC_OFFICE_CLAUDE_PATH sets pathToClaudeCodeExecutable, unset keeps SDK built-in", () => {
+  assert.equal(claudeExecutablePath({}), undefined);
+  assert.equal("pathToClaudeCodeExecutable" in buildQueryOptions(base, {}), false);
+  const env = { CC_OFFICE_CLAUDE_PATH: " /home/u/.local/bin/claude " };
+  assert.equal(
+    buildQueryOptions(base, env).pathToClaudeCodeExecutable,
+    "/home/u/.local/bin/claude",
   );
 });
