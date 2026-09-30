@@ -18,13 +18,21 @@ export function compileCheck(check) {
   return new RegExp(check.pattern, `${flags}g`);
 }
 
+// An empty match advances by one code point in unicode mode (u or v flag):
+// one UTF-16 unit would land inside a surrogate pair, where exec() matches
+// the same place again. There are at most text.length + 1 matches, so the
+// loop also stops there as a guard.
 function findAll(re, text) {
   const out = [];
+  const unicode = re.unicode || re.unicodeSets;
   re.lastIndex = 0;
   let m;
-  while ((m = re.exec(text)) !== null) {
+  while (out.length <= text.length && (m = re.exec(text)) !== null) {
     out.push({ start: m.index, match: m[0] });
-    if (m[0] === "") re.lastIndex += 1;
+    if (m[0] === "") {
+      const cp = text.codePointAt(re.lastIndex);
+      re.lastIndex += unicode && cp > 0xffff ? 2 : 1;
+    }
   }
   return out;
 }

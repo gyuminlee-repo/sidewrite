@@ -313,3 +313,33 @@ test("checkLedgerIncremental skips non-manuscript items in incremental and full 
   const [again] = await checkLedgerIncremental([stored], PARAS);
   assert.equal(again.status, "skipped");
 });
+
+// An empty match must advance by one code point in unicode mode. Advancing by
+// one UTF-16 unit lands inside a surrogate pair and exec() matches the same
+// place again forever.
+test("regex empty matches advance by code point under the u and v flags", () => {
+  const para = (text) => [{ index: 0, text }];
+  for (const flags of ["u", "v"]) {
+    const item = { id: "L9", check: { type: "regex", pattern: "(?=.)", flags, expect: "absent" } };
+    const astral = checkRegexItem(item, para("\u{1D400}x"));
+    assert.deepEqual(
+      astral.violations.map((v) => v.start),
+      [0, 2],
+    );
+    const ascii = checkRegexItem(item, para("ab"));
+    assert.deepEqual(
+      ascii.violations.map((v) => v.start),
+      [0, 1],
+    );
+  }
+  // Without a unicode flag the pattern sees UTF-16 units, one match each.
+  const plain = {
+    id: "L9",
+    check: { type: "regex", pattern: "(?=[^])", flags: "", expect: "absent" },
+  };
+  assert.equal(checkRegexItem(plain, para("\u{1D400}")).violations.length, 2);
+  assert.deepEqual(
+    forbidHits([{ ...plain, kind: "forbid", check: { ...plain.check, flags: "u" } }], "\u{1D400}"),
+    ["L9"],
+  );
+});
