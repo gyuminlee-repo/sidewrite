@@ -122,7 +122,34 @@ test("buildCommentsBackup keeps every comment and its count", () => {
     resolved: true,
     anchor_text: "t",
     paragraph_index: 0,
+    replies: [],
   });
+  assert.equal(b.reply_count, 0);
+});
+
+test("buildCommentsBackup keeps the replies of every thread", () => {
+  const b = view.buildCommentsBackup(
+    [
+      {
+        id: "1",
+        author: "A",
+        content: "Check units later",
+        replies: [
+          { id: "1a", author: "B", content: "Done in 2.1", created_at: "2026-01-02T00:00:00Z" },
+          { id: "1b", author: "A", content: "Thanks" },
+        ],
+      },
+      { id: "2", author: "A", content: "[R1.1] a / b / c" },
+    ],
+    { now: new Date("2026-01-03T00:00:00Z") },
+  );
+  // count stays the number of parent comments; replies are counted apart.
+  assert.deepEqual([b.count, b.reply_count], [2, 2]);
+  assert.deepEqual(b.comments[0].replies, [
+    { id: "1a", author: "B", content: "Done in 2.1", created_at: "2026-01-02T00:00:00Z" },
+    { id: "1b", author: "A", content: "Thanks", created_at: null },
+  ]);
+  assert.deepEqual(b.comments[1].replies, []);
 });
 
 test("deleteAllReport needs backup == deleted == shown and nothing left", () => {

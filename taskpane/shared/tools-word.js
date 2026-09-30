@@ -1614,8 +1614,15 @@ export async function toolTrackedEdit({
   });
 }
 
-// Paragraphs + comments for status refresh and ledger checks.
-export async function collectReviewSnapshot() {
+function isoOrNull(d) {
+  const t = d ? new Date(d) : null;
+  return t && !Number.isNaN(t.getTime()) ? t.toISOString() : null;
+}
+
+// Paragraphs + comments for status refresh and ledger checks. replies: also
+// read every reply of each thread (Word.Comment.replies, WordApi 1.4, the
+// same set as getComments) for the "Delete ALL comments" backup.
+export async function collectReviewSnapshot({ replies = false } = {}) {
   return await Word.run(async (context) => {
     const { paragraphs, idMode } = await getParagraphsWithIds(context);
     const oox = paragraphs.items.map((p) => p.getOoxml());
@@ -1627,6 +1634,7 @@ export async function collectReviewSnapshot() {
       r.load("text");
       const ps = r.paragraphs;
       ps.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId" : "items/text");
+      if (replies) c.replies.load("items/id, items/content, items/authorName, items/creationDate");
       return { c, r, ps };
     });
     await context.sync();
@@ -1660,6 +1668,16 @@ export async function collectReviewSnapshot() {
           anchor_text: r.text,
           paragraph_id: idMode === "uniqueLocalId" && first ? first.uniqueLocalId : null,
           paragraph_index: indexOf(first),
+          ...(replies
+            ? {
+                replies: c.replies.items.map((x) => ({
+                  id: String(x.id),
+                  author: x.authorName,
+                  content: x.content,
+                  created_at: isoOrNull(x.creationDate),
+                })),
+              }
+            : {}),
         };
       }),
     };
@@ -1712,7 +1730,7 @@ export async function selectParagraphByIndex(index) {
 }
 
 export async function readAllComments() {
-  const snap = await collectReviewSnapshot();
+  const snap = await collectReviewSnapshot({ replies: true });
   return snap.comments;
 }
 

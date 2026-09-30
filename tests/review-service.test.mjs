@@ -308,6 +308,16 @@ test("comments_backup writes <stem>.comments_backup.json, never overwrites, chec
     assert.equal(JSON.parse(await readFile(b.path, "utf8")).comments.length, 2);
     const bad = await t.ask("comments_backup", { backup: { ...backup, count: 3 } });
     assert.equal(bad.ok, false);
+    const threads = {
+      version: 1,
+      count: 1,
+      reply_count: 2,
+      comments: [{ id: "1", replies: [{ content: "a" }, { content: "b" }] }],
+    };
+    const c = await t.ask("comments_backup", { backup: threads });
+    assert.deepEqual([c.ok, c.count, c.reply_count], [true, 1, 2]);
+    const badReplies = await t.ask("comments_backup", { backup: { ...threads, reply_count: 1 } });
+    assert.equal(badReplies.ok, false);
   } finally {
     await t.cleanup();
   }

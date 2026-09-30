@@ -282,14 +282,24 @@ export function createReviewService({
       if (backup.count !== backup.comments.length) {
         throw new Error(`backup count ${backup.count} != ${backup.comments.length} comments`);
       }
+      // Replies are deleted with their thread; count stays the parent count.
+      const replies = backup.comments.reduce(
+        (n, c) => n + (Array.isArray(c.replies) ? c.replies.length : 0),
+        0,
+      );
+      if (backup.reply_count != null && backup.reply_count !== replies) {
+        throw new Error(`backup reply_count ${backup.reply_count} != ${replies} replies`);
+      }
       let path = commentsBackupPathFor(doc);
       if (await exists(path)) {
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         path = path.replace(/\.comments_backup\.json$/, `.comments_backup.${stamp}.json`);
       }
       await writeJsonAtomic(path, backup);
-      log(`[review] comments_backup path=${path} count=${backup.comments.length}`);
-      return { path, count: backup.comments.length };
+      log(
+        `[review] comments_backup path=${path} count=${backup.comments.length} replies=${replies}`,
+      );
+      return { path, count: backup.comments.length, reply_count: replies };
     },
   };
 

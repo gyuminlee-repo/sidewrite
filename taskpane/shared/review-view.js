@@ -68,20 +68,31 @@ export function cleanupReport(before, after) {
   };
 }
 
+// Deleting a comment deletes its replies, so the backup keeps them.
+// count is the number of parent comments (what Word lists and deletes);
+// reply_count is the number of replies across all threads.
 export function buildCommentsBackup(comments, { manuscript = null, now = new Date() } = {}) {
+  const rows = comments.map((c) => ({
+    id: String(c.id),
+    author: c.author ?? null,
+    content: c.content ?? "",
+    resolved: !!c.resolved,
+    anchor_text: c.anchor_text ?? "",
+    paragraph_index: c.paragraph_index ?? null,
+    replies: (c.replies ?? []).map((r) => ({
+      id: r.id == null ? null : String(r.id),
+      author: r.author ?? null,
+      content: r.content ?? "",
+      created_at: r.created_at ?? null,
+    })),
+  }));
   return {
     version: 1,
     manuscript,
     created_at: now.toISOString(),
-    count: comments.length,
-    comments: comments.map((c) => ({
-      id: String(c.id),
-      author: c.author ?? null,
-      content: c.content ?? "",
-      resolved: !!c.resolved,
-      anchor_text: c.anchor_text ?? "",
-      paragraph_index: c.paragraph_index ?? null,
-    })),
+    count: rows.length,
+    reply_count: rows.reduce((n, c) => n + c.replies.length, 0),
+    comments: rows,
   };
 }
 
