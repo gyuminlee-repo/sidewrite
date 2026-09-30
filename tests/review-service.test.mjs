@@ -905,3 +905,23 @@ test("overlapping comments_backup requests write two files, neither overwritten"
     await t.cleanup();
   }
 });
+
+test("ledger_check stores an unsure LLM verdict on the item", async () => {
+  const t = await setup({
+    oneshot: async () => ({
+      ok: true,
+      json: { violations: [], unsure: [{ paragraph_index: 3, reason: "cannot tell" }] },
+    }),
+  });
+  try {
+    await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
+    const r = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 3, text: "a", reviewed_text: "a" }] },
+    });
+    const item = r.revision.ledger[0];
+    assert.deepEqual([item.status, item.unsure.length, item.checked_hashes], ["unsure", 1, []]);
+    assert.ok(t.lines.includes("[review] ledger check L1 status=unsure violations=0 unsure=1"));
+  } finally {
+    await t.cleanup();
+  }
+});

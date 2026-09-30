@@ -240,8 +240,14 @@ export const SKIPPED_SCOPE_LABELS = {
   supplement: "Checked at the supplement stage",
 };
 
+const unsureText = (item) => `unsure on ${item.unsure.length} paragraph(s)`;
+
 export function ledgerStatusText(item) {
-  if (item?.status === "violations") return `${item.violation_count} violation(s)`;
+  if (item?.status === "violations")
+    return item.unsure?.length
+      ? `${item.violation_count} violation(s), ${unsureText(item)}`
+      : `${item.violation_count} violation(s)`;
+  if (item?.status === "unsure") return unsureText(item);
   if (item?.status === "skipped")
     return SKIPPED_SCOPE_LABELS[item.scope] ?? `Checked at the ${item.scope} stage`;
   return item?.status;
@@ -386,11 +392,14 @@ export function pendingDecisions(revision) {
       });
     }
   }
+  // An unsure paragraph (the LLM check abstained) is the author's call.
   const ledger = (revision?.ledger ?? [])
-    .filter((i) => i.status === "unchecked" || i.status === "error")
+    .filter((i) => i.status === "unchecked" || i.status === "error" || i.unsure?.length)
     .map((i) => ({
       id: i.id,
-      text: `${i.id} ${i.status === "error" ? "check failed" : "not checked yet"}`,
+      text: i.unsure?.length
+        ? `${i.id} unsure on paragraph(s) ${i.unsure.map((u) => u.paragraph_index).join(", ")}`
+        : `${i.id} ${i.status === "error" ? "check failed" : "not checked yet"}`,
     }));
   return {
     blocked,

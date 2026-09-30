@@ -370,3 +370,69 @@ test("LLM check: a reply without a well-formed violations list is an error", asy
   const none = await checkLlmItem(LLM_ITEM, PARAS, { oneshot: reply({ violations: [] }) });
   assert.equal(none.status, "ok");
 });
+
+// Abstain: a paragraph the model cannot judge comes back under "unsure", a
+// normal result. No confidence number is asked for or read.
+test("LLM check: unsure paragraphs are a result, and incremental checks read them again", async () => {
+  const prompts = [];
+  const oneshot = async (req) => {
+    prompts.push(req);
+    return {
+      ok: true,
+      json: { violations: [], unsure: [{ paragraph_index: 5, reason: "cannot tell" }] },
+    };
+  };
+  const r = await checkLlmItem(LLM_ITEM, PARAS, { oneshot });
+  assert.equal(r.status, "unsure");
+  assert.deepEqual(r.unsure, [{ paragraph_index: 5, reason: "cannot tell" }]);
+  assert.match(prompts[0].system, /unsure/);
+  assert.match(prompts[0].prompt, /"unsure"/);
+  assert.doesNotMatch(prompts[0].prompt, /confidence|probability/i);
+
+  const [first] = await checkLedgerIncremental([LLM_ITEM], PARAS, { oneshot, maxChars: 1 });
+  assert.equal(first.status, "unsure");
+  assert.equal(first.unsure.length, 1);
+  assert.equal(first.unsure[0].paragraph_index, 5);
+  assert.equal(first.checked_hashes.length, PARAS.length - 1);
+  prompts.length = 0;
+  const quiet = async (req) => {
+    prompts.push(req);
+    return { ok: true, json: { violations: [] } };
+  };
+  const [next] = await checkLedgerIncremental(
+    [{ ...asStored(LLM_ITEM, first), unsure: first.unsure }],
+    PARAS,
+    { oneshot: quiet, maxChars: 1 },
+  );
+  assert.equal(next.mode, "incremental");
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0].prompt, /\[5\] /);
+  assert.deepEqual([next.status, next.unsure, next.checked_hashes.length], ["ok", [], 4]);
+});
+
+test("LLM check: violations outrank unsure in status; a malformed unsure list is an error", async () => {
+  const reply = (json) => async () => ({ ok: true, json });
+  const both = await checkLlmItem(LLM_ITEM, PARAS, {
+    oneshot: reply({
+      violations: [{ paragraph_index: 3, quote: "in-vitro only", reason: "r" }],
+      unsure: [
+        { paragraph_index: 5, reason: "?" },
+        { paragraph_index: 99, reason: "foreign" },
+      ],
+    }),
+  });
+  assert.equal(both.status, "violations");
+  assert.deepEqual(
+    both.unsure.map((u) => u.paragraph_index),
+    [5],
+  );
+  for (const [json, why] of [
+    [{ violations: [], unsure: "x" }, /unsure/],
+    [{ violations: [], unsure: [{ reason: "r" }] }, /unsure\[0\]\.paragraph_index/],
+    [{ violations: [], unsure: [{ paragraph_index: 3 }] }, /unsure\[0\]\.reason/],
+  ]) {
+    const r = await checkLlmItem(LLM_ITEM, PARAS, { oneshot: reply(json) });
+    assert.equal(r.status, "error", JSON.stringify(json));
+    assert.match(r.error, why, JSON.stringify(json));
+  }
+});

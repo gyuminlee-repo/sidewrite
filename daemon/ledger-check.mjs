@@ -87,29 +87,40 @@ export function batchParagraphs(paragraphs, maxChars = 6000) {
 }
 
 export const LEDGER_SYSTEM =
-  "You check a manuscript against one author instruction. Report only clear violations and quote the violating words exactly. Reply with JSON only.";
+  "You check a manuscript against one author instruction. Report only clear violations and quote the violating words exactly. If you are not sure whether a paragraph breaks the instruction, list it under unsure; do not guess that it has no violation. Reply with JSON only.";
 
 export function ledgerPrompt(item, batch) {
   return [
     `Instruction [${item.id}]: ${item.text}`,
-    'Return {"violations":[{"paragraph_index":<int>,"quote":"<exact words>","reason":"<short>"}]} or {"violations":[]}.',
+    'Return {"violations":[{"paragraph_index":<int>,"quote":"<exact words>","reason":"<short>"}],"unsure":[{"paragraph_index":<int>,"reason":"<short>"}]}.',
+    'Put a paragraph under "unsure" when you cannot tell whether it breaks the instruction. Use empty lists when nothing applies.',
     "Paragraphs:",
     ...batch.map((p) => `[${p.index}] ${viewText(p)}`),
   ].join("\n");
 }
 
+const notInteger = (idx) =>
+  typeof idx === "boolean" || idx === null || idx === "" || !Number.isInteger(Number(idx));
+
 // Why a one-shot reply is not {"violations":[{paragraph_index, quote,
-// reason}]}, or null when it is. A malformed reply must not read as "no
-// violations": checkLlmItem turns it into a check error.
+// reason}], "unsure"?:[{paragraph_index, reason}]}, or null when it is.
+// "unsure" is optional (a reply without it has no unsure paragraph). A
+// malformed reply must not read as "no violations": checkLlmItem turns it
+// into a check error.
 export function llmReplyProblem(json) {
   if (!Array.isArray(json?.violations)) return "reply has no violations array";
   for (const [i, v] of json.violations.entries()) {
     if (v === null || typeof v !== "object") return `violations[${i}] is not an object`;
-    const idx = v.paragraph_index;
-    if (typeof idx === "boolean" || idx === null || idx === "" || !Number.isInteger(Number(idx)))
-      return `violations[${i}].paragraph_index is not an integer`;
+    if (notInteger(v.paragraph_index)) return `violations[${i}].paragraph_index is not an integer`;
     if (typeof v.quote !== "string") return `violations[${i}].quote is not a string`;
     if (typeof v.reason !== "string") return `violations[${i}].reason is not a string`;
+  }
+  if (json.unsure === undefined) return null;
+  if (!Array.isArray(json.unsure)) return "unsure is not an array";
+  for (const [i, u] of json.unsure.entries()) {
+    if (u === null || typeof u !== "object") return `unsure[${i}] is not an object`;
+    if (notInteger(u.paragraph_index)) return `unsure[${i}].paragraph_index is not an integer`;
+    if (typeof u.reason !== "string") return `unsure[${i}].reason is not a string`;
   }
   return null;
 }
@@ -131,12 +142,19 @@ export async function checkLlmItem(
     };
   }
   const violations = [];
+  const unsure = [];
   for (const batch of batches) {
     const r = await oneshot({ system: LEDGER_SYSTEM, prompt: ledgerPrompt(item, batch) });
-    if (!r.ok) return { id: item.id, status: "error", error: r.error, violations };
+    if (!r.ok) return { id: item.id, status: "error", error: r.error, violations, unsure };
     const problem = llmReplyProblem(r.json);
     if (problem)
-      return { id: item.id, status: "error", error: `malformed LLM reply: ${problem}`, violations };
+      return {
+        id: item.id,
+        status: "error",
+        error: `malformed LLM reply: ${problem}`,
+        violations,
+        unsure,
+      };
     for (const v of r.json.violations) {
       const para = batch.find((p) => p.index === Number(v?.paragraph_index));
       if (!para) continue;
@@ -150,9 +168,17 @@ export async function checkLlmItem(
         reason: String(v?.reason ?? ""),
       });
     }
+    for (const u of r.json.unsure ?? []) {
+      const para = batch.find((p) => p.index === Number(u.paragraph_index));
+      if (para) unsure.push({ paragraph_index: para.index, reason: u.reason });
+    }
   }
-  return { id: item.id, status: violations.length ? "violations" : "ok", violations };
+  return { id: item.id, status: llmStatus(violations, unsure), violations, unsure };
 }
+
+// A violation outranks unsure; unsure paragraphs still wait for the author.
+const llmStatus = (violations, unsure) =>
+  violations.length ? "violations" : unsure.length ? "unsure" : "ok";
 
 export async function checkLedger(items, paragraphs, deps = {}) {
   const outcomes = [];
@@ -205,8 +231,11 @@ export function forbidHits(ledger, text) {
 // the manuscript scope (inManuscriptScope) is not run against the manuscript:
 // it comes back status "skipped", skipped "scope", with no violations and
 // checked_hashes null, so a later scope change to manuscript runs in full.
-// Returns [{ id, status, violations, error?, mode, checked, total,
-// checked_hashes }]; violations carry `h`, the paragraph hash.
+// Returns [{ id, status, violations, unsure, error?, mode, checked, total,
+// checked_hashes }]; violations and unsure entries carry `h`, the paragraph
+// hash. An unsure paragraph's hash is left out of checked_hashes, so the
+// next incremental check reads it again; unsure entries are not carried
+// over (the recheck makes them fresh).
 
 function needsFull(item, full) {
   return (
@@ -235,6 +264,7 @@ export async function checkLedgerIncremental(items, paragraphs, { full = false, 
         status: "skipped",
         skipped: "scope",
         violations: [],
+        unsure: [],
         mode: "skipped",
         checked: 0,
         total: paragraphs.length,
@@ -263,16 +293,22 @@ export async function checkLedgerIncremental(items, paragraphs, { full = false, 
     const violations = [...kept, ...fresh].sort(
       (a, b) => (a.paragraph_index ?? -1) - (b.paragraph_index ?? -1),
     );
-    const status = r.status === "error" ? "error" : violations.length ? "violations" : "ok";
+    const unsure = (r.unsure ?? []).map((u) => ({
+      ...u,
+      h: hashOfIndex.get(u.paragraph_index) ?? null,
+    }));
+    const open = new Set(unsure.map((u) => u.h));
+    const status = r.status === "error" ? "error" : llmStatus(violations, unsure);
     outcomes.push({
       id: item.id,
       status,
       ...(r.error ? { error: r.error } : {}),
       violations,
+      unsure,
       mode: whole ? "full" : "incremental",
       checked: subset.length,
       total: paragraphs.length,
-      checked_hashes: status === "error" ? null : allHashes,
+      checked_hashes: status === "error" ? null : allHashes.filter((h) => !open.has(h)),
     });
   }
   return outcomes;

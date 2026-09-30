@@ -108,6 +108,14 @@ const Comment = z.object({
   blocked: z.array(Blocked).default([]),
 });
 
+// A paragraph the LLM check could not judge (abstain). Not a violation; it
+// waits for the author and is read again by the next incremental check.
+const Unsure = z.object({
+  paragraph_index: z.number().int(),
+  h: z.string().nullable(),
+  reason: z.string().default(""),
+});
+
 const Violation = z.object({
   paragraph_index: z.number().int().nullable(),
   h: z.string().nullable(),
@@ -124,12 +132,16 @@ export const LedgerItemSchema = z.object({
   scope: z.enum(["manuscript", "response", "supplement"]).default("manuscript"),
   check: z.discriminatedUnion("type", [RegexCheck, LlmCheck]),
   // skipped: outside the manuscript scope, not checked against the manuscript.
-  status: z.enum(["unchecked", "ok", "violations", "error", "skipped"]).default("unchecked"),
+  // unsure: an LLM check could not judge some paragraphs and found no violation.
+  status: z
+    .enum(["unchecked", "ok", "violations", "error", "skipped", "unsure"])
+    .default("unchecked"),
   violation_count: z.number().int().nonnegative().default(0),
   checked_at: z.string().nullable().default(null),
   // L10: violations of the last check keyed by paragraph hash, and the
   // hashes of every paragraph that check covered (null: never checked).
   violations: z.array(Violation).default([]),
+  unsure: z.array(Unsure).default([]),
   checked_hashes: z.array(z.string()).nullable().default(null),
 });
 
@@ -468,6 +480,7 @@ export function updateLedgerItem(rev, id, patch) {
         status: "unchecked",
         violation_count: 0,
         violations: [],
+        unsure: [],
         checked_hashes: null,
         checked_at: null,
       }

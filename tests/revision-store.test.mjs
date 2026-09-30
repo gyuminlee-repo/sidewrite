@@ -401,3 +401,20 @@ test("a change applied without its comment is stored with a null id and the erro
   );
   assert.equal(addChange(base(), "R1.1", change()).change.comment_missing, null);
 });
+
+test("an unsure ledger check is stored with its paragraphs; a changed rule clears them", () => {
+  let rev = addLedgerItem(base(), {
+    kind: "instruction",
+    text: "t",
+    check: { type: "llm" },
+  }).revision;
+  assert.deepEqual(rev.ledger[0].unsure, []);
+  rev = updateLedgerItem(rev, "L1", {
+    status: "unsure",
+    unsure: [{ paragraph_index: 5, h: "0000abcd", reason: "cannot tell" }],
+  });
+  assert.equal(rev.ledger[0].status, "unsure");
+  assert.equal(rev.ledger[0].unsure.length, 1);
+  const edited = updateLedgerItem(rev, "L1", { text: "t2" }).ledger[0];
+  assert.deepEqual([edited.status, edited.unsure], ["unchecked", []]);
+});

@@ -454,7 +454,10 @@ export function createReviewService({
       });
       const at = new Date().toISOString();
       for (const r of outcomes) {
-        log(`[review] ledger check ${r.id} status=${r.status} violations=${r.violations.length}`);
+        const unsure = r.unsure.length ? ` unsure=${r.unsure.length}` : "";
+        log(
+          `[review] ledger check ${r.id} status=${r.status} violations=${r.violations.length}${unsure}`,
+        );
         log(`[review] ledger scope ${r.id} mode=${r.mode} paragraphs=${r.checked}/${r.total}`);
       }
       const revision = await update(key, (x) => {
@@ -465,6 +468,7 @@ export function createReviewService({
             violation_count: r.violations.length,
             checked_at: at,
             violations: r.violations,
+            unsure: r.unsure,
             checked_hashes: r.checked_hashes,
           });
         }

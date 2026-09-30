@@ -504,3 +504,27 @@ test("a change applied without its rationale comment: warning flag and an invari
     [],
   );
 });
+
+test("an unsure ledger item waits for the author and says how many paragraphs", () => {
+  const unsure = [
+    { paragraph_index: 5, h: "a", reason: "r" },
+    { paragraph_index: 8, h: "b", reason: "r" },
+  ];
+  const d = view.pendingDecisions({
+    comments: [],
+    ledger: [
+      { id: "L1", status: "unsure", unsure },
+      { id: "L2", status: "violations", violation_count: 1, unsure: unsure.slice(0, 1) },
+      { id: "L3", status: "ok", unsure: [] },
+    ],
+  });
+  assert.deepEqual(
+    d.ledger.map((x) => x.text),
+    ["L1 unsure on paragraph(s) 5, 8", "L2 unsure on paragraph(s) 5"],
+  );
+  assert.equal(view.ledgerStatusText({ status: "unsure", unsure }), "unsure on 2 paragraph(s)");
+  assert.equal(
+    view.ledgerStatusText({ status: "violations", violation_count: 1, unsure: unsure.slice(0, 1) }),
+    "1 violation(s), unsure on 1 paragraph(s)",
+  );
+});
