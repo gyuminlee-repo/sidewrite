@@ -1,4 +1,10 @@
 /* global Word */
+import {
+  normalizeParaText,
+  computeAfterText,
+  countRevisionMarks,
+  isToolComment,
+} from "./review-view.js";
 //
 // Word tool implementations + Word-specific helpers.
 //
@@ -1464,5 +1470,269 @@ export async function toolHeaderFooter({ which, text }) {
     }
     await context.sync();
     return { which, sections: sections.items.length, set: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Review tab (C1). office_tracked_edit is the only writer in a review turn;
+// the other functions here are called by the Review tab directly, without
+// the agent. Word evidence for the comment anchors: 2026-09-30 spike
+// (comment on the deleted range survives accept and reject; comment on an
+// inserted range is removed by reject).
+// ---------------------------------------------------------------------------
+
+// Tool: office_tracked_edit. Always tracked, whatever the
+// track-changes mode setting (taskpane.js dispatches it without writeArgs()).
+// narrow ({ find, replace }, from daemon/edit-facts.mjs narrowEdit, L3): the
+// changed words only. Used when narrow.find occurs exactly once inside the
+// located hit; otherwise the full find/replace. The result says which.
+export async function toolTrackedEdit({
+  find,
+  replace,
+  insert_after,
+  paragraph_hint,
+  narrow,
+  comment_text,
+}) {
+  if (typeof find !== "string" || !find) throw new Error("`find` is required");
+  if (find.length > 255) throw new Error("`find` exceeds the 255-character limit of Word search");
+  const isInsert = typeof insert_after === "string";
+  if (isInsert === (typeof replace === "string")) {
+    throw new Error("Give exactly one of replace or insert_after");
+  }
+  if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
+
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const all = context.document.body.search(find, { matchCase: true });
+    all.load("items");
+    await context.sync();
+    let hits = all.items;
+    if (hits.length > 1 && paragraph_hint) {
+      const idx = findIndexById(paragraphs, paragraph_hint, idMode);
+      if (idx === -1)
+        return {
+          ok: false,
+          code: "HintNotFound",
+          message: `Paragraph not found: ${paragraph_hint}`,
+        };
+      const inPara = paragraphs.items[idx].search(find, { matchCase: true });
+      inPara.load("items");
+      await context.sync();
+      hits = inPara.items;
+    }
+    if (hits.length === 0) return { ok: false, code: "NotFound", message: `"${find}" not found` };
+    if (hits.length > 1) {
+      return {
+        ok: false,
+        code: "Ambiguous",
+        hit_count: hits.length,
+        message: `"${find}" occurs ${hits.length} times; pass paragraph_hint or a longer find`,
+      };
+    }
+    const hit = hits[0];
+    const para = hit.paragraphs.getFirst();
+    para.load(idMode === "uniqueLocalId" ? "text, uniqueLocalId" : "text");
+    await context.sync();
+    const paragraphIndex =
+      idMode === "uniqueLocalId"
+        ? paragraphs.items.findIndex((p) => p.uniqueLocalId === para.uniqueLocalId)
+        : paragraphs.items.findIndex((p) => p.text === para.text);
+    const before = normalizeParaText(para.text);
+    // after is computed from the full find/replace: narrowing cuts only
+    // words both sides share, so the sentence comes out the same.
+    const computed = computeAfterText(before, find, isInsert ? { insert_after } : { replace });
+    if (computed.error) return { ok: false, code: "AmbiguousInParagraph", message: computed.error };
+
+    let target = hit;
+    let editFind = find;
+    let editReplace = replace;
+    let narrowed = false;
+    if (!isInsert && narrow && typeof narrow.find === "string" && narrow.find) {
+      const sub = hit.search(narrow.find, { matchCase: true });
+      sub.load("items");
+      await context.sync();
+      if (sub.items.length === 1) {
+        target = sub.items[0];
+        editFind = narrow.find;
+        editReplace = narrow.replace;
+        narrowed = true;
+      }
+    }
+
+    return await withTrackChanges(context, true, async () => {
+      let anchor;
+      if (isInsert) {
+        anchor = hit.insertText(insert_after, Word.InsertLocation.after);
+        await context.sync();
+      } else {
+        const inserted = target.insertText(editReplace, Word.InsertLocation.replace);
+        await context.sync();
+        // The tracked-deleted original is still searchable (spike b). When
+        // the replacement contains the find text, skip the hit inside the
+        // insertion. A narrowed find is short and may occur elsewhere in the
+        // paragraph, so it is searched inside the original hit first.
+        let again = (narrowed ? hit : para).search(editFind, { matchCase: true });
+        again.load("items");
+        await context.sync();
+        if (narrowed && again.items.length === 0) {
+          again = para.search(editFind, { matchCase: true });
+          again.load("items");
+          await context.sync();
+        }
+        if (again.items.length > 1 && editReplace) {
+          const where = again.items.map((r) => r.compareLocationWith(inserted));
+          await context.sync();
+          anchor = again.items.find(
+            (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
+          );
+        } else {
+          anchor = again.items[0];
+        }
+      }
+      if (!anchor) {
+        return {
+          ok: false,
+          code: "CommentAnchorMissing",
+          applied: true,
+          message: "Edit applied but no range to anchor the comment",
+        };
+      }
+      const c = anchor.insertComment(comment_text);
+      c.load("id");
+      await context.sync();
+      return {
+        ok: true,
+        word_comment_id: c.id,
+        paragraph_index: paragraphIndex,
+        paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
+        before,
+        after: computed.after,
+        narrowed,
+      };
+    });
+  });
+}
+
+// Paragraphs + comments for status refresh and ledger checks.
+export async function collectReviewSnapshot() {
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const oox = paragraphs.items.map((p) => p.getOoxml());
+    const comments = context.document.body.getComments();
+    comments.load("items/id, items/content, items/resolved, items/authorName");
+    await context.sync();
+    const probes = comments.items.map((c) => {
+      const r = c.getRange();
+      r.load("text");
+      const ps = r.paragraphs;
+      ps.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId" : "items/text");
+      return { c, r, ps };
+    });
+    await context.sync();
+    const reviewed = await getReviewedTextBatch(
+      context,
+      paragraphs.items.map((p) => p.getRange("Whole")),
+    );
+    const indexOf = (first) => {
+      if (!first) return null;
+      const i =
+        idMode === "uniqueLocalId"
+          ? paragraphs.items.findIndex((p) => p.uniqueLocalId === first.uniqueLocalId)
+          : paragraphs.items.findIndex((p) => p.text === first.text);
+      return i === -1 ? null : i;
+    };
+    return {
+      paragraphs: paragraphs.items.map((p, i) => ({
+        index: i,
+        id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
+        text: p.text,
+        reviewed_text: reviewed ? reviewed[i] : null,
+        ...countRevisionMarks(oox[i].value),
+      })),
+      comments: probes.map(({ c, r, ps }) => {
+        const first = ps.items[0];
+        return {
+          id: String(c.id),
+          content: c.content,
+          author: c.authorName,
+          resolved: c.resolved,
+          anchor_text: r.text,
+          paragraph_id: idMode === "uniqueLocalId" && first ? first.uniqueLocalId : null,
+          paragraph_index: indexOf(first),
+        };
+      }),
+    };
+  });
+}
+
+// Paragraphs under the current selection, for "Propose changes".
+export async function selectionParagraphs(max = 10) {
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const sel = context.document.getSelection().paragraphs;
+    sel.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId, items/text" : "items/text");
+    await context.sync();
+    return sel.items.slice(0, max).map((p) => {
+      const index =
+        idMode === "uniqueLocalId"
+          ? paragraphs.items.findIndex((x) => x.uniqueLocalId === p.uniqueLocalId)
+          : paragraphs.items.findIndex((x) => x.text === p.text);
+      return {
+        id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
+        index,
+        text: normalizeParaText(p.text),
+      };
+    });
+  });
+}
+
+export async function selectCommentById(commentId) {
+  return await Word.run(async (context) => {
+    const comments = await getCommentsLoaded(context, "items/id");
+    const c = comments.items.find((x) => String(x.id) === String(commentId));
+    if (!c) throw new Error(`Comment not found: ${commentId}`);
+    c.getRange().select();
+    await context.sync();
+    return { selected: true };
+  });
+}
+
+export async function selectParagraphByIndex(index) {
+  return await Word.run(async (context) => {
+    const paragraphs = context.document.body.paragraphs;
+    paragraphs.load("items");
+    await context.sync();
+    const p = paragraphs.items[index];
+    if (!p) throw new Error(`Paragraph ${index} not found`);
+    p.select();
+    await context.sync();
+    return { selected: true };
+  });
+}
+
+export async function readAllComments() {
+  const snap = await collectReviewSnapshot();
+  return snap.comments;
+}
+
+// Delete only "[R<n>.<m>]" comments; returns counts before and after.
+export async function deleteToolComments() {
+  return await Word.run(async (context) => {
+    const comments = await getCommentsLoaded(context, "items/id, items/content");
+    const before = { tool: 0, user: 0 };
+    for (const c of comments.items) {
+      if (isToolComment(c.content)) {
+        before.tool += 1;
+        c.delete();
+      } else {
+        before.user += 1;
+      }
+    }
+    await context.sync();
+    const left = await getCommentsLoaded(context, "items/content");
+    const after = { tool: 0, user: 0 };
+    for (const c of left.items) after[isToolComment(c.content) ? "tool" : "user"] += 1;
+    return { before, after };
   });
 }

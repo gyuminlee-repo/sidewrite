@@ -28,7 +28,15 @@ import {
   toolReplyToComment,
   toolResolveComment,
   toolHeaderFooter,
+  toolTrackedEdit,
+  collectReviewSnapshot,
+  selectionParagraphs,
+  selectCommentById,
+  selectParagraphByIndex,
+  readAllComments,
+  deleteToolComments,
 } from "./tools-word.js";
+import { initReviewPane } from "./review-pane.js";
 import {
   toolExcelGetSelectedRange,
   toolExcelListSheets,
@@ -116,6 +124,7 @@ let attachSelection = true;
 // the gate, appendUserMessage would reset assistantTurnElem and subsequent
 // streaming deltas would land in a new (wrong) bubble.
 let turnInFlight = false;
+let reviewPane = null; // Review tab controller (Word), set in Office.onReady
 
 function setComposerDisabled(disabled) {
   $send.disabled = disabled;
@@ -264,6 +273,7 @@ const TOOL_STATUS_LABELS = {
   office_reply_to_comment: "Replying to a comment…",
   office_resolve_comment: "Resolving a comment…",
   office_header_footer: "Editing header/footer…",
+  office_tracked_edit: "Applying a tracked change with its rationale…",
   // Excel
   excel_get_selected_range: "Reading your selection…",
   excel_list_sheets: "Listing sheets…",
@@ -650,6 +660,7 @@ async function handleServerMessage(msg) {
       setConnectionStatus("ok", "Connected");
       setAgentStatus("idle", "Ready");
       refreshWorkspaceFromDaemon();
+      reviewPane?.reload();
       break;
 
     case "transcript_replay":
@@ -704,6 +715,10 @@ async function handleServerMessage(msg) {
       runOfficeTool(msg);
       break;
 
+    case "review_event":
+      reviewPane?.onEvent(msg);
+      break;
+
     case "pong":
       break;
 
@@ -725,7 +740,7 @@ async function handleServerMessage(msg) {
 const pendingRequests = new Map();
 const REQUEST_TIMEOUT_MS = 10_000;
 
-function sendRequest(type, payload = {}) {
+function sendRequest(type, payload = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     if (!wsReady) {
       reject(new Error("Not connected to daemon"));
@@ -739,7 +754,7 @@ function sendRequest(type, payload = {}) {
         pendingRequests.delete(request_id);
         reject(new Error(`Request "${type}" timed out`));
       }
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
   });
 }
 
@@ -865,6 +880,11 @@ async function runOfficeTool(msg) {
         break;
       case "office_header_footer":
         result = await toolHeaderFooter(args);
+        break;
+      // Review turns: always tracked, so NOT writeArgs() (a "never"
+      // track-changes setting must not turn tracking off for a review change).
+      case "office_tracked_edit":
+        result = await toolTrackedEdit(args || {});
         break;
       // ---- Excel ----
       case "excel_get_selected_range":
@@ -1096,6 +1116,30 @@ Office.onReady((info) => {
 
   // Initialize presets UI.
   initPresets();
+
+  // Review tab (Word only; the Excel page has no #review-root).
+  if (HOST === "word") {
+    reviewPane = initReviewPane({
+      sendRequest,
+      isTurnInFlight: () => turnInFlight,
+      onTurnStarted: (note) => {
+        appendNotice(note);
+        beginTurn();
+        setAgentStatus("working", "Proposing changes…");
+      },
+      word: {
+        collectReviewSnapshot,
+        selectionParagraphs,
+        selectCommentById,
+        selectParagraphByIndex,
+        readAllComments,
+        deleteToolComments,
+        clearAllComments: () => toolClearComments({ all: true }),
+        listComments: () => toolListComments(),
+        resolveComment: (id) => toolResolveComment({ comment_id: id, resolved: true }),
+      },
+    });
+  }
 
   // Show the welcome card on first launch (per browser-storage, so it
   // re-shows in a fresh profile or if the user clears storage).
