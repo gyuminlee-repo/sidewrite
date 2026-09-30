@@ -1562,63 +1562,83 @@ export async function toolTrackedEdit({
     }
 
     return await withTrackChanges(context, true, async () => {
-      let anchor;
-      if (isInsert) {
-        anchor = hit.insertText(insert_after, Word.InsertLocation.after);
-        await context.sync();
-      } else {
-        const inserted = target.insertText(editReplace, Word.InsertLocation.replace);
-        await context.sync();
-        // The tracked-deleted original is still searchable (spike b). When
-        // the replacement contains the find text, skip the hit inside the
-        // insertion. A narrowed find is short and may occur elsewhere in the
-        // paragraph, so it is searched inside the original hit first.
-        let again = (narrowed ? hit : para).search(editFind, { matchCase: true });
-        again.load("items");
-        await context.sync();
-        if (narrowed && again.items.length === 0) {
-          again = para.search(editFind, { matchCase: true });
-          again.load("items");
-          await context.sync();
-        }
-        if (again.items.length > 1 && editReplace) {
-          const where = again.items.map((r) => r.compareLocationWith(inserted));
-          await context.sync();
-          anchor = again.items.find(
-            (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
-          );
-        } else {
-          anchor = again.items[0];
-        }
-      }
-      if (!anchor) {
-        return {
-          ok: false,
-          code: "CommentAnchorMissing",
-          applied: true,
-          message: "Edit applied but no range to anchor the comment",
-          // The daemon records the applied change from these (no comment id).
-          paragraph_index: paragraphIndex,
-          paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
-          before,
-          after: computed.after,
-          narrowed,
-        };
-      }
-      const c = anchor.insertComment(comment_text);
-      c.load("id");
+      const inserted = isInsert
+        ? hit.insertText(insert_after, Word.InsertLocation.after)
+        : target.insertText(editReplace, Word.InsertLocation.replace);
+      // A failure of the sync that carries the edit is treated as not
+      // applied (the batch failed) and propagates.
       await context.sync();
-      return {
-        ok: true,
-        word_comment_id: c.id,
+      // From here on the edit is in the document. Every later failure comes
+      // back as applied:true so the daemon records the change and tells the
+      // model not to repeat it (afterEditApplied).
+      const applied = {
         paragraph_index: paragraphIndex,
         paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
         before,
         after: computed.after,
         narrowed,
       };
+      return await afterEditApplied(applied, async () => {
+        let anchor;
+        if (isInsert) {
+          anchor = inserted;
+        } else {
+          // The tracked-deleted original is still searchable (spike b). When
+          // the replacement contains the find text, skip the hit inside the
+          // insertion. A narrowed find is short and may occur elsewhere in
+          // the paragraph, so it is searched inside the original hit first.
+          let again = (narrowed ? hit : para).search(editFind, { matchCase: true });
+          again.load("items");
+          await context.sync();
+          if (narrowed && again.items.length === 0) {
+            again = para.search(editFind, { matchCase: true });
+            again.load("items");
+            await context.sync();
+          }
+          if (again.items.length > 1 && editReplace) {
+            const where = again.items.map((r) => r.compareLocationWith(inserted));
+            await context.sync();
+            anchor = again.items.find(
+              (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
+            );
+          } else {
+            anchor = again.items[0];
+          }
+        }
+        if (!anchor) {
+          return {
+            ok: false,
+            code: "CommentAnchorMissing",
+            applied: true,
+            message: "Edit applied but no range to anchor the comment",
+          };
+        }
+        const c = anchor.insertComment(comment_text);
+        c.load("id");
+        await context.sync();
+        return { ok: true, word_comment_id: c.id };
+      });
     });
   });
+}
+
+// The steps after a tracked edit is in the document (anchor search, comment
+// insert and its sync). step() returns { ok, ... } without the edit fields;
+// `applied` holds them (paragraph_index, paragraph_id, before, after,
+// narrowed), which the daemon records the change from. A throw becomes the
+// partial result CommentInsertFailed, applied:true, like CommentAnchorMissing.
+export async function afterEditApplied(applied, step) {
+  try {
+    return { ...(await step()), ...applied };
+  } catch (e) {
+    return {
+      ok: false,
+      code: "CommentInsertFailed",
+      applied: true,
+      message: `Edit applied but the rationale comment could not be added: ${e?.message ?? e}`,
+      ...applied,
+    };
+  }
 }
 
 function isoOrNull(d) {

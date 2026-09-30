@@ -387,6 +387,62 @@ test("applied edit without a comment anchor: recorded with no comment id, model 
   assert.ok(d.lines.some((l) => /comment missing R1\.1-1 code=CommentAnchorMissing/.test(l)));
 });
 
+test("comment insert failure after the edit applied: recorded like a missing anchor", async () => {
+  const d = deps({
+    ok: false,
+    code: "CommentInsertFailed",
+    applied: true,
+    word_comment_id: undefined,
+    message: "Edit applied but the rationale comment could not be added: GeneralException",
+  });
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.equal(d.edits.length, 1, "the applied change must be recorded");
+  const change = d.edits[0][1];
+  assert.deepEqual(
+    [change.word_comment_id, change.comment_missing, change.paragraph_index, change.after],
+    [null, "CommentInsertFailed", 9, "held at 30 °C"],
+  );
+  assert.deepEqual([r.ok, r.applied, r.comment_missing], [true, true, "CommentInsertFailed"]);
+  assert.match(r.warning, /do not repeat/i);
+});
+
+test("no answer from the task pane (timeout or disconnect): outcome unknown, not retried", async () => {
+  for (const code of ["ToolTimeout", "TaskpaneDisconnected"]) {
+    const d = deps();
+    d.call = async () => {
+      throw Object.assign(new Error(`lost: ${code}`), { code });
+    };
+    const r = await applyTrackedEdit(
+      d,
+      { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+      { ref: "R1.1" },
+    );
+    assert.deepEqual([r.ok, r.code, d.edits.length], [false, "OutcomeUnknown", 0]);
+    assert.match(r.message, /may already be in the document.*do not repeat/i);
+    assert.ok(d.lines.some((l) => /outcome unknown R1\.1/.test(l)));
+  }
+});
+
+test("an error the task pane sent back (edit not applied) still propagates", async () => {
+  const d = deps();
+  d.call = async () => {
+    throw new Error("`find` exceeds the 255-character limit of Word search");
+  };
+  await assert.rejects(
+    applyTrackedEdit(
+      d,
+      { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+      { ref: "R1.1" },
+    ),
+    /255-character/,
+  );
+  assert.equal(d.edits.length, 0);
+});
+
 test("an old task pane without before/after on the anchor failure still records the change", async () => {
   const d = deps();
   d.call = async (name, args) => (

@@ -137,6 +137,8 @@ export function formatRationaleComment(
   return `[${ref}] ${one(what)} / ${one(why)} / ${one(addresses)}${ids}${facts}`;
 }
 
+const NO_ANSWER_CODES = new Set(["ToolTimeout", "TaskpaneDisconnected"]);
+
 function fail(message, extra = {}) {
   return { ok: false, message, ...extra };
 }
@@ -208,13 +210,25 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     kind === "delete" ? [] : unsourcedTerms(newText, [...texts, ctx.comment_text ?? "", args.find]);
   const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
 
-  const r = await deps.call(REVIEW_WRITE_TOOL, {
-    find: args.find,
-    ...(hasReplace ? { replace: args.replace } : { insert_after: args.insert_after }),
-    ...(args.paragraph_hint ? { paragraph_hint: args.paragraph_hint } : {}),
-    ...(narrow ? { narrow } : {}),
-    comment_text: formatRationaleComment(turn.ref, rationale, { lost }),
-  });
+  let r;
+  try {
+    r = await deps.call(REVIEW_WRITE_TOOL, {
+      find: args.find,
+      ...(hasReplace ? { replace: args.replace } : { insert_after: args.insert_after }),
+      ...(args.paragraph_hint ? { paragraph_hint: args.paragraph_hint } : {}),
+      ...(narrow ? { narrow } : {}),
+      comment_text: formatRationaleComment(turn.ref, rationale, { lost }),
+    });
+  } catch (e) {
+    // No answer (bridge.mjs timeout or pane disconnect): the edit may be in
+    // the document with nothing recorded. A retry could apply it twice.
+    if (!NO_ANSWER_CODES.has(e?.code)) throw e;
+    deps.log?.(`[review] outcome unknown ${turn.ref} code=${e.code}`);
+    return fail(
+      `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
+      { code: "OutcomeUnknown" },
+    );
+  }
   if (!r) return fail("empty result from the task pane");
   // applied:true with ok:false: the task pane changed the document but could
   // not anchor the rationale comment (CommentAnchorMissing). The change is
