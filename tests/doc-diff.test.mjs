@@ -186,3 +186,19 @@ test("L4 positive: a rejected tool change does not hide a hand edit", () => {
     [["24 h"]],
   );
 });
+
+// A change recorded without context words is placed by its bare find and
+// text; they must stand on word or number boundaries, like
+// revision-classify.
+test("a context-free change does not explain a number it only sits inside", () => {
+  const legacy = {
+    paragraph_index: 0,
+    state: "accepted",
+    kind: "replace",
+    find: "5",
+    text: "7",
+    context: null,
+  };
+  assert.equal(outsideChanges(["value 50"], ["value 70"], [legacy]).length, 1);
+  assert.deepEqual(outsideChanges(["value 5 and 50"], ["value 7 and 50"], [legacy]), []);
+});

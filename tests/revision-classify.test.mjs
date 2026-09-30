@@ -462,3 +462,73 @@ test("a change with no rationale comment id is located by index or text and clas
     ["unlocated", "accepted"],
   );
 });
+
+// Codex review 3: with the context words gone, a bare substring match took
+// "7" inside the author's "70" as the accepted suggestion.
+const P_DAYS = "Samples were kept for 5 days before the assay.";
+const days = () =>
+  withContext(
+    {
+      id: "R1.4-1",
+      kind: "replace",
+      word_comment_id: "40",
+      paragraph_index: 0,
+      paragraph_id: null,
+      before: P_DAYS,
+      after: P_DAYS.replace("5", "7"),
+    },
+    "5",
+    "7",
+  );
+const para = (text) => ({
+  paragraphs: [{ index: 0, id: null, text, w_ins: 0, w_del: 0 }],
+  comments: [
+    { id: "40", paragraph_index: 0 },
+    { id: "41", paragraph_index: 0 },
+  ],
+});
+
+test("a one-character change inside a longer number the author typed is user_edited", () => {
+  assert.equal(
+    classifyChange(days(), para("Samples were kept for 70 days before the assay.")).state,
+    "user_edited",
+  );
+  assert.equal(
+    classifyChange(days(), para("Samples stayed 70 days in the cold.")).state,
+    "user_edited",
+  );
+});
+
+test("the plain accepted one-character change stays accepted", () => {
+  assert.equal(classifyChange(days(), para(P_DAYS.replace("5", "7"))).state, "accepted");
+  assert.equal(classifyChange(days(), para(P_DAYS)).state, "rejected");
+  // Context words rewritten, the new value once on word boundaries.
+  assert.equal(
+    classifyChange(days(), para("Samples stayed 7 days in the cold.")).state,
+    "accepted",
+  );
+});
+
+test("a one-character change found several times without context is not called accepted", () => {
+  const t = "Samples stayed 7 days in the cold at 7 sites.";
+  assert.notEqual(classifyChange(days(), para(t)).state, "accepted");
+});
+
+test("Korean counters keep the context rule: 5개 -> 7개 accepted, 70개 edited", () => {
+  const before = "시료 5개를 준비했다.";
+  const ch = withContext(
+    {
+      id: "R1.5-1",
+      kind: "replace",
+      word_comment_id: "41",
+      paragraph_index: 0,
+      paragraph_id: null,
+      before,
+      after: before.replace("5", "7"),
+    },
+    "5",
+    "7",
+  );
+  assert.equal(classifyChange(ch, para("시료 7개를 준비했다.")).state, "accepted");
+  assert.equal(classifyChange(ch, para("시료 70개를 준비했다.")).state, "user_edited");
+});

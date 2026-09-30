@@ -5,7 +5,7 @@
 // Texts are the reviewed view (Word getReviewedText: pending changes counted
 // as accepted), normalized like revision-classify.
 
-import { normalizeParaText } from "./revision-classify.mjs";
+import { normalizeParaText, boundedMatches } from "./revision-classify.mjs";
 import { lostFacts } from "./edit-facts.mjs";
 
 // FNV-1a 32 bit over UTF-16 code units, 8 hex digits. Not cryptographic: it
@@ -108,7 +108,7 @@ function applyRecorded(text, ch) {
   const right = collapse(ctx?.right);
   const I = kind === "delete" ? "" : collapse(ch.text);
   const D = kind === "insert" ? "" : collapse(ch.find);
-  const once = (f) => f !== "" && text.indexOf(f) !== -1 && text.indexOf(f) === text.lastIndexOf(f);
+  const once = (f) => boundedMatches(text, f).length === 1;
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
     const R = headWords(right, k);
@@ -119,7 +119,9 @@ function applyRecorded(text, ch) {
     const hasD = once(fD);
     if (hasI === hasD) continue;
     const [from, to] = ch.state === "rejected" ? [fI, fD] : [fD, fI];
-    return hasI === (from === fI) ? normalizeParaText(text.replace(from, () => to)) : text;
+    if (hasI !== (from === fI)) return text;
+    const [at] = boundedMatches(text, from);
+    return normalizeParaText(text.slice(0, at) + to + text.slice(at + from.length));
   }
   return null;
 }

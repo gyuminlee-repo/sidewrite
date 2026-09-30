@@ -81,7 +81,8 @@ export function locateParagraph(change, snapshot) {
 //   delete   L+D+R present (pending while marks remain, else rejected),
 //            L+R present: accepted
 // A sibling change can alter the context words, so the check is repeated
-// with fewer context words (3, 2, 1, 0) until one form alone matches. For a
+// with fewer context words (3, 2, 1, 0) until one form alone matches, once
+// and on word boundaries (boundedMatches). For a
 // pure insertion or deletion the pending text equals the accepted or the
 // rejected text, so the paragraph's revision marks still decide pending;
 // such a change next to a pending sibling reads pending.
@@ -126,14 +127,33 @@ export function changeContext(before, find, { kind = "replace", narrowFind = nul
   };
 }
 
+// Start indexes of the occurrences of `form` in `text` that do not cut a
+// word or a number: the character before and after a match may not be a
+// letter or a digit when the form's own first or last character is one.
+// Without context words a bare "7" would otherwise match inside "70" (Codex
+// review 3). Shared with doc-diff.mjs.
+const WORD_CHAR = /[\p{L}\p{N}]/u;
+export function boundedMatches(text, form) {
+  const out = [];
+  if (!form) return out;
+  const wordStart = WORD_CHAR.test(form[0]);
+  const wordEnd = WORD_CHAR.test(form[form.length - 1]);
+  for (let i = text.indexOf(form); i !== -1; i = text.indexOf(form, i + 1)) {
+    const end = i + form.length;
+    if (wordStart && i > 0 && WORD_CHAR.test(text[i - 1])) continue;
+    if (wordEnd && end < text.length && WORD_CHAR.test(text[end])) continue;
+    out.push(i);
+  }
+  return out;
+}
+
 function classifyByContext(change, t, revisions) {
   const { left, right } = change.context;
   const I = collapse(change.text);
   const D = collapse(change.find);
-  const has = (form) => {
-    const x = normalizeParaText(form);
-    return x !== "" && t.includes(x);
-  };
+  // Exactly one bounded match: a form found several times says nothing
+  // about which occurrence is this change.
+  const has = (form) => boundedMatches(t, normalizeParaText(form)).length === 1;
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
     const R = headWords(right, k);
