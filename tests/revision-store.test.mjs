@@ -290,6 +290,35 @@ test("L5 requirements get q-ids, keep them for the same text, and ride on the co
   assert.throws(() => setRequirements(rev, "R9.9", ["x"]), /No reviewer comment/);
 });
 
+test("L5 a requirement id that a recorded change cites is never given out again", async () => {
+  const { unaddressedRequirements } = await import("../taskpane/shared/review-view.js");
+  let rev = setRequirements(base(), "R1.1", ["state the unit"]);
+  rev = addChange(
+    rev,
+    "R1.1",
+    change({ rationale: { ...rationale, requirement_ids: ["q1"] } }),
+  ).revision;
+  // The author clears the list, then lists a new request.
+  rev = setRequirements(rev, "R1.1", []);
+  rev = setRequirements(rev, "R1.1", ["cite the method"]);
+  assert.deepEqual(rev.comments[0].requirements, [{ id: "q2", text: "cite the method" }]);
+  assert.deepEqual(
+    unaddressedRequirements(rev.comments[0]).map((r) => r.id),
+    ["q2"],
+  );
+  // Same through the comment list (Save comments) path.
+  rev = setRequirements(rev, "R1.1", []);
+  rev = replaceComments(rev, [
+    { ref: "R1.1", reviewer: 1, text: "x", requirements: ["use Celsius"] },
+    { ref: "R1.2", reviewer: 1, text: "Rename the extract." },
+  ]);
+  assert.deepEqual(rev.comments[0].requirements, [{ id: "q2", text: "use Celsius" }]);
+  assert.deepEqual(
+    unaddressedRequirements(rev.comments[0]).map((r) => r.id),
+    ["q2"],
+  );
+});
+
 test("L10 a changed rule drops the last check; a status patch keeps it", () => {
   let rev = addLedgerItem(base(), {
     kind: "forbid",

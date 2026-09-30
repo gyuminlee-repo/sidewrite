@@ -252,7 +252,7 @@ export function replaceComments(rev, incoming) {
       reviewer: c.reviewer,
       text: c.text,
       requirements: Array.isArray(c.requirements)
-        ? numberRequirements(old?.requirements ?? [], c.requirements)
+        ? numberRequirements(old?.requirements ?? [], c.requirements, citedIds(old))
         : clone(old?.requirements ?? []),
       status: c.status ?? old?.status ?? "pending",
       changes: old ? clone(old.changes) : [],
@@ -268,14 +268,19 @@ export function replaceComments(rev, incoming) {
   return next;
 }
 
+// Requirement ids that recorded changes of this comment cite.
+function citedIds(comment) {
+  return (comment?.changes ?? []).flatMap((ch) => ch.rationale?.requirement_ids ?? []);
+}
+
 // L5. texts: strings or { text }. A text that was already listed keeps its
 // id, so changes that point at it stay linked; new texts get the next q-id.
-export function numberRequirements(old, texts) {
+// The next q-id is above every listed id and every id in `used` (the ids
+// recorded changes cite), so a removed requirement's id is never given to a
+// new one that no change answers.
+export function numberRequirements(old, texts, used = []) {
   const byText = new Map(old.map((r) => [r.text, r.id]));
-  let n = nextNumber(
-    old.map((r) => r.id),
-    "q",
-  );
+  let n = nextNumber([...old.map((r) => r.id), ...used], "q");
   const out = [];
   const seen = new Set();
   for (const t of texts) {
@@ -290,7 +295,7 @@ export function numberRequirements(old, texts) {
 export function setRequirements(rev, ref, texts) {
   const next = clone(rev);
   const c = requireComment(next, ref);
-  c.requirements = numberRequirements(c.requirements, texts);
+  c.requirements = numberRequirements(c.requirements, texts, citedIds(c));
   return next;
 }
 
