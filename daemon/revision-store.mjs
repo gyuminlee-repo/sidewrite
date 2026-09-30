@@ -103,7 +103,8 @@ export const LedgerItemSchema = z.object({
   text: z.string().min(1),
   scope: z.enum(["manuscript", "response", "supplement"]).default("manuscript"),
   check: z.discriminatedUnion("type", [RegexCheck, LlmCheck]),
-  status: z.enum(["unchecked", "ok", "violations", "error"]).default("unchecked"),
+  // skipped: outside the manuscript scope, not checked against the manuscript.
+  status: z.enum(["unchecked", "ok", "violations", "error", "skipped"]).default("unchecked"),
   violation_count: z.number().int().nonnegative().default(0),
   checked_at: z.string().nullable().default(null),
   // L10: violations of the last check keyed by paragraph hash, and the

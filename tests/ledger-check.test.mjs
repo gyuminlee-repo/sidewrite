@@ -285,3 +285,31 @@ test("L10 LLM items: one-shot calls only for changed paragraphs", async () => {
   assert.match(prompts[0], /\[3\] Changed\./);
   assert.equal(next.mode, "incremental");
 });
+
+// A response or supplement rule is not a manuscript rule: the manuscript
+// check marks it skipped (not ok, no violations counted) in both modes.
+test("checkLedgerIncremental skips non-manuscript items in incremental and full runs", async () => {
+  const RESPONSE_NOVEL = { ...NOVEL, id: "L4", scope: "response" };
+  const SUPP_NOVEL = { ...NOVEL, id: "L5", scope: "supplement" };
+  const items = [IN_VITRO, RESPONSE_NOVEL, SUPP_NOVEL];
+  for (const full of [false, true]) {
+    const [inVitro, response, supp] = await checkLedgerIncremental(items, PARAS, { full });
+    assert.equal(inVitro.status, "violations");
+    assert.equal(inVitro.violations.length, 2);
+    for (const [o, id] of [
+      [response, "L4"],
+      [supp, "L5"],
+    ]) {
+      assert.equal(o.id, id);
+      assert.equal(o.status, "skipped");
+      assert.equal(o.skipped, "scope");
+      assert.deepEqual(o.violations, []);
+      assert.equal(o.checked, 0);
+      assert.equal(o.checked_hashes, null);
+    }
+  }
+  // An item stored after an earlier check is still skipped incrementally.
+  const stored = { ...RESPONSE_NOVEL, status: "ok", violations: [], checked_hashes: ["x"] };
+  const [again] = await checkLedgerIncremental([stored], PARAS);
+  assert.equal(again.status, "skipped");
+});

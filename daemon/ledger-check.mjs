@@ -174,7 +174,10 @@ export function forbidHits(ledger, text) {
 // stay for paragraphs that are still there unchanged; a paragraph that
 // occurs twice keeps its violation in both copies. A full run happens when
 // asked (full), for an item never checked or last in error, and always for
-// an expect:"present" rule (it is about the whole document).
+// an expect:"present" rule (it is about the whole document). An item outside
+// the manuscript scope (inManuscriptScope) is not run against the manuscript:
+// it comes back status "skipped", skipped "scope", with no violations and
+// checked_hashes null, so a later scope change to manuscript runs in full.
 // Returns [{ id, status, violations, error?, mode, checked, total,
 // checked_hashes }]; violations carry `h`, the paragraph hash.
 
@@ -199,6 +202,19 @@ export async function checkLedgerIncremental(items, paragraphs, { full = false, 
   const allHashes = [...new Set(hashes)];
   const outcomes = [];
   for (const item of items) {
+    if (!inManuscriptScope(item)) {
+      outcomes.push({
+        id: item.id,
+        status: "skipped",
+        skipped: "scope",
+        violations: [],
+        mode: "skipped",
+        checked: 0,
+        total: paragraphs.length,
+        checked_hashes: null,
+      });
+      continue;
+    }
     const whole = needsFull(item, full);
     const seen = new Set(whole ? [] : item.checked_hashes);
     const subset = whole ? paragraphs : paragraphs.filter((p, i) => !seen.has(hashes[i]));

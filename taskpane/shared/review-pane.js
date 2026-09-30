@@ -21,6 +21,7 @@ import {
   ledgerDraftFromChange,
   ledgerFormFromItem,
   ledgerCheckFromText,
+  ledgerStatusText,
   pendingDecisions,
   progressText,
 } from "./review-view.js";
@@ -330,8 +331,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           fillLedgerForm(ledgerFormFromItem(item));
         }),
       );
-      const statusText =
-        item.status === "violations" ? `${item.violation_count} violation(s)` : item.status;
+      const statusText = ledgerStatusText(item);
       box.append(
         el(
           "div",

@@ -297,6 +297,40 @@ test("ledger_check updates status and violation counts", async () => {
   }
 });
 
+test("ledger_check marks response-scope items skipped, still catches manuscript items", async () => {
+  const t = await setup();
+  try {
+    await t.ask("ledger_add", { item: IN_VITRO });
+    await t.ask("ledger_add", {
+      item: {
+        kind: "forbid",
+        text: "no in-vitro in the response letter",
+        scope: "response",
+        check: { type: "regex", pattern: String.raw`\bin-vitro\b`, flags: "i" },
+      },
+    });
+    const snapshot = {
+      paragraphs: [{ index: 3, text: "measured in-vitro", reviewed_text: "measured in-vitro" }],
+    };
+    for (const full of [false, true]) {
+      const r = await t.ask("ledger_check", { snapshot, full });
+      assert.deepEqual(
+        r.outcomes.map((x) => [x.id, x.status, x.skipped ?? null, x.violations.length]),
+        [
+          ["L1", "violations", null, 1],
+          ["L2", "skipped", "scope", 0],
+        ],
+      );
+      const stored = r.revision.ledger.find((i) => i.id === "L2");
+      assert.equal(stored.status, "skipped");
+      assert.equal(stored.violation_count, 0);
+    }
+    assert.ok(t.lines.includes("[review] ledger check L2 status=skipped violations=0"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("comments_backup writes <stem>.comments_backup.json, never overwrites, checks the count", async () => {
   const t = await setup();
   try {

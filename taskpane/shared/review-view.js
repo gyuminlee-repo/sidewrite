@@ -187,6 +187,20 @@ export const STATE_LABELS = {
 
 export const STATUS_LABELS = { pending: "To do", in_progress: "In progress", done: "Done" };
 
+// Ledger status shown on an item row. A skipped item is outside the
+// manuscript scope and is checked at its own stage, not counted as clean.
+export const SKIPPED_SCOPE_LABELS = {
+  response: "Checked at the response stage",
+  supplement: "Checked at the supplement stage",
+};
+
+export function ledgerStatusText(item) {
+  if (item?.status === "violations") return `${item.violation_count} violation(s)`;
+  if (item?.status === "skipped")
+    return SKIPPED_SCOPE_LABELS[item.scope] ?? `Checked at the ${item.scope} stage`;
+  return item?.status;
+}
+
 // Parse the ledger form into the ledger item shape of the daemon.
 export function ledgerItemFromForm({ kind, text, scope, checkType, pattern, flags, expect }) {
   const t = String(text ?? "").trim();

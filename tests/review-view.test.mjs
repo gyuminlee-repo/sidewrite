@@ -392,6 +392,27 @@ test("L7 pendingDecisions gathers blocked edits, unchecked ledger items and open
   assert.equal(view.pendingDecisions({ comments: [], ledger: [] }).total, 0);
 });
 
+test("ledgerStatusText names the stage that checks a non-manuscript item", () => {
+  assert.equal(
+    view.ledgerStatusText({ status: "violations", violation_count: 2 }),
+    "2 violation(s)",
+  );
+  assert.equal(view.ledgerStatusText({ status: "ok" }), "ok");
+  assert.equal(
+    view.ledgerStatusText({ status: "skipped", scope: "response" }),
+    "Checked at the response stage",
+  );
+  assert.equal(
+    view.ledgerStatusText({ status: "skipped", scope: "supplement" }),
+    "Checked at the supplement stage",
+  );
+  // A skipped item waits for nothing in the manuscript review.
+  assert.equal(
+    view.pendingDecisions({ comments: [], ledger: [{ id: "L1", status: "skipped" }] }).total,
+    0,
+  );
+});
+
 test("L9 progressText: elapsed time and comments not done", () => {
   const comments = [{ status: "done" }, { status: "in_progress" }, { status: "pending" }];
   assert.equal(
