@@ -140,6 +140,52 @@ const squash = (s) =>
     .replace(/\s+/g, " ")
     .trim();
 
+// Sentence units for the coverage check: split at line breaks and sentence
+// ends, drop a leading list marker (the model often leaves it out) and keep
+// units with a letter. An abbreviation ("e.g.", "Fig. 2") only splits a
+// sentence into shorter pieces, each still inside a comment that holds it.
+const LIST_MARK = /^(?:\(?\d+[.)]|\(?[a-z][.)]|[-*\u2022])\s+/i;
+function sentenceUnits(text) {
+  return String(text ?? "")
+    .split(/\n|(?<=[.!?])\s+/)
+    .map((u) => squash(u).replace(LIST_MARK, ""))
+    .filter((u) => /\p{L}/u.test(u));
+}
+
+function nextNumber(comments, reviewer) {
+  let max = 0;
+  for (const c of comments) {
+    const m = /^R(\d+)\.(\d+)$/.exec(c.ref);
+    if (m && Number(m[1]) === reviewer) max = Math.max(max, Number(m[2]));
+  }
+  return max + 1;
+}
+
+const quoteUnits = (units) =>
+  units
+    .slice(0, 3)
+    .map((u) => `"${u.length > 80 ? `${u.slice(0, 77)}...` : u}"`)
+    .join(", ") + (units.length > 3 ? ` and ${units.length - 3} more` : "");
+
+// Sentences of the review, without reviewer heads and comment heads, that are
+// inside none of the comments.
+function uncoveredText(text, comments, patterns) {
+  const p = { ...DEFAULT_PATTERNS, ...patterns };
+  const reReviewer = new RegExp(p.reviewerHead, "i");
+  const reComment = new RegExp(p.commentHead, "i");
+  const body = String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .filter((l) => !reReviewer.test(l))
+    .map((l) => {
+      const m = reComment.exec(l);
+      return m ? l.slice(m[0].length).replace(HEAD_TRIM, "") : l;
+    })
+    .join("\n");
+  const texts = comments.map((c) => squash(c.text));
+  return sentenceUnits(body).filter((u) => !texts.some((t) => t.includes(u)));
+}
+
 export const SPLIT_SYSTEM =
   "You split peer-review text into individual reviewer comments. Copy the text of each comment verbatim from the input. Do not summarize, merge, or invent comments. For each comment also list the separate things the reviewer asks the authors to do. Reply with JSON only.";
 
@@ -178,7 +224,23 @@ export function splitPrompt(text) {
 // comment; blocks kept whole and kept preambles do not count, so they cannot
 // hide a review the regex barely split. Kept-whole blocks and kept preambles
 // always come back as warnings.
+// Every path ends with a check of the review text that is in no comment:
+// without a reviewer head the regex drops the text before the first comment
+// head, and the model may leave text out. It is named, not added back.
 export async function splitReview(text, { patterns, oneshot } = {}) {
+  const r = await splitReviewInner(text, { patterns, oneshot });
+  const lost = uncoveredText(text, r.comments, patterns);
+  if (!lost.length) return r;
+  return {
+    ...r,
+    warnings: [
+      ...r.warnings,
+      `${lost.length} sentence(s) of the review are in no comment: ${quoteUnits(lost)}. Add them if they ask for something.`,
+    ],
+  };
+}
+
+async function splitReviewInner(text, { patterns, oneshot } = {}) {
   const { comments: regexOut, unsplit, preserved } = splitBlocks(text, patterns);
   const whole = [...preservedWarnings(preserved), ...unsplitWarnings(unsplit)];
   if (regexOut.length - unsplit.length - preserved.length > 1) {
@@ -241,16 +303,29 @@ export async function splitReview(text, { patterns, oneshot } = {}) {
       ],
     };
   }
-  // A regex comment (kept-whole block or numbered comment) of a reviewer the
-  // model left out comes back from the regex split, so its text is not lost
-  // on this path either. Kept preambles are already in `kept`.
+  // Coverage, not reviewer presence: every sentence of a regex comment
+  // (kept-whole block or numbered comment) must be inside an LLM comment of
+  // the same reviewer. Otherwise the regex text comes back whole, under the
+  // next free number, with a warning (it may repeat what the model kept).
+  // Kept preambles are already in `kept`.
   for (const c of regexOut) {
-    if (preserved.includes(c) || fromModel.some((k) => k.reviewer === c.reviewer)) continue;
-    kept.push(c);
+    if (preserved.includes(c)) continue;
+    const mine = fromModel.filter((k) => k.reviewer === c.reviewer).map((k) => squash(k.text));
+    const missing = sentenceUnits(c.text).filter((u) => !mine.some((t) => t.includes(u)));
+    if (!missing.length) continue;
+    if (!mine.length) {
+      kept.push(c);
+      warnings.push(
+        unsplit.includes(c.ref)
+          ? `Reviewer ${c.reviewer} got no comment from the LLM split; the whole text is kept as ${c.ref}.`
+          : `Reviewer ${c.reviewer} got no comment from the LLM split; the regex comment is kept as ${c.ref}.`,
+      );
+      continue;
+    }
+    const ref = `R${c.reviewer}.${nextNumber(kept, c.reviewer)}`;
+    kept.push({ ...c, ref });
     warnings.push(
-      unsplit.includes(c.ref)
-        ? `Reviewer ${c.reviewer} got no comment from the LLM split; the whole text is kept as ${c.ref}.`
-        : `Reviewer ${c.reviewer} got no comment from the LLM split; the regex comment is kept as ${c.ref}.`,
+      `The LLM split of Reviewer ${c.reviewer} left out ${quoteUnits(missing)}; the regex text is kept whole as ${ref}. It may repeat text of the other comments: delete the overlap.`,
     );
   }
   kept.sort((a, b) => a.reviewer - b.reviewer);

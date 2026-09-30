@@ -334,3 +334,122 @@ test("a numbered regex comment of a reviewer the LLM left out is kept", async ()
   );
   assert.ok(r.warnings.some((w) => /Reviewer 2.*no comment.*R2\.1/.test(w)));
 });
+
+// Codex review 4: coverage, not reviewer presence, decides whether the regex
+// text is kept. llm(items) answers with the given [reviewer, number, text].
+const llm = (items) => async () => ({
+  ok: true,
+  json: { comments: items.map(([reviewer, number, text]) => ({ reviewer, number, text })) },
+});
+const TWO_ASKS =
+  "Reviewer 1:\nPlease state the incubation temperature. Also report the sample size of each group.\n";
+
+test("a request the LLM left out of a reviewer it did return is kept, with a warning", async () => {
+  const r = await splitReview(TWO_ASKS, {
+    oneshot: llm([[1, 1, "Please state the incubation temperature."]]),
+  });
+  assert.equal(r.method, "llm");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.text]),
+    [
+      ["R1.1", "Please state the incubation temperature."],
+      [
+        "R1.2",
+        "Please state the incubation temperature. Also report the sample size of each group.",
+      ],
+    ],
+  );
+  assert.ok(
+    r.warnings.some((w) => /left out.*Also report the sample size.*kept whole as R1\.2/.test(w)),
+    r.warnings.join(" | "),
+  );
+  assert.ok(r.warnings.some((w) => /delete the overlap/.test(w)));
+  assert.ok(!r.warnings.some((w) => /duplicate ref/.test(w)));
+});
+
+test("an LLM split covering every sentence adds no warning", async () => {
+  const r = await splitReview(TWO_ASKS, {
+    oneshot: llm([
+      [1, 1, "Please state the incubation temperature."],
+      [1, 2, "Also report the sample size of each group."],
+    ]),
+  });
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["R1.1", "R1.2"],
+  );
+  assert.deepEqual(r.warnings, []);
+});
+
+test("one numbered comment the LLM splits in two is covered", async () => {
+  const one = "1. Please state the temperature. Also report the sample size.\n";
+  const r = await splitReview(one, {
+    oneshot: llm([
+      [1, 1, "Please state the temperature."],
+      [1, 2, "Also report the sample size."],
+    ]),
+  });
+  assert.deepEqual(
+    r.comments.map((c) => c.text),
+    ["Please state the temperature.", "Also report the sample size."],
+  );
+  assert.deepEqual(r.warnings, []);
+});
+
+test("list markers the LLM drops and abbreviations do not count as left out", async () => {
+  const bullets =
+    "Reviewer 1:\n- Please state the temperature.\n- Report the sample size, e.g. per group.\n";
+  const r = await splitReview(bullets, {
+    oneshot: llm([
+      [1, 1, "Please state the temperature."],
+      [1, 2, "Report the sample size, e.g. per group."],
+    ]),
+  });
+  assert.deepEqual(r.warnings, []);
+  assert.equal(r.comments.length, 2);
+});
+
+test("a sentence the LLM cut short is left out", async () => {
+  const bullets =
+    "Reviewer 1:\n- Please state the temperature.\n- Report the sample size, e.g. per group.\n";
+  const r = await splitReview(bullets, {
+    oneshot: llm([
+      [1, 1, "Please state the"],
+      [1, 2, "Report the sample size, e.g. per group."],
+    ]),
+  });
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["R1.1", "R1.2", "R1.3"],
+  );
+  assert.ok(r.warnings.some((w) => /left out.*Please state the temperature.*R1\.3/.test(w)));
+});
+
+test("review text in no comment at all (no heads, LLM left it out) is named", async () => {
+  const one = "Please state the temperature. Also report the sample size.\n1. Add error bars.\n";
+  const r = await splitReview(one, {
+    oneshot: llm([
+      [1, 1, "Please state the temperature."],
+      [1, 2, "Add error bars."],
+    ]),
+  });
+  assert.equal(r.method, "llm");
+  assert.ok(
+    r.warnings.some((w) => /in no comment.*Also report the sample size/.test(w)),
+    r.warnings.join(" | "),
+  );
+  assert.ok(!r.warnings.some((w) => /in no comment.*Please state/.test(w)));
+});
+
+test("text the regex split drops (no reviewer head) is named on the regex paths too", async () => {
+  const one = "Please also cite the method.\n1. Add units.\n2. Add error bars.\n";
+  const r = await splitReview(one);
+  assert.equal(r.method, "regex");
+  assert.ok(r.warnings.some((w) => /1 sentence\(s\) .*in no comment.*cite the method/.test(w)));
+  const failed = await splitReview("Please also cite the method.\n1. Add units.\n", {
+    oneshot: async () => ({ ok: false, error: "timed out" }),
+  });
+  assert.ok(failed.warnings.some((w) => /in no comment.*cite the method/.test(w)));
+  const clean = await splitReview(TWO_REVIEWERS);
+  assert.ok(!clean.warnings.some((w) => /in no comment/.test(w)), clean.warnings.join(" | "));
+});
