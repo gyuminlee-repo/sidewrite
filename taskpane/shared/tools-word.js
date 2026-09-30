@@ -1,4 +1,4 @@
-/* global Word */
+/* global Word, Office */
 //
 // Word tool implementations + Word-specific helpers.
 //
@@ -1465,4 +1465,264 @@ export async function toolHeaderFooter({ which, text }) {
     await context.sync();
     return { which, sections: sections.items.length, set: true };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Stage-2 spike tools (office_spike_*). Temporary instruments for testing
+// assumptions in real Word; remove together with the daemon registrations.
+// They return structured { ok:false, code, message, debugInfo } instead of
+// throwing, because the bridge flattens thrown errors to a message string.
+// ---------------------------------------------------------------------------
+function spikeError(e) {
+  return {
+    ok: false,
+    code: e?.code ?? null,
+    message: e?.message ?? String(e),
+    debugInfo: e?.debugInfo ?? null,
+  };
+}
+
+// The daemon's `ws` server keeps the library default maxPayload of 100 MiB
+// (node_modules/ws/lib/websocket-server.js; daemon/bridge.mjs does not
+// override it). Refuse before sending a frame that would be dropped.
+const SPIKE_WS_MAX_PAYLOAD = 100 * 1024 * 1024;
+const SPIKE_PDF_SLICE_SIZE = 4 * 1024 * 1024;
+
+function spikeAsync(fn) {
+  return new Promise((resolve, reject) => {
+    fn((res) => {
+      if (res.status === Office.AsyncResultStatus.Failed) reject(res.error);
+      else resolve(res.value);
+    });
+  });
+}
+
+function bytesToBase64(bytes) {
+  let bin = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+// Tool: office_spike_export_pdf
+export async function toolSpikeExportPdf() {
+  let bodyTextLength = null;
+  try {
+    bodyTextLength = await Word.run(async (context) => {
+      const body = context.document.body;
+      body.load("text");
+      await context.sync();
+      return body.text.length;
+    });
+  } catch (e) {
+    return { ...spikeError(e), stage: "body_text" };
+  }
+
+  let file = null;
+  let stage = "getFileAsync";
+  try {
+    file = await spikeAsync((cb) =>
+      Office.context.document.getFileAsync(
+        Office.FileType.Pdf,
+        { sliceSize: SPIKE_PDF_SLICE_SIZE },
+        cb,
+      ),
+    );
+    const sliceCount = file.sliceCount;
+    const parts = [];
+    let total = 0;
+    for (let i = 0; i < sliceCount; i++) {
+      stage = `getSliceAsync(${i})`;
+      const slice = await spikeAsync((cb) => file.getSliceAsync(i, cb));
+      const bytes = slice.data instanceof Uint8Array ? slice.data : Uint8Array.from(slice.data);
+      parts.push(bytes);
+      total += bytes.length;
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      all.set(p, off);
+      off += p.length;
+    }
+    stage = "encode";
+    const pdf_base64 = bytesToBase64(all);
+    // base64 plus the JSON envelope must fit one WS frame.
+    if (pdf_base64.length + 4096 > SPIKE_WS_MAX_PAYLOAD) {
+      return {
+        ok: false,
+        code: "PayloadTooLarge",
+        message: `PDF is ${total} bytes (${pdf_base64.length} base64 chars); exceeds the ${SPIKE_WS_MAX_PAYLOAD}-byte WebSocket frame limit.`,
+        stage,
+      };
+    }
+    return {
+      ok: true,
+      pdf_base64,
+      byte_length: total,
+      slice_count: sliceCount,
+      body_text_length: bodyTextLength,
+    };
+  } catch (e) {
+    return { ...spikeError(e), stage, body_text_length: bodyTextLength };
+  } finally {
+    if (file) {
+      try {
+        await spikeAsync((cb) => file.closeAsync(cb));
+      } catch {
+        /* close failure must not shadow the export result */
+      }
+    }
+  }
+}
+
+// Tool: office_spike_comment_on_tracked
+export async function toolSpikeCommentOnTracked({ find, replace }) {
+  if (typeof find !== "string" || !find) return { ok: false, message: "`find` is required" };
+  if (find.length > 255)
+    return { ok: false, message: "`find` exceeds Word search's 255-char limit" };
+  if (typeof replace !== "string") return { ok: false, message: "`replace` must be a string" };
+
+  try {
+    return await Word.run(async (context) => {
+      return await withTrackChanges(context, true, async () => {
+        const out = { ok: true, find, replace };
+        const hits = context.document.body.search(find, { matchCase: true });
+        hits.load("items");
+        await context.sync();
+        out.initial_hit_count = hits.items.length;
+        if (hits.items.length === 0) return { ok: false, message: `"${find}" not found`, ...out };
+
+        const hit = hits.items[0];
+        const para = hit.paragraphs.getFirst();
+        const inserted = hit.insertText(replace, "Replace");
+        inserted.load("text");
+        await context.sync();
+        out.inserted_range_text = inserted.text;
+
+        async function attempt(label, range, extra = {}) {
+          const r = { label, ...extra };
+          try {
+            const c = range.insertComment(`[R0.1] spike ${label}`);
+            c.load("id,content");
+            const cr = c.getRange();
+            cr.load("text");
+            await context.sync();
+            r.ok = true;
+            r.comment_id = c.id;
+            r.comment_content = c.content;
+            r.comment_range_text = cr.text;
+          } catch (e) {
+            r.ok = false;
+            r.error = spikeError(e);
+          }
+          return r;
+        }
+
+        out.a_inserted = await attempt("a", inserted);
+
+        // (b) Is the tracked-deleted original still reachable by search?
+        let b;
+        try {
+          const again = para.search(find, { matchCase: true });
+          again.load("items/text");
+          await context.sync();
+          const texts = again.items.map((x) => x.text);
+          b =
+            again.items.length > 0
+              ? await attempt("b", again.items[0], { deleted_search_hits: texts })
+              : { label: "b", ok: false, deleted_search_hits: [], error: { message: "no hit" } };
+        } catch (e) {
+          b = { label: "b", ok: false, error: spikeError(e) };
+        }
+        out.b_deleted = b;
+
+        out.c_paragraph = await attempt("c", para.getRange("Whole"));
+        try {
+          para.load("text");
+          await context.sync();
+          out.paragraph_text_after = para.text;
+        } catch (e) {
+          out.paragraph_text_after_error = spikeError(e);
+        }
+        return out;
+      });
+    });
+  } catch (e) {
+    return spikeError(e);
+  }
+}
+
+// Tool: office_spike_revision_state
+const SPIKE_FULL_LIST_MAX = 40;
+const countTag = (xml, re) => (xml.match(re) || []).length;
+// `[\s>/]` after the name excludes w:instrText, w:delText, w:delInstrText.
+const W_INS = /<w:ins[\s>/]/g;
+const W_DEL = /<w:del[\s>/]/g;
+
+export async function toolSpikeRevisionState() {
+  try {
+    return await Word.run(async (context) => {
+      const { paragraphs } = await getParagraphsWithIds(context);
+      const oox = paragraphs.items.map((p) => p.getOoxml());
+      const comments = context.document.body.getComments();
+      comments.load("items/id,items/content,items/resolved,items/authorName");
+      await context.sync();
+
+      const probes = comments.items.map((c) => {
+        const range = c.getRange();
+        range.load("text");
+        const paras = range.paragraphs;
+        paras.load("items/text");
+        return { c, range, paras };
+      });
+      await context.sync();
+
+      const paraTexts = paragraphs.items.map((p) => p.text);
+      const commentRows = probes.map(({ c, range, paras }) => {
+        const firstText = paras.items.length ? paras.items[0].text : null;
+        const matches = [];
+        if (firstText !== null) {
+          paraTexts.forEach((t, i) => {
+            if (t === firstText) matches.push(i);
+          });
+        }
+        return {
+          id: c.id,
+          content: c.content,
+          resolved: c.resolved,
+          author: c.authorName,
+          range_text: range.text,
+          paragraph_index: matches.length ? matches[0] : null,
+          paragraph_index_method: "text_match",
+          ambiguous: matches.length > 1,
+        };
+      });
+
+      const commented = new Set(
+        commentRows.map((r) => r.paragraph_index).filter((i) => i !== null),
+      );
+      const rows = paragraphs.items.map((p, i) => {
+        const xml = oox[i].value || "";
+        return { index: i, text: p.text, w_ins: countTag(xml, W_INS), w_del: countTag(xml, W_DEL) };
+      });
+      const filtered = rows.length > SPIKE_FULL_LIST_MAX;
+      return {
+        ok: true,
+        paragraph_count: rows.length,
+        filtered,
+        filter_rule: filtered
+          ? `paragraph_count > ${SPIKE_FULL_LIST_MAX}: only paragraphs with w:ins/w:del or comments`
+          : null,
+        paragraphs: filtered
+          ? rows.filter((r) => r.w_ins || r.w_del || commented.has(r.index))
+          : rows,
+        comment_count: commentRows.length,
+        comments: commentRows,
+      };
+    });
+  } catch (e) {
+    return spikeError(e);
+  }
 }

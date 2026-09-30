@@ -17,3 +17,6 @@ dist/
 
 # Office lock/owner temp files (~$foo.docx)
 ~$*
+
+# Stage-2 spike: PDFs rendered by office_spike_export_pdf
+*.render.pdf

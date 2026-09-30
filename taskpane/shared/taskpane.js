@@ -28,6 +28,9 @@ import {
   toolReplyToComment,
   toolResolveComment,
   toolHeaderFooter,
+  toolSpikeExportPdf,
+  toolSpikeCommentOnTracked,
+  toolSpikeRevisionState,
 } from "./tools-word.js";
 import {
   toolExcelGetSelectedRange,
@@ -264,6 +267,9 @@ const TOOL_STATUS_LABELS = {
   office_reply_to_comment: "Replying to a comment…",
   office_resolve_comment: "Resolving a comment…",
   office_header_footer: "Editing header/footer…",
+  office_spike_export_pdf: "Spike: exporting PDF…",
+  office_spike_comment_on_tracked: "Spike: commenting on a tracked change…",
+  office_spike_revision_state: "Spike: reading revision state…",
   // Excel
   excel_get_selected_range: "Reading your selection…",
   excel_list_sheets: "Listing sheets…",
@@ -865,6 +871,16 @@ async function runOfficeTool(msg) {
         break;
       case "office_header_footer":
         result = await toolHeaderFooter(args);
+        break;
+      // Stage-2 spike tools (temporary). Plain args: they force tracking themselves.
+      case "office_spike_export_pdf":
+        result = await toolSpikeExportPdf();
+        break;
+      case "office_spike_comment_on_tracked":
+        result = await toolSpikeCommentOnTracked(args || {});
+        break;
+      case "office_spike_revision_state":
+        result = await toolSpikeRevisionState();
         break;
       // ---- Excel ----
       case "excel_get_selected_range":

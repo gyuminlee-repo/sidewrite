@@ -1,5 +1,7 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { diag } from "./diag.mjs";
 
 // Wrap a bridge tool result for MCP. Handlers return {content: [...]}.
@@ -10,6 +12,42 @@ function asMcpResult(result, { isError = false } = {}) {
 
 function asMcpError(err) {
   return asMcpResult(`Error: ${err?.message ?? String(err)}`, { isError: true });
+}
+
+// ---- Stage-2 spike helpers (office_spike_*; temporary, remove with the spike)
+// Where office_spike_export_pdf saves the rendered PDF: `<cwd>/<doc stem>.render.pdf`.
+// `activeDoc` is the pane's document path/URL as the taskpane sent it in hello
+// (Windows path, file:// URL, POSIX path, or null for an unsaved doc).
+export function spikeRenderPdfPath(cwd, activeDoc) {
+  let base = typeof activeDoc === "string" ? activeDoc.split(/[\\/]/).pop() : "";
+  try {
+    base = decodeURIComponent(base);
+  } catch {
+    /* keep the raw basename */
+  }
+  base = base
+    .replace(/[?#].*$/, "")
+    .replace(/\.(docx?|docm|dotx?|dotm)$/i, "")
+    .trim();
+  return join(cwd, `${base || "document"}.render.pdf`);
+}
+
+// Decode the taskpane's base64 PDF, write it, and return only metadata so the
+// PDF bytes never reach the agent's context.
+export async function saveSpikeRenderPdf({ cwd, activeDoc, result }) {
+  if (!result || result.ok === false) return result ?? { ok: false, message: "empty result" };
+  const buf = Buffer.from(result.pdf_base64 ?? "", "base64");
+  if (buf.length === 0) return { ok: false, message: "taskpane returned 0 PDF bytes" };
+  const path = spikeRenderPdfPath(cwd, activeDoc);
+  await writeFile(path, buf);
+  return {
+    ok: true,
+    path,
+    bytes: buf.length,
+    reported_bytes: result.byte_length,
+    slice_count: result.slice_count,
+    body_text_length: result.body_text_length,
+  };
 }
 
 /**
@@ -31,7 +69,7 @@ function asMcpError(err) {
  * @param {{ callTaskpaneTool: (name: string, args: object) => Promise<any> }} bridge
  * @param {"word"|"excel"|null} host
  */
-export function createOfficeBridgeMcp(bridge, host = null, paneKey = null) {
+export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts = {}) {
   // `host` selects which tool family to register; `paneKey` routes every
   // call to the exact document pane this session belongs to (so two open
   // Word docs don't cross-talk).
@@ -819,6 +857,40 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null) {
     wrap("excel_set_row_height"),
   );
 
+  // ---- Stage-2 spike tools (temporary; remove with the spike) ------------
+  const office_spike_export_pdf = tool(
+    "office_spike_export_pdf",
+    "SPIKE (test only). Export the active Word document as PDF via Office getFileAsync and save it next to the document as `<name>.render.pdf`. Returns the saved path, byte count, slice count, and the body text length read just before export. Never returns PDF bytes.",
+    {},
+    async () => {
+      try {
+        const r = await call("office_spike_export_pdf", {});
+        const cwd = typeof opts.getCwd === "function" ? opts.getCwd() : process.cwd();
+        const activeDoc = bridge.getContext?.(paneKey)?.activeDoc ?? null;
+        return asMcpResult(await saveSpikeRenderPdf({ cwd, activeDoc, result: r }));
+      } catch (e) {
+        return asMcpError(e);
+      }
+    },
+  );
+
+  const office_spike_comment_on_tracked = tool(
+    "office_spike_comment_on_tracked",
+    "SPIKE (test only). With track changes on, replace the first body match of `find` with `replace`, then try three comment anchors separately: (a) the inserted text, (b) the deleted original text (re-found by search), (c) the whole paragraph. Reports success, Office error, comment id, and comment range text for each.",
+    {
+      find: z.string().describe("Text to find (first match in the body is used)."),
+      replace: z.string().describe("Replacement text, inserted as a tracked change."),
+    },
+    wrap("office_spike_comment_on_tracked"),
+  );
+
+  const office_spike_revision_state = tool(
+    "office_spike_revision_state",
+    "SPIKE (test only). Per paragraph: index, text, and counts of w:ins / w:del elements in its OOXML. Per comment: id, content, resolved, author, anchored range text, and the paragraph index it falls in. Large documents list only paragraphs with revisions or comments.",
+    {},
+    wrap("office_spike_revision_state"),
+  );
+
   const wordTools = [
     office_get_selection,
     office_read_paragraphs,
@@ -847,6 +919,9 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null) {
     office_reply_to_comment,
     office_resolve_comment,
     office_header_footer,
+    office_spike_export_pdf,
+    office_spike_comment_on_tracked,
+    office_spike_revision_state,
   ];
   const excelTools = [
     excel_get_selected_range,

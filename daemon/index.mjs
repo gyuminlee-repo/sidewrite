@@ -1007,7 +1007,7 @@ async function startSessionForFolder(
   // Register only this host's tool family, routed to THIS pane. A session
   // is created lazily on the first user message (onUserMessage →
   // ensureLoopForMessage), so `host` is normally "word" or "excel".
-  const officeMcp = createOfficeBridgeMcp(bridge, host, key);
+  const officeMcp = createOfficeBridgeMcp(bridge, host, key, { getCwd: () => cwdForKey(key) });
 
   await touchFolder(cwd);
   console.log(
