@@ -388,3 +388,16 @@ test("editor comment E.1 (reviewer 0) and preamble R1.0 are valid comments", () 
     ],
   );
 });
+
+test("a change applied without its comment is stored with a null id and the error code", () => {
+  const r = addChange(
+    base(),
+    "R1.1",
+    change({ word_comment_id: null, comment_missing: "CommentAnchorMissing" }),
+  );
+  assert.deepEqual(
+    [r.change.word_comment_id, r.change.comment_missing],
+    [null, "CommentAnchorMissing"],
+  );
+  assert.equal(addChange(base(), "R1.1", change()).change.comment_missing, null);
+});

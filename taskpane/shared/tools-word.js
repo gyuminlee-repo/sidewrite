@@ -1596,6 +1596,12 @@ export async function toolTrackedEdit({
           code: "CommentAnchorMissing",
           applied: true,
           message: "Edit applied but no range to anchor the comment",
+          // The daemon records the applied change from these (no comment id).
+          paragraph_index: paragraphIndex,
+          paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
+          before,
+          after: computed.after,
+          narrowed,
         };
       }
       const c = anchor.insertComment(comment_text);

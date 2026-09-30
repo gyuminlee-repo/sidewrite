@@ -436,3 +436,29 @@ test("reviewerOfRef reads R<n>.<m> and E.<m> refs", () => {
   assert.equal(view.reviewerOfRef("E1"), null);
   assert.equal(view.reviewerOfRef("1.3"), null);
 });
+
+test("a change applied without its rationale comment: warning flag and an invariant mismatch", () => {
+  const missing = ch({ word_comment_id: null, comment_missing: "CommentAnchorMissing" });
+  assert.deepEqual(
+    view.changeFlags(missing).map((f) => [f.kind, f.text]),
+    [["comment-missing", "No rationale comment"]],
+  );
+  const rev = {
+    comments: [
+      {
+        ref: "R1.1",
+        changes: [{ id: "R1.1-1", kind: "replace", state: "pending", word_comment_id: "1" }],
+      },
+      { ref: "R1.3", changes: [{ ...missing, state: "accepted" }] },
+    ],
+  };
+  const r = view.invariantReport(rev, [{ id: "1", content: "[R1.1] a / b / c" }]);
+  assert.deepEqual(
+    [r.ok, r.changes, r.expected_comments, r.tool_comments, r.missing_comment],
+    [false, 2, 2, 1, ["R1.3-1"]],
+  );
+  assert.deepEqual(
+    view.commentsToResolve([{ change_id: "R1.3-1", state: "accepted" }], rev, []),
+    [],
+  );
+});

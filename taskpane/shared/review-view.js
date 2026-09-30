@@ -240,9 +240,11 @@ export function ledgerItemFromForm({ kind, text, scope, checkType, pattern, flag
 
 // ---- L1-L3 badges, L5 requirements, L6 ledger drafts, L7, L9 ----------------
 
-// Short labels shown on a change row (L1 lost facts, L2 unsourced, L3 narrowed).
+// Short labels shown on a change row (L1 lost facts, L2 unsourced, L3 narrowed)
+// and a change applied without its rationale comment.
 export function changeFlags(ch) {
   const out = [];
+  if (ch?.comment_missing) out.push({ kind: "comment-missing", text: "No rationale comment" });
   if (ch?.lost_facts?.length) out.push({ kind: "lost", text: `Lost: ${ch.lost_facts.join("; ")}` });
   if (ch?.unsourced_terms?.length)
     out.push({ kind: "unsourced", text: `No source: ${ch.unsourced_terms.join(", ")}` });

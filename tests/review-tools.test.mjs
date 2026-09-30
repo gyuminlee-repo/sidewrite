@@ -363,3 +363,54 @@ test("L5 requirement ids: unknown ids are refused, known ids go into the comment
 test("office_tracked_edit is registered with the Word tools", async () => {
   assert.ok((await registeredWordTools()).includes(REVIEW_WRITE_TOOL));
 });
+
+test("applied edit without a comment anchor: recorded with no comment id, model told not to retry", async () => {
+  const d = deps({
+    ok: false,
+    code: "CommentAnchorMissing",
+    applied: true,
+    word_comment_id: undefined,
+  });
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.equal(d.edits.length, 1, "the applied change must be recorded");
+  const change = d.edits[0][1];
+  assert.deepEqual(
+    [change.word_comment_id, change.comment_missing, change.before, change.after],
+    [null, "CommentAnchorMissing", "held at 30 degrees", "held at 30 °C"],
+  );
+  assert.deepEqual([r.ok, r.applied, r.change_id, r.word_comment_id], [true, true, "R1.1-1", null]);
+  assert.match(r.warning, /applied.*no rationale comment.*do not repeat/i);
+  assert.ok(d.lines.some((l) => /comment missing R1\.1-1 code=CommentAnchorMissing/.test(l)));
+});
+
+test("an old task pane without before/after on the anchor failure still records the change", async () => {
+  const d = deps();
+  d.call = async (name, args) => (
+    d.calls.push([name, args]),
+    { ok: false, code: "CommentAnchorMissing", applied: true, message: "no range" }
+  );
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.equal(r.applied, true);
+  assert.deepEqual(
+    [d.edits[0][1].before, d.edits[0][1].after, d.edits[0][1].paragraph_index],
+    ["", "", null],
+  );
+});
+
+test("a failure that did not apply the edit records nothing", async () => {
+  const d = deps({ ok: false, code: "NotFound", message: "not found" });
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.deepEqual([r.ok, r.code, d.edits.length], [false, "NotFound", 0]);
+});

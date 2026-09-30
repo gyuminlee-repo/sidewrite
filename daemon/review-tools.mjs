@@ -215,7 +215,13 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     ...(narrow ? { narrow } : {}),
     comment_text: formatRationaleComment(turn.ref, rationale, { lost }),
   });
-  if (!r || r.ok === false) return r ?? fail("empty result from the task pane");
+  if (!r) return fail("empty result from the task pane");
+  // applied:true with ok:false: the task pane changed the document but could
+  // not anchor the rationale comment (CommentAnchorMissing). The change is
+  // still recorded, with no comment id, so the change list and the
+  // "changes == rationale comments" check show it instead of losing it.
+  const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
+  if (r.ok === false && !commentMissing) return r;
 
   // The task pane reports whether it could apply the narrowed range (the cut
   // find must occur once inside the located hit); otherwise the full range.
@@ -228,13 +234,14 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     kind: appliedKind,
     find: narrowed ? narrow.find : args.find,
     text: narrowed ? narrow.replace : newText,
-    before: r.before,
-    after: r.after,
+    before: r.before ?? "",
+    after: r.after ?? "",
     rationale,
     override_of: excepted,
     lost_facts: lost,
     unsourced_terms: unsourced,
     narrowed_from: narrowed ? { find: args.find, text: newText } : null,
+    comment_missing: commentMissing,
     // Words around the range the task pane changed (revision-classify.mjs).
     context: changeContext(r.before, args.find, {
       kind,
@@ -249,8 +256,22 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   );
   if (lost.length) deps.log?.(`[review] lost facts ${id}: ${lost.join("; ")}`);
   if (unsourced.length) deps.log?.(`[review] unsourced ${id}: ${unsourced.join("; ")}`);
+  if (commentMissing) deps.log?.(`[review] comment missing ${id} code=${commentMissing}`);
+  const warnings = [
+    ...(commentMissing
+      ? [
+          `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,
+        ]
+      : []),
+    ...(unsourced.length
+      ? [
+          `Not in the manuscript or the comment: ${unsourced.join(", ")}. Name them in your answer so the author can check where they come from.`,
+        ]
+      : []),
+  ];
   return {
     ok: true,
+    ...(commentMissing ? { applied: true, comment_missing: commentMissing } : {}),
     change_id: saved?.id ?? null,
     kind: appliedKind,
     word_comment_id: change.word_comment_id,
@@ -260,10 +281,6 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     applied_find: change.find,
     lost_facts: lost,
     unsourced_terms: unsourced,
-    ...(unsourced.length
-      ? {
-          warning: `Not in the manuscript or the comment: ${unsourced.join(", ")}. Name them in your answer so the author can check where they come from.`,
-        }
-      : {}),
+    ...(warnings.length ? { warning: warnings.join(" ") } : {}),
   };
 }

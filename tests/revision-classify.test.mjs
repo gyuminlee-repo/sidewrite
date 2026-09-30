@@ -447,3 +447,18 @@ test("a change recorded without context keeps the whole-paragraph rule", () => {
   const oldA = { ...twoA(), context: null };
   assert.equal(classifyChange(oldA, onePara(t)).state, "user_edited");
 });
+
+test("a change with no rationale comment id is located by index or text and classified", () => {
+  const bare = { ...change9, word_comment_id: null };
+  assert.deepEqual(
+    [classifyChange(bare, pendingSnapshot).state, classifyChange(bare, settledSnapshot).state],
+    ["pending", "accepted"],
+  );
+  // No comment and no valid index: a pending replace reads as neither
+  // sentence, so it is unlocated rather than guessed.
+  const lost = { ...bare, paragraph_index: 3 };
+  assert.deepEqual(
+    [classifyChange(lost, pendingSnapshot).state, classifyChange(lost, settledSnapshot).state],
+    ["unlocated", "accepted"],
+  );
+});
