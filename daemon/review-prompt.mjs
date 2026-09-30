@@ -39,6 +39,9 @@ export function buildReviewPrompt({
       "What this comment asks for (put the ids a change answers in rationale.requirement_ids):",
     );
     for (const r of reqs) lines.push(`- [${r.id}] ${r.text}`);
+    lines.push(
+      "If you are not sure which request a change answers, leave rationale.requirement_ids empty; the author sees the open request and decides.",
+    );
     lines.push("");
   }
   if (paragraphs.length) {

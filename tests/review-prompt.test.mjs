@@ -92,3 +92,14 @@ test("an editor comment E.1 is introduced as the editor, not reviewer 0", () => 
   assert.ok(text.includes("Editor, comment E.1 (verbatim):"));
   assert.ok(!text.includes("Reviewer 0"));
 });
+
+test("L5 prompt lets the model leave requirement_ids empty when not sure", () => {
+  const comment = {
+    ref: "R1.3",
+    reviewer: 1,
+    text: "Say how growth was followed.",
+    requirements: [{ id: "q1", text: "say how growth was followed" }],
+  };
+  const { text } = buildReviewPrompt({ comment });
+  assert.match(text, /not sure[^\n]*leave rationale\.requirement_ids empty/);
+});
