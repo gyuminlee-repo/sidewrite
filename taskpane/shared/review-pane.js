@@ -286,7 +286,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       );
       const propose = el("button", {
         type: "button",
-        class: "btn-primary btn-small review-propose",
+        class: "btn-primary btn-small",
         text: "Propose changes",
       });
       proposeButtons.push(propose);
