@@ -26,12 +26,15 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
   return splitBlocks(text, patterns).comments;
 }
 
-// Regex split plus the refs of reviewer blocks kept whole. A block opened by
-// a reviewer head with body text but no comment head is one comment
-// R{reviewer}.1 (no numbered comment of that block can share the ref), so a
-// reviewer who did not number the points is not dropped. The text before
-// the first reviewer head (a cover letter) and a preamble before a block's
-// first comment head stay dropped.
+// Regex split plus the refs of reviewer blocks kept whole and of kept
+// preambles. A block opened by a reviewer head with body text but no comment
+// head is one comment R{reviewer}.1 (no numbered comment of that block can
+// share the ref), so a reviewer who did not number the points is not
+// dropped. When the review has a reviewer head, the text before the first
+// one (the editor letter) is one comment E.1 with reviewer 0, and a
+// reviewer preamble before the block's first comment head is R{reviewer}.0.
+// Both are kept even when they only greet; the user deletes them. Without
+// any reviewer head the text before the first comment head is dropped.
 function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   const p = { ...DEFAULT_PATTERNS, ...patterns };
   const reReviewer = new RegExp(p.reviewerHead, "i");
@@ -56,6 +59,10 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
 
   const out = [];
   for (const b of blocks) {
+    if (!b.headed && blocks.length > 1) {
+      out.push({ reviewer: 0, editor: true, number: 1, lines: b.lines, kept: true });
+      continue;
+    }
     // Explicit "Comment n" heads win; then numbered-list items are body text.
     const head = b.lines.some((l) => reComment.test(l)) ? reComment : reList;
     if (b.headed && b.lines.join("").trim() && !b.lines.some((l) => head.test(l))) {
@@ -64,8 +71,12 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     }
     let item = null;
     let seq = 0;
+    const preamble = [];
     for (const line of b.lines) {
       const m = head.exec(line);
+      if (m && !item && b.headed) {
+        out.push({ reviewer: b.reviewer, number: 0, lines: preamble, kept: true });
+      }
       if (m) {
         if (item) out.push(item);
         seq += 1;
@@ -76,6 +87,8 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
         };
       } else if (item) {
         item.lines.push(line);
+      } else {
+        preamble.push(line);
       }
     }
     if (item) out.push(item);
@@ -83,8 +96,9 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   const rows = out
     .map((c) => ({
       whole: !!c.whole,
+      kept: !!c.kept,
       comment: {
-        ref: `R${c.reviewer}.${c.number}`,
+        ref: c.editor ? `E.${c.number}` : `R${c.reviewer}.${c.number}`,
         reviewer: c.reviewer,
         text: c.lines.join("\n").replace(HEAD_TRIM, "").trim(),
         requirements: [],
@@ -94,8 +108,16 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   return {
     comments: rows.map((x) => x.comment),
     unsplit: rows.filter((x) => x.whole).map((x) => x.comment.ref),
+    preserved: rows.filter((x) => x.kept).map((x) => x.comment),
   };
 }
+
+const preservedWarnings = (comments) =>
+  comments.map((c) =>
+    c.reviewer === 0
+      ? `Text before the first reviewer (usually the editor letter) is kept as ${c.ref}. Delete it if it asks for nothing.`
+      : `Reviewer ${c.reviewer} text before the first numbered comment is kept as ${c.ref}. Delete it if it asks for nothing.`,
+  );
 
 const unsplitWarnings = (refs) =>
   refs.map(
@@ -153,12 +175,13 @@ export function splitPrompt(text) {
 
 // oneshot: (req) => Promise<{ ok, json, error }> (daemon/oneshot.mjs).
 // The regex result stands when its comment heads found more than one
-// comment; blocks kept whole do not count, so they cannot hide a review the
-// regex barely split. Kept-whole blocks always come back as warnings.
+// comment; blocks kept whole and kept preambles do not count, so they cannot
+// hide a review the regex barely split. Kept-whole blocks and kept preambles
+// always come back as warnings.
 export async function splitReview(text, { patterns, oneshot } = {}) {
-  const { comments: regexOut, unsplit } = splitBlocks(text, patterns);
-  const whole = unsplitWarnings(unsplit);
-  if (regexOut.length - unsplit.length > 1) {
+  const { comments: regexOut, unsplit, preserved } = splitBlocks(text, patterns);
+  const whole = [...preservedWarnings(preserved), ...unsplitWarnings(unsplit)];
+  if (regexOut.length - unsplit.length - preserved.length > 1) {
     return {
       method: "regex",
       comments: regexOut,
@@ -182,7 +205,10 @@ export async function splitReview(text, { patterns, oneshot } = {}) {
   }
   const items = Array.isArray(r.json?.comments) ? r.json.comments : [];
   const source = squash(text);
-  const kept = [];
+  // The model never returns E.1 or R{n}.0 (reviewer and number start at 1),
+  // so the kept preambles come from the regex split; placed first, the
+  // stable sort below keeps them ahead of their reviewer's comments.
+  const kept = [...preserved];
   const warnings = [];
   items.forEach((c, i) => {
     const body = String(c?.text ?? "").trim();
@@ -210,5 +236,9 @@ export async function splitReview(text, { patterns, oneshot } = {}) {
     );
   }
   kept.sort((a, b) => a.reviewer - b.reviewer);
-  return { method: "llm", comments: kept, warnings: [...warnings, ...duplicateWarnings(kept)] };
+  return {
+    method: "llm",
+    comments: kept,
+    warnings: [...preservedWarnings(preserved), ...warnings, ...duplicateWarnings(kept)],
+  };
 }

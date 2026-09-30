@@ -79,8 +79,9 @@ const Requirement = z.object({
 });
 
 const Comment = z.object({
-  ref: z.string().regex(/^R\d+\.\d+$/),
-  reviewer: z.number().int().positive(),
+  // R<reviewer>.<n>; E.<n> is the editor letter with reviewer 0.
+  ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
+  reviewer: z.number().int().nonnegative(),
   text: z.string(),
   requirements: z.array(Requirement).default([]),
   status: z.enum(["pending", "in_progress", "done"]).default("pending"),

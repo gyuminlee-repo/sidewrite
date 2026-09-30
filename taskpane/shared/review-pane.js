@@ -23,6 +23,7 @@ import {
   ledgerCheckFromText,
   ledgerStatusText,
   pendingDecisions,
+  reviewerOfRef,
   progressText,
 } from "./review-view.js";
 
@@ -497,11 +498,13 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     "click",
     guard(async () => {
       const comments = state.draft.map((c) => {
-        const m = /^R(\d+)\.(\d+)$/.exec(c.ref);
-        if (!m) throw new Error(`Bad ref "${c.ref}": use R<reviewer>.<number>`);
+        const reviewer = reviewerOfRef(c.ref);
+        if (reviewer === null) {
+          throw new Error(`Bad ref "${c.ref}": use R<reviewer>.<number> or E.<number>`);
+        }
         return {
           ref: c.ref,
-          reviewer: Number(m[1]),
+          reviewer,
           text: c.text.trim(),
           requirements: requirementsFromText(c.requirementsText),
         };

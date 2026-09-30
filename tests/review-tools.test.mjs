@@ -69,6 +69,9 @@ test("schema: find is limited to 255 chars, ref format enforced, override is not
   assert.equal(s.safeParse(good).success, true);
   assert.equal(s.safeParse({ ...good, find: "x".repeat(256) }).success, false);
   assert.equal(s.safeParse({ ...good, comment_ref: "1.3" }).success, false);
+  assert.equal(s.safeParse({ ...good, comment_ref: "E.1" }).success, true);
+  assert.equal(s.safeParse({ ...good, comment_ref: "R1.0" }).success, true);
+  assert.equal(s.safeParse({ ...good, comment_ref: "E1" }).success, false);
   assert.equal("override" in s.parse({ ...good, override: true }), false);
 });
 
@@ -82,6 +85,8 @@ test("rationale comment format and the tool-comment prefix", () => {
   assert.ok(TOOL_COMMENT_PREFIX.test(t));
   assert.ok(!TOOL_COMMENT_PREFIX.test("Check units later [R1.3]"));
   assert.ok(!TOOL_COMMENT_PREFIX.test("[Ref 1] user note"));
+  assert.ok(TOOL_COMMENT_PREFIX.test("[E.1] editor"));
+  assert.ok(!TOOL_COMMENT_PREFIX.test("[E] note"));
 });
 
 const NOVEL = {

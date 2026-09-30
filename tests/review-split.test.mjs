@@ -24,30 +24,32 @@ Reviewer #2:
 3.5 mM is an unusual concentration here.
 `;
 
+// "Dear Editor," before the first reviewer head is kept as E.1.
 test("reviewer and comment heads give R{reviewer}.{n} refs", () => {
   const c = splitReviewRegex(TWO_REVIEWERS);
   assert.deepEqual(
     c.map((x) => x.ref),
-    ["R1.1", "R1.2", "R2.1", "R2.2"],
+    ["E.1", "R1.1", "R1.2", "R2.1", "R2.2"],
   );
-  assert.equal(c[0].text, "The temperature unit is missing.\nPlease use degrees Celsius.");
+  assert.equal(c[0].text, "Dear Editor,");
+  assert.equal(c[1].text, "The temperature unit is missing.\nPlease use degrees Celsius.");
 });
 
 test("numbered list inside a Comment-head block stays body text", () => {
   const c = splitReviewRegex(TWO_REVIEWERS);
-  assert.match(c[1].text, /1\. It is not cell-free\.\n {2}2\. Call it a clarified lysate\./);
+  assert.match(c[2].text, /1\. It is not cell-free\.\n {2}2\. Call it a clarified lysate\./);
 });
 
 test("trap: 'Reviewer 2 raised ...' in a body is not a reviewer head", () => {
   const c = splitReviewRegex(TWO_REVIEWERS);
-  assert.match(c[1].text, /Reviewer 2 raised a similar point/);
+  assert.match(c[2].text, /Reviewer 2 raised a similar point/);
 });
 
 test("trap: 'Q10 values' and '3.5 mM' do not start comments", () => {
   const c = splitReviewRegex(TWO_REVIEWERS);
-  assert.equal(c[3].ref, "R2.2");
+  assert.equal(c[4].ref, "R2.2");
   assert.match(
-    c[3].text,
+    c[4].text,
     /^Q10 values were not reported\.\n3\.5 mM is an unusual concentration here\.$/,
   );
 });
@@ -232,4 +234,68 @@ test("an LLM split that leaves out a kept-whole reviewer says so", async () => {
     ],
   );
   assert.ok(r.warnings.some((w) => /Reviewer 1.*no comment.*R1\.1/.test(w)));
+});
+
+// Text before the first reviewer head (the editor letter) is kept as E.1 and
+// a reviewer preamble before the first numbered comment as R{n}.0, each with
+// a warning, instead of being dropped.
+const WITH_LETTER = `Dear Dr. Lee,
+Please shorten the abstract to 200 words.
+
+Reviewer 1:
+The study is useful but the methods need detail.
+1. Report the growth temperature.
+2. Add error bars to Fig. 2.
+
+Reviewer 2:
+1. State the number of replicates.
+`;
+
+test("editor letter and reviewer preamble are kept as E.1 and R1.0 with warnings", async () => {
+  let called = 0;
+  const r = await splitReview(WITH_LETTER, {
+    oneshot: async () => (called++, { ok: true, json: {} }),
+  });
+  assert.equal(r.method, "regex");
+  assert.equal(called, 0);
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.reviewer, c.text]),
+    [
+      ["E.1", 0, "Dear Dr. Lee,\nPlease shorten the abstract to 200 words."],
+      ["R1.0", 1, "The study is useful but the methods need detail."],
+      ["R1.1", 1, "Report the growth temperature."],
+      ["R1.2", 1, "Add error bars to Fig. 2."],
+      ["R2.1", 2, "State the number of replicates."],
+    ],
+  );
+  assert.equal(r.warnings.length, 2);
+  assert.match(r.warnings[0], /E\.1.*delete it/i);
+  assert.match(r.warnings[1], /Reviewer 1.*R1\.0.*delete it/i);
+});
+
+test("whitespace-only text before a reviewer or a first comment makes no comment", async () => {
+  const r = await splitReview("  \n\nReviewer 1:\n   \n1. a\n2. b\n");
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["R1.1", "R1.2"],
+  );
+  assert.deepEqual(r.warnings, []);
+});
+
+test("kept letter and preamble do not count toward skipping the LLM split", async () => {
+  const one = "Dear Editor,\nThanks.\n\nReviewer 1:\nOverall fine.\n1. Add units.\n";
+  let called = 0;
+  const r = await splitReview(one, {
+    oneshot: async () => (
+      called++,
+      { ok: true, json: { comments: [{ reviewer: 1, number: 1, text: "Add units." }] } }
+    ),
+  });
+  assert.equal(called, 1);
+  assert.equal(r.method, "llm");
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["E.1", "R1.0", "R1.1"],
+  );
+  assert.equal(r.warnings.filter((w) => /delete it/i.test(w)).length, 2);
 });

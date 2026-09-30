@@ -26,7 +26,7 @@ export function buildReviewPrompt({
   const forbids = includeForbid ? forbidAll : [];
   const lines = [
     `[Review turn ${comment.ref}]`,
-    `Reviewer ${comment.reviewer}, comment ${comment.ref} (verbatim):`,
+    `${comment.reviewer === 0 ? "Editor" : `Reviewer ${comment.reviewer}`}, comment ${comment.ref} (verbatim):`,
     "<<<",
     comment.text,
     ">>>",

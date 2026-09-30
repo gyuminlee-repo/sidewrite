@@ -27,6 +27,9 @@ test("task pane and daemon agree on what a tool comment is", () => {
     "[R1] no",
     "note [R1.1]",
     "[r1.1] lower",
+    "[E.1] editor",
+    "[R1.0] preamble",
+    "[E] no",
   ];
   for (const s of samples) assert.equal(view.isToolComment(s), TOOL_COMMENT_PREFIX.test(s), s);
 });
@@ -424,4 +427,12 @@ test("L9 progressText: elapsed time and comments not done", () => {
     }),
     "R1.3 running 1:05. 2 of 3 comments not done.",
   );
+});
+
+test("reviewerOfRef reads R<n>.<m> and E.<m> refs", () => {
+  assert.equal(view.reviewerOfRef("R2.3"), 2);
+  assert.equal(view.reviewerOfRef("R1.0"), 1);
+  assert.equal(view.reviewerOfRef("E.1"), 0);
+  assert.equal(view.reviewerOfRef("E1"), null);
+  assert.equal(view.reviewerOfRef("1.3"), null);
 });

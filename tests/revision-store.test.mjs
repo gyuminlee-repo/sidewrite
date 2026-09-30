@@ -374,3 +374,17 @@ test("L4 snapshot, outside changes with X-ids, cap and dismiss", () => {
   assert.equal(capped.length, EXTERNAL_KEEP);
   assert.equal(capped.at(-1).id, `X${EXTERNAL_KEEP + 7}`);
 });
+
+test("editor comment E.1 (reviewer 0) and preamble R1.0 are valid comments", () => {
+  const rev = replaceComments(emptyRevision("/m/x.docx"), [
+    { ref: "E.1", reviewer: 0, text: "Shorten the abstract." },
+    { ref: "R1.0", reviewer: 1, text: "Overall fine." },
+  ]);
+  assert.deepEqual(
+    RevisionSchema.parse(rev).comments.map((c) => [c.ref, c.reviewer]),
+    [
+      ["E.1", 0],
+      ["R1.0", 1],
+    ],
+  );
+});

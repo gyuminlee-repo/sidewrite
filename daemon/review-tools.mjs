@@ -79,7 +79,7 @@ export const TRACKED_EDIT_DESCRIPTION =
 export const trackedEditShape = {
   comment_ref: z
     .string()
-    .regex(/^R\d+\.\d+$/)
+    .regex(/^(?:R\d+|E)\.\d+$/)
     .describe(
       'Reviewer comment this change answers, e.g. "R1.3". Must be the comment of this turn.',
     ),
@@ -122,7 +122,7 @@ export const trackedEditShape = {
     ),
 };
 
-export const TOOL_COMMENT_PREFIX = /^\s*\[R\d+\.\d+\]/;
+export const TOOL_COMMENT_PREFIX = /^\s*\[(?:R\d+|E)\.\d+\]/;
 
 // L1: facts the change deletes go on a last line, so the author sees them in
 // Word next to the change. L5: requirement ids follow the addresses part.

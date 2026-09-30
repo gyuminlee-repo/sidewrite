@@ -44,7 +44,15 @@ export function countRevisionMarks(xml) {
 }
 
 // Same prefix as daemon/review-tools.mjs TOOL_COMMENT_PREFIX.
-export const TOOL_COMMENT_RE = /^\s*\[R\d+\.\d+\]/;
+export const TOOL_COMMENT_RE = /^\s*\[(?:R\d+|E)\.\d+\]/;
+
+// Reviewer number of a comment ref: R<n>.<m> -> n, E.<m> (editor) -> 0,
+// anything else -> null.
+export function reviewerOfRef(ref) {
+  const m = /^(?:R(\d+)|E)\.\d+$/.exec(String(ref ?? ""));
+  if (!m) return null;
+  return m[1] === undefined ? 0 : Number(m[1]);
+}
 
 export function isToolComment(content) {
   return TOOL_COMMENT_RE.test(String(content ?? ""));

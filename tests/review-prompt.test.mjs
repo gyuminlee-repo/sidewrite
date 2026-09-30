@@ -84,3 +84,11 @@ test("L5 requirements are listed with their ids; none listed means no block", ()
   const plain = buildReviewPrompt({ comment: { ...comment, requirements: [] } }).text;
   assert.doesNotMatch(plain, /requirement_ids/);
 });
+
+test("an editor comment E.1 is introduced as the editor, not reviewer 0", () => {
+  const { text } = buildReviewPrompt({
+    comment: { ref: "E.1", reviewer: 0, text: "Shorten the abstract." },
+  });
+  assert.ok(text.includes("Editor, comment E.1 (verbatim):"));
+  assert.ok(!text.includes("Reviewer 0"));
+});
