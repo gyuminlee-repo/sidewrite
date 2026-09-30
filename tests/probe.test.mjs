@@ -1,5 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createBridge } from "../daemon/bridge.mjs";
 import { summarizeSessionJsonl, runProbe, parseArgs } from "../scripts/probe-hi.mjs";
 
@@ -52,6 +57,47 @@ test("summarizeSessionJsonl ignores the word hookEvent inside user text", () => 
     },
   ].map((o) => JSON.stringify(o));
   assert.equal(summarizeSessionJsonl(lines.join("\n")).hookEvents, 1);
+});
+
+const SCRIPT = fileURLToPath(new URL("../scripts/probe-hi.mjs", import.meta.url));
+
+function runScript(args) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [SCRIPT, ...args], (err, stdout, stderr) =>
+      resolve({ code: err ? err.code : 0, stdout, stderr }),
+    );
+  });
+}
+
+// --jsonl uses the same rule as the live path (waitForSummary): a session
+// without assistant usage is a failed probe, not a total of 0.
+test("--jsonl fails when the file has no assistant usage", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "probe-test-"));
+  const empty = join(dir, "empty.jsonl");
+  const userOnly = join(dir, "user-only.jsonl");
+  await writeFile(empty, "");
+  await writeFile(
+    userOnly,
+    [
+      { type: "attachment", attachment: { type: "hook_success", hookEvent: "SessionStart" } },
+      { type: "user", message: { role: "user", content: "hi" } },
+    ]
+      .map((o) => JSON.stringify(o))
+      .join("\n"),
+  );
+  for (const file of [empty, userOnly]) {
+    const r = await runScript(["--jsonl", file, "--max-total", "100", "--max-hooks", "5"]);
+    assert.notEqual(r.code, 0, file);
+    assert.match(r.stderr, /no assistant usage found in /);
+  }
+  const ok = join(dir, "ok.jsonl");
+  await writeFile(
+    ok,
+    JSON.stringify({ type: "assistant", message: { usage: { input_tokens: 7 } } }) + "\n",
+  );
+  const r = await runScript(["--jsonl", ok, "--max-total", "100"]);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /total=7 /);
 });
 
 test("parseArgs rejects missing values and non-numeric numbers", () => {
