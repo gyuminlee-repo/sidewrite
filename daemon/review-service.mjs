@@ -544,23 +544,15 @@ export function createReviewService({
         let next = x;
         for (const r of outcomes) {
           // The rule may have been edited or removed while the check ran: its
-          // result then belongs to the old rule and is dropped, and the item
-          // is left unchecked so the next check reads every paragraph.
+          // result then belongs to the old rule and is dropped. An edited text
+          // or check already left the item unchecked (updateLedgerItem), so
+          // the next check reads every paragraph; a newer check's result is
+          // kept.
           const now = x.ledger.find((i) => i.id === r.id);
           if (!now || ruleFingerprint(now) !== started.get(r.id)) {
             log(
               `[review] ledger check ${r.id} dropped: rule ${now ? "changed" : "removed"} during the check`,
             );
-            if (now) {
-              next = updateLedgerItem(next, r.id, {
-                status: "unchecked",
-                violation_count: 0,
-                checked_at: null,
-                violations: [],
-                unsure: [],
-                checked_hashes: null,
-              });
-            }
             continue;
           }
           next = updateLedgerItem(next, r.id, {

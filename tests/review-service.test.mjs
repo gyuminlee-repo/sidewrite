@@ -1113,3 +1113,38 @@ test("ledger_check skips an item removed during the check and still saves the ot
     await t.cleanup();
   }
 });
+
+test("ledger_check: a stale check that ends after a newer one leaves the newer result", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let n = 0;
+  const t = await setup({
+    oneshot: async () => {
+      if (++n === 1) {
+        await gate;
+        return { ok: true, json: { violations: [], unsure: [] } };
+      }
+      return {
+        ok: true,
+        json: { violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }], unsure: [] },
+      };
+    },
+  });
+  try {
+    await t.ask("ledger_add", { item: { kind: "forbid", text: "t", check: { type: "llm" } } });
+    const paras = [para(0, "a novel substrate")];
+    const stale = t.ask("ledger_check", { snapshot: { paragraphs: paras } });
+    await new Promise((r) => setImmediate(r));
+    await t.ask("ledger_update", { id: "L1", patch: { text: "novel 금지" } });
+    const fresh = await t.ask("ledger_check", { snapshot: { paragraphs: paras } });
+    assert.equal(fresh.revision.ledger[0].status, "violations");
+    release();
+    const r = await stale;
+    assert.deepEqual(
+      [r.revision.ledger[0].status, r.revision.ledger[0].violation_count],
+      ["violations", 1],
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
