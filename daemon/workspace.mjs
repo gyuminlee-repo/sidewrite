@@ -18,7 +18,7 @@
 // workspace; the user can pick a real folder instead.
 
 import { writeFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, release } from "node:os";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSystemHomeChild } from "./system-paths.mjs";
@@ -36,8 +36,55 @@ const HOME = homedir();
 // Hand the URL forms to fileURLToPath so the Windows drive letter survives
 // (a manual `replace(/^file:\/\//)` turns "file:///C:/x" into "/C:/x").
 // Treat non-file:// URLs (SharePoint, OneDrive cloud) as unaddressable.
+// WSL: the daemon runs inside WSL while Word runs on Windows, so Office
+// hands us Windows paths. Translate them to the Linux view:
+//   D:\a\b.docx, D:/a/b.docx, file:///D:/a/b.docx -> <mount root>/d/a/b.docx
+//   \\wsl.localhost\<distro>\home\a, \\wsl$\<distro>\home\a -> /home/a
+//   any other UNC share -> null (not addressable from WSL)
+// CC_OFFICE_WSL_PATHS "1" forces on, "0" forces off, unset = auto (Linux
+// kernel release mentions microsoft). CC_OFFICE_WSL_MOUNT_ROOT overrides
+// the drive mount root (default /mnt). Read per call so tests can switch.
+export function wslPathsEnabled(env = process.env) {
+  if (env.CC_OFFICE_WSL_PATHS === "1") return true;
+  if (env.CC_OFFICE_WSL_PATHS === "0") return false;
+  return process.platform === "linux" && /microsoft/i.test(release());
+}
+
+// undefined: not a Windows-form path, or translation is off (caller keeps
+// its own handling). null: Windows-form but unreachable from WSL.
+export function windowsPathToWsl(p, env = process.env) {
+  if (typeof p !== "string" || !wslPathsEnabled(env)) return undefined;
+  const root = (env.CC_OFFICE_WSL_MOUNT_ROOT || "/mnt").replace(/\/+$/, "");
+  let m = /^file:\/\/\/([a-zA-Z]):[\\/](.*)$/i.exec(p);
+  if (m) {
+    let rest;
+    try {
+      rest = decodeURIComponent(m[2]);
+    } catch {
+      return null;
+    }
+    return `${root}/${m[1].toLowerCase()}/${rest.replace(/\\/g, "/")}`;
+  }
+  m = /^([a-zA-Z]):[\\/](.*)$/.exec(p);
+  if (m) return `${root}/${m[1].toLowerCase()}/${m[2].replace(/\\/g, "/")}`;
+  m = /^\\\\(?:wsl\.localhost|wsl\$)\\[^\\]+(\\.*)?$/i.exec(p);
+  if (m) return (m[1] || "\\").replace(/\\/g, "/");
+  if (/^\\\\[^\\]/.test(p)) return null;
+  return undefined;
+}
+
+// For user-typed paths (set_cwd, context entries): Windows-form input is
+// translated under WSL, everything else is returned unchanged so relative
+// context paths keep resolving against the workspace. null = unreachable.
+export function toLocalPath(p, env = process.env) {
+  const w = windowsPathToWsl(p, env);
+  return w === undefined ? p : w;
+}
+
 function normalizeDocPath(docPath) {
   if (!docPath) return null;
+  const wsl = windowsPathToWsl(docPath);
+  if (wsl !== undefined) return wsl === null ? null : resolvePath(wsl);
   if (/^file:\/\//i.test(docPath)) {
     try {
       return resolvePath(fileURLToPath(docPath));
