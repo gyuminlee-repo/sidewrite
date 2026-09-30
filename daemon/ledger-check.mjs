@@ -139,12 +139,22 @@ export async function checkLedger(items, paragraphs, deps = {}) {
   return outcomes;
 }
 
-// Ids of forbid-list regex items (expect "absent") that match `text`.
-// LLM-checked forbid items cannot be pre-checked and are skipped here.
+// Ledger items that apply to manuscript edits. An item without a scope is a
+// manuscript item (the schema default). The review prompt (review-prompt.mjs)
+// and the pre-check below use this one rule, so what the model is told and
+// what is refused cannot drift apart.
+export function inManuscriptScope(item) {
+  return (item?.scope ?? "manuscript") === "manuscript";
+}
+
+// Ids of manuscript-scope forbid-list regex items (expect "absent") that
+// match `text`. LLM-checked forbid items cannot be pre-checked and are
+// skipped here.
 export function forbidHits(ledger, text) {
   const hits = [];
   for (const item of ledger ?? []) {
     if (item.kind !== "forbid" || item.check?.type !== "regex") continue;
+    if (!inManuscriptScope(item)) continue;
     if ((item.check.expect ?? "absent") !== "absent") continue;
     let re;
     try {

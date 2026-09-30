@@ -114,6 +114,27 @@ test("forbidHits: only forbid items with regex absent-checks", () => {
   assert.deepEqual(forbidHits(ledger, ""), []);
 });
 
+test("forbidHits pre-blocks manuscript-scope rules only, like the review prompt", async () => {
+  const { buildReviewPrompt } = await import("../daemon/review-prompt.mjs");
+  const rule = (id, scope, pattern) => ({
+    id,
+    kind: "forbid",
+    text: pattern,
+    scope,
+    check: { type: "regex", pattern, flags: "i", expect: "absent" },
+  });
+  const ledger = [
+    rule("L1", "response", "we thank the reviewer"),
+    rule("L2", "supplement", "see main text"),
+    rule("L3", "manuscript", "novel"),
+    { ...rule("L4", undefined, "groundbreaking"), scope: undefined }, // old item: manuscript
+  ];
+  const text = "We thank the reviewer; see main text for this novel, groundbreaking result.";
+  assert.deepEqual(forbidHits(ledger, text), ["L3", "L4"]);
+  const prompt = buildReviewPrompt({ comment: { ref: "R1.1", reviewer: 1, text: "x" }, ledger });
+  assert.deepEqual(prompt.forbidIds, forbidHits(ledger, text));
+});
+
 test("batchParagraphs respects the size limit and keeps order", () => {
   const ps = [0, 1, 2, 3].map((i) => ({ index: i, text: "x".repeat(40) }));
   const b = batchParagraphs(ps, 100);

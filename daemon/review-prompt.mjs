@@ -1,6 +1,8 @@
 // The one user turn sent to the drafting session for "propose changes for
 // comment R1.3". Pure: the daemon logs which ledger items went in.
 
+import { inManuscriptScope } from "./ledger-check.mjs";
+
 export const REVIEW_RULES = [
   "Change the manuscript only with office_tracked_edit, one call per change. Every other document-writing tool is disabled in this turn.",
   "Make only the changes this comment asks for. Do not delete or add anything the reviewer did not request.",
@@ -18,7 +20,7 @@ export function buildReviewPrompt({
   lang = "Korean",
   includeForbid = true,
 }) {
-  const inScope = ledger.filter((i) => (i.scope ?? "manuscript") === "manuscript");
+  const inScope = ledger.filter(inManuscriptScope);
   const instructions = inScope.filter((i) => i.kind === "instruction");
   const forbidAll = inScope.filter((i) => i.kind === "forbid");
   const forbids = includeForbid ? forbidAll : [];
