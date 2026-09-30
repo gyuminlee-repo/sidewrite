@@ -371,3 +371,53 @@ test("a blocked edit the daemon reports applying shows no enabled button", async
   assert.equal(buttons.length, 1);
   assert.equal(buttons[0].disabled, true);
 });
+
+// A chat turn (not a Review turn) that re-renders the Review tab disables
+// every "Propose changes" button; the end of that turn must enable them
+// again, whether it ended normally or on an error. No review turn_done comes.
+test("Propose changes follows the running turn: chat re-render disables, chat end enables", async () => {
+  const { createTurnState } = await import("../taskpane/shared/turn-state.js");
+  globalThis.document = fakeDocument();
+  const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+  const revision = {
+    comments: ["R1.1", "R1.2"].map((ref) => ({
+      ref,
+      reviewer: 1,
+      text: "State the unit.",
+      requirements: [],
+      status: "pending",
+      changes: [],
+      blocked: [],
+    })),
+    ledger: [],
+  };
+  let pane = null;
+  const turn = createTurnState({ getReviewPane: () => pane });
+  pane = initReviewPane({
+    sendRequest: async () => ({ ok: true, revision, prompt: "p" }),
+    word: {},
+    onTurnStarted() {},
+    isTurnInFlight: () => turn.inFlight,
+  });
+  await pane.reload();
+  const propose = () =>
+    findAll(document.getElementById("review-comments"), (n) => n.textContent === "Propose changes");
+  const states = () => propose().map((b) => b.disabled);
+  assert.deepEqual(states(), [false, false]);
+
+  for (const end of ["turn_complete", "error", "auth_error"]) {
+    turn.begin(); // a chat message was sent
+    const preview = findAll(
+      document.getElementById("review-comments"),
+      (n) => n.textContent === "Preview prompt",
+    );
+    await preview[0].click(); // re-renders the Review tab mid-turn
+    assert.deepEqual(states(), [true, true], `${end}: disabled while the chat runs`);
+    turn.onAssistantEvent({ event: end });
+    assert.deepEqual(states(), [false, false], `${end}: enabled once the turn ends`);
+  }
+  turn.begin();
+  assert.deepEqual(states(), [true, true], "a new turn disables without a re-render");
+  turn.end(); // connection dropped (ws.onclose)
+  assert.deepEqual(states(), [false, false]);
+});

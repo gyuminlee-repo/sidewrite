@@ -37,7 +37,7 @@ const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 
 export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
   const root = document.getElementById("review-root");
-  if (!root) return { onEvent() {} }; // Excel pane: no Review tab
+  if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
   const $ = (id) => document.getElementById(id);
   const state = {
     revision: null,
@@ -88,6 +88,9 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     };
 
   // ---- rendering ----------------------------------------------------------
+  // "Propose changes" buttons of the last render; setTurnBusy flips them when
+  // any turn of the pane starts or ends (turn-state.js).
+  let proposeButtons = [];
   function renderDraft() {
     const box = $("review-draft");
     box.replaceChildren();
@@ -258,6 +261,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   function renderComments() {
     const box = $("review-comments");
     box.replaceChildren();
+    proposeButtons = [];
     for (const c of state.revision?.comments ?? []) {
       const status = el("select", { class: "setting-select" });
       for (const [v, label] of Object.entries(STATUS_LABELS)) {
@@ -282,9 +286,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       );
       const propose = el("button", {
         type: "button",
-        class: "btn-primary btn-small",
+        class: "btn-primary btn-small review-propose",
         text: "Propose changes",
       });
+      proposeButtons.push(propose);
       propose.disabled = isTurnInFlight();
       propose.addEventListener(
         "click",
@@ -697,6 +702,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           .catch((e) => say(e.message, true))
           .finally(render);
       }
+    },
+    // Any turn of the pane (chat or review) started or ended.
+    setTurnBusy(busy) {
+      for (const b of proposeButtons) b.disabled = busy;
     },
     // A new connection (welcome) means no turn of this pane is running any
     // more: a daemon restart never sends turn_done, so clear the progress line.

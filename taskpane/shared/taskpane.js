@@ -38,6 +38,7 @@ import {
   deleteToolComments,
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
+import { createTurnState } from "./turn-state.js";
 import {
   toolExcelGetSelectedRange,
   toolExcelListSheets,
@@ -119,12 +120,6 @@ const $chipDetach = document.getElementById("selection-chip-detach");
 let assistantTurnElem = null;
 let attachSelection = true;
 
-// True while a user turn is mid-flight (we've sent user_message and are
-// waiting for turn_complete / error / auth_error). The composer is disabled
-// during this window so a second submit can't break turn ordering — without
-// the gate, appendUserMessage would reset assistantTurnElem and subsequent
-// streaming deltas would land in a new (wrong) bubble.
-let turnInFlight = false;
 let reviewPane = null; // Review tab controller (Word), set in Office.onReady
 
 function setComposerDisabled(disabled) {
@@ -132,15 +127,15 @@ function setComposerDisabled(disabled) {
   $input.disabled = disabled;
 }
 
-function beginTurn() {
-  turnInFlight = true;
-  setComposerDisabled(true);
-}
-
-function endTurn() {
-  turnInFlight = false;
-  setComposerDisabled(false);
-}
+// turn.inFlight: true while a user turn is mid-flight (we've sent user_message and are
+// waiting for turn_complete / error / auth_error). The composer is disabled
+// during this window so a second submit can't break turn ordering — without
+// the gate, appendUserMessage would reset assistantTurnElem and subsequent
+// streaming deltas would land in a new (wrong) bubble.
+// turn-state.js also updates the Review tab buttons at every start and end.
+const turn = createTurnState({ setComposerDisabled, getReviewPane: () => reviewPane });
+const beginTurn = () => turn.begin();
+const endTurn = () => turn.end();
 
 // The connection status doubles as the live-model indicator. Horizontal
 // space in the topbar is tight (the workspace chip takes the rest), so when
@@ -673,12 +668,13 @@ async function handleServerMessage(msg) {
       break;
 
     case "assistant_event":
+      // turn_complete, error and auth_error end the turn (turn-state.js).
+      turn.onAssistantEvent(msg);
       if (msg.event === "tool_use_announce") {
         appendToolUse(msg.tool, msg.input);
         setAgentStatus("working", statusForTool(msg.tool));
       } else if (msg.event === "turn_complete") {
         setAgentStatus("idle", msg.interrupted ? "Stopped" : "Ready");
-        endTurn();
       } else if (msg.event === "info") {
         appendNotice(msg.message);
       } else if (msg.event === "error") {
@@ -687,11 +683,9 @@ async function handleServerMessage(msg) {
         // user knows the turn ended on this error, not normally.
         appendError(msg.error || "The agent stopped without producing a result.");
         setAgentStatus("idle", "Stopped — see message");
-        endTurn();
       } else if (msg.event === "auth_error") {
         showAuthErrorBanner(msg.error);
         if (wsReady) setConnectionStatus("err", "Sign-in required");
-        endTurn();
       } else if (msg.event === "session_init") {
         appendEvent(`Session ${msg.session_id?.slice(0, 8)}… (${msg.model})`);
         // Authoritative: this is the model the SDK actually started with.
@@ -1021,7 +1015,7 @@ $composer.addEventListener("submit", (e) => {
   // Gate: refuse new submissions while a turn is still streaming. Without
   // this, appendUserMessage resets the assistant bubble pointer and the
   // remaining deltas of the prior turn would mis-order into a new bubble.
-  if (turnInFlight) return;
+  if (turn.inFlight) return;
   const text = $input.value.trim();
   if (!text) return;
   if (!wsReady) {
@@ -1122,7 +1116,7 @@ Office.onReady((info) => {
   if (HOST === "word") {
     reviewPane = initReviewPane({
       sendRequest,
-      isTurnInFlight: () => turnInFlight,
+      isTurnInFlight: () => turn.inFlight,
       onTurnStarted: (note) => {
         appendNotice(note);
         beginTurn();
@@ -1545,7 +1539,7 @@ function usePreset(p) {
       appendEvent("Not connected to daemon — can't send preset.");
       return;
     }
-    if (turnInFlight) return;
+    if (turn.inFlight) return;
     appendUserMessage(p.prompt);
     wsSend({ type: "user_message", text: p.prompt });
     setAgentStatus("working", "Working…");
