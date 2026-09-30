@@ -22,12 +22,25 @@ function firstNumber(m) {
 
 const HEAD_TRIM = /^[\s:.)\-]+/;
 
+// A journal's own label on the reviewer head line, not the reviewer's words.
+const STOCK_LABEL = /^(?:comments?|remarks?)\s+(?:to|for)\s+(?:the\s+)?(?:authors?|editors?)\W*$/i;
+
+// Text on a reviewer head line after the reviewer number ("Reviewer 1: Please
+// report n." gives "Please report n."; a stock label gives ""). The regex
+// needs the d flag.
+function reviewerRest(m, line) {
+  const end = m.indices?.[1]?.[1];
+  const rest = end == null ? "" : line.slice(end).replace(HEAD_TRIM, "").trim();
+  return STOCK_LABEL.test(rest) ? "" : rest;
+}
+
 export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
   return splitBlocks(text, patterns).comments;
 }
 
 // Regex split plus the refs of reviewer blocks kept whole and of kept
-// preambles. A block opened by a reviewer head with body text but no comment
+// preambles. Text after a reviewer head on its line is the block's first
+// body line. A block opened by a reviewer head with body text but no comment
 // head is one comment R{reviewer}.1 (no numbered comment of that block can
 // share the ref), so a reviewer who did not number the points is not
 // dropped. When the review has a reviewer head, the text before the first
@@ -37,7 +50,7 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // any reviewer head the text before the first comment head is dropped.
 function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   const p = { ...DEFAULT_PATTERNS, ...patterns };
-  const reReviewer = new RegExp(p.reviewerHead, "i");
+  const reReviewer = new RegExp(p.reviewerHead, "id");
   const reComment = new RegExp(p.commentHead, "i");
   const reList = new RegExp(p.listItem);
   const lines = String(text ?? "")
@@ -50,7 +63,8 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     const m = reReviewer.exec(line);
     if (m) {
       blocks.push(cur);
-      cur = { reviewer: Number(m[1]), lines: [], headed: true };
+      const rest = reviewerRest(m, line);
+      cur = { reviewer: Number(m[1]), lines: rest ? [rest] : [], headed: true };
     } else {
       cur.lines.push(line);
     }
@@ -167,17 +181,18 @@ const quoteUnits = (units) =>
     .map((u) => `"${u.length > 80 ? `${u.slice(0, 77)}...` : u}"`)
     .join(", ") + (units.length > 3 ? ` and ${units.length - 3} more` : "");
 
-// Sentences of the review, without reviewer heads and comment heads, that are
-// inside none of the comments.
-function uncoveredText(text, comments, patterns) {
+// Sentences of the review, without reviewer heads and comment heads (the
+// text after either on its line stays), that are inside none of the comments.
+export function uncoveredText(text, comments, patterns) {
   const p = { ...DEFAULT_PATTERNS, ...patterns };
-  const reReviewer = new RegExp(p.reviewerHead, "i");
+  const reReviewer = new RegExp(p.reviewerHead, "id");
   const reComment = new RegExp(p.commentHead, "i");
   const body = String(text ?? "")
     .replace(/\r\n?/g, "\n")
     .split("\n")
-    .filter((l) => !reReviewer.test(l))
     .map((l) => {
+      const r = reReviewer.exec(l);
+      if (r) return reviewerRest(r, l);
       const m = reComment.exec(l);
       return m ? l.slice(m[0].length).replace(HEAD_TRIM, "") : l;
     })

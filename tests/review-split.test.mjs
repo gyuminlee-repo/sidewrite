@@ -6,6 +6,7 @@ import {
   splitPrompt,
   requirementsFrom,
   MAX_REQUIREMENTS,
+  uncoveredText,
 } from "../daemon/review-split.mjs";
 
 const TWO_REVIEWERS = `Dear Editor,
@@ -452,4 +453,58 @@ test("text the regex split drops (no reviewer head) is named on the regex paths 
   assert.ok(failed.warnings.some((w) => /in no comment.*cite the method/.test(w)));
   const clean = await splitReview(TWO_REVIEWERS);
   assert.ok(!clean.warnings.some((w) => /in no comment/.test(w)), clean.warnings.join(" | "));
+});
+
+// Text on the reviewer head line after the colon is the reviewer's own
+// words: it opens the block (R{n}.0 before numbered comments, R{n}.1 in an
+// unnumbered block) and counts in the check for text in no comment.
+test("text after a reviewer head on the same line is kept, one-line comments too", async () => {
+  const review =
+    "Reviewer 1: Please report the sample size.\nComment 1: Add error bars.\nComment 2: State the temperature.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.text]),
+    [
+      ["R1.0", "Please report the sample size."],
+      ["R1.1", "Add error bars."],
+      ["R1.2", "State the temperature."],
+    ],
+  );
+  assert.ok(r.warnings.some((w) => /R1\.0/.test(w)));
+  assert.equal(r.warnings.filter((w) => /in no comment/.test(w)).length, 0);
+});
+
+test("the no-comment check reads the reviewer head line after its colon", () => {
+  const review = "Reviewer 1: Please report the sample size.\nComment 1: Add error bars.\n";
+  const lost = uncoveredText(review, [{ text: "Add error bars." }]);
+  assert.deepEqual(lost, ["Please report the sample size."]);
+  // A head with nothing after it adds nothing to check.
+  assert.deepEqual(
+    uncoveredText("Reviewer 2:\nComment 1: Add error bars.\n", [{ text: "Add error bars." }]),
+    [],
+  );
+});
+
+test("an LLM split that leaves out the reviewer head text keeps it, with a warning", async () => {
+  const review = "Reviewer 1: Please report the sample size.\nAlso add error bars.\n";
+  const oneshot = async () => ({
+    ok: true,
+    json: { comments: [{ reviewer: 1, number: 1, text: "Also add error bars." }] },
+  });
+  const r = await splitReview(review, { oneshot });
+  assert.equal(r.method, "llm");
+  assert.ok(r.comments.some((c) => c.text.includes("Please report the sample size.")));
+  assert.ok(r.warnings.some((w) => /left out "Please report the sample size\."/.test(w)));
+});
+
+test("a journal label on the reviewer head line makes no comment and no warning", async () => {
+  const review =
+    "Reviewer 1: Comments to the Author\nComment 1: Add error bars.\nComment 2: State n.\n";
+  const r = await splitReview(review);
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["R1.1", "R1.2"],
+  );
+  assert.deepEqual(r.warnings, []);
 });
