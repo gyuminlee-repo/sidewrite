@@ -5,9 +5,9 @@
 [![CI](https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code/actions/workflows/ci.yml/badge.svg)](https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Open Word or Excel, click a button, and chat with **your own local Claude Code** — the same agent, with the same MCP servers, subagents, skills, hooks, and `CLAUDE.md` you already use in the terminal — now able to read and edit the active document, leave comments, and write cells and formulas.
+Open Word or Excel, click a button, and chat with **your own local Claude Code** — the same agent you already use in the terminal — now able to read and edit the active document, leave comments, and write cells and formulas. By default a session loads only the workspace's own `CLAUDE.md` and `.claude/settings.json`; your user-level MCP servers, subagents, skills, hooks, and `~/.claude/CLAUDE.md` are opt-in (see [Configuration](#configuration)).
 
-**The point of difference: local context.** Point Claude at any folders or files on your machine — a notes folder, prior drafts, a vendor's spec PDF, last quarter's data export, a code repo — and they become background it reads on demand while it works in your document. It's your real Claude Code, so everything you've configured applies.
+**The point of difference: local context.** Point Claude at any folders or files on your machine — a notes folder, prior drafts, a vendor's spec PDF, last quarter's data export, a code repo — and they become background it reads on demand while it works in your document. It's your real Claude Code, and your own user-level configuration can be switched on too.
 
 ## How Draftspect differs from the official Claude for Word and Excel add-in
 
@@ -16,7 +16,7 @@ Anthropic ships a first-party **Claude for Word and Excel** add-in (Office store
 |                          | Official Claude for Word/Excel                                                                                                                       | **Draftspect**                                                                                                                                                                                                                                                                    |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Context it can use**   | The Office documents you have **open**; you can attach other open Excel/PowerPoint files; plus connectors & Skills configured in your Claude account | Anything on your machine — point it at **arbitrary local folders/files** (a notes dir, prior drafts, a spec, a repo). Read on demand via `Read`/`Glob`/`Grep`/`Bash`, whether or not it's an Office file or open                                                                  |
-| **Whose Claude**         | A standalone Claude experience                                                                                                                       | **Your configured Claude Code** — your MCP servers, subagents, hooks, skills, slash commands, `CLAUDE.md` all apply                                                                                                                                                               |
+| **Whose Claude**         | A standalone Claude experience                                                                                                                       | **Your local Claude Code**: the workspace's `CLAUDE.md` and `.claude/settings.json` apply by default; your user-level MCP servers, subagents, hooks, skills, slash commands, and `~/.claude/CLAUDE.md` can be switched on ([Configuration](#configuration))                       |
 | **The code**             | Closed, first-party                                                                                                                                  | **Open and user-modifiable** — clone it and change the task-pane UI, tools, presets, or system prompt to fit how you work                                                                                                                                                         |
 | **Auth**                 | Your Claude account                                                                                                                                  | Your local Claude Code OAuth **or** a plain `ANTHROPIC_API_KEY`                                                                                                                                                                                                                   |
 | **How usage is charged** | Counts against your Claude subscription's normal interactive usage                                                                                   | Programmatic usage. From **2026-06-15** it draws from your plan's dedicated monthly programmatic credit (Pro $20 / Max 5× $100 / Max 20× $200); past that, API-rate extra usage if you've enabled it, else paused until reset. Pick a cheaper model in the composer to stretch it |
@@ -69,7 +69,7 @@ The asks that set Draftspect apart are the ones that pull in **local context** �
 - _"Cross-check every figure in this paper against the data in `~/Project/results/`."_
 - _"Fill this sheet from the assumptions in last quarter's deck (added as a context file)."_
 
-Because it's your local Claude Code, anything you've configured — custom subagents, MCP servers, your `CLAUDE.md` files, hooks, skills — still applies.
+Because it's your local Claude Code, the workspace's own `CLAUDE.md` applies, and your user-level configuration (custom subagents, MCP servers, `~/.claude/CLAUDE.md`, hooks, skills) can be switched on with two environment variables (see [Configuration](#configuration)).
 
 ---
 
@@ -120,7 +120,7 @@ A tray icon (menu bar on macOS, system tray on Windows) appears. First launch of
    │   (Electron)   (Node)                 (in Word/Excel)  │
    │                  │                                     │
    │                  │ forwards MCP servers from           │
-   │                  ▼ ~/.claude.json                      │
+   │                  ▼ ~/.claude.json (opt-in)             │
    │             Your other MCP servers                     │
    │             (Visio, Gmail, custom…)                    │
    └──────────────────┬─────────────────────────────────────┘
@@ -135,7 +135,7 @@ A tray icon (menu bar on macOS, system tray on Windows) appears. First launch of
 Three pieces, all on your machine:
 
 1. **Tray app** (Electron) — spawns and watches the daemon, installs/uninstalls the add-in, surfaces native file pickers.
-2. **Daemon** (Node) — the engine. It embeds the **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`), which runs your locally-installed Claude Code **headlessly** — the same agent loop a non-interactive `claude` session uses, driven by the SDK instead of a terminal. It registers the Office tools as an in-process MCP server, forwards every MCP server from your `~/.claude.json` into the session, and speaks a small WebSocket protocol to the task pane.
+2. **Daemon** (Node) — the engine. It embeds the **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`), which runs your locally-installed Claude Code **headlessly** — the same agent loop a non-interactive `claude` session uses, driven by the SDK instead of a terminal. It registers the Office tools as an in-process MCP server, can forward the MCP servers from your `~/.claude.json` into the session (off by default, `CC_OFFICE_LOAD_USER_MCP=1`), and speaks a small WebSocket protocol to the task pane.
 3. **Task pane** — the HTML panel Word/Excel show on the right. Office.js reads and edits the active document; it chats with the daemon over `ws://127.0.0.1:47833`.
 
 **One message, end to end:** you type in the task pane → WebSocket → daemon → Agent SDK `query()` → your Claude Code reasons and calls tools → document-tool calls round-trip back over the WebSocket so the task pane executes them via Office.js in the live document → results stream into the chat. Filesystem / `Bash` / MCP tools run daemon-side exactly as in your terminal Claude Code; only the document tools hop to the task pane.
@@ -283,6 +283,28 @@ Draftspect is a clone-and-run repo — the code is yours to modify:
 
 ---
 
+## Configuration
+
+The daemon reads a few environment variables. Set them in the shell you launch the tray app (or `npm run dev`) from, then relaunch; like `ANTHROPIC_API_KEY`, they are read when the daemon starts.
+
+| Variable                    | Default           | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CC_OFFICE_SETTING_SOURCES` | `project`         | Which Claude Code setting sources a session loads. `project`: the workspace's `CLAUDE.md` and `.claude/settings.json` only, so your user-level `~/.claude` (its `CLAUDE.md`, hooks, skills, subagents, settings) is not loaded. `all`: the SDK default of user, project, and local sources. Empty string: none. Otherwise a comma list of `user`, `project`, `local` (case-insensitive); unknown names are ignored with a warning in the daemon log.                                                                                                 |
+| `CC_OFFICE_LOAD_USER_MCP`   | off               | `1` merges the `mcpServers` from `~/.claude.json` into every session. The add-in's own `office` server wins a name clash. The file is read once at daemon start.                                                                                                                                                                                                                                                                                                                                                                                     |
+| `CC_OFFICE_CLAUDE_PATH`     | the SDK's own CLI | Absolute path to a locally installed `claude` executable for the SDK to drive instead of the one bundled with the SDK.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `CC_OFFICE_WSL_PATHS`       | auto              | Windows-to-WSL path translation for a daemon running inside WSL while Office runs on Windows. `1` forces it on, `0` off; unset turns it on when the Linux kernel release mentions Microsoft. When on, `D:\a\b.docx` and `file:///D:/a/b.docx` map to `/mnt/d/a/b.docx`, `\\wsl.localhost\<distro>\…` and `\\wsl$\<distro>\…` map to Linux paths when `<distro>` matches `WSL_DISTRO_NAME`, and other UNC shares are unreachable. A document at a drive root or directly in a Windows profile folder (`C:\Users\<name>`) gets no automatic workspace. |
+| `CC_OFFICE_WSL_MOUNT_ROOT`  | `/mnt`            | Where Windows drives are mounted inside WSL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+To get the upstream behavior back (your whole user-level setup plus the MCP servers in `~/.claude.json`):
+
+```bash
+CC_OFFICE_SETTING_SOURCES=all CC_OFFICE_LOAD_USER_MCP=1 npm start
+```
+
+`CC_OFFICE_DEBUG=1` turns on the opt-in `[diag]` logger (`daemon/diag.mjs`).
+
+---
+
 ## Troubleshooting
 
 <details>
@@ -307,7 +329,7 @@ Then quit the tray app and reopen it.
 <details>
 <summary><strong>An MCP server I configured isn't visible to the agent</strong></summary>
 
-At daemon start the log shows `Loaded N MCP server(s) from ~/.claude.json: …`. The SDK silently drops any server whose initial handshake fails — restart the daemon (tray menu → **Restart daemon**) once it's back up. `~/.claude.json` is read **once at daemon boot**; changes need a daemon restart.
+User MCP servers are off by default: set `CC_OFFICE_LOAD_USER_MCP=1` and relaunch the tray app (see [Configuration](#configuration)). With it on, the log at daemon start shows `Loaded N MCP server(s) from ~/.claude.json: …`; the line after it reports the active `settingSources` and whether user MCP is on. The SDK silently drops any server whose initial handshake fails — restart the daemon (tray menu → **Restart daemon**) once it's back up. `~/.claude.json` is read **once at daemon boot**; changes need a daemon restart.
 
 </details>
 

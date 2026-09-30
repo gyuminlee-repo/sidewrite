@@ -13,12 +13,14 @@
 // thing that overrides it is the user explicitly choosing a folder in the
 // picker; ensureWorkspaceMarker then drops a CLAUDE.md there.
 //
-// The single guard: never auto-select $HOME itself or an OS-managed $HOME
-// child (~/Library, …). A doc loose in ~ shouldn't make all of home the
-// workspace; the user can pick a real folder instead.
+// The guard: never auto-select $HOME itself, an OS-managed $HOME child
+// (~/Library, …) or a filesystem root. A doc loose in ~ shouldn't make all
+// of home the workspace; the user can pick a real folder instead. Under WSL
+// the same applies to the Windows side: a drive root (<mount root>/d) and a
+// Windows profile folder (<mount root>/c/Users/<name>) are never picked.
 
 import { writeFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, release } from "node:os";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isSystemHomeChild } from "./system-paths.mjs";
@@ -36,8 +38,65 @@ const HOME = homedir();
 // Hand the URL forms to fileURLToPath so the Windows drive letter survives
 // (a manual `replace(/^file:\/\//)` turns "file:///C:/x" into "/C:/x").
 // Treat non-file:// URLs (SharePoint, OneDrive cloud) as unaddressable.
+// WSL: the daemon runs inside WSL while Word runs on Windows, so Office
+// hands us Windows paths. Translate them to the Linux view:
+//   D:\a\b.docx, D:/a/b.docx, file:///D:/a/b.docx -> <mount root>/d/a/b.docx
+//   \\wsl.localhost\<distro>\home\a, \\wsl$\<distro>\home\a -> /home/a
+//     (null when WSL_DISTRO_NAME is set and names another distro)
+//   any other UNC share -> null (not addressable from WSL)
+// UNC forms accept "/" as well as "\" (//wsl.localhost/<distro>/home/a).
+// CC_OFFICE_WSL_PATHS "1" forces on, "0" forces off, unset = auto (Linux
+// kernel release mentions microsoft). CC_OFFICE_WSL_MOUNT_ROOT overrides
+// the drive mount root (default /mnt). Read per call so tests can switch.
+export function wslPathsEnabled(env = process.env) {
+  if (env.CC_OFFICE_WSL_PATHS === "1") return true;
+  if (env.CC_OFFICE_WSL_PATHS === "0") return false;
+  return process.platform === "linux" && /microsoft/i.test(release());
+}
+
+function wslMountRoot(env = process.env) {
+  return (env.CC_OFFICE_WSL_MOUNT_ROOT || "/mnt").replace(/\/+$/, "");
+}
+
+// undefined: not a Windows-form path, or translation is off (caller keeps
+// its own handling). null: Windows-form but unreachable from WSL.
+export function windowsPathToWsl(p, env = process.env) {
+  if (typeof p !== "string" || !wslPathsEnabled(env)) return undefined;
+  const root = wslMountRoot(env);
+  let m = /^file:\/\/\/([a-zA-Z]):[\\/](.*)$/i.exec(p);
+  if (m) {
+    let rest;
+    try {
+      rest = decodeURIComponent(m[2]);
+    } catch {
+      return null;
+    }
+    return `${root}/${m[1].toLowerCase()}/${rest.replace(/\\/g, "/")}`;
+  }
+  m = /^([a-zA-Z]):[\\/](.*)$/.exec(p);
+  if (m) return `${root}/${m[1].toLowerCase()}/${m[2].replace(/\\/g, "/")}`;
+  m = /^[\\/]{2}(?:wsl\.localhost|wsl\$)[\\/]([^\\/]+)([\\/].*)?$/i.exec(p);
+  if (m) {
+    const distro = env.WSL_DISTRO_NAME;
+    if (distro && distro.toLowerCase() !== m[1].toLowerCase()) return null;
+    return (m[2] || "/").replace(/\\/g, "/");
+  }
+  if (/^[\\/]{2}[^\\/]/.test(p)) return null;
+  return undefined;
+}
+
+// For user-typed paths (set_cwd, context entries): Windows-form input is
+// translated under WSL, everything else is returned unchanged so relative
+// context paths keep resolving against the workspace. null = unreachable.
+export function toLocalPath(p, env = process.env) {
+  const w = windowsPathToWsl(p, env);
+  return w === undefined ? p : w;
+}
+
 function normalizeDocPath(docPath) {
   if (!docPath) return null;
+  const wsl = windowsPathToWsl(docPath);
+  if (wsl !== undefined) return wsl === null ? null : resolvePath(wsl);
   if (/^file:\/\//i.test(docPath)) {
     try {
       return resolvePath(fileURLToPath(docPath));
@@ -75,15 +134,30 @@ async function docDirOf(p) {
 // The workspace for a document: the folder that directly contains it.
 // Returns that folder, or null if the doc is unaddressable (cloud URL) or
 // its folder isn't a sane cwd ($HOME itself / an OS-managed $HOME child /
-// the filesystem root).
+// the filesystem root / under WSL a Windows drive root or profile folder).
 export async function resolveWorkspaceRoot(docPath) {
   const p = normalizeDocPath(docPath);
   if (!p) return null;
   const docDir = await docDirOf(p);
-  if (docDir === HOME || isSystemHomeChild(docDir) || isFilesystemRoot(docDir)) {
+  if (
+    docDir === HOME ||
+    isSystemHomeChild(docDir) ||
+    isFilesystemRoot(docDir) ||
+    isWindowsSideRoot(docDir)
+  ) {
     return null;
   }
   return docDir;
+}
+
+// Under WSL: <mount root>/d (a drive) and <mount root>/c/Users/<name> (a
+// Windows profile) are the Windows equivalents of "/" and $HOME.
+function isWindowsSideRoot(p) {
+  if (!wslPathsEnabled()) return false;
+  const root = wslMountRoot();
+  if (!p.startsWith(root + "/")) return false;
+  const rest = p.slice(root.length);
+  return /^\/[a-z]$/i.test(rest) || /^\/[a-z]\/users\/[^/]+$/i.test(rest);
 }
 
 // `dirname(p) === p` is the classic "p is a root" test, but on Windows it

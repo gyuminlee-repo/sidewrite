@@ -183,3 +183,50 @@ test("getContextEntries ignores the marker string when it's inline in prose / a 
     await rm(ws, { recursive: true, force: true });
   }
 });
+
+async function withEnv(vars, fn) {
+  const prev = {};
+  for (const [k, v] of Object.entries(vars)) {
+    prev[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test("setContextEntries translates a Windows path under WSL instead of joining it to cwd", async () => {
+  const ws = await makeTmpWs();
+  const mnt = await mkdtemp(join(tmpdir(), "cc-office-mnt-"));
+  try {
+    await mkdir(join(mnt, "d", "x"), { recursive: true });
+    await withEnv({ CC_OFFICE_WSL_PATHS: "1", CC_OFFICE_WSL_MOUNT_ROOT: mnt }, async () => {
+      const { saved, errors } = await setContextEntries(ws, [{ path: "D:\\x" }]);
+      assert.deepEqual(errors, []);
+      assert.equal(saved[0].kind, "folder");
+      assert.equal(saved[0].path, join(mnt, "d", "x"));
+    });
+  } finally {
+    await rm(ws, { recursive: true, force: true });
+    await rm(mnt, { recursive: true, force: true });
+  }
+});
+
+test("setContextEntries reports a non-WSL UNC share instead of joining it to cwd", async () => {
+  const ws = await makeTmpWs();
+  try {
+    await withEnv({ CC_OFFICE_WSL_PATHS: "1" }, async () => {
+      const { saved, errors } = await setContextEntries(ws, [{ path: "\\\\server\\share\\x" }]);
+      assert.deepEqual(saved, []);
+      assert.equal(errors[0].error, "Not reachable from WSL");
+    });
+  } finally {
+    await rm(ws, { recursive: true, force: true });
+  }
+});
