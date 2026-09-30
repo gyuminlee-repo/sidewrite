@@ -58,8 +58,8 @@ async function setup({ revision, word = {}, respond = {} }) {
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
   const requests = [];
-  const sendRequest = async (type, payload) => {
-    requests.push({ type, payload });
+  const sendRequest = async (type, payload, opts) => {
+    requests.push({ type, payload, opts });
     if (respond[type]) return respond[type](payload);
     return { ok: true, revision, path: "/m/paper.revision.json" };
   };
@@ -292,4 +292,82 @@ test("outcome unknown: Allow exception is disabled; re-apply needs two presses a
   await find(/Re-apply anyway/)[0].click();
   assert.equal(overrides().length, 1);
   assert.deepEqual(overrides()[0].payload, { ref: "R1.1", blocked_id: "R1.1-b1", force: true });
+});
+
+test("override: waits past the tool timeout and keeps the row disabled while it runs", async () => {
+  const blocked = {
+    id: "R1.1-b1",
+    args: { find: "held at 30 degrees", replace: "as suggested by the reviewer, held at 30 °C" },
+    blocked_by: ["L2"],
+    created_at: "2026-01-01T00:00:00Z",
+  };
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [],
+        blocked: [blocked],
+      },
+    ],
+    ledger: [],
+  };
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const respond = {
+    review_override: async () => {
+      await gate;
+      return { ok: true, applied: true, revision: { ...revision, comments: [] } };
+    },
+  };
+  const t = await setup({ revision, respond });
+  const find = (re) => findAll(t.$("review-comments"), (n) => re.test(n.textContent));
+  await find(/Allow exception/)[0].click();
+  const running = find(/Apply despite/)[0].click();
+  await new Promise((r) => setTimeout(r, 0));
+  const busy = find(/^Applying\.\.\.$/);
+  assert.equal(busy.length, 1);
+  assert.equal(busy[0].disabled, true);
+  assert.equal(find(/Allow exception|Apply despite/).length, 0);
+  release();
+  await running;
+  const sent = t.requests.filter((r) => r.type === "review_override");
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0].opts.timeoutMs >= 60_000);
+  assert.equal(find(/^Applying/).length, 0);
+});
+
+test("a blocked edit the daemon reports applying shows no enabled button", async () => {
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [],
+        blocked: [
+          {
+            id: "R1.1-b1",
+            args: { find: "x", replace: "y" },
+            blocked_by: ["L2"],
+            created_at: "2026-01-01T00:00:00Z",
+            state: "applying",
+            attempt: null,
+          },
+        ],
+      },
+    ],
+    ledger: [],
+  };
+  const t = await setup({ revision });
+  const buttons = findAll(t.$("review-comments"), (n) =>
+    /^(Allow exception|Re-apply anyway|Applying\.\.\.)$/.test(n.textContent),
+  );
+  assert.equal(buttons.length, 1);
+  assert.equal(buttons[0].disabled, true);
 });

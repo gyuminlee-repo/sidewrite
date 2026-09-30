@@ -25,6 +25,9 @@ import {
   addBlocked,
   takeBlocked,
   markBlockedUnknown,
+  claimBlocked,
+  releaseBlocked,
+  markStaleApplying,
   addLedgerItem,
   updateLedgerItem,
   removeLedgerItem,
@@ -153,6 +156,18 @@ export function createReviewService({
     return withRevision(path, doc, fn);
   };
 
+  // Overrides this daemon is running, per review file: "<ref>\0<blocked id>".
+  // An applying item not in here was left by a daemon that stopped.
+  const applying = new Map();
+  const applyingKey = (ref, id) => `${ref}\0${id}`;
+  function activeFor(key) {
+    const { path } = docFor(key);
+    if (!applying.has(path)) applying.set(path, new Set());
+    return applying.get(path);
+  }
+  const clearStale = (key, rev) => markStaleApplying(rev, activeFor(key));
+  const backupChains = new Map();
+
   function trackedEditDeps(key) {
     return {
       log,
@@ -253,7 +268,7 @@ export function createReviewService({
   const impl = {
     async review_load(msg, key) {
       const { path } = docFor(key);
-      return { path, revision: await load(key) };
+      return { path, revision: await update(key, (rev) => clearStale(key, rev)) };
     },
     async review_split(msg) {
       return splitReview(String(msg.text ?? ""), { patterns: msg.patterns, oneshot });
@@ -294,7 +309,7 @@ export function createReviewService({
       let external = [];
       let resolved = [];
       const revision = await update(key, (old) => {
-        const r0 = resolveUnknownOverrides(old, snapshot);
+        const r0 = resolveUnknownOverrides(clearStale(key, old) ?? old, snapshot);
         const rev = r0.revision;
         resolved = r0.resolved;
         rows = classifyRevision(rev, snapshot);
@@ -344,43 +359,59 @@ export function createReviewService({
       return { revision: await update(key, (rev) => dismissExternal(rev, msg.id)) };
     },
     async review_override(msg, key) {
-      const rev = await load(key);
-      const blocked = findComment(rev, msg.ref)?.blocked.find((b) => b.id === msg.blocked_id);
-      if (!blocked) throw new Error(`No blocked edit ${msg.blocked_id} under ${msg.ref}`);
-      // The last override got no answer and may be in the document already.
-      // Only the explicit re-apply of the task pane (force) sends it again.
-      if (blocked.state === "outcome_unknown" && msg.force !== true) {
-        throw new Error(
-          `${blocked.id}: Word did not answer the last attempt, so it may already be applied. Refresh status, then check the paragraph. Re-apply only if the change is not there.`,
-        );
+      // Claimed inside the revision chain: an overlapping override of the
+      // same item finds it applying and is refused before Word is called.
+      let blocked = null;
+      await update(key, (rev) => {
+        const r = claimBlocked(rev, msg.ref, msg.blocked_id, { force: msg.force === true });
+        blocked = r.blocked;
+        return r.revision;
+      });
+      const active = activeFor(key);
+      const held = applyingKey(msg.ref, blocked.id);
+      active.add(held);
+      const restore = () =>
+        update(key, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state));
+      try {
+        const base = trackedEditDeps(key);
+        let attempt = null;
+        const deps = {
+          ...base,
+          call: (name, args) => callTool(name, args, key),
+          onOutcomeUnknown: (x) => {
+            attempt = x.attempt;
+            return base.onOutcomeUnknown({ ...x, blocked_id: blocked.id });
+          },
+        };
+        let r;
+        try {
+          r = await applyTrackedEdit(
+            deps,
+            blocked.args,
+            { ref: msg.ref },
+            { override: { blocked_by: blocked.blocked_by } },
+          );
+        } catch (e) {
+          await restore();
+          throw e;
+        }
+        if (r.code === "OutcomeUnknown" && attempt) {
+          log(`[review] override outcome unknown ${blocked.id} id=${attempt.tool_call_id}`);
+          const revision = await update(key, (x) =>
+            markBlockedUnknown(x, msg.ref, blocked.id, attempt),
+          );
+          return { applied: false, outcome_unknown: true, result: r, revision };
+        }
+        if (!r.ok) {
+          const revision = await restore();
+          return { applied: false, result: r, revision };
+        }
+        log(`[review] override ${msg.blocked_id} approved for ${blocked.blocked_by.join(",")}`);
+        const revision = await update(key, (x) => takeBlocked(x, msg.ref, msg.blocked_id).revision);
+        return { applied: true, result: r, revision };
+      } finally {
+        active.delete(held);
       }
-      const base = trackedEditDeps(key);
-      let attempt = null;
-      const deps = {
-        ...base,
-        call: (name, args) => callTool(name, args, key),
-        onOutcomeUnknown: (x) => {
-          attempt = x.attempt;
-          return base.onOutcomeUnknown({ ...x, blocked_id: blocked.id });
-        },
-      };
-      const r = await applyTrackedEdit(
-        deps,
-        blocked.args,
-        { ref: msg.ref },
-        { override: { blocked_by: blocked.blocked_by } },
-      );
-      if (r.code === "OutcomeUnknown" && attempt) {
-        log(`[review] override outcome unknown ${blocked.id} id=${attempt.tool_call_id}`);
-        const revision = await update(key, (x) =>
-          markBlockedUnknown(x, msg.ref, blocked.id, attempt),
-        );
-        return { applied: false, outcome_unknown: true, result: r, revision };
-      }
-      if (!r.ok) return { applied: false, result: r };
-      log(`[review] override ${msg.blocked_id} approved for ${blocked.blocked_by.join(",")}`);
-      const revision = await update(key, (x) => takeBlocked(x, msg.ref, msg.blocked_id).revision);
-      return { applied: true, result: r, revision };
     },
     async ledger_add(msg, key) {
       let item = null;
@@ -446,12 +477,30 @@ export function createReviewService({
       if (backup.reply_count != null && backup.reply_count !== replies) {
         throw new Error(`backup reply_count ${backup.reply_count} != ${replies} replies`);
       }
-      let path = commentsBackupPathFor(doc);
-      if (await exists(path)) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-        path = path.replace(/\.comments_backup\.json$/, `.comments_backup.${stamp}.json`);
-      }
-      await writeJsonAtomic(path, backup);
+      // One backup at a time per file name: picking a free name and writing
+      // it is not atomic, so an overlapping backup could take the same name.
+      const base = commentsBackupPathFor(doc);
+      const prev = backupChains.get(base) ?? Promise.resolve();
+      const run = prev
+        .catch(() => {})
+        .then(async () => {
+          let path = base;
+          if (await exists(path)) {
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+            const stamped = (n) =>
+              base.replace(
+                /\.comments_backup\.json$/,
+                `.comments_backup.${stamp}${n ? `-${n}` : ""}.json`,
+              );
+            let n = 0;
+            path = stamped(n);
+            while (await exists(path)) path = stamped(++n);
+          }
+          await writeJsonAtomic(path, backup);
+          return path;
+        });
+      backupChains.set(base, run);
+      const path = await run;
       log(
         `[review] comments_backup path=${path} count=${backup.comments.length} replies=${replies}`,
       );

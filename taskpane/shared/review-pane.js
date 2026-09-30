@@ -30,6 +30,10 @@ import {
 const UNKNOWN_HINT =
   "Word did not answer; this exception may already be applied. Refresh status, then check the paragraph.";
 const LONG = 120_000; // LLM split and LLM ledger checks exceed the 10 s default
+// An override waits for the Word tool, which may take up to the daemon's 60 s
+// tool timeout (bridge.mjs TOOL_TIMEOUT_MS); LONG covers it.
+const OVERRIDE_WAIT = LONG;
+const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 
 export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
   const root = document.getElementById("review-root");
@@ -44,6 +48,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     confirmDone: null, // L5: ref whose "Done" was asked once with open requirements
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
+    applyingBlocked: new Set(), // ids of blocked edits whose override request is in flight
     turn: null, // L9: { ref, startedAt } of the running review turn
     timer: null,
   };
@@ -166,7 +171,38 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     return wrap;
   }
 
+  // One override request per blocked edit; its buttons stay disabled until
+  // the daemon answers (the daemon refuses an overlapping one too).
+  async function override(ref, b, extra = {}) {
+    state.applyingBlocked.add(b.id);
+    render();
+    try {
+      const r = await ask("review_override", { ref, blocked_id: b.id, ...extra }, OVERRIDE_WAIT);
+      if (r.outcome_unknown) throw new Error(UNKNOWN_HINT);
+      if (!r.applied) throw new Error(r.result?.message || "Not applied");
+    } finally {
+      state.applyingBlocked.delete(b.id);
+    }
+  }
+
   function blockedRow(ref, b) {
+    const newText = b.args.replace ?? b.args.insert_after ?? "";
+    const label = el("span", { text: `Blocked by ${b.blocked_by.join(", ")}: "${newText}" ` });
+    if (b.state === "applying" || state.applyingBlocked.has(b.id)) {
+      const busy = el("button", {
+        type: "button",
+        class: "btn-secondary btn-small",
+        text: "Applying...",
+      });
+      busy.disabled = true;
+      return el(
+        "div",
+        { class: "review-blocked" },
+        label,
+        el("span", { class: "review-unknown", text: APPLYING_HINT + " " }),
+        busy,
+      );
+    }
     // The armed state lives in `state`: guard() re-renders after every
     // click, which rebuilds this button.
     const armed = state.armedBlocked.has(b.id);
@@ -183,13 +219,9 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           return;
         }
         state.armedBlocked.delete(b.id);
-        const r = await ask("review_override", { ref, blocked_id: b.id });
-        if (r.outcome_unknown) throw new Error(UNKNOWN_HINT);
-        if (!r.applied) throw new Error(r.result?.message || "Not applied");
+        await override(ref, b);
       }),
     );
-    const newText = b.args.replace ?? b.args.insert_after ?? "";
-    const label = el("span", { text: `Blocked by ${b.blocked_by.join(", ")}: "${newText}" ` });
     if (b.state !== "outcome_unknown") {
       return el("div", { class: "review-blocked" }, label, allow);
     }
@@ -210,9 +242,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           return;
         }
         state.armedReapply.delete(b.id);
-        const r = await ask("review_override", { ref, blocked_id: b.id, force: true });
-        if (r.outcome_unknown) throw new Error(UNKNOWN_HINT);
-        if (!r.applied) throw new Error(r.result?.message || "Not applied");
+        await override(ref, b, { force: true });
       }),
     );
     return el(

@@ -86,7 +86,8 @@ const Blocked = z.object({
   created_at: z.string(),
   // outcome_unknown: an override was sent and not answered; it may be in the
   // document, so a plain second override is refused (review-service.mjs).
-  state: z.enum(["blocked", "outcome_unknown"]).default("blocked"),
+  // applying: an override is running now; any second override is refused.
+  state: z.enum(["blocked", "applying", "outcome_unknown"]).default("blocked"),
   attempt: Attempt.nullable().default(null),
 });
 
@@ -386,6 +387,51 @@ export function markBlockedUnknown(rev, ref, blockedId, attempt) {
   b.state = "outcome_unknown";
   b.attempt = Attempt.parse(clone(attempt));
   return next;
+}
+
+// Start an override: the item turns applying so an overlapping override of
+// the same item is refused instead of editing Word twice. An unanswered one
+// (outcome_unknown) goes again only with force.
+export function claimBlocked(rev, ref, blockedId, { force = false } = {}) {
+  const next = clone(rev);
+  const b = findComment(next, ref)?.blocked.find((x) => x.id === blockedId);
+  if (!b) throw new Error(`No blocked edit ${blockedId} under ${ref}`);
+  if (b.state === "applying") {
+    throw new Error(`${b.id}: this exception is already being applied. Wait for it to finish.`);
+  }
+  if (b.state === "outcome_unknown" && !force) {
+    throw new Error(
+      `${b.id}: Word did not answer the last attempt, so it may already be applied. Refresh status, then check the paragraph. Re-apply only if the change is not there.`,
+    );
+  }
+  const before = clone(b);
+  b.state = "applying";
+  return { revision: next, blocked: before };
+}
+
+// End an override that did not apply: back to the state it had before.
+export function releaseBlocked(rev, ref, blockedId, state) {
+  const next = clone(rev);
+  const b = findComment(next, ref)?.blocked.find((x) => x.id === blockedId);
+  if (!b || b.state !== "applying") return null;
+  b.state = state;
+  return next;
+}
+
+// applying items no running override owns (the daemon stopped mid-call) may
+// be in Word: they turn outcome_unknown. `active`: "<ref>\0<id>" keys.
+export function markStaleApplying(rev, active) {
+  const next = clone(rev);
+  let n = 0;
+  for (const c of next.comments) {
+    for (const b of c.blocked) {
+      if (b.state === "applying" && !active.has(`${c.ref}\0${b.id}`)) {
+        b.state = "outcome_unknown";
+        n++;
+      }
+    }
+  }
+  return n ? next : null;
 }
 
 export function takeBlocked(rev, ref, blockedId) {

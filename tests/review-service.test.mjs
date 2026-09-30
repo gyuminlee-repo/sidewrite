@@ -750,3 +750,135 @@ test("refresh that finds the override pending records it and releases the item",
     await t.cleanup();
   }
 });
+
+// Two overrides of the same blocked edit that overlap (the pane gave up on the
+// first after its request timeout and the user approved again) apply it once.
+test("overlapping overrides of one blocked edit call the tool once; the second is told it is applying", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const t = await setup({
+    callImpl: async () => {
+      await gate;
+      return { ok: true, word_comment_id: 3, paragraph_index: 1, before: "b", after: "a" };
+    },
+  });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("ledger_add", { item: NOVEL });
+    const deps = { ...t.svc.trackedEditDeps("k"), call: async () => ({ ok: true }) };
+    const R = { what: "w", why: "y", addresses: "a" };
+    await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.3", find: "substrate", replace: "novel substrate", rationale: R },
+      { ref: "R1.3" },
+    );
+    const first = t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    const second = t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1", force: true });
+    await new Promise((r) => setTimeout(r, 50));
+    const during = (await t.ask("review_load")).revision.comments[1].blocked[0];
+    release();
+    const [r1, r2] = await Promise.all([first, second]);
+    assert.deepEqual([r1.ok, r1.applied], [true, true]);
+    assert.equal(r2.ok, false);
+    assert.match(r2.error, /already being applied/);
+    assert.equal(during.state, "applying");
+    assert.equal(t.calls.length, 1);
+    const rev = (await t.ask("review_load")).revision;
+    assert.equal(rev.comments[1].changes.length, 1);
+    assert.equal(rev.comments[1].blocked.length, 0);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("an override the tool refuses or that throws goes back to blocked", async () => {
+  let n = 0;
+  const t = await setup({
+    callImpl: async () => {
+      if (++n === 1) return { ok: false, code: "FindNotFound", message: "not found" };
+      throw new Error("pane crashed");
+    },
+  });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("ledger_add", { item: NOVEL });
+    const deps = { ...t.svc.trackedEditDeps("k"), call: async () => ({ ok: true }) };
+    const R = { what: "w", why: "y", addresses: "a" };
+    await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.3", find: "substrate", replace: "novel substrate", rationale: R },
+      { ref: "R1.3" },
+    );
+    const r1 = await t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.deepEqual([r1.ok, r1.applied], [true, false]);
+    assert.equal(r1.revision.comments[1].blocked[0].state, "blocked");
+    const r2 = await t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.equal(r2.ok, false);
+    assert.match(r2.error, /pane crashed/);
+    const rev = (await t.ask("review_load")).revision;
+    assert.equal(rev.comments[1].blocked[0].state, "blocked");
+    assert.equal(t.calls.length, 2);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// A daemon that stopped mid-override leaves "applying" in the file. The next
+// daemon did not send it, so load and refresh turn it into outcome_unknown.
+test("an applying item left by a stopped daemon becomes outcome_unknown on load and refresh", async () => {
+  const t = await setup({ callImpl: () => new Promise(() => {}) });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("ledger_add", { item: NOVEL });
+    const deps = { ...t.svc.trackedEditDeps("k"), call: async () => ({ ok: true }) };
+    const R = { what: "w", why: "y", addresses: "a" };
+    await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.3", find: "substrate", replace: "novel substrate", rationale: R },
+      { ref: "R1.3" },
+    );
+    t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" }); // never answers
+    await new Promise((r) => setTimeout(r, 50));
+    const stuck = (await t.ask("review_load")).revision.comments[1].blocked[0];
+    assert.equal(stuck.state, "applying"); // this daemon is still applying it
+
+    const next = createReviewService({
+      getContext: () => ({ activeDoc: t.doc }),
+      callTool: async () => ({ ok: true }),
+      pushTurn: () => {},
+      log: () => {},
+      env: ENV,
+    });
+    const ask2 = (type, payload = {}) =>
+      new Promise((resolve) =>
+        next.handlers[type]({ type, request_id: "q2", ...payload }, resolve, "k", "word"),
+      );
+    const loaded = await ask2("review_load");
+    assert.equal(loaded.revision.comments[1].blocked[0].state, "outcome_unknown");
+    const plain = await ask2("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.equal(plain.ok, false);
+    assert.match(plain.error, /Refresh status/);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Two backups that overlap each keep their own file: the second may not
+// overwrite the first between its existence check and its write.
+test("overlapping comments_backup requests write two files, neither overwritten", async () => {
+  const t = await setup();
+  try {
+    const one = { version: 1, count: 1, comments: [{ id: "1" }] };
+    const two = { version: 1, count: 2, comments: [{ id: "1" }, { id: "2" }] };
+    const [a, b] = await Promise.all([
+      t.ask("comments_backup", { backup: one }),
+      t.ask("comments_backup", { backup: two }),
+    ]);
+    assert.deepEqual([a.ok, b.ok], [true, true]);
+    assert.notEqual(a.path, b.path);
+    assert.equal(JSON.parse(await readFile(a.path, "utf8")).count, 1);
+    assert.equal(JSON.parse(await readFile(b.path, "utf8")).count, 2);
+  } finally {
+    await t.cleanup();
+  }
+});
