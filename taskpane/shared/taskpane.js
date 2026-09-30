@@ -34,6 +34,7 @@ import {
   selectCommentById,
   selectParagraphByIndex,
   readAllComments,
+  deleteBackedUpComments,
   deleteToolComments,
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
@@ -1134,7 +1135,7 @@ Office.onReady((info) => {
         selectParagraphByIndex,
         readAllComments,
         deleteToolComments,
-        clearAllComments: () => toolClearComments({ all: true }),
+        deleteBackedUpComments,
         listComments: () => toolListComments(),
         resolveComment: (id) => toolResolveComment({ comment_id: id, resolved: true }),
       },

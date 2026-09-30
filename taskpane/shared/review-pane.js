@@ -563,9 +563,9 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     }),
   );
   // Delete ALL comments: first press shows the counts, second press reads
-  // the comments again, backs up that fresh list and deletes. If the list
-  // changed since it was shown, nothing is deleted and the new count is
-  // shown for another press. window.confirm is unreliable in Office panes
+  // the comments again, backs up that fresh list and deletes the backed-up
+  // threads that did not change meanwhile. If the list changed since it was
+  // shown, nothing is deleted and the new count is shown for another press. window.confirm is unreliable in Office panes
   // (taskpane.js context-error note), so the confirmation is inline.
   $("review-delete-all").addEventListener(
     "click",
@@ -597,13 +597,18 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         throw new Error(
           `Backup holds ${b.count} comments and ${b.reply_count} replies, expected ${current.length} and ${backup.reply_count}. Nothing deleted.`,
         );
-      const cleared = await word.clearAllComments();
-      const left = await word.listComments();
+      // Only the backed-up threads, and only those unchanged since the
+      // backup: a comment added or edited while the backup was written stays.
+      const plan = await word.deleteBackedUpComments(backup.comments);
+      const left = new Set((await word.listComments()).comments.map((c) => String(c.id)));
       const rep = deleteAllReport({
         shown: current.length,
         backedUp: b.count,
-        deleted: cleared.cleared_comments,
-        remaining: left.comment_count,
+        deleted: plan.delete_ids.length,
+        changed: plan.changed_ids.length,
+        missing: plan.missing_ids.length,
+        addedAfter: plan.new_ids.length,
+        stillThere: plan.delete_ids.filter((id) => left.has(id)).length,
       });
       say(`${rep.text}. Backup: ${b.path}`, !rep.ok);
     }),

@@ -137,14 +137,52 @@ export function compareCommentLists(shown, current) {
   return { same, added, removed, edited, text: parts.join(", ") };
 }
 
-// Verdict for "Delete ALL comments": backup count and deleted count must both
-// equal the count shown to the user, and nothing may remain.
-export function deleteAllReport({ shown, backedUp, deleted, remaining }) {
-  const ok = backedUp === shown && deleted === shown && remaining === 0;
-  return {
-    ok,
-    text: `Backed up ${backedUp}, deleted ${deleted} of ${shown}, remaining ${remaining}${ok ? "" : " (MISMATCH)"}`,
-  };
+// The second "Delete ALL" press deletes only the threads in the backup, and
+// only those still equal to their backed-up copy (text, author, resolved,
+// anchor, replies). The Office function reads the comments and deletes in
+// one Word.run with this decision in between. new_ids: comments added after
+// the backup (kept); changed_ids: backed-up threads that changed (kept, the
+// user presses again); missing_ids: backed-up threads already gone.
+export function planBackupDelete(backupRows, current) {
+  const backed = new Map((backupRows ?? []).map((c) => [String(c.id), commentKey(c)]));
+  const plan = { delete_ids: [], changed_ids: [], new_ids: [], missing_ids: [] };
+  const seen = new Set();
+  for (const c of current ?? []) {
+    const id = String(c.id);
+    if (!backed.has(id)) {
+      plan.new_ids.push(id);
+      continue;
+    }
+    seen.add(id);
+    (backed.get(id) === commentKey(c) ? plan.delete_ids : plan.changed_ids).push(id);
+  }
+  for (const id of backed.keys()) if (!seen.has(id)) plan.missing_ids.push(id);
+  return plan;
+}
+
+// Verdict for "Delete ALL comments": the backup holds every comment shown;
+// every backed-up thread is deleted or was already gone; none of the deleted
+// ids is still in the document (stillThere, read again afterwards).
+// Comments added after the backup are kept and named, not a mismatch. A
+// backed-up thread that changed after the backup is kept and needs another
+// press, so the result is not ok.
+export function deleteAllReport({
+  shown,
+  backedUp,
+  deleted,
+  changed = 0,
+  missing = 0,
+  addedAfter = 0,
+  stillThere = 0,
+}) {
+  const ok = backedUp === shown && changed === 0 && deleted + missing === shown && stillThere === 0;
+  const parts = [`Backed up ${backedUp}, deleted ${deleted} of ${shown}`];
+  if (missing) parts.push(`${missing} already gone`);
+  if (changed) parts.push(`${changed} changed after the backup and not deleted (press again)`);
+  if (stillThere) parts.push(`${stillThere} deleted comment(s) still present`);
+  let text = parts.join(", ") + (ok ? "" : " (MISMATCH)");
+  if (addedAfter) text += `. ${addedAfter} comment(s) added after the backup were not deleted`;
+  return { ok, text };
 }
 
 // Recorded changes vs tool comments now in the document. Every change keeps

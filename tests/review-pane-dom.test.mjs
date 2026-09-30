@@ -84,53 +84,117 @@ const comment = (id, content, extra = {}) => ({
 });
 
 test("Delete ALL: a comment added after the first press is not deleted unseen", async () => {
-  let doc = [comment("1", "Check units"), comment("2", "[R1.1] a / b / c")];
-  const cleared = [];
+  const s = fakeCommentStore([comment("1", "Check units"), comment("2", "[R1.1] a / b / c")]);
   const backups = [];
-  const word = {
-    readAllComments: async () => structuredClone(doc),
-    clearAllComments: async () => {
-      cleared.push(doc.length);
-      const n = doc.length;
-      doc = [];
-      return { cleared_comments: n };
-    },
-    listComments: async () => ({ comment_count: doc.length }),
-  };
-  const respond = {
-    comments_backup: ({ backup }) => {
-      backups.push(backup);
-      return {
-        ok: true,
-        count: backup.comments.length,
-        reply_count: backup.reply_count,
-        path: "/m/paper.comments_backup.json",
-      };
-    },
-  };
-  const t = await setup({ revision: { comments: [], ledger: [] }, word, respond });
+  const respond = backupOk((backup) => backups.push(backup));
+  const t = await setup({ revision: { comments: [], ledger: [] }, word: s.word, respond });
   const btn = t.$("review-delete-all");
 
   await btn.click();
   assert.match(btn.textContent, /Back up and delete 2 comments/);
 
   // Someone adds a comment with a reply between the two presses.
-  doc.push(comment("3", "New remark", { replies: [{ author: "B", content: "agreed" }] }));
+  s.doc.push(comment("3", "New remark", { replies: [{ author: "B", content: "agreed" }] }));
   await btn.click();
-  assert.deepEqual(cleared, [], "nothing may be deleted when the list changed");
+  assert.deepEqual(s.deleted, [], "nothing may be deleted when the list changed");
   assert.deepEqual(backups, []);
   assert.match(btn.textContent, /Back up and delete 3 comments/);
   assert.match(t.$("review-message").textContent, /1 added.*Nothing deleted/);
 
   await btn.click();
-  assert.deepEqual(cleared, [3]);
+  assert.deepEqual(s.deleted, ["1", "2", "3"]);
   assert.equal(backups.length, 1);
   assert.deepEqual(
     backups[0].comments.map((c) => c.id),
     ["1", "2", "3"],
   );
+  assert.deepEqual(s.passed, ["1", "2", "3"]);
   assert.equal(backups[0].reply_count, 1);
-  assert.match(t.$("review-message").textContent, /Backed up 3, deleted 3 of 3, remaining 0/);
+  assert.match(t.$("review-message").textContent, /Backed up 3, deleted 3 of 3/);
+  assert.doesNotMatch(t.$("review-message").textContent, /MISMATCH/);
+});
+
+// A fake Word comment store. clearAllComments deletes everything (the old
+// path); deleteBackedUpComments deletes only unchanged backed-up threads,
+// with the same decision helper the Office function uses.
+function fakeCommentStore(initial) {
+  const store = { doc: initial, deleted: [], passed: null };
+  store.word = {
+    readAllComments: async () => structuredClone(store.doc),
+    clearAllComments: async () => {
+      store.deleted.push(...store.doc.map((c) => c.id));
+      const n = store.doc.length;
+      store.doc = [];
+      return { cleared_comments: n };
+    },
+    deleteBackedUpComments: async (rows) => {
+      const { planBackupDelete } = await import("../taskpane/shared/review-view.js");
+      store.passed = rows.map((r) => r.id);
+      const plan = planBackupDelete(rows, store.doc);
+      store.deleted.push(...plan.delete_ids);
+      store.doc = store.doc.filter((c) => !plan.delete_ids.includes(c.id));
+      return plan;
+    },
+    listComments: async () => ({
+      comment_count: store.doc.length,
+      comments: store.doc.map((c) => ({ id: c.id, text: c.content })),
+    }),
+  };
+  return store;
+}
+
+const backupOk = (onBackup) => ({
+  comments_backup: ({ backup }) => {
+    onBackup?.(backup);
+    return {
+      ok: true,
+      count: backup.comments.length,
+      reply_count: backup.reply_count,
+      path: "/m/paper.comments_backup.json",
+    };
+  },
+});
+
+test("Delete ALL: a comment added while the backup is written is not deleted", async () => {
+  const s = fakeCommentStore([comment("1", "Check units")]);
+  const respond = backupOk(() => s.doc.push(comment("2", "Added during the backup")));
+  const t = await setup({ revision: { comments: [], ledger: [] }, word: s.word, respond });
+  const btn = t.$("review-delete-all");
+  await btn.click();
+  await btn.click();
+  assert.deepEqual(s.deleted, ["1"]);
+  assert.deepEqual(
+    s.doc.map((c) => c.id),
+    ["2"],
+  );
+  const msg = t.$("review-message").textContent;
+  assert.match(msg, /Backed up 1, deleted 1 of 1/);
+  assert.match(msg, /1 comment\(s\) added after the backup were not deleted/);
+  assert.doesNotMatch(msg, /MISMATCH/);
+});
+
+test("Delete ALL: a thread changed after the backup is kept and asks for a new press", async () => {
+  const s = fakeCommentStore([comment("1", "Check units"), comment("2", "Cite the method")]);
+  const respond = backupOk(() => {
+    s.doc[1] = { ...s.doc[1], replies: [{ author: "B", content: "Will do" }] };
+  });
+  const t = await setup({ revision: { comments: [], ledger: [] }, word: s.word, respond });
+  const btn = t.$("review-delete-all");
+  await btn.click();
+  await btn.click();
+  assert.deepEqual(s.deleted, ["1"]);
+  assert.deepEqual(
+    s.doc.map((c) => c.id),
+    ["2"],
+  );
+  assert.match(
+    t.$("review-message").textContent,
+    /1 changed after the backup and not deleted.*press again/,
+  );
+  // The next press shows the count again instead of deleting.
+  await btn.click();
+  assert.deepEqual(s.deleted, ["1"]);
+  assert.match(btn.textContent, /Back up and delete 1 comments/);
 });
 
 test("Delete ALL: a failed backup deletes nothing", async () => {
@@ -139,6 +203,7 @@ test("Delete ALL: a failed backup deletes nothing", async () => {
   const word = {
     readAllComments: async () => structuredClone(doc),
     clearAllComments: async () => (cleared.push(1), { cleared_comments: 1 }),
+    deleteBackedUpComments: async () => (cleared.push(1), { delete_ids: ["1"] }),
     listComments: async () => ({ comment_count: 0 }),
   };
   const respond = {

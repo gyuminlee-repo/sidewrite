@@ -4,6 +4,7 @@ import {
   computeAfterText,
   countRevisionMarks,
   isToolComment,
+  planBackupDelete,
 } from "./review-view.js";
 //
 // Word tool implementations + Word-specific helpers.
@@ -1738,6 +1739,38 @@ export async function selectParagraphByIndex(index) {
 export async function readAllComments() {
   const snap = await collectReviewSnapshot({ replies: true });
   return snap.comments;
+}
+
+// "Delete ALL comments", second press: delete only the backed-up threads
+// still equal to their backup (planBackupDelete). Reading, deciding and
+// deleting share one Word.run, so a comment added or changed while the
+// backup was written is kept.
+export async function deleteBackedUpComments(backupRows) {
+  return await Word.run(async (context) => {
+    const comments = context.document.body.getComments();
+    comments.load("items/id, items/content, items/resolved, items/authorName");
+    await context.sync();
+    const probes = comments.items.map((c) => {
+      const r = c.getRange();
+      r.load("text");
+      c.replies.load("items/content, items/authorName");
+      return { c, r };
+    });
+    await context.sync();
+    const current = probes.map(({ c, r }) => ({
+      id: String(c.id),
+      author: c.authorName,
+      content: c.content,
+      resolved: c.resolved,
+      anchor_text: r.text,
+      replies: c.replies.items.map((x) => ({ author: x.authorName, content: x.content })),
+    }));
+    const plan = planBackupDelete(backupRows, current);
+    const doomed = new Set(plan.delete_ids);
+    for (const { c } of probes) if (doomed.has(String(c.id))) c.delete();
+    await context.sync();
+    return plan;
+  });
 }
 
 // Delete only "[R<n>.<m>]" comments; returns counts before and after.

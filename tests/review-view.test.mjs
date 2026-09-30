@@ -181,11 +181,53 @@ test("compareCommentLists: the second Delete ALL press deletes only what was sho
   assert.match(added.text, /1 added/);
 });
 
-test("deleteAllReport needs backup == deleted == shown and nothing left", () => {
-  assert.equal(view.deleteAllReport({ shown: 3, backedUp: 3, deleted: 3, remaining: 0 }).ok, true);
-  assert.equal(view.deleteAllReport({ shown: 3, backedUp: 2, deleted: 3, remaining: 0 }).ok, false);
-  assert.equal(view.deleteAllReport({ shown: 3, backedUp: 3, deleted: 4, remaining: 0 }).ok, false);
-  assert.equal(view.deleteAllReport({ shown: 3, backedUp: 3, deleted: 3, remaining: 1 }).ok, false);
+test("deleteAllReport: every backed-up thread deleted, later comments kept and named", () => {
+  const r = (x) => view.deleteAllReport({ shown: 3, backedUp: 3, deleted: 3, ...x });
+  assert.equal(r({}).ok, true);
+  assert.equal(r({ backedUp: 2 }).ok, false);
+  assert.equal(r({ deleted: 4 }).ok, false);
+  assert.equal(r({ deleted: 2 }).ok, false);
+  assert.equal(r({ stillThere: 1 }).ok, false);
+  assert.equal(r({ deleted: 2, missing: 1 }).ok, true);
+  const later = r({ addedAfter: 2 });
+  assert.equal(later.ok, true);
+  assert.match(later.text, /2 comment\(s\) added after the backup were not deleted/);
+  const changed = r({ deleted: 2, changed: 1 });
+  assert.equal(changed.ok, false);
+  assert.match(changed.text, /1 changed after the backup and not deleted \(press again\)/);
+});
+
+test("planBackupDelete: only unchanged backed-up threads are deleted", () => {
+  const c = (id, content, extra = {}) => ({
+    id,
+    author: "A",
+    content,
+    resolved: false,
+    anchor_text: "t",
+    ...extra,
+  });
+  const backup = view.buildCommentsBackup([
+    c("1", "a"),
+    c("2", "b"),
+    c("3", "c"),
+    c("4", "d"),
+  ]).comments;
+  const now = [
+    c("1", "a"),
+    c("2", "b edited"),
+    c("3", "c", { replies: [{ author: "B", content: "ok" }] }),
+    c("5", "new"),
+  ];
+  assert.deepEqual(view.planBackupDelete(backup, now), {
+    delete_ids: ["1"],
+    changed_ids: ["2", "3"],
+    new_ids: ["5"],
+    missing_ids: ["4"],
+  });
+  // A reply the backup holds is not a change.
+  const withReply = [c("1", "a", { replies: [{ author: "B", content: "ok", id: "9" }] })];
+  const b2 = view.buildCommentsBackup(withReply).comments;
+  assert.deepEqual(view.planBackupDelete(b2, withReply).delete_ids, ["1"]);
 });
 
 test("invariantReport: one comment per change, rejected insertions excepted", () => {
