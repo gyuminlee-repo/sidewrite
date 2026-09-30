@@ -5,7 +5,12 @@
 // the review and returns no text, and the code builds the comments from the
 // source lines, so no line is lost or rewritten.
 // L5: every comment carries requirements [{ id, text }], the separate things
-// the reviewer asks for. Both splits leave them empty for the user to fill.
+// the reviewer asks for. Both splits leave them empty; extractRequirements
+// fills them afterwards the same way: the code splits the comment sentences
+// and one one-shot labels each sentence, so a requirement is always a
+// sentence of the comment as written.
+
+import { numberRequirements } from "./revision-store.mjs";
 
 // Defaults are stricter than the plain design patterns so body lines do not
 // start a new comment: "Reviewer 2 raised the same point" (reviewer word at
@@ -128,11 +133,14 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   };
 }
 
-const preservedWarnings = (comments) =>
+// late: refs of editor text that comes after a reviewer (label split only).
+const preservedWarnings = (comments, late = []) =>
   comments.map((c) =>
-    c.reviewer === 0
-      ? `Text before the first reviewer (usually the editor letter) is kept as ${c.ref}. Delete it if it asks for nothing.`
-      : `Reviewer ${c.reviewer} text before the first numbered comment is kept as ${c.ref}. Delete it if it asks for nothing.`,
+    late.includes(c.ref)
+      ? `Editor text after a reviewer is kept as ${c.ref}. Delete it if it asks for nothing.`
+      : c.reviewer === 0
+        ? `Text before the first reviewer (usually the editor letter) is kept as ${c.ref}. Delete it if it asks for nothing.`
+        : `Reviewer ${c.reviewer} text before the first numbered comment is kept as ${c.ref}. Delete it if it asks for nothing.`,
   );
 
 const unsplitWarnings = (refs) =>
@@ -262,7 +270,8 @@ function commentsFromLabels(src, labels, patterns) {
     } else if (type === "continue" || (type === "editor" && cur?.editor)) {
       cur.lines.push(line);
     } else if (type === "editor") {
-      open({ reviewer: 0, editor: true, number: ++editors, lines: [line] });
+      const late = groups.some((g) => !g.editor);
+      open({ reviewer: 0, editor: true, late, number: ++editors, lines: [line] });
     } else if (type === "reviewer_head") {
       reviewer = label.reviewer;
       const m = reReviewer.exec(line);
@@ -286,6 +295,7 @@ function commentsFromLabels(src, labels, patterns) {
       return {
         whole,
         kept: !!g.editor || (!!g.pre && !whole),
+        late: !!g.late,
         comment: {
           ref: g.editor ? `E.${number}` : `R${g.reviewer}.${number}`,
           reviewer: g.reviewer,
@@ -298,7 +308,10 @@ function commentsFromLabels(src, labels, patterns) {
     .sort((a, b) => a.comment.reviewer - b.comment.reviewer);
   const comments = rows.map((x) => x.comment);
   const warnings = [
-    ...preservedWarnings(rows.filter((x) => x.kept).map((x) => x.comment)),
+    ...preservedWarnings(
+      rows.filter((x) => x.kept).map((x) => x.comment),
+      rows.filter((x) => x.late).map((x) => x.comment.ref),
+    ),
     ...unsplitWarnings(rows.filter((x) => x.whole).map((x) => x.comment.ref)),
   ];
   if (dropped.length) {
@@ -382,4 +395,121 @@ async function splitReviewInner(text, { patterns, oneshot } = {}) {
     };
   }
   return { method: "llm", ...commentsFromLabels(src, labels, patterns) };
+}
+
+// ---- L5 requirement extraction ----------------------------------------------
+
+// A period after one of these does not end a sentence ("e.g.", "Fig. 2",
+// "et al. Nature"). A lowercase letter after the space does not either.
+const ABBREV =
+  /(?:^|[\s(])(?:e\.g|i\.e|et al|vs|cf|Figs?|Eqs?|Refs?|Tabs?|Nos?|Suppl|approx|resp|ca|Dr|Prof|Sec)\.$/i;
+// A bare list number at the start of a unit or after a colon ("points: 1.").
+const LIST_NUMBER = /(?:^|[:;]\s*)\(?\d{1,2}[.)]$/;
+const LIST_LINE = /^\s*(?:\(?\d+[.)]|\(?[a-z][.)]|[-*\u2022])\s+/i;
+const BOUNDARY = /[.!?]+["')\]]*\s+/g;
+
+// Sentences of a comment, whitespace squashed, a leading list marker left
+// off, only units with a letter. A line break is a space (pasted text wraps
+// mid-sentence) except before a list line and at a blank line. Every
+// sentence is a substring of the comment text with whitespace squashed.
+export function splitSentences(text) {
+  const chunks = [];
+  let cur = [];
+  for (const line of String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")) {
+    if (!line.trim() || LIST_LINE.test(line)) {
+      if (cur.length) chunks.push(cur.join(" "));
+      cur = line.trim() ? [line] : [];
+    } else {
+      cur.push(line);
+    }
+  }
+  if (cur.length) chunks.push(cur.join(" "));
+  const out = [];
+  for (const chunk of chunks) {
+    const t = squash(chunk);
+    let start = 0;
+    for (const m of t.matchAll(BOUNDARY)) {
+      const end = m.index + m[0].length;
+      const head = t.slice(start, end).trimEnd();
+      const next = t[end] ?? "";
+      if (/\p{Ll}/u.test(next) || ABBREV.test(head) || LIST_NUMBER.test(head)) continue;
+      out.push(head);
+      start = end;
+    }
+    if (start < t.length) out.push(t.slice(start));
+  }
+  return out.map((u) => u.replace(LIST_MARK, "").trim()).filter((u) => /\p{L}/u.test(u));
+}
+
+export const REQUIREMENT_SYSTEM =
+  "You sort the sentences of peer-review comments. Give every sentence exactly one type. Do not return any text of the review. Reply with JSON only.";
+
+export const REQUIREMENT_TYPES = ["request", "other"];
+
+export const REQUIREMENT_WARNING = "model could not label requirement sentences; add them by hand";
+
+// items: [{ ref, sentences }], sentences numbered from 1 per ref.
+export function requirementPrompt(items) {
+  return [
+    'Return {"sentences":[{"ref":"R1.2","s":1,"type":"request"}, ...]} with every ref and sentence number exactly once.',
+    'Types: "request" (asks the authors to do, change, add, explain or answer something; questions too), "other" (praise, summary, background, greeting).',
+    "Sentences:",
+    ...items.flatMap((it) => it.sentences.map((t, i) => `[${it.ref} s${i + 1}] ${t}`)),
+  ].join("\n");
+}
+
+// One type per (ref, s) as { ref: [types] }, or null unless every asked
+// sentence is there exactly once with a known type and nothing else is.
+function validSentenceLabels(json, items) {
+  const list = json?.sentences;
+  const total = items.reduce((n, it) => n + it.sentences.length, 0);
+  if (!Array.isArray(list) || list.length !== total) return null;
+  const out = Object.fromEntries(items.map((it) => [it.ref, new Array(it.sentences.length)]));
+  for (const x of list) {
+    const types = Object.hasOwn(out, x?.ref) ? out[x.ref] : null;
+    const s = x?.s;
+    if (!types || !Number.isInteger(s) || s < 1 || s > types.length || types[s - 1]) return null;
+    if (!REQUIREMENT_TYPES.includes(x.type)) return null;
+    types[s - 1] = x.type;
+  }
+  return out;
+}
+
+// comments: the split result. A comment that already has requirements, has
+// no sentence or shares its ref is left as it is. One one-shot labels the sentences of
+// the rest; a request sentence becomes a requirement as written. A failed
+// call or a reply that does not label every sentence once leaves the
+// requirements empty, with a warning; the comments are otherwise unchanged.
+// Returns { comments, warnings, asked, input, requests }: input is the prompt
+// (for a fingerprint), requests the count of request sentences per ref.
+export async function extractRequirements(comments, { oneshot } = {}) {
+  const none = { comments, warnings: [], asked: false, input: null, requests: null };
+  if (!oneshot) return none;
+  // A doubled ref (named in a split warning) is left for the user to renumber.
+  const once = (ref) => comments.filter((c) => c.ref === ref).length === 1;
+  const items = comments
+    .filter((c) => !(c.requirements ?? []).length && once(c.ref))
+    .map((c) => ({ ref: c.ref, sentences: splitSentences(c.text) }))
+    .filter((it) => it.sentences.length);
+  if (!items.length) return none;
+  const input = requirementPrompt(items);
+  const r = await oneshot({ system: REQUIREMENT_SYSTEM, prompt: input });
+  const failed = (warning) => ({ ...none, warnings: [warning], asked: true, input });
+  if (!r.ok) return failed(`requirement extraction failed: ${r.error}; add them by hand`);
+  const labels = validSentenceLabels(r.json, items);
+  if (!labels) return failed(REQUIREMENT_WARNING);
+  const texts = Object.fromEntries(
+    items.map((it) => [it.ref, it.sentences.filter((_, i) => labels[it.ref][i] === "request")]),
+  );
+  return {
+    comments: comments.map((c) =>
+      texts[c.ref] ? { ...c, requirements: numberRequirements([], texts[c.ref]) } : c,
+    ),
+    warnings: [],
+    asked: true,
+    input,
+    requests: Object.fromEntries(items.map((it) => [it.ref, texts[it.ref].length])),
+  };
 }

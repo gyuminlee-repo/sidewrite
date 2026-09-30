@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 import { loadRevision, saveRevision } from "../daemon/revision-store.mjs";
+import { REQUIREMENT_SYSTEM } from "../daemon/review-split.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 
@@ -48,6 +49,12 @@ async function setup({ env = ENV, oneshot = null, callResult, callImpl = null, .
     cleanup: () => rm(dir, { recursive: true, force: true }),
   };
 }
+
+const readDecisions = async (dir) =>
+  (await readFile(join(dir, "paper.decisions.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
 
 const COMMENTS = [
   { ref: "R1.1", reviewer: 1, text: "Use Celsius." },
@@ -108,6 +115,78 @@ test("split (regex) then save; the file is written next to the manuscript", asyn
     assert.deepEqual(await readdir(t.dir), ["paper.revision.json"]);
     const onDisk = JSON.parse(await readFile(join(t.dir, "paper.revision.json"), "utf8"));
     assert.equal(onDisk.comments.length, 2);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a regex split extracts requirements once; saving edited ones asks no model", async () => {
+  const calls = [];
+  const t = await setup({
+    oneshotModel: "haiku",
+    oneshot: async (req) => {
+      calls.push(req);
+      return {
+        ok: true,
+        json: {
+          sentences: [
+            { ref: "R1.1", s: 1, type: "other" },
+            { ref: "R1.1", s: 2, type: "request" },
+            { ref: "R1.2", s: 1, type: "request" },
+          ],
+        },
+      };
+    },
+  });
+  try {
+    const s = await t.ask("review_split", {
+      text: "Reviewer #1\nComment 1: Nice study. Please use Celsius.\nComment 2: Rename it.",
+    });
+    assert.equal(s.method, "regex");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].system, REQUIREMENT_SYSTEM);
+    assert.deepEqual(
+      s.comments.map((c) => [c.ref, c.text, c.requirements]),
+      [
+        ["R1.1", "Nice study. Please use Celsius.", [{ id: "q1", text: "Please use Celsius." }]],
+        ["R1.2", "Rename it.", [{ id: "q1", text: "Rename it." }]],
+      ],
+    );
+    const [row] = await readDecisions(t.dir);
+    assert.deepEqual(
+      [row.kind, row.model, row.output],
+      ["requirement_extract", "haiku", { requests: { "R1.1": 1, "R1.2": 1 } }],
+    );
+    const raw = await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8");
+    assert.ok(!raw.includes("Celsius"));
+    const saved = await t.ask("review_save_comments", {
+      comments: [{ ref: "R1.1", reviewer: 1, text: "Use Celsius.", requirements: ["use °C"] }],
+    });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(saved.revision.comments[0].requirements, [{ id: "q1", text: "use °C" }]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a bad requirement reply warns and keeps the split", async () => {
+  const t = await setup({ oneshot: async () => ({ ok: true, json: { sentences: [] } }) });
+  try {
+    const s = await t.ask("review_split", {
+      text: "Reviewer #1\nComment 1: Use Celsius.\nComment 2: Rename it.",
+    });
+    assert.equal(s.method, "regex");
+    assert.deepEqual(
+      s.comments.map((c) => [c.ref, c.requirements]),
+      [
+        ["R1.1", []],
+        ["R1.2", []],
+      ],
+    );
+    assert.ok(
+      s.warnings.includes("model could not label requirement sentences; add them by hand"),
+      s.warnings.join(" | "),
+    );
   } finally {
     await t.cleanup();
   }
@@ -928,21 +1007,19 @@ test("ledger_check stores an unsure LLM verdict on the item", async () => {
   }
 });
 
-const readDecisions = async (dir) =>
-  (await readFile(join(dir, "paper.decisions.jsonl"), "utf8"))
-    .trim()
-    .split("\n")
-    .map((l) => JSON.parse(l));
-
 test("receipts: an LLM split, LLM ledger verdicts and requirement links land in <stem>.decisions.jsonl", async () => {
   const REVIEW = 'Please say how "secret growth phrase" was followed.';
   let call = 0;
   const t = await setup({
     oneshotModel: "haiku",
     getModel: () => "sonnet",
-    oneshot: async () => {
+    oneshot: async (req) => {
       call += 1;
       if (call === 1) return { ok: true, json: { lines: [{ n: 1, type: "comment_start" }] } };
+      if (call === 2) {
+        assert.equal(req.system, REQUIREMENT_SYSTEM);
+        return { ok: true, json: { sentences: [{ ref: "R1.1", s: 1, type: "request" }] } };
+      }
       return {
         ok: true,
         json: {
@@ -996,6 +1073,7 @@ test("receipts: an LLM split, LLM ledger verdicts and requirement links land in 
       rows.map((r) => [r.kind, r.model, r.expected]),
       [
         ["comment_split", "haiku", null],
+        ["requirement_extract", "haiku", null],
         ["ledger_check", "haiku", null],
         ["ledger_check", "haiku", null],
         ["ledger_check", "haiku", null],
@@ -1016,14 +1094,15 @@ test("receipts: an LLM split, LLM ledger verdicts and requirement links land in 
       drop: 0,
     });
     assert.deepEqual(
-      rows.slice(1, 4).map((r) => [r.output.item_id, r.output.paragraph_index, r.output.verdict]),
+      rows.slice(2, 5).map((r) => [r.output.item_id, r.output.paragraph_index, r.output.verdict]),
       [
         ["L1", 3, "violation"],
         ["L1", 4, "unsure"],
         ["L1", 5, "ok"],
       ],
     );
-    assert.deepEqual(rows[4].output, {
+    assert.deepEqual(rows[1].output, { requests: { "R1.1": 1 } });
+    assert.deepEqual(rows[5].output, {
       change_id: "R1.1-1",
       comment_ref: "R1.1",
       requirement_ids: ["q1"],

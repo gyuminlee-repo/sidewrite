@@ -407,6 +407,10 @@ Editor note: also fix the title.
   );
   assert.ok(r.warnings.some((w) => /E\.1.*delete it/i.test(w)));
   assert.ok(r.warnings.some((w) => /R1\.0.*delete it/i.test(w)));
+  // E.2 comes after a reviewer: its warning does not call it text before one.
+  const e2 = r.warnings.filter((w) => /E\.2/.test(w));
+  assert.equal(e2.length, 1, r.warnings.join(" | "));
+  assert.match(e2[0], /^Editor text after a reviewer .*E\.2.*delete it/i);
 });
 
 test("a first line labelled continue starts a comment", async () => {

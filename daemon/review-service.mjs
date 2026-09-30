@@ -46,7 +46,7 @@ import {
   summarizeStates,
   normalizeParaText,
 } from "./revision-classify.mjs";
-import { splitReview } from "./review-split.mjs";
+import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental } from "./ledger-check.mjs";
 import { snapshotTexts, outsideChanges } from "./doc-diff.mjs";
@@ -385,8 +385,9 @@ export function createReviewService({
           return oneshot(req);
         });
       const r = await splitReview(text, { patterns: msg.patterns, oneshot: ask });
+      const records = [];
       if (asked) {
-        await receipt(key, [
+        records.push(
           decisionRecord({
             kind: "comment_split",
             input: text,
@@ -398,9 +399,23 @@ export function createReviewService({
               warnings: r.warnings.map(redactQuotes),
             },
           }),
-        ]);
+        );
       }
-      return r;
+      // L5: once the comments are known, whichever split made them. A save of
+      // the edited list does not come here, so it never runs again on it.
+      const x = await extractRequirements(r.comments, { oneshot });
+      if (x.asked) {
+        records.push(
+          decisionRecord({
+            kind: "requirement_extract",
+            input: x.input,
+            model: oneshotModel,
+            output: { requests: x.requests },
+          }),
+        );
+      }
+      if (records.length) await receipt(key, records);
+      return { ...r, comments: x.comments, warnings: [...r.warnings, ...x.warnings] };
     },
     async review_save_comments(msg, key) {
       const incoming = Array.isArray(msg.comments) ? msg.comments : [];

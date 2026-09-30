@@ -303,7 +303,7 @@ CC_OFFICE_SETTING_SOURCES=all CC_OFFICE_LOAD_USER_MCP=1 npm start
 
 `CC_OFFICE_DEBUG=1` turns on the opt-in `[diag]` logger (`daemon/diag.mjs`).
 
-The Review tab appends one JSON line per model decision (comment split, LLM ledger check verdict, requirement link) to `<manuscript>.decisions.jsonl` next to the document. Each line holds a SHA-256 fingerprint of the input instead of its text, the model, a short output, and an empty `expected` field for a person to fill in later; delete the file whenever you like.
+The Review tab appends one JSON line per model decision (comment split, requirement sentence labels, LLM ledger check verdict, requirement link) to `<manuscript>.decisions.jsonl` next to the document. Each line holds a SHA-256 fingerprint of the input instead of its text, the model, a short output, and an empty `expected` field for a person to fill in later; delete the file whenever you like.
 
 ---
 
