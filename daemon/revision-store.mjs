@@ -64,6 +64,10 @@ export const ChangeSchema = z.object({
   // task pane error code (CommentAnchorMissing or CommentInsertFailed).
   // word_comment_id is then null.
   comment_missing: z.string().nullable().default(null),
+  // When the task pane's comment cleanup (tool comments or Delete ALL)
+  // removed the rationale comment: its absence is then no sign of a reject
+  // and no missing comment (Codex review 7).
+  comment_cleaned_at: z.string().nullable().default(null),
   created_at: z.string(),
   state: z.enum(["pending", "accepted", "rejected", "user_edited", "unlocated"]).default("pending"),
   checked_at: z.string().nullable().default(null),
@@ -389,6 +393,23 @@ export function addChange(rev, ref, change, now = new Date()) {
   c.changes.push(row);
   if (c.status === "pending") c.status = "in_progress";
   return { revision: next, change: row };
+}
+
+// ids: Word comment ids the task pane's cleanup deleted. Marks the changes
+// whose rationale comment is one of them; returns null when none is.
+export function markCommentsCleaned(rev, ids, now = new Date()) {
+  const gone = new Set((ids ?? []).map(String));
+  const next = clone(rev);
+  let hit = false;
+  for (const c of next.comments) {
+    for (const ch of c.changes) {
+      if (ch.word_comment_id == null || ch.comment_cleaned_at) continue;
+      if (!gone.has(String(ch.word_comment_id))) continue;
+      ch.comment_cleaned_at = now.toISOString();
+      hit = true;
+    }
+  }
+  return hit ? next : null;
 }
 
 // rows: [{ ref, change_id, state, paragraph_index }] from classifyRevision.

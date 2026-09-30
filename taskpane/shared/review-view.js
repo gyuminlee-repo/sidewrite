@@ -194,7 +194,11 @@ export function invariantReport(revision, comments) {
     (comments ?? []).filter((c) => isToolComment(c.content)).map((c) => String(c.id)),
   );
   const changes = (revision?.comments ?? []).flatMap((c) => c.changes ?? []);
-  const expected = changes.filter((ch) => !(ch.kind === "insert" && ch.state === "rejected"));
+  // No comment is expected for a rejected insertion (Word removes it) or
+  // for a change whose comment the tool comment cleanup removed.
+  const expected = changes.filter(
+    (ch) => !(ch.kind === "insert" && ch.state === "rejected") && !ch.comment_cleaned_at,
+  );
   const recorded = new Set(changes.map((ch) => String(ch.word_comment_id)));
   const missing = expected.filter((ch) => !ids.has(String(ch.word_comment_id)));
   const orphans = [...ids].filter((id) => !recorded.has(id));

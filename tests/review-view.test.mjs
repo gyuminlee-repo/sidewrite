@@ -528,3 +528,27 @@ test("an unsure ledger item waits for the author and says how many paragraphs", 
     "1 violation(s), unsure on 1 paragraph(s)",
   );
 });
+
+test("invariantReport: a change whose comment the cleanup removed expects no comment", () => {
+  const rev = {
+    comments: [
+      {
+        ref: "R1.6",
+        changes: [
+          {
+            id: "R1.6-1",
+            kind: "insert",
+            state: "accepted",
+            word_comment_id: "60",
+            comment_cleaned_at: "2026-09-30T00:00:00.000Z",
+          },
+          { id: "R1.6-2", kind: "replace", state: "pending", word_comment_id: "61" },
+        ],
+      },
+    ],
+  };
+  const after = view.invariantReport(rev, [{ id: "61", content: "[R1.6] a / b / c" }]);
+  assert.deepEqual([after.ok, after.expected_comments, after.missing_comment], [true, 1, []]);
+  const lost = view.invariantReport(rev, []);
+  assert.deepEqual([lost.ok, lost.missing_comment], [false, ["R1.6-2"]]);
+});

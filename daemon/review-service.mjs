@@ -5,8 +5,8 @@
 // request_id, the existing sendRequest pattern in taskpane.js):
 //   review_load, review_split, review_save_comments, review_set_status,
 //   review_set_requirements, review_preview, review_propose, review_refresh,
-//   review_external_dismiss, review_override, ledger_add, ledger_update,
-//   ledger_remove, ledger_check, comments_backup
+//   review_external_dismiss, review_comments_cleaned, review_override,
+//   ledger_add, ledger_update, ledger_remove, ledger_check, comments_backup
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
 //     | "late_result_recorded", ... }
@@ -39,6 +39,7 @@ import {
   setSnapshot,
   addExternal,
   dismissExternal,
+  markCommentsCleaned,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -520,6 +521,13 @@ export function createReviewService({
     },
     async review_external_dismiss(msg, key) {
       return { revision: await update(key, (rev) => dismissExternal(rev, msg.id)) };
+    },
+    // msg.ids: Word comment ids the task pane's comment cleanup deleted.
+    async review_comments_cleaned(msg, key) {
+      const ids = Array.isArray(msg.ids) ? msg.ids : [];
+      const revision = await update(key, (rev) => markCommentsCleaned(rev, ids));
+      log(`[review] comments cleaned ids=${ids.length}`);
+      return { revision };
     },
     async review_override(msg, key) {
       // Claimed inside the revision chain: an overlapping override of the

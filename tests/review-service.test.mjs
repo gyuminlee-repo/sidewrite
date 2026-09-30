@@ -1364,3 +1364,50 @@ test("an edit whose comment is gone restores the comment: ref only, or the text 
     await t.cleanup();
   }
 });
+
+test("review_comments_cleaned marks the change; refresh then keeps it and reports no missing comment", async () => {
+  const { invariantReport } = await import("../taskpane/shared/review-view.js");
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({
+        ok: true,
+        word_comment_id: 44,
+        paragraph_index: 9,
+        before: "held at 30 degrees",
+        after: "held at 30 °C",
+      }),
+    };
+    await applyTrackedEdit(
+      deps,
+      {
+        comment_ref: "R1.1",
+        find: "30 degrees",
+        replace: "30 °C",
+        rationale: { what: "w", why: "y", addresses: "a" },
+      },
+      { ref: "R1.1" },
+    );
+    const c = await t.ask("review_comments_cleaned", { ids: ["44", "99"] });
+    assert.equal(c.ok, true);
+    assert.equal(typeof c.revision.comments[0].changes[0].comment_cleaned_at, "string");
+    const snapshot = {
+      paragraphs: [{ index: 9, id: null, text: "held at 30 °C", w_ins: 0, w_del: 0 }],
+      comments: [{ id: "45", paragraph_index: 1, content: "Check units later" }],
+    };
+    const r = await t.ask("review_refresh", { snapshot });
+    assert.deepEqual(
+      r.rows.map((x) => [x.change_id, x.state]),
+      [["R1.1-1", "accepted"]],
+    );
+    const inv = invariantReport(r.revision, snapshot.comments);
+    assert.deepEqual([inv.ok, inv.missing_comment], [true, []]);
+    // Nothing recorded for these ids: no write.
+    const none = await t.ask("review_comments_cleaned", { ids: ["7"] });
+    assert.equal(none.ok, true);
+  } finally {
+    await t.cleanup();
+  }
+});

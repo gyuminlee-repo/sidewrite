@@ -1793,23 +1793,27 @@ export async function deleteBackedUpComments(backupRows) {
   });
 }
 
-// Delete only "[R<n>.<m>]" comments; returns counts before and after.
+// Delete only "[R<n>.<m>]" comments; returns counts before and after and
+// deleted_ids, the ids of the tool comments that are gone.
 export async function deleteToolComments() {
   return await Word.run(async (context) => {
     const comments = await getCommentsLoaded(context, "items/id, items/content");
     const before = { tool: 0, user: 0 };
+    const doomed = [];
     for (const c of comments.items) {
       if (isToolComment(c.content)) {
         before.tool += 1;
+        doomed.push(String(c.id));
         c.delete();
       } else {
         before.user += 1;
       }
     }
     await context.sync();
-    const left = await getCommentsLoaded(context, "items/content");
+    const left = await getCommentsLoaded(context, "items/id, items/content");
     const after = { tool: 0, user: 0 };
     for (const c of left.items) after[isToolComment(c.content) ? "tool" : "user"] += 1;
-    return { before, after };
+    const still = new Set(left.items.map((c) => String(c.id)));
+    return { before, after, deleted_ids: doomed.filter((id) => !still.has(id)) };
   });
 }

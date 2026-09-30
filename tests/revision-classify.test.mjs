@@ -214,8 +214,9 @@ test("pure insertion: pending while marked, accepted, rejected when comment and 
     ],
     comments: [],
   };
-  // Not locatable by text and the comment is gone: the insertion was rejected.
-  assert.equal(classifyChange(insertChange, rejectedThenEdited).state, "rejected");
+  // Not locatable and the text is neither form: a missing comment alone is no
+  // proof of a reject (Codex review 7), so the change is not found.
+  assert.equal(classifyChange(insertChange, rejectedThenEdited).state, "unlocated");
 });
 
 test("accepted insertion stays accepted after tool comments are cleaned up", () => {
@@ -531,4 +532,64 @@ test("Korean counters keep the context rule: 5개 -> 7개 accepted, 70개 edited
   );
   assert.equal(classifyChange(ch, para("시료 7개를 준비했다.")).state, "accepted");
   assert.equal(classifyChange(ch, para("시료 70개를 준비했다.")).state, "user_edited");
+});
+
+// Codex review 7: a missing rationale comment is evidence of a rejected
+// insertion only when the text reads the old form; the comment cleanup
+// removes it from accepted and edited insertions too.
+const grow = (extra = {}) =>
+  withContext(
+    {
+      id: "R1.6-1",
+      kind: "insert",
+      word_comment_id: "60",
+      paragraph_index: 0,
+      paragraph_id: "P60",
+      before: "Cells grow.",
+      after: "Cells rapidly grow.",
+      ...extra,
+    },
+    "Cells",
+    " rapidly",
+    { kind: "insert" },
+  );
+const growPara = (text, comments = []) => ({
+  paragraphs: [{ index: 0, id: "P60", text, w_ins: 0, w_del: 0 }],
+  comments,
+});
+
+test("insertion accepted then reworded, comment cleaned up: user_edited, not rejected", () => {
+  const withComment = growPara("Cells quickly grow.", [{ id: "60", paragraph_index: 0 }]);
+  assert.equal(classifyChange(grow(), withComment).state, "user_edited");
+  assert.equal(classifyChange(grow(), growPara("Cells quickly grow.")).state, "user_edited");
+  // Recorded before context existed: the whole-paragraph rule says the same.
+  const old = { ...grow(), context: null };
+  assert.equal(classifyChange(old, growPara("Cells quickly grow.")).state, "user_edited");
+});
+
+test("insertion accepted and comment cleaned up: accepted; rejected when the text is the old one", () => {
+  assert.equal(classifyChange(grow(), growPara("Cells rapidly grow.")).state, "accepted");
+  assert.equal(classifyChange(grow(), growPara("Cells grow.")).state, "rejected");
+  const old = { ...grow(), context: null };
+  assert.equal(classifyChange(old, growPara("Cells rapidly grow.")).state, "accepted");
+  assert.equal(classifyChange(old, growPara("Cells grow.")).state, "rejected");
+});
+
+test("unlocated insertion: a gone comment means rejected only when every match is the old text", () => {
+  const noId = { ...grow(), paragraph_id: null, context: null, paragraph_index: 5 };
+  const twice = (a, b) => ({
+    paragraphs: [
+      { index: 0, id: null, text: a, w_ins: 0, w_del: 0 },
+      { index: 1, id: null, text: b, w_ins: 0, w_del: 0 },
+    ],
+    comments: [],
+  });
+  assert.equal(classifyChange(noId, twice("Cells grow.", "Cells grow.")).state, "rejected");
+  assert.equal(
+    classifyChange(noId, twice("Cells grow.", "Cells rapidly grow.")).state,
+    "unlocated",
+  );
+  // The comment was removed by the cleanup, not by Word: no evidence.
+  const cleaned = { ...noId, comment_cleaned_at: "2026-09-30T00:00:00.000Z" };
+  assert.equal(classifyChange(cleaned, twice("Cells grow.", "Cells grow.")).state, "unlocated");
 });

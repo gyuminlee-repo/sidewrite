@@ -112,6 +112,11 @@ test("Delete ALL: a comment added after the first press is not deleted unseen", 
   assert.equal(backups[0].reply_count, 1);
   assert.match(t.$("review-message").textContent, /Backed up 3, deleted 3 of 3/);
   assert.doesNotMatch(t.$("review-message").textContent, /MISMATCH/);
+  // The daemon is told which comments are gone (rationale comments among them).
+  assert.deepEqual(
+    t.requests.filter((r) => r.type === "review_comments_cleaned").map((r) => r.payload.ids),
+    [["1", "2", "3"]],
+  );
 });
 
 // A fake Word comment store. clearAllComments deletes everything (the old
@@ -548,3 +553,24 @@ test("propose: answer then turn end leaves the buttons and the chat input enable
 test("propose: turn end before the answer does not start the turn again", () =>
   proposeRace("end-first"));
 test("propose: a failed request releases the turn it took", () => proposeRace("failed"));
+
+test("Clean up tool comments tells the daemon which comment ids are gone", async () => {
+  const revision = { comments: [], ledger: [] };
+  const t = await setup({
+    revision,
+    word: {
+      deleteToolComments: async () => ({
+        before: { tool: 2, user: 1 },
+        after: { tool: 0, user: 1 },
+        deleted_ids: ["60", "61"],
+      }),
+    },
+  });
+  await t.$("review-clean-tool").click();
+  const sent = t.requests.filter((r) => r.type === "review_comments_cleaned");
+  assert.deepEqual(
+    sent.map((r) => r.payload.ids),
+    [["60", "61"]],
+  );
+  assert.match(t.$("review-message").textContent, /Tool comments 2 -> 0/);
+});

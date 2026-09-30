@@ -181,13 +181,34 @@ function classifyByContext(change, t, revisions) {
 export function classifyChange(change, snapshot) {
   const loc = locateParagraph(change, snapshot);
   const commentIds = new Set((snapshot.comments ?? []).map((c) => String(c.id)));
-  const commentPresent =
-    change.word_comment_id != null && commentIds.has(String(change.word_comment_id));
+  // Word removes the comment on a rejected inserted range, but the comment
+  // cleanup (comment_cleaned_at) and the author remove comments too. So a
+  // gone comment backs a reject only where the text already reads the old
+  // form, never on its own (Codex review 7).
+  const commentGone =
+    change.word_comment_id != null &&
+    !change.comment_cleaned_at &&
+    !commentIds.has(String(change.word_comment_id));
   if (loc.index === null) {
-    // A rejected pure insertion loses its comment (Word removes comments on
-    // a rejected inserted range) and its paragraph may no longer be unique.
-    if (change.kind === "insert" && !commentPresent) {
-      return { state: "rejected", paragraph_index: null, method: `${loc.method}+comment_gone` };
+    // A rejected pure insertion whose paragraph is no longer unique or was
+    // edited since: rejected when the comment Word removes is gone and the
+    // text reads the old form, either every paragraph matching a sentence
+    // reads the old one or the recorded paragraph holds the old form of the
+    // change's own range (context).
+    if (change.kind === "insert" && commentGone) {
+      const before = normalizeParaText(change.before);
+      const after = normalizeParaText(change.after);
+      const texts = (snapshot.paragraphs ?? []).map((p) => normalizeParaText(p.text));
+      const rec = byIndex(snapshot).get(change.paragraph_index);
+      const oldForm =
+        loc.method === "ambiguous"
+          ? texts.includes(before) && !texts.includes(after)
+          : !!change.context &&
+            !!rec &&
+            classifyByContext(change, normalizeParaText(rec.text), 0) === "rejected";
+      if (oldForm) {
+        return { state: "rejected", paragraph_index: null, method: `${loc.method}+comment_gone` };
+      }
     }
     return { state: "unlocated", paragraph_index: null, method: loc.method };
   }
@@ -212,7 +233,6 @@ export function classifyChange(change, snapshot) {
   }
   if (t === after) return out("accepted");
   if (t === before) return out("rejected");
-  if (change.kind === "insert" && !commentPresent) return out("rejected");
   return out("user_edited");
 }
 

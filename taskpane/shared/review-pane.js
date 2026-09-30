@@ -637,10 +637,16 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       $("ledger-pattern").value = "";
     }),
   );
+  // Tell the daemon which rationale comments the cleanup removed, so their
+  // absence is not read as a reject or a missing comment (Codex review 7).
+  async function markCleaned(ids) {
+    if (ids?.length) await ask("review_comments_cleaned", { ids: ids.map(String) });
+  }
   $("review-clean-tool").addEventListener(
     "click",
     guard(async () => {
       const r = await word.deleteToolComments();
+      await markCleaned(r.deleted_ids);
       const rep = cleanupReport(r.before, r.after);
       say(rep.text, !rep.ok);
     }),
@@ -684,6 +690,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       // backup: a comment added or edited while the backup was written stays.
       const plan = await word.deleteBackedUpComments(backup.comments);
       const left = new Set((await word.listComments()).comments.map((c) => String(c.id)));
+      await markCleaned(plan.delete_ids.filter((id) => !left.has(String(id))));
       const rep = deleteAllReport({
         shown: current.length,
         backedUp: b.count,
