@@ -38,6 +38,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     backupShown: null,
     editingLedger: null, // L6: id of the ledger item loaded into the form
     confirmDone: null, // L5: ref whose "Done" was asked once with open requirements
+    armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     turn: null, // L9: { ref, startedAt } of the running review turn
     timer: null,
   };
@@ -161,20 +162,22 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   }
 
   function blockedRow(ref, b) {
+    // The armed state lives in `state`: guard() re-renders after every
+    // click, which rebuilds this button.
+    const armed = state.armedBlocked.has(b.id);
     const allow = el("button", {
       type: "button",
       class: "btn-secondary btn-small",
-      text: "Allow exception",
+      text: armed ? `Apply despite ${b.blocked_by.join(", ")}?` : "Allow exception",
     });
-    let armed = false;
     allow.addEventListener(
       "click",
       guard(async () => {
-        if (!armed) {
-          armed = true;
-          allow.textContent = `Apply despite ${b.blocked_by.join(", ")}?`;
+        if (!state.armedBlocked.has(b.id)) {
+          state.armedBlocked.add(b.id);
           return;
         }
+        state.armedBlocked.delete(b.id);
         const r = await ask("review_override", { ref, blocked_id: b.id });
         if (!r.applied) throw new Error(r.result?.message || "Not applied");
       }),

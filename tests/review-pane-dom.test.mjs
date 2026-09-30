@@ -151,3 +151,40 @@ test("Delete ALL: a failed backup deletes nothing", async () => {
   assert.deepEqual(cleared, []);
   assert.match(t.$("review-message").textContent, /disk full/);
 });
+
+test("Allow exception: the second press sends one review_override", async () => {
+  const blocked = {
+    id: "R1.1-b1",
+    args: { find: "held at 30 degrees", replace: "as suggested by the reviewer, held at 30 °C" },
+    blocked_by: ["L2"],
+    created_at: "2026-01-01T00:00:00Z",
+  };
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [],
+        blocked: [blocked],
+      },
+    ],
+    ledger: [],
+  };
+  const respond = { review_override: () => ({ ok: true, applied: true, revision }) };
+  const t = await setup({ revision, respond });
+  const allow = () =>
+    findAll(t.$("review-comments"), (n) => /Allow exception|Apply despite/.test(n.textContent));
+
+  assert.equal(allow().length, 1);
+  await allow()[0].click();
+  assert.equal(t.requests.filter((r) => r.type === "review_override").length, 0);
+  // render() rebuilt the row; the rebuilt button must still be armed.
+  assert.match(allow()[0].textContent, /Apply despite L2\?/);
+  await allow()[0].click();
+  const overrides = t.requests.filter((r) => r.type === "review_override");
+  assert.equal(overrides.length, 1);
+  assert.deepEqual(overrides[0].payload, { ref: "R1.1", blocked_id: "R1.1-b1" });
+});
