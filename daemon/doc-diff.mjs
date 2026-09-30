@@ -83,28 +83,88 @@ export function alignParagraphs(oldTexts, newTexts, { maxCells = 25_000_000 } = 
 // tool edit itself (pending) or the author accepting or rejecting it.
 const EXPLAINED = new Set(["pending", "accepted", "rejected"]);
 
+const CONTEXT_WORDS = 3;
+const collapse = (s) =>
+  String(s ?? "")
+    .replace(/\u0005/g, "")
+    .replace(/\s+/g, " ");
+const tailWords = (s, k) => (k > 0 ? (s.match(/\S+\s*/g) ?? []).slice(-k).join("") : "");
+const headWords = (s, k) => (k > 0 ? (s.match(/\s*\S+/g) ?? []).slice(0, k).join("") : "");
+
+// Put one recorded change into the form its state gives in the reviewed
+// view (pending and accepted: the new words, rejected: the old ones). Both
+// snapshots are the reviewed view, so a paragraph holds either the new form
+// (L+I+R) or the old form (L+D+R) of the change; which one is found in
+// `text` is swapped for the target. Context words shrink 3..0 like
+// classifyByContext. Returns null when neither form, both forms or a
+// repeated form is found: the change cannot be placed and explains nothing.
+function applyRecorded(text, ch) {
+  const kind = ch.kind;
+  if (!["replace", "insert", "delete"].includes(kind)) return null;
+  // Changes recorded before context existed: an insertion sits right after
+  // its find, the other kinds have no context words.
+  const ctx = ch.context ?? (kind === "insert" ? { left: ch.find, right: "" } : null);
+  const left = collapse(ctx?.left);
+  const right = collapse(ctx?.right);
+  const I = kind === "delete" ? "" : collapse(ch.text);
+  const D = kind === "insert" ? "" : collapse(ch.find);
+  const once = (f) => f !== "" && text.indexOf(f) !== -1 && text.indexOf(f) === text.lastIndexOf(f);
+  for (let k = CONTEXT_WORDS; k >= 0; k--) {
+    const L = tailWords(left, k);
+    const R = headWords(right, k);
+    const fI = normalizeParaText(L + I + R);
+    const fD = normalizeParaText(L + D + R);
+    if (fI === fD) continue;
+    const hasI = once(fI);
+    const hasD = once(fD);
+    if (hasI === hasD) continue;
+    const [from, to] = ch.state === "rejected" ? [fI, fD] : [fD, fI];
+    return hasI === (from === fI) ? normalizeParaText(text.replace(from, () => to)) : text;
+  }
+  return null;
+}
+
+// The old paragraph with every recorded change of the new paragraph put in
+// its current form: what the paragraph would read if only the tool changes
+// and the author's accept or reject happened. null when any change is not
+// in an EXPLAINED state or cannot be placed.
+function expectedText(before, changes) {
+  let t = before;
+  for (const ch of changes) {
+    if (!EXPLAINED.has(ch.state)) return null;
+    t = applyRecorded(t, ch);
+    if (t == null) return null;
+  }
+  return t;
+}
+
 // oldTexts/newTexts: snapshotTexts of the last and the current snapshot.
-// rows: classifyRevision rows for the current snapshot.
+// changes: classifyRevision rows joined to their recorded change, i.e.
+// [{ paragraph_index, state, kind, find, text, context }].
+// A paragraph with recorded changes is reported when its text differs from
+// the old text with those changes applied (expectedText); `before` is then
+// that expected text and lost_facts are what the rest of the edit dropped.
 // Returns [{ kind: modified|inserted|deleted, paragraph_index, old_index,
 // before, after, lost_facts }], the ones that lose facts first.
-export function outsideChanges(oldTexts, newTexts, rows = []) {
+export function outsideChanges(oldTexts, newTexts, changes = []) {
   const byPara = new Map();
-  for (const r of rows) {
-    if (r.paragraph_index == null) continue;
-    if (!byPara.has(r.paragraph_index)) byPara.set(r.paragraph_index, []);
-    byPara.get(r.paragraph_index).push(r.state);
+  for (const c of changes) {
+    if (c.paragraph_index == null) continue;
+    if (!byPara.has(c.paragraph_index)) byPara.set(c.paragraph_index, []);
+    byPara.get(c.paragraph_index).push(c);
   }
-  const explained = (j) => {
-    const states = byPara.get(j) ?? [];
-    return states.length > 0 && states.every((s) => EXPLAINED.has(s));
-  };
   const out = [];
   for (const a of alignParagraphs(oldTexts, newTexts)) {
     if (a.same) continue;
-    const before = a.old == null ? "" : oldTexts[a.old];
+    let before = a.old == null ? "" : oldTexts[a.old];
     const after = a.new == null ? "" : newTexts[a.new];
     if (before === after) continue;
-    if (a.new != null && explained(a.new)) continue;
+    const own = a.new == null ? [] : (byPara.get(a.new) ?? []);
+    if (own.length) {
+      const expected = expectedText(before, own);
+      if (expected === after) continue;
+      if (expected != null) before = expected;
+    }
     out.push({
       kind: a.old == null ? "inserted" : a.new == null ? "deleted" : "modified",
       paragraph_index: a.new,

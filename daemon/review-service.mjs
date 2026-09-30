@@ -181,7 +181,13 @@ export function createReviewService({
         // L4: changes since the last refresh that no review change explains.
         // The first refresh only stores the snapshot.
         if (rev.snapshot) {
-          const r = addExternal(next, outsideChanges(rev.snapshot.paragraphs, texts, rows));
+          const changes = rows.map((row) => ({
+            ...rev.comments
+              .find((c) => c.ref === row.ref)
+              ?.changes.find((ch) => ch.id === row.change_id),
+            ...row,
+          }));
+          const r = addExternal(next, outsideChanges(rev.snapshot.paragraphs, texts, changes));
           next = r.revision;
           external = r.added;
         }

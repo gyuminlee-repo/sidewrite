@@ -40,6 +40,15 @@ test("alignParagraphs: an inserted paragraph does not shift the others into chan
   );
 });
 
+// The recorded tool change in P[2], as review_refresh joins it to its row.
+const LYSATE = {
+  paragraph_index: 2,
+  kind: "replace",
+  find: "cell-free extract",
+  text: "clarified lysate",
+  context: { left: "A ", right: " was prepared by" },
+};
+
 // Positive: each must be reported.
 test("L4 positive: sentence deleted outside the tool loses its facts", () => {
   const next = [P[0], "Growth was followed at 600 nm.", P[2], P[3]];
@@ -64,7 +73,7 @@ test("L4 positive: deleted and inserted paragraphs, shifted indexes", () => {
 
 test("L4 positive: a paragraph whose recorded change is user_edited is reported", () => {
   const next = [P[0], P[1], "A clarified lysate was prepared on ice.", P[3]];
-  const rows = [{ paragraph_index: 2, state: "user_edited" }];
+  const rows = [{ ...LYSATE, state: "user_edited" }];
   assert.equal(outsideChanges(P, next, rows).length, 1);
 });
 
@@ -75,7 +84,7 @@ test("L4 positive: the paragraph of a pending tool change is explained, a hand-e
     "A clarified lysate was prepared by sonication.",
     "Enzyme activity was measured.",
   ];
-  const rows = [{ paragraph_index: 2, state: "pending" }];
+  const rows = [{ ...LYSATE, state: "pending" }];
   const out = outsideChanges(P, next, rows);
   assert.deepEqual(
     out.map((x) => x.paragraph_index),
@@ -98,9 +107,12 @@ test("L4 positive: changes that lose facts come first", () => {
 test("L4 negative: unchanged, tool-explained, spacing-only", () => {
   assert.deepEqual(outsideChanges(P, [...P], []), []);
   const edited = [P[0], P[1], "A clarified lysate was prepared by sonication.", P[3]];
-  for (const state of ["pending", "accepted", "rejected"]) {
-    assert.deepEqual(outsideChanges(P, edited, [{ paragraph_index: 2, state }]), [], state);
+  for (const state of ["pending", "accepted"]) {
+    assert.deepEqual(outsideChanges(P, edited, [{ ...LYSATE, state }]), [], state);
   }
+  // Rejected after the last refresh saw it pending: the reviewed text goes
+  // back from the new words to the old ones.
+  assert.deepEqual(outsideChanges(edited, P, [{ ...LYSATE, state: "rejected" }]), []);
   const spaced = snapshotTexts({
     paragraphs: P.map((t, index) => ({ index, text: ` ${t.replace(/ /g, "  ")}\u0005` })),
   });
@@ -109,7 +121,68 @@ test("L4 negative: unchanged, tool-explained, spacing-only", () => {
 
 test("L4 negative: rows at another paragraph do not explain this one", () => {
   const next = [P[0], P[1], P[2], "Enzyme activity was measured."];
-  const out = outsideChanges(P, next, [{ paragraph_index: 2, state: "accepted" }]);
+  const out = outsideChanges(P, next, [{ ...LYSATE, state: "accepted" }]);
   assert.equal(out.length, 1);
   assert.equal(out[0].paragraph_index, 3);
+});
+
+// A tool change in a paragraph explains only its own range. A later hand
+// edit in the same paragraph is still an outside change, and its lost facts
+// are the ones the hand edit dropped, not the tool edit.
+const GROWTH = "Cells grew rapidly and were harvested after 24 h.";
+const SLOWLY = {
+  paragraph_index: 0,
+  kind: "replace",
+  find: "rapidly",
+  text: "slowly",
+  context: { left: "Cells grew ", right: " and were harvested" },
+};
+
+test("L4 positive: a hand edit next to an accepted tool change is reported", () => {
+  const now = ["Cells grew slowly and were harvested after 48 h."];
+  // The last refresh saw the tool edit already (reviewed view) or not yet.
+  for (const old of [[GROWTH], ["Cells grew slowly and were harvested after 24 h."]]) {
+    for (const state of ["accepted", "pending"]) {
+      const out = outsideChanges(old, now, [{ ...SLOWLY, state }]);
+      assert.equal(out.length, 1, `${old[0]} ${state}`);
+      assert.equal(out[0].kind, "modified");
+      assert.deepEqual(out[0].lost_facts, ["24 h"]);
+      assert.equal(out[0].before, "Cells grew slowly and were harvested after 24 h.");
+    }
+  }
+});
+
+test("L4 negative: a tool change alone is explained in every state", () => {
+  const slow = ["Cells grew slowly and were harvested after 24 h."];
+  for (const state of ["accepted", "pending"]) {
+    assert.deepEqual(outsideChanges([GROWTH], slow, [{ ...SLOWLY, state }]), [], state);
+    assert.deepEqual(outsideChanges(slow, slow, [{ ...SLOWLY, state }]), [], state);
+  }
+  assert.deepEqual(outsideChanges(slow, [GROWTH], [{ ...SLOWLY, state: "rejected" }]), []);
+  // Two tool changes in one paragraph, no hand edit.
+  const HOURS = {
+    paragraph_index: 0,
+    kind: "replace",
+    find: "24 h",
+    text: "one day",
+    context: { left: "were harvested after ", right: "" },
+  };
+  const both = ["Cells grew slowly and were harvested after one day."];
+  const rows = [
+    { ...SLOWLY, state: "accepted" },
+    { ...HOURS, state: "pending" },
+  ];
+  assert.deepEqual(outsideChanges([GROWTH], both, rows), []);
+});
+
+test("L4 positive: a rejected tool change does not hide a hand edit", () => {
+  const out = outsideChanges(
+    [GROWTH],
+    ["Cells grew rapidly and were harvested after 48 h."],
+    [{ ...SLOWLY, state: "rejected" }],
+  );
+  assert.deepEqual(
+    out.map((x) => x.lost_facts),
+    [["24 h"]],
+  );
 });

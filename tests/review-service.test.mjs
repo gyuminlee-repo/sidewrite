@@ -408,6 +408,69 @@ test("L4 refresh stores a snapshot; the next refresh records outside changes", a
   }
 });
 
+// The refresh joins each row to its recorded change, so a tool edit
+// explains only its own range and a later hand edit in the same paragraph
+// is still recorded.
+test("L4 refresh records a hand edit next to an accepted tool change", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const before = "Cells grew rapidly and were harvested after 24 h.";
+    const slow = "Cells grew slowly and were harvested after 24 h.";
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({
+        ok: true,
+        word_comment_id: 44,
+        paragraph_index: 1,
+        before,
+        after: slow,
+      }),
+    };
+    await applyTrackedEdit(
+      deps,
+      {
+        comment_ref: "R1.1",
+        find: "rapidly",
+        replace: "slowly",
+        rationale: { what: "w", why: "y", addresses: "a" },
+      },
+      { ref: "R1.1" },
+    );
+    const comments = [{ id: "44", paragraph_index: 1, content: "[R1.1] w / y / a" }];
+    const pending = {
+      index: 1,
+      id: null,
+      text: "Cells grew slowlyrapidly and were harvested after 24 h.",
+      reviewed_text: slow,
+      w_ins: 1,
+      w_del: 1,
+    };
+    const first = await t.ask("review_refresh", {
+      snapshot: { paragraphs: [para(0, DOC[0]), pending], comments },
+    });
+    assert.deepEqual(first.external, []);
+    const hand = "Cells grew slowly and were harvested after 48 h.";
+    const r = await t.ask("review_refresh", {
+      snapshot: { paragraphs: [para(0, DOC[0]), para(1, hand)], comments },
+    });
+    assert.deepEqual(
+      r.rows.map((x) => x.state),
+      ["accepted"],
+    );
+    assert.deepEqual(
+      r.external.map((x) => [x.kind, x.paragraph_index, x.lost_facts]),
+      [["modified", 1, ["24 h"]]],
+    );
+    const again = await t.ask("review_refresh", {
+      snapshot: { paragraphs: [para(0, DOC[0]), para(1, hand)], comments },
+    });
+    assert.deepEqual(again.external, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("L5 requirements: saved with the comment list, edited, and given to the tracked edit", async () => {
   const t = await setup();
   try {
