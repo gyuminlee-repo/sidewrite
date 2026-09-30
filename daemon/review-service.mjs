@@ -39,7 +39,6 @@ import {
   classifyRevision,
   classifyChange,
   summarizeStates,
-  boundedMatches,
   normalizeParaText,
 } from "./revision-classify.mjs";
 import { splitReview } from "./review-split.mjs";
@@ -84,8 +83,10 @@ export function resolveUnknownOverrides(rev, snapshot) {
       };
       const row = classifyChange(change, snapshot);
       const p = paras.find((x) => x.index === row.paragraph_index);
+      // Plain containment: Word joins pending inserted and deleted text with
+      // no space, so a word-bounded match would miss it.
       const newTextThere =
-        !!p && boundedMatches(normalizeParaText(p.text), normalizeParaText(change.text)).length > 0;
+        !!p && normalizeParaText(p.text).includes(normalizeParaText(change.text));
       const applied =
         row.state === "accepted" ||
         (row.state === "pending" && change.kind !== "delete" && newTextThere);

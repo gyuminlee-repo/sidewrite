@@ -714,3 +714,39 @@ test("refresh that does not find the override applied keeps the item outcome_unk
     await t.cleanup();
   }
 });
+
+// Word shows a pending tracked replace as inserted then deleted text.
+test("refresh that finds the override pending records it and releases the item", async () => {
+  const t = await setup({
+    callImpl: () => {
+      throw noAnswer("x1");
+    },
+  });
+  try {
+    await unknownOverride(t);
+    const r = await t.ask("review_refresh", {
+      snapshot: {
+        paragraphs: [
+          { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0 },
+          {
+            index: 1,
+            id: "p1",
+            text: "Cells grew on the novel substratethe substrate at 30 C.",
+            w_ins: 1,
+            w_del: 1,
+          },
+        ],
+        comments: [],
+      },
+    });
+    const c = r.revision.comments[1];
+    assert.equal(c.blocked.length, 0);
+    assert.equal(c.changes.length, 1);
+    assert.equal(c.changes[0].state, "pending");
+    assert.equal(c.changes[0].word_comment_id, null);
+    assert.equal(c.changes[0].comment_missing, "CommentNotFound");
+    assert.ok(t.lines.some((l) => /R1\.3-b1 found applied in refresh .* state=pending/.test(l)));
+  } finally {
+    await t.cleanup();
+  }
+});
