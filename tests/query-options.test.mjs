@@ -33,10 +33,10 @@ test("settingSources=all omits the key (SDK loads every source, upstream behavio
 
 test("settingSources empty string means isolation, list is filtered", () => {
   assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "" }), []);
-  assert.deepEqual(
-    resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "user, project,bogus" }),
-    ["user", "project"],
-  );
+  assert.deepEqual(resolveSettingSources({ CC_OFFICE_SETTING_SOURCES: "user, project,bogus" }), [
+    "user",
+    "project",
+  ]);
 });
 
 test("user MCP from ~/.claude.json is off by default", () => {

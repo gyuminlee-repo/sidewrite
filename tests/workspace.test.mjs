@@ -121,32 +121,48 @@ test("WSL mode: drive paths and file:// URLs map under the mount root", posixOnl
   withEnv(WSL_ON, async () => {
     assert.equal(await resolveWorkspaceRoot("D:\\a\\b.docx"), "/mnt/d/a");
     assert.equal(await resolveWorkspaceRoot("file:///D:/a/b.docx"), "/mnt/d/a");
-    assert.equal(await resolveWorkspaceRoot("C:\\Users\\me\\Docs\\spec.docx"), "/mnt/c/Users/me/Docs");
-  }));
+    assert.equal(
+      await resolveWorkspaceRoot("C:\\Users\\me\\Docs\\spec.docx"),
+      "/mnt/c/Users/me/Docs",
+    );
+  }),
+);
 
 test("WSL mode: \\\\wsl.localhost and \\\\wsl$ shares map to Linux paths", posixOnly, () =>
   withEnv(WSL_ON, async () => {
-    assert.equal(await resolveWorkspaceRoot("\\\\wsl.localhost\\Ubuntu\\home\\a\\b.docx"), "/home/a");
+    assert.equal(
+      await resolveWorkspaceRoot("\\\\wsl.localhost\\Ubuntu\\home\\a\\b.docx"),
+      "/home/a",
+    );
     assert.equal(await resolveWorkspaceRoot("\\\\wsl$\\Ubuntu\\home\\a\\b.docx"), "/home/a");
-  }));
+  }),
+);
 
 test("WSL mode: other UNC shares and SharePoint are unaddressable", () =>
   withEnv(WSL_ON, async () => {
     assert.equal(await resolveWorkspaceRoot("\\\\server\\share\\b.docx"), null);
     assert.equal(await resolveWorkspaceRoot("\\\\fileserver\\share\\spec.docx"), null);
-    assert.equal(await resolveWorkspaceRoot("https://contoso.sharepoint.com/sites/x/spec.docx"), null);
+    assert.equal(
+      await resolveWorkspaceRoot("https://contoso.sharepoint.com/sites/x/spec.docx"),
+      null,
+    );
   }));
 
-test("WSL mode: percent signs stay literal in drive paths and decode in file:// URLs", posixOnly, () =>
-  withEnv(WSL_ON, async () => {
-    assert.equal(await resolveWorkspaceRoot("D:\\a\\100%\\b.docx"), "/mnt/d/a/100%");
-    assert.equal(await resolveWorkspaceRoot("file:///D:/a/100%25/b.docx"), "/mnt/d/a/100%");
-  }));
+test(
+  "WSL mode: percent signs stay literal in drive paths and decode in file:// URLs",
+  posixOnly,
+  () =>
+    withEnv(WSL_ON, async () => {
+      assert.equal(await resolveWorkspaceRoot("D:\\a\\100%\\b.docx"), "/mnt/d/a/100%");
+      assert.equal(await resolveWorkspaceRoot("file:///D:/a/100%25/b.docx"), "/mnt/d/a/100%");
+    }),
+);
 
 test("WSL mode: mount root is overridable", posixOnly, () =>
   withEnv({ CC_OFFICE_WSL_PATHS: "1", CC_OFFICE_WSL_MOUNT_ROOT: "/x/" }, async () => {
     assert.equal(await resolveWorkspaceRoot("D:\\a\\b.docx"), "/x/d/a");
-  }));
+  }),
+);
 
 test("toLocalPath (set_cwd / context input) translates only Windows-form paths", () =>
   withEnv(WSL_ON, async () => {

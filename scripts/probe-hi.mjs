@@ -175,16 +175,23 @@ async function waitForSummary(sessionId, tries = 20) {
 }
 
 function parseArgs(argv) {
-  const a = { text: "hi", model: "sonnet", timeout: 180, jsonl: null, maxTotal: null, maxHooks: null };
+  const a = {
+    text: "hi",
+    model: "sonnet",
+    timeout: 180,
+    jsonl: null,
+    maxTotal: null,
+    maxHooks: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     const v = argv[i + 1];
-    if (k === "--jsonl") (a.jsonl = v), i++;
-    else if (k === "--text") (a.text = v), i++;
-    else if (k === "--model") (a.model = v), i++;
-    else if (k === "--timeout") (a.timeout = Number(v)), i++;
-    else if (k === "--max-total") (a.maxTotal = Number(v)), i++;
-    else if (k === "--max-hooks") (a.maxHooks = Number(v)), i++;
+    if (k === "--jsonl") ((a.jsonl = v), i++);
+    else if (k === "--text") ((a.text = v), i++);
+    else if (k === "--model") ((a.model = v), i++);
+    else if (k === "--timeout") ((a.timeout = Number(v)), i++);
+    else if (k === "--max-total") ((a.maxTotal = Number(v)), i++);
+    else if (k === "--max-hooks") ((a.maxHooks = Number(v)), i++);
     else throw new Error(`unknown argument ${k}`);
   }
   return a;
@@ -208,7 +215,12 @@ async function main() {
     if (!meta.sessionId) throw new Error("turn completed without session_init");
     summary = await waitForSummary(meta.sessionId);
   }
-  const r = { ...summary, sessionId: meta.sessionId ?? null, cwd: meta.cwd ?? null, toolCalls: meta.toolCalls ?? 0 };
+  const r = {
+    ...summary,
+    sessionId: meta.sessionId ?? null,
+    cwd: meta.cwd ?? null,
+    toolCalls: meta.toolCalls ?? 0,
+  };
   console.log(
     `total=${r.total} input=${r.input} cache_creation=${r.cacheCreation} cache_read=${r.cacheRead}` +
       ` output=${r.output} hookEvents=${r.hookEvents} version=${r.version} model=${r.model}` +

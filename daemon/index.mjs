@@ -7,13 +7,23 @@ import { dirname, resolve, extname, join, sep } from "node:path";
 import { homedir } from "node:os";
 import { createBridge } from "./bridge.mjs";
 import { createOfficeBridgeMcp } from "./office-tools.mjs";
-import { resolveWorkspaceRoot, suggestWorkspaceRoot, ensureWorkspaceMarker, toLocalPath } from "./workspace.mjs";
+import {
+  resolveWorkspaceRoot,
+  suggestWorkspaceRoot,
+  ensureWorkspaceMarker,
+  toLocalPath,
+} from "./workspace.mjs";
 import { randomUUID } from "node:crypto";
 import { getSessionId, saveSessionId, touchFolder } from "./sessions.mjs";
 import { readTranscript } from "./transcript.mjs";
 import { diag } from "./diag.mjs";
 import { getContextEntries, setContextEntries } from "./context.mjs";
-import { buildQueryOptions, formatUsageLine, resolveSettingSources, userMcpEnabled } from "./query-options.mjs";
+import {
+  buildQueryOptions,
+  formatUsageLine,
+  resolveSettingSources,
+  userMcpEnabled,
+} from "./query-options.mjs";
 import { stat } from "node:fs/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

@@ -23,7 +23,12 @@ test("summarizeSessionJsonl sums the first assistant usage and counts hook lines
       type: "assistant",
       message: {
         model: "claude-sonnet-4-6",
-        usage: { input_tokens: 3, cache_creation_input_tokens: 50128, cache_read_input_tokens: 0, output_tokens: 45 },
+        usage: {
+          input_tokens: 3,
+          cache_creation_input_tokens: 50128,
+          cache_read_input_tokens: 0,
+          output_tokens: 45,
+        },
       },
     },
     { type: "assistant", message: { model: "x", usage: { input_tokens: 999 } } },
@@ -45,11 +50,17 @@ test("runProbe speaks the taskpane protocol against the real bridge", async () =
     token: "t",
     allowedOrigins: [ORIGIN],
     onHello: (key) =>
-      bridge.sendToTaskpane({ type: "transcript_replay", session_id: null, truncated: false, events: [] }, key),
+      bridge.sendToTaskpane(
+        { type: "transcript_replay", session_id: null, truncated: false, events: [] },
+        key,
+      ),
     onUserMessage: (key) => {
       setImmediate(async () => {
         seen.message = await bridge.nextUserMessage(key);
-        bridge.sendAssistantEvent({ event: "session_init", session_id: "s-1", model: "claude-x" }, key);
+        bridge.sendAssistantEvent(
+          { event: "session_init", session_id: "s-1", model: "claude-x" },
+          key,
+        );
         await bridge.callTaskpaneTool("office_get_doc_info", {}, key).catch((e) => {
           seen.toolError = e.message;
         });
@@ -91,7 +102,13 @@ test("runProbe rejects when the token is wrong", async () => {
   try {
     await waitForListening(bridge);
     await assert.rejects(
-      runProbe({ url: `ws://127.0.0.1:${bridge.address().port}`, origin: ORIGIN, token: "bad", doc: "/tmp/p/x.docx", timeoutMs: 5000 }),
+      runProbe({
+        url: `ws://127.0.0.1:${bridge.address().port}`,
+        origin: ORIGIN,
+        token: "bad",
+        doc: "/tmp/p/x.docx",
+        timeoutMs: 5000,
+      }),
       /4002/,
     );
   } finally {
