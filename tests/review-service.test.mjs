@@ -942,8 +942,7 @@ test("receipts: an LLM split, LLM ledger verdicts and requirement links land in 
     getModel: () => "sonnet",
     oneshot: async () => {
       call += 1;
-      if (call === 1)
-        return { ok: true, json: { comments: [{ reviewer: 1, number: 1, text: REVIEW }] } };
+      if (call === 1) return { ok: true, json: { lines: [{ n: 1, type: "comment_start" }] } };
       return {
         ok: true,
         json: {
@@ -1009,6 +1008,13 @@ test("receipts: an LLM split, LLM ledger verdicts and requirement links land in 
     }
     assert.deepEqual(rows[0].output.refs, ["R1.1"]);
     assert.equal(rows[0].output.method, "llm");
+    assert.deepEqual(rows[0].output.labels, {
+      editor: 0,
+      reviewer_head: 0,
+      comment_start: 1,
+      continue: 0,
+      drop: 0,
+    });
     assert.deepEqual(
       rows.slice(1, 4).map((r) => [r.output.item_id, r.output.paragraph_index, r.output.verdict]),
       [

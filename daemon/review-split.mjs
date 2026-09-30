@@ -1,9 +1,11 @@
 // Split a pasted review into reviewer comments with refs R{reviewer}.{n}.
 // Regex first (no model call); a single LLM one-shot only when the regex
 // finds at most one comment. The user edits the result in the task pane.
+// The one-shot recovers document structure: it labels each numbered line of
+// the review and returns no text, and the code builds the comments from the
+// source lines, so no line is lost or rewritten.
 // L5: every comment carries requirements [{ id, text }], the separate things
-// the reviewer asks for. The regex split leaves them empty for the user to
-// fill; the LLM split asks the same one-shot for them.
+// the reviewer asks for. Both splits leave them empty for the user to fill.
 
 // Defaults are stricter than the plain design patterns so body lines do not
 // start a new comment: "Reviewer 2 raised the same point" (reviewer word at
@@ -155,7 +157,7 @@ const squash = (s) =>
     .trim();
 
 // Sentence units for the coverage check: split at line breaks and sentence
-// ends, drop a leading list marker (the model often leaves it out) and keep
+// ends, drop a leading list marker (a list head loses it in its comment) and keep
 // units with a letter. An abbreviation ("e.g.", "Fig. 2") only splits a
 // sentence into shorter pieces, each still inside a comment that holds it.
 const LIST_MARK = /^(?:\(?\d+[.)]|\(?[a-z][.)]|[-*\u2022])\s+/i;
@@ -166,19 +168,10 @@ function sentenceUnits(text) {
     .filter((u) => /\p{L}/u.test(u));
 }
 
-function nextNumber(comments, reviewer) {
-  let max = 0;
-  for (const c of comments) {
-    const m = /^R(\d+)\.(\d+)$/.exec(c.ref);
-    if (m && Number(m[1]) === reviewer) max = Math.max(max, Number(m[2]));
-  }
-  return max + 1;
-}
-
-const quoteUnits = (units) =>
+const quoteUnits = (units, max = 80) =>
   units
     .slice(0, 3)
-    .map((u) => `"${u.length > 80 ? `${u.slice(0, 77)}...` : u}"`)
+    .map((u) => `"${u.length > max ? `${u.slice(0, max - 3)}...` : u}"`)
     .join(", ") + (units.length > 3 ? ` and ${units.length - 3} more` : "");
 
 // Sentences of the review, without reviewer heads and comment heads (the
@@ -202,36 +195,123 @@ export function uncoveredText(text, comments, patterns) {
 }
 
 export const SPLIT_SYSTEM =
-  "You split peer-review text into individual reviewer comments. Copy the text of each comment verbatim from the input. Do not summarize, merge, or invent comments. For each comment also list the separate things the reviewer asks the authors to do. Reply with JSON only.";
+  "You recover the structure of a peer review. Give every numbered line exactly one type. Do not return any text of the review. Reply with JSON only.";
 
-export const MAX_REQUIREMENTS = 10;
+export const LINE_TYPES = ["editor", "reviewer_head", "comment_start", "continue", "drop"];
 
-// LLM requirement list -> [{ id: q1.., text }]: strings only, trimmed,
-// at most MAX_REQUIREMENTS of at most 300 characters, no duplicates.
-export function requirementsFrom(list) {
-  const out = [];
-  for (const r of Array.isArray(list) ? list : []) {
-    const text = String(typeof r === "string" ? r : "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 300);
-    if (!text || out.some((x) => x.text === text)) continue;
-    out.push({ id: `q${out.length + 1}`, text });
-    if (out.length === MAX_REQUIREMENTS) break;
+// lines: the non-empty lines of the review, numbered from 1 in the prompt.
+export function splitPrompt(lines) {
+  return [
+    'Return {"lines":[{"n":<line number>,"type":"<type>"}]} with every line number exactly once.',
+    'Types: "editor" (the editor letter), "reviewer_head" (a new reviewer starts; add "reviewer":<int>), "comment_start" (a new comment starts), "continue" (same comment as the line before), "drop" (only a page header, page footer or rule line).',
+    "Lines:",
+    ...lines.map((l, i) => `${i + 1}: ${l}`),
+  ].join("\n");
+}
+
+// The model reply as one label per line, or null unless every line number
+// 1..count is there exactly once with a known type, and every reviewer_head
+// has a positive integer reviewer.
+function validLabels(json, count) {
+  const items = json?.lines;
+  if (!Array.isArray(items) || items.length !== count) return null;
+  const out = new Array(count);
+  for (const it of items) {
+    const n = it?.n;
+    if (!Number.isInteger(n) || n < 1 || n > count || out[n - 1]) return null;
+    if (!LINE_TYPES.includes(it.type)) return null;
+    if (it.type === "reviewer_head" && !(Number.isInteger(it.reviewer) && it.reviewer > 0)) {
+      return null;
+    }
+    out[n - 1] = it;
   }
   return out;
 }
 
-export function splitPrompt(text) {
-  return [
-    'Return {"comments":[{"reviewer":<int>,"number":<int>,"text":"<verbatim comment text>","requirements":["<one thing the reviewer asks for>"]}]}.',
-    "requirements: one short item per separate request in the comment (a comment asking for two changes has two items).",
-    "Number comments per reviewer from 1 when the review does not number them. Use reviewer 1 when reviewers are not named.",
-    "Review text:",
-    "<<<",
-    String(text ?? ""),
-    ">>>",
-  ].join("\n");
+// Comments from the source lines and one label per non-empty line. A blank
+// line joins the block before it. Only recognized heads lose text: the
+// reviewer label of a reviewer_head line (regex reviewerHead, as in the regex
+// split) and the comment marker of a comment_start line (commentHead or
+// listItem, whose number becomes the ref). Every other line not dropped is in
+// exactly one comment. Refs follow the regex split: E.{k} for each editor run,
+// R{n}.0 for reviewer text before its first comment, R{n}.1 for a reviewer
+// with no comment start, otherwise the marker number or the next free one.
+function commentsFromLabels(src, labels, patterns) {
+  const p = { ...DEFAULT_PATTERNS, ...patterns };
+  const reReviewer = new RegExp(p.reviewerHead, "id");
+  const reComment = new RegExp(p.commentHead, "i");
+  const reList = new RegExp(p.listItem);
+  const counts = Object.fromEntries(LINE_TYPES.map((t) => [t, 0]));
+  const groups = [];
+  const dropped = [];
+  let cur = null;
+  let reviewer = 1;
+  let editors = 0;
+  let n = 0;
+  const open = (g) => groups.push((cur = g));
+  for (const line of src) {
+    if (!line.trim()) {
+      cur?.lines.push(line);
+      continue;
+    }
+    const label = labels[n++];
+    counts[label.type] += 1;
+    const type = label.type === "continue" && !cur ? "comment_start" : label.type;
+    if (type === "drop") {
+      dropped.push(line.trim());
+    } else if (type === "continue" || (type === "editor" && cur?.editor)) {
+      cur.lines.push(line);
+    } else if (type === "editor") {
+      open({ reviewer: 0, editor: true, number: ++editors, lines: [line] });
+    } else if (type === "reviewer_head") {
+      reviewer = label.reviewer;
+      const m = reReviewer.exec(line);
+      open({ reviewer, number: 0, pre: true, lines: [m ? reviewerRest(m, line) : line] });
+    } else {
+      const m = reComment.exec(line) ?? reList.exec(line);
+      const used = groups.filter((g) => !g.editor && g.reviewer === reviewer).map((g) => g.number);
+      const number = (m && firstNumber(m)) ?? Math.max(0, ...used) + 1;
+      open({
+        reviewer,
+        number,
+        lines: [m ? line.slice(m[0].length).replace(HEAD_TRIM, "") : line],
+      });
+    }
+  }
+  const rows = groups
+    .map((g) => {
+      const whole =
+        !!g.pre && !groups.some((c) => !c.pre && !c.editor && c.reviewer === g.reviewer);
+      const number = whole ? 1 : g.number;
+      return {
+        whole,
+        kept: !!g.editor || (!!g.pre && !whole),
+        comment: {
+          ref: g.editor ? `E.${number}` : `R${g.reviewer}.${number}`,
+          reviewer: g.reviewer,
+          text: g.lines.join("\n").trim(),
+          requirements: [],
+        },
+      };
+    })
+    .filter((x) => x.comment.text)
+    .sort((a, b) => a.comment.reviewer - b.comment.reviewer);
+  const comments = rows.map((x) => x.comment);
+  const warnings = [
+    ...preservedWarnings(rows.filter((x) => x.kept).map((x) => x.comment)),
+    ...unsplitWarnings(rows.filter((x) => x.whole).map((x) => x.comment.ref)),
+  ];
+  if (dropped.length) {
+    warnings.push(
+      `${dropped.length} line(s) were dropped as page headers, footers or rules: ${quoteUnits(dropped, 40)}. Add them back if they ask for something.`,
+    );
+  }
+  if (dropped.length * 2 > labels.length) {
+    warnings.push(
+      `The model dropped more than half of the lines (${dropped.length} of ${labels.length}); check the split against the review.`,
+    );
+  }
+  return { comments, warnings: [...warnings, ...duplicateWarnings(comments)], labels: counts };
 }
 
 // oneshot: (req) => Promise<{ ok, json, error }> (daemon/oneshot.mjs).
@@ -239,11 +319,13 @@ export function splitPrompt(text) {
 // comment; blocks kept whole and kept preambles do not count, so they cannot
 // hide a review the regex barely split. Kept-whole blocks and kept preambles
 // always come back as warnings.
-// Every path ends with a check of the review text that is in no comment:
-// without a reviewer head the regex drops the text before the first comment
-// head, and the model may leave text out. It is named, not added back.
+// A regex result ends with a check of the review text that is in no comment
+// (without a reviewer head the regex drops the text before the first comment
+// head); it is named, not added back. A result built from line labels needs
+// no check: only dropped lines are left out, and a warning names them.
 export async function splitReview(text, { patterns, oneshot } = {}) {
   const r = await splitReviewInner(text, { patterns, oneshot });
+  if (r.labels) return r;
   const lost = uncoveredText(text, r.comments, patterns);
   if (!lost.length) return r;
   return {
@@ -272,7 +354,12 @@ async function splitReviewInner(text, { patterns, oneshot } = {}) {
       warnings: ["regex found at most one comment; no LLM fallback configured", ...whole],
     };
   }
-  const r = await oneshot({ system: SPLIT_SYSTEM, prompt: splitPrompt(text) });
+  const src = String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n");
+  const numbered = src.filter((l) => l.trim());
+  if (!numbered.length) return { method: "regex", comments: regexOut, warnings: whole };
+  const r = await oneshot({ system: SPLIT_SYSTEM, prompt: splitPrompt(numbered) });
   if (!r.ok) {
     return {
       method: "llm",
@@ -280,73 +367,19 @@ async function splitReviewInner(text, { patterns, oneshot } = {}) {
       warnings: [`LLM split failed: ${r.error}`, ...whole],
     };
   }
-  const items = Array.isArray(r.json?.comments) ? r.json.comments : [];
-  const source = squash(text);
-  // The model never returns E.1 or R{n}.0 (reviewer and number start at 1),
-  // so the kept preambles come from the regex split; placed first, the
-  // stable sort below keeps them ahead of their reviewer's comments.
-  const kept = [...preserved];
-  const warnings = [];
-  items.forEach((c, i) => {
-    const body = String(c?.text ?? "").trim();
-    if (!body) return;
-    if (!source.includes(squash(body))) {
-      warnings.push(`dropped LLM item ${i + 1}: its text is not in the review verbatim`);
-      return;
-    }
-    const reviewer = Number.isInteger(c?.reviewer) && c.reviewer > 0 ? c.reviewer : 1;
-    const number = Number.isInteger(c?.number) && c.number > 0 ? c.number : i + 1;
-    kept.push({
-      ref: `R${reviewer}.${number}`,
-      reviewer,
-      text: body,
-      requirements: requirementsFrom(c?.requirements),
-    });
-  });
-  // No usable comment from the model ({"comments":[]}, another JSON shape,
-  // or every item dropped): the regex split stands, with a warning.
-  const fromModel = kept.slice(preserved.length);
-  if (!fromModel.length) {
+  // A reply that does not label every line once (empty, another JSON shape,
+  // a line missing, doubled or unknown): the regex split stands, with a warning.
+  const labels = validLabels(r.json, numbered.length);
+  if (!labels) {
     return {
       method: "regex",
       comments: regexOut,
       warnings: [
-        "model split returned no comment; kept the regex split",
-        ...warnings,
+        "model split returned no usable line labels; kept the regex split",
         ...whole,
         ...duplicateWarnings(regexOut),
       ],
     };
   }
-  // Coverage, not reviewer presence: every sentence of a regex comment
-  // (kept-whole block or numbered comment) must be inside an LLM comment of
-  // the same reviewer. Otherwise the regex text comes back whole, under the
-  // next free number, with a warning (it may repeat what the model kept).
-  // Kept preambles are already in `kept`.
-  for (const c of regexOut) {
-    if (preserved.includes(c)) continue;
-    const mine = fromModel.filter((k) => k.reviewer === c.reviewer).map((k) => squash(k.text));
-    const missing = sentenceUnits(c.text).filter((u) => !mine.some((t) => t.includes(u)));
-    if (!missing.length) continue;
-    if (!mine.length) {
-      kept.push(c);
-      warnings.push(
-        unsplit.includes(c.ref)
-          ? `Reviewer ${c.reviewer} got no comment from the LLM split; the whole text is kept as ${c.ref}.`
-          : `Reviewer ${c.reviewer} got no comment from the LLM split; the regex comment is kept as ${c.ref}.`,
-      );
-      continue;
-    }
-    const ref = `R${c.reviewer}.${nextNumber(kept, c.reviewer)}`;
-    kept.push({ ...c, ref });
-    warnings.push(
-      `The LLM split of Reviewer ${c.reviewer} left out ${quoteUnits(missing)}; the regex text is kept whole as ${ref}. It may repeat text of the other comments: delete the overlap.`,
-    );
-  }
-  kept.sort((a, b) => a.reviewer - b.reviewer);
-  return {
-    method: "llm",
-    comments: kept,
-    warnings: [...preservedWarnings(preserved), ...warnings, ...duplicateWarnings(kept)],
-  };
+  return { method: "llm", ...commentsFromLabels(src, labels, patterns) };
 }

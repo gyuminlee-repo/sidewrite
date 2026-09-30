@@ -394,6 +394,7 @@ export function createReviewService({
             output: {
               method: r.method,
               refs: r.comments.map((c) => c.ref),
+              labels: r.labels ?? null,
               warnings: r.warnings.map(redactQuotes),
             },
           }),
