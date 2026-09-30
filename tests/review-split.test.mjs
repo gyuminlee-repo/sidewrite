@@ -169,3 +169,67 @@ test("L5 requirementsFrom caps count and length", () => {
   assert.equal(r[0].text.length, 300);
   assert.deepEqual(requirementsFrom("not a list"), []);
 });
+
+// A reviewer block with no numbered heads is kept whole as R{n}.1 with a
+// warning, instead of being dropped because another reviewer numbered theirs.
+const MIXED = `Reviewer 1:
+Please report the growth temperature for every culture.
+
+Reviewer 2:
+1. Add error bars to Fig. 2.
+2. State the number of replicates.
+`;
+
+test("a reviewer block without numbered comments is kept whole, with a warning", async () => {
+  let called = 0;
+  const r = await splitReview(MIXED, {
+    oneshot: async () => (called++, { ok: true, json: {} }),
+  });
+  assert.equal(r.method, "regex");
+  assert.equal(called, 0);
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.text]),
+    [
+      ["R1.1", "Please report the growth temperature for every culture."],
+      ["R2.1", "Add error bars to Fig. 2."],
+      ["R2.2", "State the number of replicates."],
+    ],
+  );
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /Reviewer 1.*not split.*R1\.1/);
+  assert.deepEqual(splitReviewRegex(MIXED).length, 3);
+});
+
+test("an unsplit block does not count toward skipping the LLM split", async () => {
+  const one = "Reviewer 1:\nPlease report the temperature.\n\nReviewer 2:\n1. Add error bars.\n";
+  let called = 0;
+  const r = await splitReview(one, {
+    oneshot: async () => (called++, { ok: false, error: "timed out" }),
+  });
+  assert.equal(called, 1);
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["R1.1", "R2.1"],
+  );
+  assert.ok(r.warnings.some((w) => /R1\.1/.test(w)));
+  assert.ok(r.warnings.some((w) => /timed out/.test(w)));
+});
+
+test("an LLM split that leaves out a kept-whole reviewer says so", async () => {
+  const one = "Reviewer 1:\nPlease report the temperature.\n\nReviewer 2:\n1. Add error bars.\n";
+  const r = await splitReview(one, {
+    oneshot: async () => ({
+      ok: true,
+      json: { comments: [{ reviewer: 2, number: 1, text: "Add error bars." }] },
+    }),
+  });
+  assert.equal(r.method, "llm");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.text]),
+    [
+      ["R1.1", "Please report the temperature."],
+      ["R2.1", "Add error bars."],
+    ],
+  );
+  assert.ok(r.warnings.some((w) => /Reviewer 1.*no comment.*R1\.1/.test(w)));
+});

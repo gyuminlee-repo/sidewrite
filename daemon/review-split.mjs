@@ -23,6 +23,16 @@ function firstNumber(m) {
 const HEAD_TRIM = /^[\s:.)\-]+/;
 
 export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
+  return splitBlocks(text, patterns).comments;
+}
+
+// Regex split plus the refs of reviewer blocks kept whole. A block opened by
+// a reviewer head with body text but no comment head is one comment
+// R{reviewer}.1 (no numbered comment of that block can share the ref), so a
+// reviewer who did not number the points is not dropped. The text before
+// the first reviewer head (a cover letter) and a preamble before a block's
+// first comment head stay dropped.
+function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   const p = { ...DEFAULT_PATTERNS, ...patterns };
   const reReviewer = new RegExp(p.reviewerHead, "i");
   const reComment = new RegExp(p.commentHead, "i");
@@ -32,12 +42,12 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
     .split("\n");
 
   const blocks = [];
-  let cur = { reviewer: 1, lines: [] };
+  let cur = { reviewer: 1, lines: [], headed: false };
   for (const line of lines) {
     const m = reReviewer.exec(line);
     if (m) {
       blocks.push(cur);
-      cur = { reviewer: Number(m[1]), lines: [] };
+      cur = { reviewer: Number(m[1]), lines: [], headed: true };
     } else {
       cur.lines.push(line);
     }
@@ -48,6 +58,10 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
   for (const b of blocks) {
     // Explicit "Comment n" heads win; then numbered-list items are body text.
     const head = b.lines.some((l) => reComment.test(l)) ? reComment : reList;
+    if (b.headed && b.lines.join("").trim() && !b.lines.some((l) => head.test(l))) {
+      out.push({ reviewer: b.reviewer, number: 1, lines: b.lines, whole: true });
+      continue;
+    }
     let item = null;
     let seq = 0;
     for (const line of b.lines) {
@@ -66,15 +80,28 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
     }
     if (item) out.push(item);
   }
-  return out
+  const rows = out
     .map((c) => ({
-      ref: `R${c.reviewer}.${c.number}`,
-      reviewer: c.reviewer,
-      text: c.lines.join("\n").replace(HEAD_TRIM, "").trim(),
-      requirements: [],
+      whole: !!c.whole,
+      comment: {
+        ref: `R${c.reviewer}.${c.number}`,
+        reviewer: c.reviewer,
+        text: c.lines.join("\n").replace(HEAD_TRIM, "").trim(),
+        requirements: [],
+      },
     }))
-    .filter((c) => c.text);
+    .filter((x) => x.comment.text);
+  return {
+    comments: rows.map((x) => x.comment),
+    unsplit: rows.filter((x) => x.whole).map((x) => x.comment.ref),
+  };
 }
+
+const unsplitWarnings = (refs) =>
+  refs.map(
+    (ref) =>
+      `Reviewer ${ref.slice(1, ref.indexOf("."))} text was not split into numbered comments; it is kept whole as ${ref}. Split it by hand if it holds several requests.`,
+  );
 
 function duplicateWarnings(comments) {
   const seen = new Set();
@@ -125,21 +152,33 @@ export function splitPrompt(text) {
 }
 
 // oneshot: (req) => Promise<{ ok, json, error }> (daemon/oneshot.mjs).
+// The regex result stands when its comment heads found more than one
+// comment; blocks kept whole do not count, so they cannot hide a review the
+// regex barely split. Kept-whole blocks always come back as warnings.
 export async function splitReview(text, { patterns, oneshot } = {}) {
-  const regexOut = splitReviewRegex(text, patterns);
-  if (regexOut.length > 1) {
-    return { method: "regex", comments: regexOut, warnings: duplicateWarnings(regexOut) };
+  const { comments: regexOut, unsplit } = splitBlocks(text, patterns);
+  const whole = unsplitWarnings(unsplit);
+  if (regexOut.length - unsplit.length > 1) {
+    return {
+      method: "regex",
+      comments: regexOut,
+      warnings: [...whole, ...duplicateWarnings(regexOut)],
+    };
   }
   if (!oneshot) {
     return {
       method: "regex",
       comments: regexOut,
-      warnings: ["regex found at most one comment; no LLM fallback configured"],
+      warnings: ["regex found at most one comment; no LLM fallback configured", ...whole],
     };
   }
   const r = await oneshot({ system: SPLIT_SYSTEM, prompt: splitPrompt(text) });
   if (!r.ok) {
-    return { method: "llm", comments: regexOut, warnings: [`LLM split failed: ${r.error}`] };
+    return {
+      method: "llm",
+      comments: regexOut,
+      warnings: [`LLM split failed: ${r.error}`, ...whole],
+    };
   }
   const items = Array.isArray(r.json?.comments) ? r.json.comments : [];
   const source = squash(text);
@@ -161,5 +200,15 @@ export async function splitReview(text, { patterns, oneshot } = {}) {
       requirements: requirementsFrom(c?.requirements),
     });
   });
+  // A kept-whole reviewer block the model left out comes back from the regex
+  // split, so its text is not lost on this path either.
+  for (const c of regexOut) {
+    if (!unsplit.includes(c.ref) || kept.some((k) => k.reviewer === c.reviewer)) continue;
+    kept.push(c);
+    warnings.push(
+      `Reviewer ${c.reviewer} got no comment from the LLM split; the whole text is kept as ${c.ref}.`,
+    );
+  }
+  kept.sort((a, b) => a.reviewer - b.reviewer);
   return { method: "llm", comments: kept, warnings: [...warnings, ...duplicateWarnings(kept)] };
 }
