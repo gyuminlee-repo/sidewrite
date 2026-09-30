@@ -7,7 +7,7 @@ import { dirname, resolve, extname, join, sep } from "node:path";
 import { homedir } from "node:os";
 import { createBridge } from "./bridge.mjs";
 import { createOfficeBridgeMcp } from "./office-tools.mjs";
-import { resolveWorkspaceRoot, suggestWorkspaceRoot, ensureWorkspaceMarker } from "./workspace.mjs";
+import { resolveWorkspaceRoot, suggestWorkspaceRoot, ensureWorkspaceMarker, toLocalPath } from "./workspace.mjs";
 import { randomUUID } from "node:crypto";
 import { getSessionId, saveSessionId, touchFolder } from "./sessions.mjs";
 import { readTranscript } from "./transcript.mjs";
@@ -520,7 +520,8 @@ const bridge = createBridge({
             throw new Error("Could not auto-detect a workspace folder from that doc path");
           cwd = detected;
         } else if (msg.cwd) {
-          cwd = msg.cwd;
+          cwd = toLocalPath(msg.cwd);
+          if (!cwd) throw new Error(`Folder is not reachable from WSL: ${msg.cwd}`);
           explicitPick = true;
         } else {
           throw new Error("set_cwd requires `cwd` or `autodetect_from_doc`");
