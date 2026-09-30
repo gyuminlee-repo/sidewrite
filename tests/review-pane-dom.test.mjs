@@ -574,3 +574,80 @@ test("Clean up tool comments tells the daemon which comment ids are gone", async
   );
   assert.match(t.$("review-message").textContent, /Tool comments 2 -> 0/);
 });
+
+// Codex review 8: two quick clicks on Propose changes both used to wait for
+// refresh() before taking the turn. The second request was refused by the
+// daemon and its release ended the first turn, so the chat input came back
+// while the first turn ran. The first click now takes the turn before any
+// wait and a second click while it runs does nothing.
+test("propose: a double click sends one review_propose and keeps the chat input disabled", async () => {
+  const { createTurnState } = await import("../taskpane/shared/turn-state.js");
+  globalThis.document = fakeDocument();
+  const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "pending",
+        changes: [],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  let composerDisabled = false;
+  let pane = null;
+  const turn = createTurnState({
+    setComposerDisabled: (v) => (composerDisabled = v),
+    getReviewPane: () => pane,
+  });
+  let answer;
+  const answered = new Promise((r) => (answer = r));
+  const proposals = [];
+  const sendRequest = async (type) => {
+    if (type === "review_refresh") return { ok: true, rows: [], counts, external: [], revision };
+    if (type === "review_propose") {
+      proposals.push(type);
+      // The daemon runs one turn per pane and refuses a second one.
+      if (proposals.length > 1) return { ok: false, error: "The agent is still working" };
+      return answered;
+    }
+    return { ok: true, revision };
+  };
+  pane = initReviewPane({
+    sendRequest,
+    word: { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) },
+    onTurnStarted() {
+      const id = turn.begin();
+      return () => turn.endIf(id);
+    },
+    isTurnInFlight: () => turn.inFlight,
+  });
+  await pane.reload();
+  const button = findAll(
+    document.getElementById("review-comments"),
+    (n) => n.textContent === "Propose changes",
+  )[0];
+  try {
+    const first = button.click();
+    const second = button.click();
+    for (let i = 0; i < 20; i++) await null;
+    await second;
+    assert.equal(proposals.length, 1, "one review_propose");
+    assert.equal(turn.inFlight, true, "the first turn still runs");
+    assert.equal(composerDisabled, true, "chat input stays disabled");
+    answer({ ok: true, started: true, ref: "R1.1", started_at: "2026-09-30T00:00:00Z", revision });
+    await first;
+    assert.equal(composerDisabled, true, "still disabled until the turn ends");
+    turn.onAssistantEvent({ event: "turn_complete" });
+    pane.onEvent({ event: "turn_done", ref: "R1.1" });
+    for (let i = 0; i < 20; i++) await null;
+    assert.equal(composerDisabled, false, "enabled after the turn ends");
+  } finally {
+    await pane.reload();
+  }
+});

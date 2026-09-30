@@ -292,33 +292,35 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       });
       proposeButtons.push(propose);
       propose.disabled = isTurnInFlight();
-      propose.addEventListener(
-        "click",
-        guard(async () => {
+      // The turn is taken on the click, before the selection and refresh()
+      // waits: a second click meanwhile is ignored (Codex review 8) and the
+      // daemon, which queues the agent message before it answers, may send
+      // turn_complete and turn_done before the answer (Codex review 7).
+      // onTurnStarted returns a release that ends only this turn. The check
+      // runs before guard() so an ignored click keeps the message line.
+      const run = guard(async (release) => {
+        let r;
+        try {
           const paragraphs = $("review-use-selection").checked
             ? await word.selectionParagraphs()
             : [];
           // A fresh snapshot first: outside changes are caught before the turn
           // (L4) and the new words of the turn are checked against it (L2).
           await refresh();
-          // The turn is taken before the request: the daemon queues the agent
-          // message before it answers, so turn_complete and turn_done may
-          // arrive first (Codex review 7). onTurnStarted returns a release
-          // for a request that fails.
-          const release = onTurnStarted(
-            `Review ${c.ref}: proposing changes (tracked, one comment per change)...`,
-          );
           const done = state.turnsDone;
-          let r;
-          try {
-            r = await ask("review_propose", { ref: c.ref, paragraphs });
-          } catch (e) {
-            release?.();
-            throw e;
-          }
+          r = await ask("review_propose", { ref: c.ref, paragraphs });
           if (state.turnsDone === done && isTurnInFlight()) startProgress(c.ref, r.started_at);
-        }),
-      );
+        } catch (e) {
+          release?.();
+          throw e;
+        }
+      });
+      propose.addEventListener("click", () => {
+        if (isTurnInFlight()) return;
+        return run(
+          onTurnStarted(`Review ${c.ref}: proposing changes (tracked, one comment per change)...`),
+        );
+      });
       const preview = el("button", {
         type: "button",
         class: "btn-secondary btn-small",
