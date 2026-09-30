@@ -98,6 +98,22 @@ export function ledgerPrompt(item, batch) {
   ].join("\n");
 }
 
+// Why a one-shot reply is not {"violations":[{paragraph_index, quote,
+// reason}]}, or null when it is. A malformed reply must not read as "no
+// violations": checkLlmItem turns it into a check error.
+export function llmReplyProblem(json) {
+  if (!Array.isArray(json?.violations)) return "reply has no violations array";
+  for (const [i, v] of json.violations.entries()) {
+    if (v === null || typeof v !== "object") return `violations[${i}] is not an object`;
+    const idx = v.paragraph_index;
+    if (typeof idx === "boolean" || idx === null || idx === "" || !Number.isInteger(Number(idx)))
+      return `violations[${i}].paragraph_index is not an integer`;
+    if (typeof v.quote !== "string") return `violations[${i}].quote is not a string`;
+    if (typeof v.reason !== "string") return `violations[${i}].reason is not a string`;
+  }
+  return null;
+}
+
 export async function checkLlmItem(
   item,
   paragraphs,
@@ -118,7 +134,10 @@ export async function checkLlmItem(
   for (const batch of batches) {
     const r = await oneshot({ system: LEDGER_SYSTEM, prompt: ledgerPrompt(item, batch) });
     if (!r.ok) return { id: item.id, status: "error", error: r.error, violations };
-    for (const v of Array.isArray(r.json?.violations) ? r.json.violations : []) {
+    const problem = llmReplyProblem(r.json);
+    if (problem)
+      return { id: item.id, status: "error", error: `malformed LLM reply: ${problem}`, violations };
+    for (const v of r.json.violations) {
       const para = batch.find((p) => p.index === Number(v?.paragraph_index));
       if (!para) continue;
       const quote = String(v?.quote ?? "");

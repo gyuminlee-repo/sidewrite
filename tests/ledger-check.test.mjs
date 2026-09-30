@@ -343,3 +343,30 @@ test("regex empty matches advance by code point under the u and v flags", () => 
     ["L9"],
   );
 });
+
+// A JSON reply that is not {violations:[{paragraph_index, quote, reason}]}
+// is a check error, never a pass, and its paragraphs are checked again.
+test("LLM check: a reply without a well-formed violations list is an error", async () => {
+  const reply = (json) => async () => ({ ok: true, json });
+  for (const [json, why] of [
+    [{}, /violations/],
+    [{ violations: "invalid" }, /violations/],
+    [{ violations: [{ paragraph_index: 3, quote: "in-vitro only" }] }, /reason/],
+    [{ violations: [{ quote: "in-vitro only", reason: "r" }] }, /paragraph_index/],
+    [{ violations: [{ paragraph_index: 3, reason: "r" }] }, /quote/],
+    [{ violations: [null] }, /violations\[0\]/],
+    [null, /violations/],
+  ]) {
+    const r = await checkLlmItem(LLM_ITEM, PARAS, { oneshot: reply(json) });
+    assert.equal(r.status, "error", JSON.stringify(json));
+    assert.match(r.error, why, JSON.stringify(json));
+    const [o] = await checkLedgerIncremental([LLM_ITEM], PARAS, { oneshot: reply(json) });
+    assert.deepEqual([o.status, o.checked_hashes], ["error", null], JSON.stringify(json));
+  }
+  const ok = await checkLlmItem(LLM_ITEM, PARAS, {
+    oneshot: reply({ violations: [{ paragraph_index: 3, quote: "in-vitro only", reason: "r" }] }),
+  });
+  assert.deepEqual([ok.status, ok.violations.length], ["violations", 1]);
+  const none = await checkLlmItem(LLM_ITEM, PARAS, { oneshot: reply({ violations: [] }) });
+  assert.equal(none.status, "ok");
+});
