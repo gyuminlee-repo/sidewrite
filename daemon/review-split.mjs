@@ -226,13 +226,31 @@ export async function splitReview(text, { patterns, oneshot } = {}) {
       requirements: requirementsFrom(c?.requirements),
     });
   });
-  // A kept-whole reviewer block the model left out comes back from the regex
-  // split, so its text is not lost on this path either.
+  // No usable comment from the model ({"comments":[]}, another JSON shape,
+  // or every item dropped): the regex split stands, with a warning.
+  const fromModel = kept.slice(preserved.length);
+  if (!fromModel.length) {
+    return {
+      method: "regex",
+      comments: regexOut,
+      warnings: [
+        "model split returned no comment; kept the regex split",
+        ...warnings,
+        ...whole,
+        ...duplicateWarnings(regexOut),
+      ],
+    };
+  }
+  // A regex comment (kept-whole block or numbered comment) of a reviewer the
+  // model left out comes back from the regex split, so its text is not lost
+  // on this path either. Kept preambles are already in `kept`.
   for (const c of regexOut) {
-    if (!unsplit.includes(c.ref) || kept.some((k) => k.reviewer === c.reviewer)) continue;
+    if (preserved.includes(c) || fromModel.some((k) => k.reviewer === c.reviewer)) continue;
     kept.push(c);
     warnings.push(
-      `Reviewer ${c.reviewer} got no comment from the LLM split; the whole text is kept as ${c.ref}.`,
+      unsplit.includes(c.ref)
+        ? `Reviewer ${c.reviewer} got no comment from the LLM split; the whole text is kept as ${c.ref}.`
+        : `Reviewer ${c.reviewer} got no comment from the LLM split; the regex comment is kept as ${c.ref}.`,
     );
   }
   kept.sort((a, b) => a.reviewer - b.reviewer);

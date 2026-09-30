@@ -299,3 +299,38 @@ test("kept letter and preamble do not count toward skipping the LLM split", asyn
   );
   assert.equal(r.warnings.filter((w) => /delete it/i.test(w)).length, 2);
 });
+
+// Codex review 3: a valid but empty LLM reply must not wipe the regex split.
+for (const json of [{ comments: [] }, { foo: 1 }, { comments: [{ text: "not in the review" }] }]) {
+  test(`LLM reply ${JSON.stringify(json)} keeps the regex comment and warns`, async () => {
+    const one = "1. Please add error bars to Fig. 2.\n";
+    const r = await splitReview(one, { oneshot: async () => ({ ok: true, json }) });
+    assert.equal(r.method, "regex");
+    assert.deepEqual(
+      r.comments.map((c) => [c.ref, c.text]),
+      [["R1.1", "Please add error bars to Fig. 2."]],
+    );
+    assert.ok(
+      r.warnings.some((w) => /model split returned no comment; kept the regex split/.test(w)),
+    );
+  });
+}
+
+test("a numbered regex comment of a reviewer the LLM left out is kept", async () => {
+  const one = "Reviewer 1:\nPlease report the temperature.\n\nReviewer 2:\n1. Add error bars.\n";
+  const r = await splitReview(one, {
+    oneshot: async () => ({
+      ok: true,
+      json: { comments: [{ reviewer: 1, number: 1, text: "Please report the temperature." }] },
+    }),
+  });
+  assert.equal(r.method, "llm");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.text]),
+    [
+      ["R1.1", "Please report the temperature."],
+      ["R2.1", "Add error bars."],
+    ],
+  );
+  assert.ok(r.warnings.some((w) => /Reviewer 2.*no comment.*R2\.1/.test(w)));
+});
