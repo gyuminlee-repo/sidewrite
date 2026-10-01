@@ -12,6 +12,7 @@ import { forbidHits, forbidHitsAfterEdit, brokenForbidRules } from "./ledger-che
 import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
+import { newNumbers } from "./number-guard.mjs";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
 // The capability a task pane must name in its hello to be sent a tracked
@@ -171,11 +172,12 @@ function fail(message, extra = {}) {
 // same way as an answer in time (review-service.mjs lateToolResult);
 // `attempt` is the change as it would read in the document (unknownAttempt).
 // getReviewContext returns { requirements, comment_text, paragraphs,
-// paragraph_ids, recent_changes } for the L2 sources (manuscript snapshot
+// paragraph_ids, recent_changes, author_texts } for the L2 sources (manuscript snapshot
 // texts and the comment), the L5 ids, and what is judged in the paragraph of
 // the edit before Word is called (paragraph_ids: the task pane ids of the
 // snapshot paragraphs, for paragraph_hint; recent_changes: changes recorded
-// since that snapshot, oldest first).
+// since that snapshot, oldest first; author_texts: what the author answered
+// to questions of this review, a source of numbers like the comment).
 // turn: { ref } of the current review turn, or null.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
@@ -227,6 +229,30 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     return fail(
       `Not applied: forbidden rule(s) ${ids.join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}). No edit is applied until the author fixes or removes the rule in the Review tab. Do not retry; tell the author.`,
       { code: "ForbidRuleBroken", broken_rules: ids },
+    );
+  }
+  // A number the change adds (number-guard.mjs) must be given: by the text
+  // it replaces, the paragraph it lands in, the reviewer comment, an author
+  // instruction or an author answer. Any other number is a fact only the
+  // author can confirm, so the edit is refused and the model asks. Unit
+  // notation changes no number; a deletion adds none. An approved forbid
+  // exception does not lift this. The log holds the count, not the number.
+  const numbers = newNumbers({
+    kind,
+    find: args.find,
+    text: newText,
+    sources: [
+      ctx.comment_text ?? "",
+      ...(ctx.author_texts ?? []),
+      ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
+      ...(target === null ? [] : [current[target]]),
+    ],
+  });
+  if (numbers.length) {
+    deps.log?.(`[review] number needs author ${turn.ref} count=${numbers.length}`);
+    return fail(
+      `Not applied: the change puts a number into the manuscript (${numbers.join(", ")}) that is not in the text it replaces, its paragraph, the reviewer comment, an author instruction or an author answer. Which value is right is a fact only the author can confirm. Leave the text as it is and ask with office_ask_author: say which values disagree and where. Do not try another number.`,
+      { code: "NumberNeedsAuthor", numbers },
     );
   }
   const around = forbidHitsAfterEdit(ledger, target === null ? current : [current[target]], {

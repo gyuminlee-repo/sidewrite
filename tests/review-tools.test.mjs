@@ -277,6 +277,8 @@ test("L1 lost facts go on the last line of the rationale comment and into the ch
   assert.equal(d.lines[1], "[review] lost facts R1.4-1: 4000 × g; 10 min");
 });
 
+// A new quantity is no longer among them: a change that adds a number is
+// refused before it gets here (tests/number-guard.test.mjs).
 test("L2 new words found in neither the snapshot nor the comment are reported", async () => {
   const d = withContext(deps(), {
     requirements: [],
@@ -288,15 +290,15 @@ test("L2 new words found in neither the snapshot nor the comment are reported", 
     {
       comment_ref: "R1.5",
       find: "sealed flasks",
-      replace: "sealed flasks with 0.1 % antifoam and Tween",
+      replace: "sealed flasks with Pluronic antifoam and Tween",
       rationale: R,
     },
     { ref: "R1.5" },
   );
-  assert.deepEqual(r.unsourced_terms, ["0.1 %", "Tween"]);
-  assert.match(r.warning, /0\.1 %, Tween/);
-  assert.deepEqual(d.edits[0][1].unsourced_terms, ["0.1 %", "Tween"]);
-  assert.ok(d.lines.includes("[review] unsourced R1.5-1: 0.1 %; Tween"));
+  assert.deepEqual(r.unsourced_terms, ["Pluronic", "Tween"]);
+  assert.match(r.warning, /Pluronic, Tween/);
+  assert.deepEqual(d.edits[0][1].unsourced_terms, ["Pluronic", "Tween"]);
+  assert.ok(d.lines.includes("[review] unsourced R1.5-1: Pluronic; Tween"));
 });
 
 test("L3 narrowed range: recorded find, text and kind follow what the task pane applied", async () => {
