@@ -7,8 +7,9 @@
 // L5: every comment carries requirements [{ id, text }], the separate things
 // the reviewer asks for. Both splits leave them empty; extractRequirements
 // fills them afterwards the same way: the code splits the comment sentences
-// and one one-shot labels each sentence, so a requirement is always a
-// sentence of the comment as written.
+// and marks where a sentence could be cut (clauseCuts), and one one-shot
+// labels each sentence and each mark, so a requirement is always a sentence
+// of the comment, or a part of one, as written.
 
 import { numberRequirements } from "./revision-store.mjs";
 
@@ -443,47 +444,143 @@ export function splitSentences(text) {
   return out.map((u) => u.replace(LIST_MARK, "").trim()).filter((u) => /\p{L}/u.test(u));
 }
 
+// S2-30: one sentence may ask for two things ("please state how growth was
+// followed, and describe the carbon source as novel"). The code marks the
+// places where it could be cut; the model only says split or keep at each
+// mark and gives each part a type, so a requirement is still text of the
+// comment as written. A mark is a coordinator outside brackets: "; ",
+// ", and ", " and also ", or " and " before an imperative verb or "please".
+const IMPERATIVE =
+  "add|address|avoid|change|check|cite|clarify|comment|compare|consider|correct|define|delete|describe|discuss|elaborate|explain|expand|give|include|indicate|justify|list|mention|move|name|note|perform|present|provide|quantify|remove|rename|rephrase|replace|report|revise|rewrite|show|specify|state|summarise|summarize|test|update|use";
+const CUT = new RegExp(
+  `;\\s+|,\\s+and\\s+(?:also\\s+)?|\\s+and\\s+also\\s+|\\s+and\\s+(?=(?:please\\s+)?(?:${IMPERATIVE})\\b)`,
+  "gi",
+);
+
+// Cut points of one sentence: [{ end, start }], the part before ends at
+// `end` and the part after starts at `start`; the coordinator between them
+// belongs to no part. Only at bracket depth 0, and only where both sides
+// hold a letter.
+export function clauseCuts(sentence) {
+  const t = String(sentence ?? "");
+  const depth = [];
+  let d = 0;
+  // By UTF-16 index, as matchAll reports it.
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (ch === "(" || ch === "[") d += 1;
+    depth.push(d);
+    if ((ch === ")" || ch === "]") && d > 0) d -= 1;
+  }
+  const cuts = [];
+  let from = 0;
+  for (const m of t.matchAll(CUT)) {
+    if (depth[m.index]) continue;
+    const end = m.index;
+    const start = m.index + m[0].length;
+    if (!/\p{L}/u.test(t.slice(from, end)) || !/\p{L}/u.test(t.slice(start))) continue;
+    cuts.push({ end, start });
+    from = start;
+  }
+  return cuts;
+}
+
+// Parts of a sentence for one "split"/"keep" per cut point: a kept cut joins
+// its neighbours with the coordinator as written. Each part is a substring
+// of the sentence (trailing ",;" and spaces left off).
+export function requirementParts(sentence, decisions) {
+  const t = String(sentence ?? "");
+  const cuts = clauseCuts(t);
+  const parts = [];
+  let start = 0;
+  cuts.forEach((c, i) => {
+    if (decisions[i] !== "split") return;
+    parts.push(t.slice(start, c.end));
+    start = c.start;
+  });
+  parts.push(t.slice(start));
+  return parts.map((x) => x.replace(/[\s,;]+$/u, "").trim());
+}
+
 export const REQUIREMENT_SYSTEM =
-  "You sort the sentences of peer-review comments. Give every sentence exactly one type. Do not return any text of the review. Reply with JSON only.";
+  "You sort the sentences of peer-review comments. Label every sentence exactly once: one type, or cuts and types where cut marks are shown. Do not return any text of the review. Reply with JSON only.";
 
 export const REQUIREMENT_TYPES = ["request", "other"];
 
 export const REQUIREMENT_WARNING = "model could not label requirement sentences; add them by hand";
+
+// A sentence with its cut points marked <c1>, <c2>, ... where each part
+// before the coordinator ends.
+function markCuts(sentence) {
+  let out = "";
+  let at = 0;
+  clauseCuts(sentence).forEach((c, i) => {
+    out += `${sentence.slice(at, c.end)}<c${i + 1}>`;
+    at = c.end;
+  });
+  return out + sentence.slice(at);
+}
 
 // items: [{ ref, sentences }], sentences numbered from 1 per ref.
 export function requirementPrompt(items) {
   return [
     'Return {"sentences":[{"ref":"R1.2","s":1,"type":"request"}, ...]} with every ref and sentence number exactly once.',
     'Types: "request" (asks the authors to do, change, add, explain or answer something; questions too), "other" (praise, summary, background, greeting).',
+    'A sentence with marks <c1>, <c2>, ... may ask for more than one thing. For it give "cuts" instead of "type": one "split" or "keep" per mark in order, and "types": one type per part after the splits, e.g. {"ref":"R1.3","s":1,"cuts":["split"],"types":["request","request"]}. Split only where the parts ask for different things; keep when they are one request.',
     "Sentences:",
-    ...items.flatMap((it) => it.sentences.map((t, i) => `[${it.ref} s${i + 1}] ${t}`)),
+    ...items.flatMap((it) => it.sentences.map((t, i) => `[${it.ref} s${i + 1}] ${markCuts(t)}`)),
   ].join("\n");
 }
 
-// One type per (ref, s) as { ref: [types] }, or null unless every asked
-// sentence is there exactly once with a known type and nothing else is.
+// One label of a sentence: a type for a sentence without cut points; for
+// one with k cut points, k decisions and one type per part. null otherwise.
+function sentenceLabel(x, sentence) {
+  const k = clauseCuts(sentence).length;
+  if (!k) return REQUIREMENT_TYPES.includes(x.type) && !("cuts" in x) ? [[], [x.type]] : null;
+  const { cuts, types } = x;
+  if (!Array.isArray(cuts) || cuts.length !== k) return null;
+  if (!cuts.every((c) => c === "split" || c === "keep")) return null;
+  const parts = 1 + cuts.filter((c) => c === "split").length;
+  if (!Array.isArray(types) || types.length !== parts) return null;
+  if (!types.every((t) => REQUIREMENT_TYPES.includes(t))) return null;
+  return [cuts, types];
+}
+
+// The request texts per ref as { ref: [texts] }, or null unless every asked
+// sentence is there exactly once with a valid label and nothing else is.
 function validSentenceLabels(json, items) {
   const list = json?.sentences;
   const total = items.reduce((n, it) => n + it.sentences.length, 0);
   if (!Array.isArray(list) || list.length !== total) return null;
-  const out = Object.fromEntries(items.map((it) => [it.ref, new Array(it.sentences.length)]));
+  const labels = Object.fromEntries(items.map((it) => [it.ref, new Array(it.sentences.length)]));
+  const sentences = Object.fromEntries(items.map((it) => [it.ref, it.sentences]));
   for (const x of list) {
-    const types = Object.hasOwn(out, x?.ref) ? out[x.ref] : null;
+    const slots = Object.hasOwn(labels, x?.ref) ? labels[x.ref] : null;
     const s = x?.s;
-    if (!types || !Number.isInteger(s) || s < 1 || s > types.length || types[s - 1]) return null;
-    if (!REQUIREMENT_TYPES.includes(x.type)) return null;
-    types[s - 1] = x.type;
+    if (!slots || !Number.isInteger(s) || s < 1 || s > slots.length || slots[s - 1]) return null;
+    const label = sentenceLabel(x, sentences[x.ref][s - 1]);
+    if (!label) return null;
+    slots[s - 1] = label;
   }
-  return out;
+  return Object.fromEntries(
+    items.map((it) => [
+      it.ref,
+      it.sentences.flatMap((sentence, i) => {
+        const [cuts, types] = labels[it.ref][i];
+        return requirementParts(sentence, cuts).filter((_, n) => types[n] === "request");
+      }),
+    ]),
+  );
 }
 
 // comments: the split result. A comment that already has requirements, has
-// no sentence or shares its ref is left as it is. One one-shot labels the sentences of
-// the rest; a request sentence becomes a requirement as written. A failed
+// no sentence or shares its ref is left as it is. One one-shot labels the
+// sentences of the rest; a request sentence, or a request part of a sentence
+// the model split at a cut point, becomes a requirement as written. A failed
 // call or a reply that does not label every sentence once leaves the
 // requirements empty, with a warning; the comments are otherwise unchanged.
 // Returns { comments, warnings, asked, input, requests }: input is the prompt
-// (for a fingerprint), requests the count of request sentences per ref.
+// (for a fingerprint), requests the count of requirements per ref.
 export async function extractRequirements(comments, { oneshot } = {}) {
   const none = { comments, warnings: [], asked: false, input: null, requests: null };
   if (!oneshot) return none;
@@ -498,11 +595,8 @@ export async function extractRequirements(comments, { oneshot } = {}) {
   const r = await oneshot({ system: REQUIREMENT_SYSTEM, prompt: input });
   const failed = (warning) => ({ ...none, warnings: [warning], asked: true, input });
   if (!r.ok) return failed(`requirement extraction failed: ${r.error}; add them by hand`);
-  const labels = validSentenceLabels(r.json, items);
-  if (!labels) return failed(REQUIREMENT_WARNING);
-  const texts = Object.fromEntries(
-    items.map((it) => [it.ref, it.sentences.filter((_, i) => labels[it.ref][i] === "request")]),
-  );
+  const texts = validSentenceLabels(r.json, items);
+  if (!texts) return failed(REQUIREMENT_WARNING);
   return {
     comments: comments.map((c) =>
       texts[c.ref] ? { ...c, requirements: numberRequirements([], texts[c.ref]) } : c,
