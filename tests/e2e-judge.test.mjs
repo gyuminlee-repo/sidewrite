@@ -1508,3 +1508,69 @@ test("fixtureTurnEvidence: what a fixture turn did, from the log, the review fil
   );
   assert.deepEqual(Object.keys(fixture), ["R1.2", "R1.5", "R1.4"]);
 });
+
+// A conditional feature is skipped when its condition could not come about,
+// not when it failed to: Codex chosen for review turns and no proposal turn
+// in the log is a turn that broke before it began. Only a provider the pane
+// did not offer (the SKIP row of select-provider) makes a skip.
+test("exitDecision: S25-42..45 are skipped only when Codex could not be chosen, not when a chosen Codex started no turn", async () => {
+  const { exitDecision } = await import("../scripts/e2e/judge.mjs");
+  const ids = ["S25-42", "S25-43", "S25-44", "S25-45"];
+  const features = ids.map((id) => ({ id, exit: 1 }));
+  const logs = "[agent] turn complete (success) slash=false output=true\n";
+  const row = (result) => ({ step: "select-provider turn=codex", result, got: "x" });
+  // Chosen, and no `[proposal] prompt` line: every one of them fails the run.
+  const broken = exitDecision({ rows: [row("PASS")], features, conditional: ids, logs });
+  assert.deepEqual(
+    broken.features.map((f) => f.status),
+    ids.map(() => "FAIL"),
+  );
+  assert.equal(broken.code, 1);
+  // Not offered: skipped, and the run can pass.
+  const absent = exitDecision({ rows: [row("SKIP")], features, conditional: ids, logs });
+  assert.deepEqual(
+    absent.features.map((f) => f.status),
+    ids.map(() => "SKIPPED-CONDITION-NOT-MET"),
+  );
+  assert.equal(absent.code, 0);
+  // No row at all (the run never came to choosing): nothing is known, so it counts.
+  assert.equal(exitDecision({ rows: [], features, conditional: ids, logs }).code, 1);
+  // The usage-limit feature of stage 2 has no such row and is as before.
+  const s2 = exitDecision({
+    rows: [],
+    features: [{ id: "S2-27", exit: 1 }],
+    conditional: ["S2-27"],
+    logs,
+  });
+  assert.equal(s2.features[0].status, "SKIPPED-CONDITION-NOT-MET");
+});
+
+// The pane step of a proposal turn is judged from the daemon log: the turn
+// came to its end (and ended as expected, where one outcome is expected).
+test("judge propose-proposal: the turn of the step has a done line, with the outcome that was expected", () => {
+  const done = (outcome) =>
+    "[proposal] prompt ref=R1.1 provider=codex:default scope=manuscript paragraphs=9 chars=1\n" +
+    `[proposal] done ref=R1.1 proposals=2 applied=2 rejected=0 skipped=0 stopped_at=- outcome=${outcome}\n`;
+  const step = { ok: true, progress_samples: [], message: "x" };
+  const ctx = { ref: "R1.1", provider: "codex", log: done("ok"), outcome: "ok" };
+  assert.equal(judge("propose-proposal", step, ctx).pass, true);
+  assert.equal(judge("propose-proposal", step, { ...ctx, log: done("error") }).pass, false);
+  // Any end will do where none is expected (the guard turn, a fixture turn).
+  assert.equal(
+    judge("propose-proposal", step, { ...ctx, log: done("error"), outcome: null }).pass,
+    true,
+  );
+  // No turn in the log, the turn of another comment, a step that threw: no pass.
+  const none = judge("propose-proposal", step, { ...ctx, log: "" });
+  assert.equal(none.pass, false);
+  assert.match(none.got, /no \[proposal\] done line for R1\.1/);
+  assert.equal(judge("propose-proposal", step, { ...ctx, ref: "R1.2" }).pass, false);
+  assert.equal(judge("propose-proposal", { ok: false, error: "boom" }, ctx).pass, false);
+});
+
+test("run-acceptance.mjs judges every proposal turn it runs", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../scripts/e2e/run-acceptance.mjs", import.meta.url), "utf8");
+  assert.equal(/judge: "none"/.test(src), false);
+  assert.match(src, /judge: "propose-proposal"/);
+});
