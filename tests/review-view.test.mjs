@@ -80,6 +80,35 @@ test("computeAfterText: refuses missing, repeated, or empty find", () => {
   assert.match(view.computeAfterText(BEFORE, "held", {}).error, /replace or insert_after/);
 });
 
+test("countRevisionMarks counts the document part of a package only", () => {
+  const part = (name, body) =>
+    `<pkg:part pkg:name="${name}"><pkg:xmlData>${body}</pkg:xmlData></pkg:part>`;
+  const pkg = (...parts) => `<pkg:package>${parts.join("")}</pkg:package>`;
+  const ins = '<w:ins w:id="1"><w:r><w:t>x</w:t></w:r></w:ins>';
+  const del = '<w:del w:id="2"><w:r><w:delText>y</w:delText></w:r></w:del>';
+  // An accepted insertion whose rationale comment body is still tracked.
+  assert.deepEqual(
+    view.countRevisionMarks(
+      pkg(part("/word/document.xml", "<w:p/>"), part("/word/comments.xml", ins)),
+    ),
+    { w_ins: 0, w_del: 0 },
+  );
+  assert.deepEqual(
+    view.countRevisionMarks(
+      pkg(
+        part("/word/comments.xml", ins + del),
+        part("/word/document.xml", ins),
+        part("/word/styles.xml", del),
+      ),
+    ),
+    { w_ins: 1, w_del: 0 },
+  );
+  assert.deepEqual(view.countRevisionMarks(pkg(part("/word/document.xml", ins + del))), {
+    w_ins: 1,
+    w_del: 1,
+  });
+});
+
 test("countRevisionMarks counts w:ins/w:del and not w:delText or w:instrText", () => {
   const xml =
     '<w:p><w:ins w:id="1"><w:r><w:t>new</w:t></w:r></w:ins><w:del w:id="2"><w:r><w:delText>old</w:delText></w:r></w:del>' +
