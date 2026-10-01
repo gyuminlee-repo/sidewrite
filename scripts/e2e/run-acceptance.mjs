@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Stage-2 review acceptance run without hands: daemon, a separate Word
-// process with a CDP port on its add-in pane, the Review tab steps, the
-// author's Word steps over COM, the feature_list verify commands, cleanup.
+// Review acceptance run without hands: daemon, a separate Word process with
+// a CDP port on its add-in pane, the Review tab steps, the author's Word
+// steps over COM, the feature_list verify commands, cleanup. Two flows:
+// stage 2 (main) and stage 2.5 (mainS25), chosen by --stage or --features.
 // Runs from WSL; Word, its pane and COM are on Windows. See README.md.
 
 import { spawn, execFileSync } from "node:child_process";
@@ -13,15 +14,27 @@ import {
   badgesMatch,
   buildComPlan,
   cleanupDecision,
+  cleanupEvidence,
+  cliTurnEvidence,
+  defaultFeatures,
+  docStem,
   exitDecision,
   featureIds,
+  focusEvidence,
+  guardEvidence,
   judge,
   minimalFind,
+  modelsEvidence,
   norm,
+  ollamaSplitEvidence,
+  proposeAllEvidence,
+  providersEvidence,
   resolvedMatch,
   rewriteVerify,
   stageOf,
   staleMarkers,
+  stopEvidence,
+  suggestEvidence,
   table,
 } from "./judge.mjs";
 
@@ -57,7 +70,15 @@ const { values: opt } = parseArgs({
     "plan-repo": { type: "string", default: process.env.E2E_PLAN_REPO },
     // Default /tmp/daemon-<stage>.log; --plan-dir defaults to /tmp/<stage>-run.
     "plan-log": { type: "string" },
-    features: { type: "string", default: "S2-18..S2-34" },
+    // Default: the range of the stage (S2-18..S2-34, S25-30..S25-41).
+    features: { type: "string" },
+    // Stage 2.5: the provider of the judgments (split, ledger suggestions),
+    // and a review text with a rule the ledger suggestions must find.
+    "judgment-provider": { type: "string", default: "ollama" },
+    "rules-review": {
+      type: "string",
+      default: path.join(REPO, "tests/fixtures/fake_review_rules.txt"),
+    },
     // Prefix of the feature ids and of the marker files (s2, s25, ...).
     // Default: the stage of --features.
     stage: { type: "string" },
@@ -86,12 +107,14 @@ if (!opt["playwright-core"])
 
 let STAGE;
 try {
-  STAGE = (opt.stage ?? stageOf(opt.features)).toLowerCase();
+  STAGE = (opt.stage ?? stageOf(opt.features ?? defaultFeatures("s2"))).toLowerCase();
+  if (!/^s\d+$/.test(STAGE)) throw new Error(`--stage takes s2 or s25, not ${opt.stage}`);
+  opt.features ??= defaultFeatures(STAGE);
   featureIds(opt.features);
 } catch (e) {
   die(e.message);
 }
-if (!/^s\d+$/.test(STAGE)) die(`--stage takes a prefix like s2 or s25, not ${opt.stage}`);
+if (STAGE !== "s2" && STAGE !== "s25") die(`there is no flow for stage ${STAGE} (s2, s25)`);
 const PLAN_DIR = opt["plan-dir"] ?? `/tmp/${STAGE}-run`;
 const PLAN_LOG = opt["plan-log"] ?? `/tmp/daemon-${STAGE}.log`;
 
@@ -99,8 +122,12 @@ const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").sl
 const RUN = path.resolve(opt["run-dir"] ?? path.join(opt["base-dir"], `e2e-${stamp}`));
 const TOOLS = path.join(RUN, "tools");
 const OK_DIR = path.join(RUN, "ok");
-const DOC = path.join(RUN, "review_manuscript.docx");
-const REVISION = path.join(RUN, "review_manuscript.revision.json");
+// The copy of the manuscript: review_manuscript.docx (stage 2), paper.docx
+// (stage 2.5, whose feature list reads paper.decisions.jsonl and
+// paper.ledger.json next to it).
+const STEM = docStem(STAGE);
+const DOC = path.join(RUN, `${STEM}.docx`);
+const REVISION = path.join(RUN, `${STEM}.revision.json`);
 const LOG = opt.log ?? `/tmp/daemon-${STAGE}-e2e.log`;
 const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
 const MODE14_LOG = LOG.replace(/\.log$/, "") + "-mode14.log";
@@ -315,7 +342,8 @@ async function propose(ref, label) {
   return note("propose", r, { label: label ?? `propose ${ref}`, ctx: { ref, turnCompleted } });
 }
 
-async function main() {
+// Both flows: the run folder, the daemon, a Word of its own on the copy.
+async function setup() {
   fs.mkdirSync(TOOLS, { recursive: true });
   for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1"])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
@@ -336,7 +364,10 @@ async function main() {
 
   record.word.launch = launchWord(DOC, path.join(RUN, "webview2"));
   save();
+}
 
+// Stage 2 (procedure of the stage-2 plan, S2-18..S2-34).
+async function main() {
   note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
   // A provider that cannot run review turns is refused here with its reason
   // (the step fails); the turns below then run with Claude.
@@ -446,6 +477,183 @@ async function main() {
       minimal: minimalFind(c),
     })),
   });
+}
+
+// Stage 2.5 (S25-30..S25-41). Every feature gets its evidence file under
+// ok/, and its .ok marker only when the evidence passes; nothing here is a
+// person's judgment. A feature that needs a review turn of a CLI provider
+// (S25-33..36) gets evidence that says why no such turn ran when the pane
+// does not offer the provider for review turns; run with
+// --conditional S25-33,S25-34,S25-35,S25-36 to have those reported as
+// SKIPPED-CONDITION-NOT-MET (no `[cli-turn] start` in the log).
+async function mainS25() {
+  const revisionNow = () => JSON.parse(fs.readFileSync(REVISION, "utf8"));
+  const logAt = () => readLog(LOG).length;
+  const logFrom = (at) => readLog(LOG).slice(at);
+  const cliProcesses = (pattern) => {
+    try {
+      return Number(execFileSync("pgrep", ["-fc", pattern], { encoding: "utf8" }).trim());
+    } catch {
+      return 0; // pgrep exits 1 when nothing matches
+    }
+  };
+  // Try a provider for review turns. Not being offered is a SKIP row, not a
+  // failure: the features that need it are judged from their evidence.
+  const turnProvider = (id) => {
+    const r = pane("select-provider", { role: "turn", id });
+    const selected = r.ok !== false && r.selected?.id === id && !r.refused && !r.message;
+    rows.push({
+      step: `select-provider turn=${id}`,
+      result: selected ? "PASS" : "SKIP",
+      got: selected
+        ? `${id}${r.selected.model ? `:${r.selected.model}` : ""}`
+        : (r.refused ?? r.message ?? r.error),
+    });
+    record.steps.push({ step: `select-provider turn=${id}`, raw: r });
+    save();
+    pane("open-review");
+    return { select: r, selected };
+  };
+  const cliPropose = (ref, id) =>
+    note("propose", pane("propose", { ref }), { label: `propose ${ref} (${id})`, judge: "none" });
+
+  note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+
+  // S25-30: the model menu holds what the account lists.
+  const models = note("models", pane("models"));
+  marker("s25-models", modelsEvidence({ step: models, log: readLog(LOG) }));
+
+  // S25-31: which providers can be chosen, and why the others cannot.
+  marker("s25-providers", providersEvidence(note("providers", pane("providers"))));
+
+  // S25-32: judgments by Ollama, the review text from a file, then the split.
+  const judgeBy = opt["judgment-provider"];
+  const picked = note(
+    "select-provider",
+    pane("select-provider", { role: "oneshot", id: judgeBy }),
+    {
+      label: `select-provider oneshot=${judgeBy}`,
+      ctx: { id: judgeBy },
+    },
+  );
+  pane("open-review");
+  note("load-review-file", pane("load-review-file", { path: winPath(opt.review) }));
+  const split = note("split", pane("split"));
+  marker(
+    "s25-ollama-split",
+    ollamaSplitEvidence({
+      select: picked,
+      split,
+      decisions: readLog(path.join(RUN, `${STEM}.decisions.jsonl`)),
+    }),
+  );
+  note("edit-draft", pane("edit-draft", { requirements: { "R1.3": R13_REQUIREMENTS } }));
+
+  // S25-39: the ledger from a file, out to <stem>.ledger.json, and in again.
+  note("import-ledger", pane("import-ledger", { path: winPath(opt.ledger) }), {
+    label: "import-ledger (fixture)",
+    ctx: { added: 3, skipped: 0 },
+  });
+  note("export-ledger", pane("export-ledger"), { ctx: { count: 3 } });
+  const exported = path.join(RUN, `${STEM}.ledger.json`);
+  if (fs.existsSync(exported)) {
+    note("import-ledger", pane("import-ledger", { path: winPath(exported) }), {
+      label: "import-ledger (the exported file again)",
+      ctx: { added: 0, skipped: 3 },
+    });
+  } else {
+    rows.push({
+      step: "import-ledger (the exported file again)",
+      result: "FAIL",
+      got: `no ${exported}`,
+    });
+  }
+
+  // S25-40: a rule the review text asks for, found and added on a tick.
+  const rule = "cell-free extract";
+  const suggested = note(
+    "suggest-ledger",
+    pane("suggest-ledger", { review_file: winPath(opt["rules-review"]), pick: [rule] }),
+  );
+  marker("s25-ledger-suggest", suggestEvidence({ step: suggested, pick: rule, before: 3 }));
+
+  // S25-33, 34, 36: review turns by Codex, when the pane offers it for them.
+  const codex = turnProvider("codex");
+  let at = logAt();
+  if (codex.selected) cliPropose("R1.1", "codex");
+  marker(
+    "s25-codex-turn",
+    cliTurnEvidence({
+      provider: "codex",
+      ref: "R1.1",
+      select: codex.select,
+      log: logFrom(at),
+      revision: revisionNow(),
+    }),
+  );
+  // R1.3 asks for "novel", which ledger rule L2 forbids.
+  at = logAt();
+  if (codex.selected) cliPropose("R1.3", "codex");
+  marker(
+    "s25-codex-guard",
+    guardEvidence({
+      provider: "codex",
+      ref: "R1.3",
+      forbidden: "\\bnovel",
+      select: codex.select,
+      log: logFrom(at),
+      revision: revisionNow(),
+    }),
+  );
+  at = logAt();
+  const stop = codex.selected ? note("propose-stop", pane("propose-stop", { ref: "R1.4" })) : null;
+  marker(
+    "s25-cli-stop",
+    stopEvidence({
+      select: codex.select,
+      step: stop,
+      log: logFrom(at),
+      processes: codex.selected ? cliProcesses("codex exec --json") : 0,
+    }),
+  );
+
+  // S25-35: a review turn by Antigravity, when the pane offers it.
+  const agy = turnProvider("antigravity");
+  at = logAt();
+  if (agy.selected) cliPropose("R1.2", "antigravity");
+  marker(
+    "s25-agy-turn",
+    cliTurnEvidence({
+      provider: "antigravity",
+      ref: "R1.2",
+      select: agy.select,
+      log: logFrom(at),
+      revision: revisionNow(),
+    }),
+  );
+  if (codex.selected || agy.selected) {
+    note("select-provider", pane("select-provider", { role: "turn", id: "claude" }), {
+      label: "select-provider turn=claude",
+      ctx: { id: "claude" },
+    });
+    pane("open-review");
+  }
+
+  // S25-37: every comment that is not done, one turn after another.
+  at = logAt();
+  const all = pane("propose-all");
+  note("propose-all", all, { ctx: { log: logFrom(at) } });
+  marker("s25-propose-all", proposeAllEvidence({ message: all.message, log: logFrom(at) }));
+
+  // S25-38: a hand edit in Word, then the pane gets the focus back.
+  const del = com("delete-text", ["-Text", OUTSIDE_SENTENCE]);
+  record.word.delete_text = del;
+  rows.push({
+    step: "word: delete outside sentence",
+    result: del.ok ? "PASS" : "FAIL",
+    got: del.removed ?? del.error,
+  });
+  marker("s25-focus-refresh", focusEvidence(note("focus-refresh", pane("focus-refresh"))));
 }
 
 // Close the Word this run started (pid, with `doc` open in it). It is stopped
@@ -562,7 +770,7 @@ async function mode14() {
 async function cleanup() {
   const pid = record.word.launch?.pid;
   quitWord(pid, DOC);
-  if (!failed && !opt["skip-mode14"]) {
+  if (!failed && STAGE === "s2" && !opt["skip-mode14"]) {
     try {
       if (record.cleanup.left_running?.length || wordPids().includes(pid))
         throw new Error("the Word of the main run is still up");
@@ -589,7 +797,8 @@ async function cleanup() {
 
 let failed = null;
 try {
-  await main();
+  await setup();
+  await (STAGE === "s2" ? main() : mainS25());
 } catch (e) {
   failed = e;
   record.error = String(e?.stack ?? e);
@@ -611,20 +820,39 @@ function isolationCheck() {
   });
 }
 
-// Verify commands first: S2-18 checks that the daemon still listens.
 isolationCheck();
-try {
-  runFeatures();
-} catch (e) {
-  record.features_error = String(e?.message ?? e);
-}
 // Before the mode-14 check starts a daemon with a log of its own.
 const mainLogs = runLogs();
-if (failed && opt["keep-on-fail"]) {
-  record.cleanup.kept = { word_pid: record.word.launch?.pid, daemon_pid: daemon?.pid };
-  daemon?.unref();
+function verify() {
+  try {
+    runFeatures();
+  } catch (e) {
+    record.features_error = String(e?.message ?? e);
+  }
+}
+async function tidy() {
+  if (failed && opt["keep-on-fail"]) {
+    record.cleanup.kept = { word_pid: record.word.launch?.pid, daemon_pid: daemon?.pid };
+    daemon?.unref();
+  } else {
+    await cleanup();
+  }
+}
+if (STAGE === "s2") {
+  // Verify commands first: S2-18 checks that the daemon still listens.
+  verify();
+  await tidy();
 } else {
-  await cleanup();
+  // Cleanup first: S25-41 checks that Word and the daemon are gone.
+  await tidy();
+  marker(
+    `${STAGE}-cleanup`,
+    cleanupEvidence({
+      cleanup: record.cleanup,
+      listening: [WS_PORT, HTTP_PORT].filter(listening).length,
+    }),
+  );
+  verify();
 }
 const decision = exitDecision({
   failed: !!failed,

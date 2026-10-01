@@ -158,8 +158,10 @@ const steps = {
     return view(page);
   },
 
+  // a.review_file fills the paste box first; without it the text already
+  // there is split (stage 2.5 loads it with load-review-file).
   async split(page, a) {
-    await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
+    if (a.review_file) await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
     await clearMessage(page);
     await page.click("#review-split");
     const message = await waitMessage(page, 10 * 60_000);
@@ -317,6 +319,52 @@ const steps = {
     await page.click(btn);
     const message = await waitMessage(page, 120_000);
     return { offer, ...(await view(page)), message };
+  },
+
+  // ---- stage 2.5: the model menu of the chat box ----
+
+  // The rows of #composer-model once the daemon's list (or its failure) is
+  // in: taskpane.js loadModelMenu sets the tooltip either way.
+  async models(page) {
+    await page.waitForFunction(
+      () =>
+        /^(Models your Claude account|Model list unavailable)/.test(
+          document.getElementById("composer-model").title,
+        ),
+      null,
+      { timeout: 90_000, polling: 200 },
+    );
+    return page.$eval("#composer-model", (m) => ({
+      title: m.title,
+      selected: m.value,
+      options: [...m.options].map((o) => ({ value: o.value, label: o.textContent.trim() })),
+    }));
+  },
+
+  // Propose changes on one comment, then press Stop while the turn runs
+  // (a.after_ms after it began, default 8 s) and wait until the pane is free.
+  async "propose-stop"(page, a) {
+    if (await turnBusy(page)) throw new Error("a turn is already running");
+    await card(page, a.ref).locator("button", { hasText: "Propose changes" }).click();
+    await page.waitForFunction(() => document.getElementById("input").disabled, null, {
+      timeout: 30_000,
+    });
+    const started = Date.now();
+    await sleep(a.after_ms ?? 8000);
+    if (!(await turnBusy(page))) {
+      return { stopped: false, reason: "the turn ended before Stop", ...(await view(page)) };
+    }
+    await page.click("#stop-agent");
+    while (await turnBusy(page)) {
+      if (Date.now() - started > 120_000) throw new Error("the turn did not end after Stop");
+      await sleep(500);
+    }
+    await sleep(3000);
+    return {
+      stopped: true,
+      seconds: Math.round((Date.now() - started) / 1000),
+      ...(await view(page)),
+    };
   },
 
   // ---- stage 2.5: Providers section (Setup tab) ----

@@ -322,6 +322,188 @@ export function proposeAllEvidence({ message, log }) {
   };
 }
 
+// ---- Stage 2.5 (run-acceptance.mjs mainS25) ----
+// Each builder below returns the evidence the runner writes next to a marker
+// (`ok/s25-<name>.evidence.json`; the `.ok` file only when pass is true).
+
+// What a run uses when --features is not given.
+export function defaultFeatures(stage) {
+  const known = { s2: "S2-18..S2-34", s25: "S25-30..S25-41" };
+  if (!known[stage])
+    throw new Error(`no default feature range for stage ${stage}: give --features`);
+  return known[stage];
+}
+
+// The name of the manuscript copy in the run folder. The stage 2.5 feature
+// list reads paper.decisions.jsonl and paper.ledger.json next to it.
+export const docStem = (stage) => (stage === "s2" ? "review_manuscript" : "paper");
+
+const ALIASES = new Set(["sonnet", "opus", "haiku", "default"]);
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const refusal = (select) =>
+  select?.refused ?? select?.message ?? select?.error ?? "the provider was not selected";
+
+// S25-30. step: the `models` pane step; log: the daemon log of the run.
+export function modelsEvidence({ step, log }) {
+  const options = (step?.options ?? []).map((o) => o.value);
+  const outside_aliases = options.filter((v) => v && !ALIASES.has(v));
+  const source_sdk = /^\[models\] source=sdk /m.test(String(log ?? ""));
+  return {
+    pass: step?.ok !== false && outside_aliases.length > 0 && source_sdk,
+    options,
+    outside_aliases,
+    source_sdk,
+  };
+}
+
+// S25-32. select: `select-provider` for judgments with Ollama; split: the
+// `split` step; decisions: the text of <stem>.decisions.jsonl.
+export function ollamaSplitEvidence({ select, split, decisions }) {
+  const models = [];
+  for (const line of String(decisions ?? "").split("\n")) {
+    const m = /"model":"([^"]*)"/.exec(line);
+    if (m && !models.includes(m[1])) models.push(m[1]);
+  }
+  const selected = select?.selected?.id === "ollama" && !select?.refused;
+  return {
+    pass:
+      selected &&
+      /^Split by /.test(String(split?.message ?? "")) &&
+      models.some((m) => m.startsWith("ollama:")),
+    selected: select?.selected ?? null,
+    split_message: split?.message ?? null,
+    models,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// What the log says about the review turns of one CLI provider.
+function cliTurnLog(provider, log) {
+  const text = String(log ?? "");
+  const p = escapeRe(provider);
+  return {
+    started: new RegExp(`^\\[cli-turn\\] start provider=${p} `, "m").test(text),
+    done: new RegExp(`^\\[cli-turn\\] done provider=${p} code=0 `, "m").test(text),
+    endpoint_calls: (text.match(/^\[mcp-http\] POST route=/gm) ?? []).length,
+  };
+}
+const selectedFor = (select, provider) => select?.selected?.id === provider && !select?.refused;
+const changesOf = (revision, ref) =>
+  (revision?.comments ?? []).find((c) => c.ref === ref)?.changes ?? [];
+
+// S25-33 (Codex) and S25-35 (Antigravity): one review turn of the provider on
+// `ref`. log: the daemon log lines of that turn; revision: the file after it.
+export function cliTurnEvidence({ provider, ref, select, log, revision }) {
+  const selected = selectedFor(select, provider);
+  const l = cliTurnLog(provider, selected ? log : "");
+  const changes = changesOf(revision, ref);
+  return {
+    pass:
+      selected &&
+      l.started &&
+      l.done &&
+      l.endpoint_calls > 0 &&
+      changes.length > 0 &&
+      changes.every((c) => c.word_comment_id != null),
+    provider,
+    ref,
+    ...l,
+    changes: selected ? changes.length : 0,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// S25-34: a CLI turn on a comment whose request asks for a forbidden word.
+// document_changes: recorded changes of that comment whose new text holds the
+// word (must be 0: the edit is blocked, as in a Claude turn). The tool filter
+// of a CLI turn (no writer but office_tracked_edit) is tested in
+// tests/mcp-http.test.mjs and tests/review-turn-parity.test.mjs.
+export function guardEvidence({ provider, ref, forbidden, select, log, revision }) {
+  const selected = selectedFor(select, provider);
+  const l = cliTurnLog(provider, selected ? log : "");
+  const re = new RegExp(forbidden, "i");
+  const leaked = changesOf(revision, ref).filter((c) => re.test(String(c.text ?? "")));
+  const document_changes = selected && l.done ? leaked.length : null;
+  return {
+    pass: document_changes === 0,
+    document_changes,
+    blocked: new RegExp(`^\\[review\\] blocked ${escapeRe(ref)} by=`, "m").test(String(log ?? "")),
+    provider,
+    ref,
+    ...l,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// S25-36. step: the `propose-stop` pane step; processes: CLI processes of
+// the provider still running after it.
+export function stopEvidence({ select, step, log, processes }) {
+  const provider = select?.selected?.id;
+  const selected = !!provider && provider !== "claude" && !select?.refused;
+  const started = selected && cliTurnLog(provider, log).started;
+  return {
+    pass:
+      selected &&
+      started &&
+      step?.stopped === true &&
+      step?.agent_status === "Ready" &&
+      processes === 0,
+    stopped: step?.stopped === true,
+    agent_status: step?.agent_status ?? null,
+    started,
+    processes,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// S25-38. step: the `focus-refresh` pane step after a hand edit in Word.
+export function focusEvidence(step) {
+  const external = step?.external ?? [];
+  return {
+    pass:
+      step?.changed === true && /^Auto-refreshed /.test(step?.after ?? "") && external.length > 0,
+    auto_line: step?.after ?? null,
+    external,
+  };
+}
+
+// S25-40. step: the `suggest-ledger` pane step; pick: the text the ticked
+// candidate holds; before: ledger rules before the step.
+export function suggestEvidence({ step, pick, before }) {
+  const ticked = (step?.candidates ?? []).filter((c) => c.checked);
+  const ledger = step?.ledger ?? [];
+  return {
+    pass:
+      ticked.some((c) => c.label.includes(pick)) &&
+      /^Added [1-9]\d* ledger rule\(s\)/.test(step?.message ?? "") &&
+      ledger.length > before &&
+      ledger.some((l) => l.includes(pick)),
+    candidates: step?.candidates ?? [],
+    message: step?.message ?? null,
+    ledger_before: before,
+    ledger_after: ledger.length,
+  };
+}
+
+// S25-41. cleanup: record.cleanup of the runner; listening: daemon ports
+// still open after it.
+export function cleanupEvidence({ cleanup, listening }) {
+  return {
+    pass:
+      cleanup?.own_word_gone === true &&
+      cleanup?.preexisting_alive === true &&
+      !cleanup?.left_running?.length &&
+      !cleanup?.daemon_error &&
+      !cleanup?.kept &&
+      listening === 0,
+    own_word_gone: cleanup?.own_word_gone ?? null,
+    preexisting_alive: cleanup?.preexisting_alive ?? null,
+    left_running: cleanup?.left_running ?? [],
+    daemon_error: cleanup?.daemon_error ?? null,
+    listening,
+  };
+}
+
 // Judgments of one pane step from the runner's record of it. Each returns
 // { pass, expect, got } where expect quotes the acceptance procedure.
 export const JUDGES = {
@@ -445,6 +627,16 @@ export const JUDGES = {
     got: `${r.offer} | ${r.message}`,
   }),
   // ---- stage 2.5 steps ----
+  models: (r) => ({
+    pass: /^Models your Claude account can use/.test(r.title ?? "") && r.options?.length > 0,
+    expect: "the model menu filled from the account (tooltip: Models your Claude account can use)",
+    got: `${r.title} | ${(r.options ?? []).map((o) => o.value).join(",")}`,
+  }),
+  "propose-stop": (r) => ({
+    pass: r.stopped === true && r.agent_status === "Ready",
+    expect: "Stop pressed while the turn ran; the pane is Ready again",
+    got: r.stopped ? `stopped after ${r.seconds} s, status ${r.agent_status}` : String(r.reason),
+  }),
   providers: (r) => {
     const e = providersEvidence(r);
     const ids = (k) =>

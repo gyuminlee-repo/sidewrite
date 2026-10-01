@@ -633,3 +633,348 @@ test("exitDecision: a CLI-turn feature is skipped only when no CLI review turn s
   // Not named with --conditional: it counts.
   assert.equal(exitDecision({ rows: [], features, logs: claudeOnly }).code, 1);
 });
+
+// ---- Stage 2.5 flow: evidence written next to each marker (run-acceptance.mjs) ----
+// The pane outputs below are written by hand in the form pane-driver.cjs
+// returns; none was recorded from Word yet.
+
+test("defaultFeatures and docStem follow the stage", async () => {
+  const { defaultFeatures, docStem } = await import("../scripts/e2e/judge.mjs");
+  assert.equal(defaultFeatures("s2"), "S2-18..S2-34");
+  assert.equal(defaultFeatures("s25"), "S25-30..S25-41");
+  assert.throws(() => defaultFeatures("s9"), /--features/);
+  // The stage 2.5 feature list names paper.decisions.jsonl and paper.ledger.json.
+  assert.equal(docStem("s2"), "review_manuscript");
+  assert.equal(docStem("s25"), "paper");
+});
+
+test("modelsEvidence: a model outside the three aliases and the list from the account", async () => {
+  const { modelsEvidence } = await import("../scripts/e2e/judge.mjs");
+  const step = {
+    ok: true,
+    title: "Models your Claude account can use",
+    options: [
+      { value: "sonnet", label: "Sonnet" },
+      { value: "opus", label: "Opus" },
+      { value: "haiku", label: "Haiku" },
+      { value: "claude-fable-5", label: "Fable · claude-fable-5" },
+    ],
+  };
+  const log = "[daemon] Ready\n[models] source=sdk count=11\n";
+  const e = modelsEvidence({ step, log });
+  assert.deepEqual([e.pass, e.outside_aliases, e.source_sdk], [true, ["claude-fable-5"], true]);
+  assert.equal(
+    modelsEvidence({ step, log: "[models] source=fallback count=3 error=x\n" }).pass,
+    false,
+  );
+  const aliases = { ...step, options: step.options.slice(0, 3) };
+  assert.equal(modelsEvidence({ step: aliases, log }).pass, false);
+  assert.equal(modelsEvidence({ step: { ok: false, error: "x" }, log }).pass, false);
+  assert.equal(judge("models", step).pass, true);
+  assert.equal(
+    judge("models", { ...step, title: "Model list unavailable (x); aliases only" }).pass,
+    false,
+  );
+});
+
+test("ollamaSplitEvidence: Ollama chosen, the split done, a receipt with an ollama model", async () => {
+  const { ollamaSplitEvidence } = await import("../scripts/e2e/judge.mjs");
+  const select = { ok: true, selected: { id: "ollama", model: "qwen3.5:9b" }, message: "" };
+  const split = {
+    ok: true,
+    message: "Split by regex: 7 comment(s). Edit, then Save.",
+    draft_refs: [],
+  };
+  const decisions =
+    '{"kind":"requirement_extract","model":"ollama:qwen3.5:9b"}\n{"kind":"ledger_check","model":"haiku"}\n';
+  const e = ollamaSplitEvidence({ select, split, decisions });
+  assert.deepEqual([e.pass, e.models], [true, ["ollama:qwen3.5:9b", "haiku"]]);
+  assert.equal(
+    ollamaSplitEvidence({ select, split, decisions: '{"model":"haiku"}\n' }).pass,
+    false,
+  );
+  assert.equal(ollamaSplitEvidence({ select, split, decisions: "" }).pass, false);
+  const refused = {
+    ok: true,
+    selected: { id: "claude", model: null },
+    refused: "Ollama (local) (Ollama is not running)",
+  };
+  const r = ollamaSplitEvidence({ select: refused, split, decisions });
+  assert.equal(r.pass, false);
+  assert.match(r.reason, /Ollama is not running/);
+});
+
+test("cliTurnEvidence: a CLI turn that started, used the endpoint and left a change with its comment", async () => {
+  const { cliTurnEvidence } = await import("../scripts/e2e/judge.mjs");
+  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
+  const log = [
+    "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.1",
+    "[mcp-http] POST route=ab key=k ref=R1.1",
+    "[cli-turn] done provider=codex code=0 tools=2",
+  ].join("\n");
+  const revision = {
+    comments: [{ ref: "R1.1", changes: [{ id: "R1.1-1", word_comment_id: "12" }] }],
+  };
+  const e = cliTurnEvidence({ provider: "codex", ref: "R1.1", select, log, revision });
+  assert.deepEqual(
+    [e.pass, e.started, e.done, e.endpoint_calls, e.changes],
+    [true, true, true, 1, 1],
+  );
+  // No rationale comment, no change, or no finished turn: no pass.
+  const bare = { comments: [{ ref: "R1.1", changes: [{ id: "R1.1-1", word_comment_id: null }] }] };
+  assert.equal(
+    cliTurnEvidence({ provider: "codex", ref: "R1.1", select, log, revision: bare }).pass,
+    false,
+  );
+  assert.equal(
+    cliTurnEvidence({
+      provider: "codex",
+      ref: "R1.1",
+      select,
+      log: log.replace("code=0", "code=1"),
+      revision,
+    }).pass,
+    false,
+  );
+  assert.equal(
+    cliTurnEvidence({ provider: "antigravity", ref: "R1.1", select, log, revision }).pass,
+    false,
+    "the log lines of another provider do not count",
+  );
+  // The provider is not offered for review turns: nothing ran, and the reason is kept.
+  const refused = {
+    ok: true,
+    selected: { id: "claude", model: null },
+    refused: "Codex CLI (judgments only): Judgments only. Codex CLI will not call the office tools",
+  };
+  const n = cliTurnEvidence({ provider: "codex", ref: "R1.1", select: refused, log: "", revision });
+  assert.deepEqual([n.pass, n.started], [false, false]);
+  assert.match(n.reason, /judgments only/);
+});
+
+test("guardEvidence: the forbid rule holds on a CLI turn; the count the feature reads is at the top", async () => {
+  const { guardEvidence } = await import("../scripts/e2e/judge.mjs");
+  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
+  const log = [
+    "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.3",
+    "[review] blocked R1.3 by=L2",
+    "[cli-turn] done provider=codex code=0 tools=3",
+  ].join("\n");
+  const clean = {
+    comments: [{ ref: "R1.3", changes: [{ id: "R1.3-1", text: "followed by optical density" }] }],
+  };
+  const e = guardEvidence({
+    provider: "codex",
+    ref: "R1.3",
+    forbidden: "\\bnovel",
+    select,
+    log,
+    revision: clean,
+  });
+  assert.deepEqual([e.pass, e.document_changes, e.blocked], [true, 0, true]);
+  const leaked = {
+    comments: [{ ref: "R1.3", changes: [{ id: "R1.3-1", text: "a novel substrate" }] }],
+  };
+  const bad = guardEvidence({
+    provider: "codex",
+    ref: "R1.3",
+    forbidden: "\\bnovel",
+    select,
+    log,
+    revision: leaked,
+  });
+  assert.deepEqual([bad.pass, bad.document_changes], [false, 1]);
+  const refused = { ok: true, selected: { id: "claude" }, refused: "Codex CLI (judgments only)" };
+  const n = guardEvidence({
+    provider: "codex",
+    ref: "R1.3",
+    forbidden: "\\bnovel",
+    select: refused,
+    log: "",
+    revision: clean,
+  });
+  assert.deepEqual([n.pass, n.document_changes], [false, null]);
+});
+
+test("stopEvidence: Stop ended the CLI turn, the pane is ready and no CLI process is left", async () => {
+  const { stopEvidence } = await import("../scripts/e2e/judge.mjs");
+  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
+  const step = { ok: true, stopped: true, agent_status: "Ready", seconds: 12 };
+  const log =
+    "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.4\n[cli-turn] done provider=codex code=- tools=0\n";
+  assert.equal(stopEvidence({ select, step, log, processes: 0 }).pass, true);
+  assert.equal(stopEvidence({ select, step, log, processes: 1 }).pass, false);
+  assert.equal(
+    stopEvidence({ select, step: { ...step, stopped: false }, log, processes: 0 }).pass,
+    false,
+  );
+  assert.equal(
+    stopEvidence({ select, step: { ...step, agent_status: "Working" }, log, processes: 0 }).pass,
+    false,
+  );
+  assert.equal(judge("propose-stop", step).pass, true);
+  assert.equal(
+    judge("propose-stop", { ok: true, stopped: false, reason: "the turn ended before Stop" }).pass,
+    false,
+  );
+});
+
+test("focusEvidence, suggestEvidence and cleanupEvidence", async () => {
+  const { focusEvidence, suggestEvidence, cleanupEvidence } =
+    await import("../scripts/e2e/judge.mjs");
+  const focus = {
+    ok: true,
+    changed: true,
+    after:
+      "Auto-refreshed 10:00:00: Changes 5, expected tool comments 5, found 5. Outside changes: 1.",
+    external: ["X1: a sentence was deleted. Lost: 0.82; 0.91"],
+  };
+  assert.equal(focusEvidence(focus).pass, true);
+  assert.equal(focusEvidence({ ...focus, external: [] }).pass, false);
+  assert.equal(focusEvidence({ ...focus, changed: false }).pass, false);
+
+  const suggest = {
+    ok: true,
+    candidates: [
+      { label: "Forbidden, must not match /cell-free extract/i: Please do not ...", checked: true },
+    ],
+    message: "Added 1 ledger rule(s), skipped 0 already in the ledger.",
+    ledger: [
+      "L1 instruction a",
+      "L2 forbid b",
+      "L3 instruction c",
+      'L4 forbid Please do not use "cell-free extract"',
+    ],
+  };
+  assert.equal(suggestEvidence({ step: suggest, pick: "cell-free extract", before: 3 }).pass, true);
+  assert.equal(
+    suggestEvidence({ step: suggest, pick: "cell-free extract", before: 4 }).pass,
+    false,
+  );
+  assert.equal(
+    suggestEvidence({ step: { ...suggest, candidates: [] }, pick: "x", before: 3 }).pass,
+    false,
+  );
+
+  const cleanup = { own_word_gone: true, preexisting_alive: true };
+  assert.equal(cleanupEvidence({ cleanup, listening: 0 }).pass, true);
+  assert.equal(cleanupEvidence({ cleanup, listening: 2 }).pass, false);
+  assert.equal(
+    cleanupEvidence({ cleanup: { ...cleanup, own_word_gone: false }, listening: 0 }).pass,
+    false,
+  );
+  assert.equal(
+    cleanupEvidence({ cleanup: { ...cleanup, preexisting_alive: false }, listening: 0 }).pass,
+    false,
+  );
+  assert.equal(
+    cleanupEvidence({
+      cleanup: { ...cleanup, left_running: [{ pid: 1, reason: "x" }] },
+      listening: 0,
+    }).pass,
+    false,
+  );
+  assert.equal(
+    cleanupEvidence({ cleanup: { ...cleanup, daemon_error: "x" }, listening: 0 }).pass,
+    false,
+  );
+  assert.equal(cleanupEvidence({ cleanup: { kept: { word_pid: 1 } }, listening: 2 }).pass, false);
+});
+
+test("the stage 2.5 feature commands pass on the evidence the builders write, and fail on a bare run", async (t) => {
+  if (process.platform === "win32") return t.skip("verify commands are bash lines");
+  const j = await import("../scripts/e2e/judge.mjs");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { spawnSync } = await import("node:child_process");
+  if (spawnSync("jq", ["--version"]).status !== 0) return t.skip("jq is not installed");
+  const run = fs.mkdtempSync(path.join(os.tmpdir(), "e2e-s25-"));
+  const ok = path.join(run, "ok");
+  fs.mkdirSync(ok);
+  const log = path.join(run, "daemon.log");
+  const opts = {
+    runDir: run,
+    prefix: "s25",
+    planDir: "/tmp/s25-run",
+    planLog: "/tmp/daemon-s25.log",
+    log,
+  };
+  const exit = (cmd) =>
+    spawnSync("bash", ["-c", j.rewriteVerify(cmd, opts)], { stdio: "ignore" }).status;
+  // As the runner's marker(): evidence always, .ok only on a pass.
+  const marker = (name, evidence) => {
+    fs.writeFileSync(path.join(ok, `${name}.evidence.json`), JSON.stringify(evidence));
+    if (evidence.pass) fs.writeFileSync(path.join(ok, `${name}.ok`), "");
+  };
+  // The commands of the feature list that read an evidence file with jq.
+  const S31 =
+    "jq -e '.claude.enabled and .codex.enabled and (.openrouter.enabled|not) and (.openrouter.note|test(\"No API key\"))' /tmp/s25-providers.evidence.json";
+  const S34 =
+    "test -f /tmp/s25-codex-guard.ok && jq -e '.document_changes == 0' /tmp/s25-codex-guard.evidence.json";
+  const S37 =
+    "jq -e '.overlaps == 0 and .proposed == .open_before' /tmp/s25-propose-all.evidence.json";
+  const S38 =
+    "test -f /tmp/s25-focus-refresh.ok && grep -q '\\[review\\] external X' /tmp/daemon-s25.log";
+  fs.writeFileSync(log, "");
+  for (const c of [S31, S34, S37, S38]) assert.notEqual(exit(c), 0, c);
+
+  const menu = (id, enabled, note = "") => ({ id, text: id, enabled, note });
+  marker(
+    "s25-providers",
+    j.providersEvidence({
+      ok: true,
+      menus: {
+        turn: [menu("claude", true)],
+        oneshot: [
+          menu("claude", true),
+          menu("codex", true),
+          menu("openrouter", false, "No API key"),
+        ],
+      },
+      rows: [],
+    }),
+  );
+  assert.equal(exit(S31), 0);
+  const turnLog =
+    "[review] prompt R1.1 x\n[review] turn done R1.1\n[review] prompt R1.2 x\n[review] turn done R1.2\n";
+  marker(
+    "s25-propose-all",
+    j.proposeAllEvidence({ message: "Propose all: 2 of 2 proposed.", log: turnLog }),
+  );
+  assert.equal(exit(S37), 0);
+  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
+  marker(
+    "s25-codex-guard",
+    j.guardEvidence({
+      provider: "codex",
+      ref: "R1.3",
+      forbidden: "\\bnovel",
+      select,
+      log: "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.3\n[cli-turn] done provider=codex code=0 tools=1\n",
+      revision: { comments: [{ ref: "R1.3", changes: [] }] },
+    }),
+  );
+  assert.equal(exit(S34), 0);
+  marker(
+    "s25-focus-refresh",
+    j.focusEvidence({
+      ok: true,
+      changed: true,
+      after: "Auto-refreshed 1:00:00: x",
+      external: ["X1: y"],
+    }),
+  );
+  fs.writeFileSync(log, "[review] external X1 kind=delete paragraph=4 lost=2\n");
+  assert.equal(exit(S38), 0);
+});
+
+test("the rules review of the stage 2.5 run yields the candidate its suggest step ticks", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { suggestLedgerRegex } = await import("../daemon/ledger-suggest.mjs");
+  const { candidateLabel } = await import("../taskpane/shared/review-view.js");
+  const text = readFileSync(new URL("./fixtures/fake_review_rules.txt", import.meta.url), "utf8");
+  const labels = suggestLedgerRegex(text).map(candidateLabel);
+  assert.equal(labels.length, 1);
+  assert.match(labels[0], /^Forbidden, must not match \/cell-free extract\/i: /);
+});
