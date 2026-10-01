@@ -34,7 +34,20 @@ export const wordCount = (s) => (String(s ?? "").match(/\S+/g) ?? []).length;
 
 const blank = (s) => !String(s ?? "").trim();
 
-const XREF = /\b(?:Reviewer|Referee)\s*#?\s*\d/i;
+// Reviewer numbers a text names: "Reviewer 2", "Referee #3", a list after the
+// plural ("Reviewers 1, 3 and 4") and a comment id of this tool ("R2.4").
+// A bare "R2" is not taken: in a manuscript letter it is mostly R squared or
+// a strain name.
+const XREF =
+  /\b(?:(Reviewers|Referees)|Reviewer|Referee)\s*#?\s*(\d+)((?:\s*(?:,\s*(?:and|or)|,|&|and|or)\s*#?\s*\d+)*)|\bR(\d+)\.\d+\b/gi;
+function reviewersNamed(text) {
+  const out = [];
+  for (const m of text.matchAll(XREF)) {
+    if (m[4]) out.push(Number(m[4]));
+    else out.push(Number(m[2]), ...(m[1] ? (m[3].match(/\d+/g) ?? []).map(Number) : []));
+  }
+  return out;
+}
 // A whole line in square brackets: the shape of a location line.
 const BRACKET_LINE = /^\s*\[.+\]\s*$/;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -150,8 +163,13 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
     if (openingError) add("rule_opening", "warn", c.ref, `opening_regex: ${openingError}`);
     else if (opening && !opening.test(text))
       add("rule_opening", "fail", c.ref, "first sentence does not match the profile opening");
-    if (L.forbid_cross_reviewer && XREF.test(text))
-      add("rule_xref", "fail", c.ref, `mentions ${XREF.exec(text)[0]}`);
+    // The reviewer being answered may be named, any other may not. An answer
+    // to the editor (reviewer 0) has no reviewer of its own: every number is
+    // a cross reference there.
+    const others = L.forbid_cross_reviewer
+      ? [...new Set(reviewersNamed(text).filter((n) => n !== c.reviewer))]
+      : [];
+    if (others.length) add("rule_xref", "fail", c.ref, `mentions Reviewer ${others.join(", ")}`);
     const lost = r.previous ? lostFacts(r.previous, text) : [];
     if (lost.length) add("lost_facts", "warn", c.ref, `not in the new draft: ${lost.join("; ")}`);
   }

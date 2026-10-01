@@ -260,6 +260,62 @@ test("profile rules: word cap, opening, cross-reviewer; counts come from code", 
   ]);
 });
 
+test("cross-reviewer rule: only another reviewer's number fails, in every way of writing it", () => {
+  // The answer to comment `ref` of reviewer `reviewer`; null when it passes,
+  // else the detail of the rule_xref row.
+  const xref = (text, ref = "R1.1", reviewer = 1) => {
+    const rows = checkResponses(
+      good(
+        (r) => {
+          Object.assign(r.comments[0], { ref, reviewer });
+          r.comments[0].response.text = text;
+        },
+        { forbid_cross_reviewer: true },
+      ),
+    ).filter((row) => row.id === "rule_xref");
+    assert.ok(rows.length <= 1);
+    return rows.length ? rows[0].detail : null;
+  };
+  // The reviewer being answered may be named.
+  for (const own of [
+    "As Reviewer 1 requested, we state the unit.",
+    "As Reviewer #1 requested, we state the unit.",
+    "As reviewer 1 requested, we state the unit.",
+    "We thank Referee 1 and state the unit.",
+    "Reviewer 1's point is taken; see also our answer to R1.3.",
+    "We thank the reviewer and state the unit.",
+    "We thank both reviewers and state the unit.",
+  ])
+    assert.equal(xref(own), null, own);
+  // Another reviewer may not.
+  assert.equal(xref("As Reviewer 2 requested, we state the unit."), "mentions Reviewer 2");
+  assert.equal(xref("As Referee #2 requested, we state the unit."), "mentions Reviewer 2");
+  assert.equal(xref("As Reviewer2 requested, we state the unit."), "mentions Reviewer 2");
+  assert.equal(xref("Reviewers 1 and 2 asked for the unit."), "mentions Reviewer 2");
+  assert.equal(xref("Reviewers 1, 3 and 4 asked for the unit."), "mentions Reviewer 3, 4");
+  assert.equal(xref("Reviewer 1 and Reviewer 2 asked for the unit."), "mentions Reviewer 2");
+  assert.equal(xref("See our answer to R2.4."), "mentions Reviewer 2");
+  // A number that only starts or ends like the own one is another reviewer.
+  assert.equal(xref("As Reviewer 11 requested, we state the unit."), "mentions Reviewer 11");
+  assert.equal(xref("As Reviewer 1 requested.", "R11.1", 11), "mentions Reviewer 1");
+  assert.equal(xref("See our answer to R11.2."), "mentions Reviewer 11");
+  assert.equal(xref("As Reviewer 11 requested.", "R11.1", 11), null);
+  // Not a reviewer: a word that holds "reviewer", R squared, a number after another word.
+  for (const none of [
+    "The interviewer 2 weeks later confirmed it.",
+    "The fit gave R2 = 0.98 for 2 replicates.",
+    "Strain R2 was used, and reviewers will find 3 new figures.",
+    "The reviewer asked 2 questions.",
+  ])
+    assert.equal(xref(none), null, none);
+  // In an answer to the editor every reviewer number is a cross reference.
+  assert.equal(
+    xref("As Reviewer 1 also noted, the title is long.", "E.1", 0),
+    "mentions Reviewer 1",
+  );
+  assert.equal(xref("The title is now shorter.", "E.1", 0), null);
+});
+
 test("positions belong to the tool: a location line or a line number in the prose fails", () => {
   const prose = (text) => ids(checkResponses(good((r) => (r.comments[0].response.text = text))));
   assert.deepEqual(prose("We now state the unit.\n[Revised in 3. Results, lines 4-5]"), [
