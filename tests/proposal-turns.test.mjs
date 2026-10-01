@@ -926,7 +926,13 @@ test("preview gives the request of the turn and asks nobody", async () => {
     assert.equal(t.out.length, 0, "nothing goes to the pane");
     t.start();
     await t.turnEnded();
-    assert.deepEqual([p.system, p.prompt], [t.asked[0].system, t.asked[0].prompt]);
+    // The same but for the fence of the comment, which every prompt takes anew.
+    const fence = (s) => /\n<<<([0-9a-f]{12})\n/.exec(s)[1];
+    assert.notEqual(fence(p.prompt), fence(t.asked[0].prompt));
+    assert.deepEqual(
+      [p.system, p.prompt.replaceAll(fence(p.prompt), "F")],
+      [t.asked[0].system, t.asked[0].prompt.replaceAll(fence(t.asked[0].prompt), "F")],
+    );
     const sel = await t.turns.preview(
       "k",
       { ref: "R1.1" },
