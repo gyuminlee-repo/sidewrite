@@ -9,6 +9,8 @@ import {
   rulesAdded,
   fileTooLarge,
   markedLines,
+  checkRows,
+  formatFindingText,
 } from "../taskpane/shared/tools-view.js";
 
 test("the document line names the saved file, or says to save", () => {
@@ -88,4 +90,89 @@ test("the marked copy: what was written, or the refusal as the tool said it", ()
   ]);
   assert.equal(fileTooLarge(1024), false);
   assert.equal(fileTooLarge(80 * 1024 * 1024), true);
+});
+
+test("a format finding names its paragraph and what should be", () => {
+  assert.equal(
+    formatFindingText({
+      paragraph_index: 9,
+      rule: "stat",
+      find: "p",
+      context: " significant (p < 0.05). ",
+    }),
+    'Paragraph 9: "p" should be italic in "significant (p < 0.05)."',
+  );
+  assert.equal(
+    formatFindingText({
+      paragraph_index: 4,
+      rule: "subscript",
+      find: "CO2",
+      context: "of CO2 was",
+    }),
+    'Paragraph 4: the digits of "CO2" should be subscript in "of CO2 was"',
+  );
+  assert.equal(
+    formatFindingText({
+      paragraph_index: 8,
+      rule: "indent",
+      found: 0,
+      want: { first_line_indent: 36 },
+      context: "The cultures",
+    }),
+    "Paragraph 8: first-line indent is 0 pt, the others have 36 pt",
+  );
+  assert.equal(
+    formatFindingText({ paragraph_index: 10, rule: "empty_table", found: { rows: 2, cols: 2 } }),
+    "Paragraph 10: empty table (2 x 2)",
+  );
+});
+
+test("the rows of a check: rules on, findings with their paragraph, count results", () => {
+  const rows = checkRows({
+    format: {
+      rules: ["statistics symbols in italics"],
+      error: null,
+      findings: [{ paragraph_index: 9, rule: "stat", find: "p", context: "(p < 0.05)" }],
+    },
+    counts: [
+      {
+        id: "L1",
+        text: "At most 10 words.",
+        status: "violations",
+        violations: [{ paragraph_index: 0, count: 12, min: null, max: 10 }],
+      },
+      { id: "L2", text: "3 to 6 keywords.", status: "ok", count: 3, violations: [] },
+      {
+        id: "L3",
+        text: "Order.",
+        status: "violations",
+        violations: [{ paragraph_index: 5, count: null, min: null, max: null }],
+      },
+      { id: "L4", text: "Tables.", status: "error", error: "no section", violations: [] },
+    ],
+  });
+  assert.deepEqual(rows, [
+    { text: "Format rules on: statistics symbols in italics, empty tables." },
+    { text: 'Paragraph 9: "p" should be italic in "(p < 0.05)"', index: 9, bad: true },
+    { text: "L1: 12 found, at most 10 allowed. Rule: At most 10 words.", index: 0, bad: true },
+    { text: "L2 ok (3): 3 to 6 keywords." },
+    { text: "L3: out of order. Rule: Order.", index: 5, bad: true },
+    { text: "L4 could not be checked: no section. Rule: Tables.", bad: true },
+  ]);
+  assert.deepEqual(
+    checkRows({ format: { rules: [], error: "not read", findings: [] }, counts: [] }),
+    [
+      { text: "No format rule is on in the profile; only empty tables are reported." },
+      { text: "not read", bad: true },
+      { text: "No count rule is in the ledger." },
+    ],
+  );
+  assert.deepEqual(
+    checkRows({ format: { rules: [], error: null, findings: [] }, counts: [] }).map((r) => r.text),
+    [
+      "No format rule is on in the profile; only empty tables are reported.",
+      "Format: nothing found.",
+      "No count rule is in the ledger.",
+    ],
+  );
 });

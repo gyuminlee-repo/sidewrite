@@ -39,6 +39,64 @@ export function rulesAdded(r) {
   return `${parts.join("; ")}.`;
 }
 
+// One format finding (daemon/format-check.mjs), in words.
+const FORMAT_WANT = {
+  stat: (f) => `"${f.find}" should be italic`,
+  species: (f) => `"${f.find}" should be italic`,
+  gene: (f) => `"${f.find}" should be italic`,
+  subscript: (f) => `the digits of "${f.find}" should be subscript`,
+  indent: (f) => {
+    const found = typeof f.found === "object" ? `${f.found?.chars} characters` : `${f.found} pt`;
+    return `first-line indent is ${found}, the others have ${f.want.first_line_indent} pt`;
+  },
+  empty_table: (f) => `empty table (${f.found.rows} x ${f.found.cols})`,
+};
+export function formatFindingText(f) {
+  const what = FORMAT_WANT[f.rule]?.(f) ?? f.rule;
+  const near = f.context && f.rule !== "indent" ? ` in "${f.context.trim()}"` : "";
+  return `Paragraph ${f.paragraph_index}: ${what}${near}`;
+}
+
+// The rows under "Run checks": [{ text, index?, bad? }]. A row with an index
+// goes to that paragraph when it is clicked.
+export function checkRows(r) {
+  const rows = [];
+  const f = r.format;
+  rows.push({
+    text: f.rules.length
+      ? `Format rules on: ${f.rules.join(", ")}, empty tables.`
+      : "No format rule is on in the profile; only empty tables are reported.",
+  });
+  if (f.error) rows.push({ text: f.error, bad: true });
+  for (const x of f.findings)
+    rows.push({ text: formatFindingText(x), index: x.paragraph_index, bad: true });
+  if (!f.error && !f.findings.length) rows.push({ text: "Format: nothing found." });
+  if (!r.counts.length) rows.push({ text: "No count rule is in the ledger." });
+  for (const c of r.counts) {
+    if (c.status === "error") {
+      rows.push({ text: `${c.id} could not be checked: ${c.error}. Rule: ${c.text}`, bad: true });
+    } else if (c.status === "ok") {
+      const n = c.count == null ? "" : ` (${c.count})`;
+      rows.push({ text: `${c.id} ok${n}: ${c.text}` });
+    } else {
+      for (const v of c.violations) {
+        const limits = [
+          v.min != null ? `at least ${v.min}` : null,
+          v.max != null ? `at most ${v.max}` : null,
+        ].filter(Boolean);
+        const found =
+          v.count == null ? "out of order" : `${v.count} found, ${limits.join(" and ")} allowed`;
+        rows.push({
+          text: `${c.id}: ${found}. Rule: ${c.text}`,
+          index: v.paragraph_index,
+          bad: true,
+        });
+      }
+    }
+  }
+  return rows;
+}
+
 // A file larger than this does not fit one frame to the daemon (base64).
 const FRAME_LIMIT = 100 * 1024 * 1024 - 4096;
 export const fileTooLarge = (bytes) => Math.ceil(bytes / 3) * 4 > FRAME_LIMIT;

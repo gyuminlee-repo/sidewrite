@@ -35,6 +35,7 @@ import {
   selectCommentById,
   selectParagraphByIndex,
   selectionText,
+  readFormatSnapshot,
   readAllComments,
   deleteBackedUpComments,
   deleteToolComments,
@@ -1261,7 +1262,13 @@ Office.onReady((info) => {
       providersReady: () => providersPane?.whenRestored() ?? null,
       settings,
       saveSettings,
-      word: { selectionText },
+      word: {
+        selectionText,
+        collectReviewSnapshot,
+        collectHeadings,
+        readFormatSnapshot,
+        selectParagraphByIndex,
+      },
     });
   }
 

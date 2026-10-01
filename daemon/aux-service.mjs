@@ -2,7 +2,7 @@
 //
 // Requests (bridge.mjs extraHandlers): { type, request_id, ...payload } and the
 // reply { type: "<type>_result", request_id, ok, ... }.
-//   tools_state, profile_rules_apply
+//   tools_state, profile_rules_apply, format_check
 // Jobs (AUX_JOBS; they call a model or a Python tool): accepted at once, the
 // result follows as { type: "tools_event", event: "job_done", job_id, result }.
 //   selection_translate, selection_ask, profile_rules_extract, marked_build
@@ -23,6 +23,11 @@
 // the tool and the options the script uses (tools/build_marked_diff.py), so
 // the button and the script give the same file. A refusal of the tool is the
 // error of the job, word for word.
+//
+// Checks. format_check reports and changes nothing: the format rules the
+// profile turns on (format-check.mjs) over the formatting the pane read, and
+// the count rules of the ledger (count-check.mjs) over the snapshot and the
+// headings. Nothing of the result is stored.
 //
 // Nothing here writes to the open document. A copy (marked, anonymized) is a
 // new file next to the manuscript, made from the file as it was last saved.
@@ -52,6 +57,9 @@ import { appendDecisions, decisionRecord } from "./decision-log.mjs";
 import { SAVE_FIRST } from "./doc-bytes.mjs";
 import { runPy as defaultRunPy } from "./py-tool.mjs";
 import { runMarkedDiff } from "./marked-diff.mjs";
+import { findFormatIssues } from "./format-check.mjs";
+import { checkCountItem } from "./count-check.mjs";
+import { usableHeadings } from "./response-service.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
 
 export const AUX_JOBS = new Set([
@@ -81,6 +89,22 @@ export const buildAskPrompt = (text, question) => ({
   prompt: `Text:\n${text}\n\nQuestion: ${question}`,
   expectJson: false,
 });
+
+const isObj = (x) => !!x && typeof x === "object" && !Array.isArray(x);
+const named = (x) => Array.isArray(x) && x.some((s) => typeof s === "string" && s);
+
+// The format rules a profile turns on, by name, for the line above the
+// findings. An empty table is always reported.
+export function formatRulesOn(profile = {}) {
+  const italics = profile.italics ?? {};
+  return [
+    italics.statistics === true && "statistics symbols in italics",
+    named(italics.genera) && "species names in italics",
+    named(italics.genes) && "gene names in italics",
+    named(profile.subscripts) && "formula digits in subscript",
+    profile.first_line_indent != null && "first-line indent",
+  ].filter(Boolean);
+}
 
 function selectedText(msg) {
   const text = String(msg.text ?? "").trim();
@@ -274,6 +298,38 @@ export function createAuxService({
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
+    },
+
+    // Format findings and count results for the document as the pane read
+    // it. Report only: nothing is written to the document or the revision.
+    async format_check(msg, key) {
+      const d = at(key);
+      const snapshot = msg.snapshot;
+      if (!isObj(snapshot) || !Array.isArray(snapshot.paragraphs))
+        throw new Error("The request holds no document snapshot.");
+      const { headings } = usableHeadings(msg.headings, snapshot);
+      const rev = await load(d);
+      const { profile } = await profileOf(d, rev);
+      const read = msg.format?.paragraphs;
+      const format = { rules: formatRulesOn(profile), findings: [], error: null };
+      if (!Array.isArray(read) || read.length !== snapshot.paragraphs.length) {
+        format.error = `The formatting was read from ${Array.isArray(read) ? read.length : 0} paragraphs and the text from ${snapshot.paragraphs.length}; the format rules were not checked. Run the checks again.`;
+      } else {
+        format.findings = findFormatIssues(read, profile, { headings });
+        if (msg.format.tables_read === false)
+          format.error =
+            "The tables could not be matched to their paragraphs; empty tables were not checked.";
+      }
+      const counts = rev.ledger
+        .filter((item) => item.check.type === "count")
+        .map((item) => ({
+          text: item.text,
+          ...checkCountItem(item, snapshot.paragraphs, { headings, profile }),
+        }));
+      log(
+        `[tools] format_check paragraphs=${snapshot.paragraphs.length} headings=${headings.length} rules=${format.rules.length} findings=${format.findings.length} counts=${counts.length}`,
+      );
+      return { format, counts };
     },
 
     // Which saved file the copies are made from, and the profile in force.

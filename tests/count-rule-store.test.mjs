@@ -8,7 +8,7 @@ import { COUNT_TARGETS } from "../daemon/count-check.mjs";
 import { withDefaults } from "../daemon/journal-profile.mjs";
 import { ledgerStatusText } from "../taskpane/shared/review-view.js";
 
-const base = () => emptyRevision({ doc_path: "/tmp/paper.docx" });
+const base = () => emptyRevision("/tmp/paper.docx");
 const COUNT = {
   kind: "instruction",
   text: "The abstract has at most 250 words.",

@@ -182,7 +182,7 @@ test("a ledger export keeps the guideline sentence and an older export without i
     check: { type: "count", target: "keywords", min: 4, max: 6 },
     source: { kind: "guideline", sentence: "Provide 4 to 6 keywords." },
   };
-  const { revision } = importLedgerItems(emptyRevision({ doc_path: "/x.docx" }), [rule]);
+  const { revision } = importLedgerItems(emptyRevision("/x.docx"), [rule]);
   assert.deepEqual(ledgerExportDoc(revision).items, [rule]);
   const old = { kind: "forbid", text: "novel", scope: "manuscript", check: { type: "llm" } };
   const r = importLedgerItems(revision, [old]);

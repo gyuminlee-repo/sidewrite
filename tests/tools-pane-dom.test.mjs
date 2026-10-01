@@ -313,6 +313,60 @@ test("the policy pack box shows the profile and saves an override of this paper"
   assert.equal(t.message(), "Review turns no longer carry rules 2 to 4 for this paper.");
 });
 
+// ---- checks ------------------------------------------------------------------
+
+test("checks: the pane reads Word, lists the findings, and a finding selects its paragraph", async () => {
+  const wordCalls = [];
+  const SNAP = { paragraphs: [{ index: 0, text: "Abstract" }], comments: [] };
+  const t = await setup({
+    word: {
+      collectReviewSnapshot: async () => (wordCalls.push("snapshot"), SNAP),
+      collectHeadings: async () => (
+        wordCalls.push("headings"),
+        [{ index: 0, level: 1, text: "Abstract" }]
+      ),
+      readFormatSnapshot: async () => (
+        wordCalls.push("format"),
+        { paragraphs: [{ index: 0 }], tables_read: true }
+      ),
+      selectParagraphByIndex: async (i) => wordCalls.push(`select ${i}`),
+    },
+    respond: {
+      format_check: () => ({
+        ok: true,
+        format: {
+          rules: ["statistics symbols in italics"],
+          error: null,
+          findings: [{ paragraph_index: 9, rule: "stat", find: "p", context: "(p < 0.05)" }],
+        },
+        counts: [{ id: "L1", text: "3 to 6 keywords.", status: "ok", count: 3, violations: [] }],
+      }),
+    },
+  });
+  await t.$("tools-check").click();
+  assert.deepEqual(wordCalls, ["snapshot", "headings", "format"]);
+  assert.deepEqual(t.of("format_check")[0].payload, {
+    snapshot: SNAP,
+    headings: [{ index: 0, level: 1, text: "Abstract" }],
+    format: { paragraphs: [{ index: 0 }], tables_read: true },
+  });
+  assert.deepEqual(texts(t.$("tools-checks")), [
+    "Format rules on: statistics symbols in italics, empty tables.",
+    'Paragraph 9: "p" should be italic in "(p < 0.05)"',
+    "L1 ok (3): 3 to 6 keywords.",
+  ]);
+  assert.equal(t.message(), "1 findings. Nothing was changed.");
+  const go = findAll(t.$("tools-checks"), (n) => n.tagName === "BUTTON");
+  assert.equal(go.length, 1);
+  await go[0].click();
+  assert.deepEqual(wordCalls.slice(3), ["select 9"]);
+  // The check sent no request that changes anything.
+  assert.deepEqual(
+    t.requests.map((r) => r.type),
+    ["tools_state", "format_check"],
+  );
+});
+
 // ---- marked copy -------------------------------------------------------------
 
 const docx = (name = "v1.docx", size = 3) => ({

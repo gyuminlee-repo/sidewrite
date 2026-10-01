@@ -32,8 +32,8 @@
 // offsets). locate.text occurs once in the paragraph and locate.offset is
 // where `find` starts inside it, so a single letter can be found again.
 //
-// Not wired yet: the caller passes the pane's format snapshot and the
-// heading list, and offers each finding to the author.
+// Called by the Tools tab (aux-service.mjs format_check) with the pane's
+// format snapshot and the heading list. The findings are reported only.
 
 import { referenceSection, paraText, wordsIn } from "./ref-section.mjs";
 

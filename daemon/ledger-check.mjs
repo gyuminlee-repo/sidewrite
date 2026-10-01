@@ -465,7 +465,8 @@ export async function checkLedgerIncremental(items, paragraphs, { full = false, 
   const outcomes = [];
   for (const item of items) {
     // A count rule needs the headings of the document, which this check
-    // does not have: the Tools tab checks it (aux-service.mjs format_check).
+    // does not have: the Tools tab checks it (aux-service.mjs format_check
+    // runs checkCountItem).
     if (!inManuscriptScope(item) || item.check.type === "count") {
       outcomes.push({
         id: item.id,

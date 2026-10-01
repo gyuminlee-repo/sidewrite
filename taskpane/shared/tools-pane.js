@@ -13,6 +13,7 @@ import {
   rulesAdded,
   fileTooLarge,
   markedLines,
+  checkRows,
 } from "./tools-view.js";
 import { bytesToBase64 } from "./response-view.js";
 
@@ -231,6 +232,33 @@ export function initToolsPane({
     rows.map((x) =>
       el("div", { class: x.bad ? "response-check-fail" : "review-reqs-line", text: x.text }),
     );
+
+  // Checks: the pane reads the text, the headings and the formatting; the
+  // daemon answers findings. A finding with a paragraph is a button that
+  // selects the paragraph. Nothing is changed.
+  async function runChecks() {
+    $("tools-checks").replaceChildren();
+    say("Reading the document...");
+    const snapshot = await word.collectReviewSnapshot();
+    const headings = await word.collectHeadings();
+    const format = await word.readFormatSnapshot();
+    const r = await ask("format_check", { snapshot, headings, format });
+    const rows = checkRows(r);
+    $("tools-checks").replaceChildren(
+      ...rows.map((x) => {
+        if (x.index == null) return lines([x])[0];
+        const go = el("button", { type: "button", class: "review-violation", text: x.text });
+        go.addEventListener(
+          "click",
+          guard(() => word.selectParagraphByIndex(x.index)),
+        );
+        return go;
+      }),
+    );
+    const found = rows.filter((x) => x.bad).length;
+    say(found ? `${found} findings. Nothing was changed.` : "The checks found nothing.");
+  }
+  onClick("tools-check", runChecks);
 
   // Marked copy: the earlier version is read here and sent; the daemon
   // compares it with the saved file and writes the copy.
