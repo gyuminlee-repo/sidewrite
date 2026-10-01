@@ -452,6 +452,8 @@ export function changeFlags(ch) {
   if (ch?.lost_facts?.length) out.push({ kind: "lost", text: `Lost: ${ch.lost_facts.join("; ")}` });
   if (ch?.unsourced_terms?.length)
     out.push({ kind: "unsourced", text: `No source: ${ch.unsourced_terms.join(", ")}` });
+  if (ch?.from_review?.length)
+    out.push({ kind: "unsourced", text: `From the review: ${ch.from_review.join(", ")}` });
   if (ch?.narrowed_from) out.push({ kind: "narrowed", text: "Narrowed" });
   return out;
 }

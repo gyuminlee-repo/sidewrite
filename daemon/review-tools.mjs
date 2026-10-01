@@ -9,7 +9,14 @@
 
 import { z } from "zod";
 import { forbidHits, forbidHitsAfterEdit, brokenForbidRules } from "./ledger-check.mjs";
-import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
+import {
+  lostFacts,
+  unsourcedTerms,
+  narrowEdit,
+  startsSentence,
+  extractFacts,
+  factPresent,
+} from "./edit-facts.mjs";
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
 import { newNumbers } from "./number-guard.mjs";
@@ -240,15 +247,21 @@ export const TOOL_COMMENT_PREFIX = /^\s*\[(?:R\d+|E)\.\d+\]/;
 
 // L1: facts the change deletes go on a last line, so the author sees them in
 // Word next to the change. L5: requirement ids follow the addresses part.
+// fromReview: words and quantities of the new text that the review has and
+// the manuscript does not: the change took them from the reviewer, and the
+// author sees that they were not checked against a source.
 export function formatRationaleComment(
   ref,
   { what, why, addresses, requirement_ids },
-  { lost = [] } = {},
+  { lost = [], fromReview = [] } = {},
 ) {
   const one = (s) => String(s).replace(/\s+/g, " ").trim();
   const ids = requirement_ids?.length ? ` [${requirement_ids.join(",")}]` : "";
   const facts = lost.length ? `\n사라지는 사실: ${lost.join("; ")}` : "";
-  return `[${ref}] ${one(what)} / ${one(why)} / ${one(addresses)}${ids}${facts}`;
+  const taken = fromReview.length
+    ? `\nFrom the review, not checked against the source: ${fromReview.join("; ")}`
+    : "";
+  return `[${ref}] ${one(what)} / ${one(why)} / ${one(addresses)}${ids}${facts}${taken}`;
 }
 
 const NO_ANSWER_CODES = new Set(["ToolTimeout", "TaskpaneDisconnected"]);
@@ -397,9 +410,25 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         });
   const unsourced =
     kind === "delete" ? [] : unsourcedTerms(newText, [...texts, ctx.comment_text ?? "", args.find]);
+  // Facts of the new text (quantities, names: edit-facts.mjs extractFacts)
+  // that the review has and the manuscript does not: taken from the
+  // reviewer. They pass as sourced above; the rationale comment tells the
+  // author they were not checked against a source. A plain word the reviewer
+  // suggested is wording, not a fact, and is not marked.
+  const own = [...texts, args.find].join("\n");
+  const fromReview =
+    kind === "delete"
+      ? []
+      : [
+          ...new Set(
+            extractFacts(newText)
+              .map((f) => f.text)
+              .filter((t) => !factPresent(t, own) && factPresent(t, ctx.comment_text ?? "")),
+          ),
+        ];
   const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
 
-  const commentText = formatRationaleComment(turn.ref, rationale, { lost });
+  const commentText = formatRationaleComment(turn.ref, rationale, { lost, fromReview });
   // The edit as it would read in the document (unknownAttempt). It goes into
   // the review file BEFORE Word is called (onAttempt), so the stretch between
   // "Word applied it" and "the file says so" is never empty: a daemon that
@@ -417,6 +446,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       override_of: excepted,
       lost_facts: lost,
       unsourced_terms: unsourced,
+      from_review: fromReview,
       // The narrower form the task pane applies when it can (L3). Word's
       // answer says which one went in; when that answer is never saved, a
       // refresh looks for both (narrowedAttempt).
@@ -494,6 +524,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       excepted,
       lost,
       unsourced,
+      fromReview,
       find: args.find,
       commentMissing,
       // change: the change as Word applied it (narrowed or not, with its
@@ -716,6 +747,7 @@ async function recordApplied(
     excepted,
     lost,
     unsourced,
+    fromReview = [],
     find,
     commentMissing,
     onFailed,
@@ -738,6 +770,7 @@ async function recordApplied(
     override_of: excepted,
     lost_facts: lost,
     unsourced_terms: unsourced,
+    from_review: fromReview,
     narrowed_from: narrowed ? { find: find, text: newText } : null,
     comment_missing: commentMissing,
     duplicate_before: hasTwin(texts, r.before),
@@ -812,6 +845,11 @@ async function recordApplied(
           `Not in the manuscript or the comment: ${unsourced.join(", ")}. Name them in your answer so the author can check where they come from.`,
         ]
       : []),
+    ...(fromReview.length
+      ? [
+          `From the review, not checked against the source: ${fromReview.join(", ")}. The rationale comment says so; name them in your answer.`,
+        ]
+      : []),
   ];
   return {
     ok: true,
@@ -825,6 +863,7 @@ async function recordApplied(
     applied_find: change.find,
     lost_facts: lost,
     unsourced_terms: unsourced,
+    from_review: fromReview,
     ...(warnings.length ? { warning: warnings.join(" ") } : {}),
   };
 }

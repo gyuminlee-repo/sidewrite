@@ -76,6 +76,8 @@ export const ChangeSchema = z.object({
   lost_facts: z.array(z.string()).default([]),
   // L2: new facts and words found neither in the manuscript nor in the comment.
   unsourced_terms: z.array(z.string()).default([]),
+  // New words and quantities that the review has and the manuscript does not.
+  from_review: z.array(z.string()).default([]),
   // L3: the find/replace the model asked for, when the applied range is smaller.
   narrowed_from: z.object({ find: z.string(), text: z.string() }).nullable().default(null),
   // Up to 3 words before and after the changed range at edit time, so one

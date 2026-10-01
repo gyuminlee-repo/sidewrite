@@ -699,6 +699,14 @@ export function createReviewService({
       .finally(done);
   }
 
+  // The model of a receipt: the one the last request of the job ran on,
+  // when the router knows it (a Claude job; another provider's name stays
+  // as the job gives it, with the provider in it).
+  const ranOf = (job) =>
+    job.provider == null || job.provider === "claude"
+      ? (job.used?.()?.ran ?? job.model)
+      : job.model;
+
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";
 
   // The journal profile of the paper (journal-profile.mjs). A profile that
@@ -773,7 +781,6 @@ export function createReviewService({
       // Provider and model of this job, for the split and the extraction after it.
       const job = await oneshotJob(key);
       const shot = job.run;
-      const shotModel = job.model;
       let asked = false;
       const ask =
         shot &&
@@ -798,7 +805,7 @@ export function createReviewService({
           decisionRecord({
             kind: "comment_split",
             input: text,
-            model: shotModel,
+            model: ranOf(job),
             output: {
               method: r.method,
               refs: r.comments.map((c) => c.ref),
@@ -816,7 +823,7 @@ export function createReviewService({
           decisionRecord({
             kind: "requirement_extract",
             input: x.input,
-            model: shotModel,
+            model: ranOf(job),
             output: { requests: x.requests },
           }),
         );
@@ -1073,7 +1080,10 @@ export function createReviewService({
         change_id: ch.id,
         // As applyTrackedEdit composed it for the edit (the stored rationale
         // holds the note of an approved exception; lost facts on the last line).
-        comment_text: formatRationaleComment(msg.ref, ch.rationale, { lost: ch.lost_facts }),
+        comment_text: formatRationaleComment(msg.ref, ch.rationale, {
+          lost: ch.lost_facts,
+          fromReview: ch.from_review,
+        }),
         // The task pane reuses none of these for this change.
         known_comment_ids: recordedCommentIds(rev),
         change: {
@@ -1244,7 +1254,6 @@ export function createReviewService({
       if (!text.trim()) throw new Error("Paste or load the review text first.");
       const d = at(key); // before the model call: the receipt goes next to this document
       const job = await oneshotJob(key);
-      const shotModel = job.model;
       const r = await suggestLedger(text, { oneshot: job.run });
       log(
         `[review] ledger suggest method=${r.method} candidates=${r.candidates.length} warnings=${r.warnings.length}`,
@@ -1255,7 +1264,7 @@ export function createReviewService({
           decisionRecord({
             kind: "ledger_suggest",
             input: r.input,
-            model: shotModel,
+            model: ranOf(job),
             output: {
               method: r.method,
               candidates: r.candidates.length,
@@ -1291,7 +1300,6 @@ export function createReviewService({
       const decisions = [];
       // Every batch of this check runs on the provider and model of its start.
       const job = await oneshotJob(key);
-      const shotModel = job.model;
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
         oneshot: job.run,
         full: msg.full === true,
@@ -1300,7 +1308,7 @@ export function createReviewService({
             decisionRecord({
               kind: "ledger_check",
               input: { instruction: x.instruction, paragraph: x.paragraph },
-              model: shotModel,
+              model: ranOf(job),
               output: {
                 item_id: x.item_id,
                 paragraph_index: x.paragraph_index,
