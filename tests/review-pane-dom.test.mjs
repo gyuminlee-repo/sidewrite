@@ -563,6 +563,41 @@ test("propose: turn end before the answer does not start the turn again", () =>
   proposeRace("end-first"));
 test("propose: a failed request releases the turn it took", () => proposeRace("failed"));
 
+test("Refresh: Word refusing to resolve a comment still shows the counts", async () => {
+  const change = { id: "R1.1-1", word_comment_id: "70", state: "accepted", rationale: {} };
+  const revision = { comments: [{ ref: "R1.1", changes: [change], blocked: [] }], ledger: [] };
+  const counts = { accepted: 1, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const tried = [];
+  const t = await setup({
+    revision,
+    word: {
+      collectReviewSnapshot: async () => ({
+        paragraphs: [],
+        comments: [comment("70", "[R1.1] a / b / c")],
+      }),
+      resolveComment: async (id) => {
+        tried.push(id);
+        throw new Error("GeneralException");
+      },
+    },
+    respond: {
+      review_refresh: () => ({
+        ok: true,
+        rows: [{ change_id: "R1.1-1", state: "accepted" }],
+        counts,
+        external: [{ id: "X1" }],
+        revision,
+      }),
+    },
+  });
+  await t.$("review-refresh").click();
+  assert.deepEqual(tried, ["70"]);
+  const m = t.$("review-message").textContent;
+  assert.match(m, /^Accepted 1, rejected 0/);
+  assert.match(m, /Outside changes: 1 /);
+  assert.match(m, /1 rationale comment\(s\) not marked resolved \(Word: GeneralException;/);
+});
+
 test("Clean up tool comments tells the daemon which comment ids are gone", async () => {
   const revision = { comments: [], ledger: [] };
   const t = await setup({
