@@ -1,23 +1,17 @@
-// A review turn must leave the same record whoever runs it. The same edit
-// script goes through (a) the in-process MCP server a Claude turn uses and
-// (b) the HTTP MCP endpoint a CLI turn uses, each over its own review
-// service and revision file; the recorded changes, blocked edits, id
-// counters, decision receipts and Word calls are then compared.
+// What a review turn leaves on record. An edit script goes through the
+// in-process MCP server a Claude turn uses, over a review service and a
+// revision file of its own; the recorded changes, blocked edits, id counters,
+// decision receipts and Word calls are then checked.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createReviewService } from "../daemon/review-service.mjs";
 import { createOfficeBridgeMcp } from "../daemon/office-tools.mjs";
-import { createMcpHttp } from "../daemon/mcp-http.mjs";
 
 const KEY = "pane";
 const REF = "R1.1";
-const TOKEN = "p".repeat(48);
 const PARAS = [
   "2. Materials and Methods",
   "Cultures were grown in sealed flasks and held at 30 degrees for 5 days.",
@@ -25,7 +19,7 @@ const PARAS = [
 ];
 const R = { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] };
 
-// What the model does in the turn, in order. `expect` is checked on both paths.
+// What the model does in the turn, in order. `expect` is what each step must end as.
 const SCRIPT = [
   {
     tool: "office_tracked_edit",
@@ -149,7 +143,7 @@ const outcome = (r) => {
   return r.isError || body?.ok === false ? "refused" : "applied";
 };
 
-// (a) the server of a Claude turn, its handlers called as the SDK calls them.
+// The server of a Claude turn, its handlers called as the SDK calls them.
 async function claudePath(w) {
   const s = createOfficeBridgeMcp(w.bridge, "word", KEY, {
     getReviewTurn: () => ({ ref: REF }),
@@ -162,43 +156,7 @@ async function claudePath(w) {
   return got;
 }
 
-// (b) the endpoint of a CLI turn, called by an MCP client over HTTP.
-async function cliPath(w) {
-  const mcp = createMcpHttp({
-    bridge: w.bridge,
-    getReviewTurn: () => ({ ref: REF }),
-    trackedEditDeps: (key) => w.svc.trackedEditDeps(key),
-    log: () => {},
-  });
-  const http = createServer(async (req, res) => {
-    if (!(await mcp.handle(req, res, req.url.split("?")[0]))) res.writeHead(404).end();
-  });
-  await new Promise((r) => http.listen(0, "127.0.0.1", r));
-  try {
-    mcp.bind("turn", { token: TOKEN, key: KEY, ref: REF });
-    const client = new Client({ name: "parity", version: "0" });
-    await client.connect(
-      new StreamableHTTPClientTransport(
-        new URL(`http://127.0.0.1:${http.address().port}/mcp/turn`),
-        { requestInit: { headers: { authorization: `Bearer ${TOKEN}` } } },
-      ),
-    );
-    const got = [];
-    for (const step of SCRIPT) {
-      const r = await client.callTool({ name: step.tool, arguments: step.args }).then(
-        (x) => x,
-        (e) => ({ isError: true, content: [{ text: String(e?.message ?? e) }] }),
-      );
-      got.push(outcome(r));
-    }
-    await client.close();
-    return got;
-  } finally {
-    http.close();
-  }
-}
-
-// Times differ between two runs; everything else must not.
+// Times and the folder differ from run to run.
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 function normalize(x, dir) {
   if (Array.isArray(x)) return x.map((v) => normalize(v, dir));
@@ -211,7 +169,7 @@ function normalize(x, dir) {
 
 async function record(w, got) {
   // The author then approves the blocked edit: the override flow of the
-  // service, the same for both.
+  // service.
   const rev0 = JSON.parse(await readFile(join(w.dir, "paper.revision.json"), "utf8"));
   const blockedId = rev0.comments[0].blocked[0]?.id;
   const override = blockedId
@@ -243,28 +201,16 @@ async function record(w, got) {
   );
 }
 
-test("the same edit script leaves the same record through the Claude path and the CLI path", async (t) => {
+test("the edit script of a review turn leaves its record: changes, the blocked edit, counters, receipts, Word calls", async (t) => {
   const a = await world();
-  const b = await world();
   try {
     const viaClaude = await claudePath(a);
     if (!viaClaude) return t.skip("McpServer._registeredTools not available in this SDK build");
-    const viaCli = await cliPath(b);
     assert.deepEqual(
       viaClaude,
       SCRIPT.map((s) => s.expect),
-      "Claude path outcomes",
-    );
-    assert.deepEqual(
-      viaCli,
-      SCRIPT.map((s) => s.expect),
-      "CLI path outcomes",
     );
     const ra = await record(a, viaClaude);
-    const rb = await record(b, viaCli);
-    assert.deepEqual(rb, ra);
-
-    // The record is not trivially equal because it is empty.
     assert.deepEqual(
       ra.changes.map((c) => c.id),
       ["R1.1-1", "R1.1-2", "R1.1-3"],
@@ -290,6 +236,5 @@ test("the same edit script leaves the same record through the Claude path and th
     );
   } finally {
     await rm(a.dir, { recursive: true, force: true });
-    await rm(b.dir, { recursive: true, force: true });
   }
 });

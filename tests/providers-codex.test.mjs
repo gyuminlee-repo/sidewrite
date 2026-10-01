@@ -1,12 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import {
-  codexTurnArgs,
-  codexOneshotArgs,
-  parseCodexLine,
-  codexOneshot,
-} from "../daemon/providers/codex.mjs";
+import { codexOneshotArgs, parseCodexLine, codexOneshot } from "../daemon/providers/codex.mjs";
 
 // Captured from codex-cli 0.159.2 on 2026-10-01 with a trivial prompt (ids
 // and the home path replaced): a run that answered, and one that failed.
@@ -19,28 +14,10 @@ const FAILED_LINES = fixture("codex_exec_failed.jsonl");
 
 const BYPASS = /approval|bypass|dangerously|full-auto|yolo|danger-full-access/i;
 
-test("turn args: json, read-only, ephemeral, per-turn MCP url, token by env, stdin prompt", () => {
-  const a = codexTurnArgs({
-    model: "gpt-6.1-sol",
-    cwd: "/tmp/t1",
-    mcpUrl: "http://127.0.0.1:47834/mcp/r1",
-  });
-  assert.deepEqual(a.slice(0, 1), ["exec"]);
-  for (const f of ["--json", "--ephemeral", "--skip-git-repo-check"]) assert.ok(a.includes(f), f);
-  assert.deepEqual(a.slice(a.indexOf("-s"), a.indexOf("-s") + 2), ["-s", "read-only"]);
-  assert.deepEqual(a.slice(a.indexOf("-C"), a.indexOf("-C") + 2), ["-C", "/tmp/t1"]);
-  assert.deepEqual(a.slice(a.indexOf("-m"), a.indexOf("-m") + 2), ["-m", "gpt-6.1-sol"]);
-  assert.ok(a.includes('mcp_servers.office.url="http://127.0.0.1:47834/mcp/r1"'));
-  assert.ok(a.includes('mcp_servers.office.bearer_token_env_var="CC_OFFICE_MCP_TOKEN"'));
-  assert.equal(a.at(-1), "-");
-  assert.equal(codexTurnArgs({ cwd: "/t", mcpUrl: "u" }).includes("-m"), false);
-});
-
 // Hard rule of this stage: the model that edits a manuscript is never run
 // with a flag that turns approvals or the sandbox off.
 test("no permission-bypass flag in any argument list; the user's config is kept", () => {
   for (const args of [
-    codexTurnArgs({ model: "m", cwd: "/t", mcpUrl: "http://127.0.0.1:1/mcp/r" }),
     codexOneshotArgs({ model: "m", cwd: "/t" }),
     codexOneshotArgs({ cwd: "/t" }),
   ]) {

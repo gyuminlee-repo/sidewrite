@@ -19,7 +19,7 @@ const ROWS = [
     label: "Codex CLI",
     available: true,
     turn_ready: false,
-    turn_note: "Judgments only. Codex CLI will not call the office tools without an approval.",
+    turn_note: "Judgments only: review turns are not offered for this provider.",
     reason: null,
     models: [{ value: "gpt-6.1-sol" }],
   },
@@ -29,7 +29,7 @@ const ROWS = [
     label: "Ollama (local)",
     available: true,
     turn_ready: false,
-    turn_note: "Judgments only: no tool loop for this provider in this stage.",
+    turn_note: "Judgments only: review turns are not offered for this provider.",
     reason: null,
     models: [{ value: "qwen3.5:9b" }],
   },
@@ -39,7 +39,7 @@ const ROWS = [
     label: "DeepSeek",
     available: false,
     turn_ready: false,
-    turn_note: "Judgments only: no tool loop for this provider in this stage.",
+    turn_note: "Judgments only: review turns are not offered for this provider.",
     reason: "Connection failed (ECONNRESET)",
     models: [],
     has_key: true,
@@ -71,11 +71,11 @@ test("only a provider that passed its check can be chosen, and the refusal says 
   const sel = createProviderSelection();
   assert.throws(
     () => sel.set("a", "turn", { id: "codex", model: "gpt-6.1-sol" }, ROWS),
-    /Codex CLI cannot run review turns\. Judgments only\. Codex CLI will not call/,
+    /Codex CLI cannot run review turns\. Judgments only: review turns are not offered/,
   );
   assert.throws(
     () => sel.set("a", "turn", { id: "ollama", model: "qwen3.5:9b" }, ROWS),
-    /Ollama \(local\) cannot run review turns\. Judgments only: no tool loop/,
+    /Ollama \(local\) cannot run review turns\. Judgments only: review turns are not offered/,
   );
   assert.throws(
     () => sel.set("a", "oneshot", { id: "deepseek", model: "x" }, ROWS),

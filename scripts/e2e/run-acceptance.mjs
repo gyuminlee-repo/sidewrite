@@ -16,14 +16,12 @@ import {
   buildComPlan,
   cleanupDecision,
   cleanupEvidence,
-  cliTurnEvidence,
   defaultFeatures,
   docStem,
   exitDecision,
   featureIds,
   exportEvidence,
   focusEvidence,
-  guardEvidence,
   insertTarget,
   JUDGES,
   judge,
@@ -48,7 +46,6 @@ import {
   stageOf,
   staleEvidence,
   staleMarkers,
-  stopEvidence,
   suggestEvidence,
   trackedPlaced,
   table,
@@ -108,8 +105,8 @@ const { values: opt } = parseArgs({
     // Prefix of the feature ids and of the marker files (s2, s25, ...).
     // Default: the stage of --features.
     stage: { type: "string" },
-    // Provider for the review turns (claude, codex, antigravity), chosen in
-    // the pane's Providers section after the Review tab opened.
+    // Provider for the review turns, chosen in the pane's Providers section
+    // after the Review tab opened. Only claude is offered for them.
     provider: { type: "string" },
     // Feature ids that depend on an event the run cannot force (judge.mjs
     // CONDITIONS). Repeat the flag or separate ids with commas.
@@ -553,42 +550,12 @@ async function main() {
 
 // Stage 2.5 (S25-30..S25-41). Every feature gets its evidence file under
 // ok/, and its .ok marker only when the evidence passes; nothing here is a
-// person's judgment. A feature that needs a review turn of a CLI provider
-// (S25-33..36) gets evidence that says why no such turn ran when the pane
-// does not offer the provider for review turns; run with
-// --conditional S25-33,S25-34,S25-35,S25-36 to have those reported as
-// SKIPPED-CONDITION-NOT-MET (no `[cli-turn] start` in the log).
+// person's judgment. Review turns are run with Claude: Codex is used for
+// judgments only and no step chooses it for a review turn.
 async function mainS25() {
   const revisionNow = () => JSON.parse(fs.readFileSync(REVISION, "utf8"));
   const logAt = () => readLog(LOG).length;
   const logFrom = (at) => readLog(LOG).slice(at);
-  const cliProcesses = (pattern) => {
-    try {
-      return Number(execFileSync("pgrep", ["-fc", pattern], { encoding: "utf8" }).trim());
-    } catch {
-      return 0; // pgrep exits 1 when nothing matches
-    }
-  };
-  // Try a provider for review turns. Not being offered is a SKIP row, not a
-  // failure: the features that need it are judged from their evidence.
-  const turnProvider = (id) => {
-    const r = pane("select-provider", { role: "turn", id });
-    const selected = r.ok !== false && r.selected?.id === id && !r.refused && !r.message;
-    rows.push({
-      step: `select-provider turn=${id}`,
-      result: selected ? "PASS" : "SKIP",
-      got: selected
-        ? `${id}${r.selected.model ? `:${r.selected.model}` : ""}`
-        : (r.refused ?? r.message ?? r.error),
-    });
-    record.steps.push({ step: `select-provider turn=${id}`, raw: r });
-    save();
-    pane("open-review");
-    return { select: r, selected };
-  };
-  const cliPropose = (ref, id) =>
-    note("propose", pane("propose", { ref }), { label: `propose ${ref} (${id})`, judge: "none" });
-
   note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
 
   // S25-30: the model menu holds what the account lists.
@@ -677,70 +644,8 @@ async function mainS25() {
   );
   marker("s25-ledger-suggest", suggestEvidence({ step: suggested, pick: rule, before: 3 }));
 
-  // S25-33, 34, 36: review turns by Codex, when the pane offers it for them.
-  const codex = turnProvider("codex");
-  let at = logAt();
-  if (codex.selected) cliPropose("R1.1", "codex");
-  marker(
-    "s25-codex-turn",
-    cliTurnEvidence({
-      provider: "codex",
-      ref: "R1.1",
-      select: codex.select,
-      log: logFrom(at),
-      revision: revisionNow(),
-    }),
-  );
-  // R1.3 asks for "novel", which ledger rule L2 forbids.
-  at = logAt();
-  if (codex.selected) cliPropose("R1.3", "codex");
-  marker(
-    "s25-codex-guard",
-    guardEvidence({
-      provider: "codex",
-      ref: "R1.3",
-      forbidden: "\\bnovel",
-      select: codex.select,
-      log: logFrom(at),
-      revision: revisionNow(),
-    }),
-  );
-  at = logAt();
-  const stop = codex.selected ? note("propose-stop", pane("propose-stop", { ref: "R1.4" })) : null;
-  marker(
-    "s25-cli-stop",
-    stopEvidence({
-      select: codex.select,
-      step: stop,
-      log: logFrom(at),
-      processes: codex.selected ? cliProcesses("codex exec --json") : 0,
-    }),
-  );
-
-  // S25-35: a review turn by Antigravity, when the pane offers it.
-  const agy = turnProvider("antigravity");
-  at = logAt();
-  if (agy.selected) cliPropose("R1.2", "antigravity");
-  marker(
-    "s25-agy-turn",
-    cliTurnEvidence({
-      provider: "antigravity",
-      ref: "R1.2",
-      select: agy.select,
-      log: logFrom(at),
-      revision: revisionNow(),
-    }),
-  );
-  if (codex.selected || agy.selected) {
-    note("select-provider", pane("select-provider", { role: "turn", id: "claude" }), {
-      label: "select-provider turn=claude",
-      ctx: { id: "claude" },
-    });
-    pane("open-review");
-  }
-
   // S25-37: every comment that is not done, one turn after another.
-  at = logAt();
+  const at = logAt();
   const all = pane("propose-all");
   note("propose-all", all, { ctx: { log: logFrom(at) } });
   marker("s25-propose-all", proposeAllEvidence({ message: all.message, log: logFrom(at) }));

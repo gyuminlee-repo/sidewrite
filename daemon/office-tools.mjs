@@ -897,12 +897,8 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
     excel_set_column_width,
     excel_set_row_height,
   ];
-  const all =
+  const tools =
     host === "word" ? wordTools : host === "excel" ? excelTools : [...wordTools, ...excelTools];
-  // opts.only (a Set of tool names): register just these. The HTTP MCP
-  // endpoint of a CLI review turn passes the review-turn set (mcp-http.mjs);
-  // the review guard above still applies to whatever is registered.
-  const tools = opts.only ? all.filter((t) => opts.only.has(t.name)) : all;
 
   diag(
     `createOfficeBridgeMcp host=${host ?? "both"} → ${tools.length} tools:`,

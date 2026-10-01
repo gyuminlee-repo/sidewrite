@@ -19,9 +19,9 @@ test("three tiers, ten presets, ids unique", () => {
   );
 });
 
-test("only subscription CLIs run review turns; every preset can judge", () => {
+test("only Claude runs review turns; every preset can judge", () => {
   for (const p of PRESETS) {
-    assert.equal(canRun(p, "turn"), p.tier === "subscription", p.id);
+    assert.equal(canRun(p, "turn"), p.id === "claude", p.id);
     assert.equal(canRun(p, "oneshot"), true, p.id);
   }
   assert.equal(canRun(null, "oneshot"), false);

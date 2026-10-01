@@ -337,7 +337,7 @@ test("childEnv: no provider key and no setting of the daemon reaches a CLI", asy
     OPENAI_API_KEY: "sk-a",
     openrouter_api_key: "sk-b",
     CC_OFFICE_KEY_OPENROUTER: "sk-c",
-    CC_OFFICE_MCP_TOKEN: "t",
+    CC_OFFICE_DEBUG: "1",
     CC_OFFICE_CODEX_BIN: "/opt/codex",
     GITHUB_TOKEN: "ghp",
     AWS_SECRET_ACCESS_KEY: "s",
