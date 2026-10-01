@@ -344,15 +344,15 @@ function countsUnit(target, span, lower) {
   return named && /^\s*(?:[.;,)\]]|$)/.test(after);
 }
 
-// [lower, upper] of every range the sentence writes: "4 to 6", "4-6",
-// "between 150 and 250".
+// [lower, upper] of every range the sentence writes, as the two number spans:
+// "4 to 6", "4-6", "between 150 and 250".
 function rangesIn(spans, lower) {
   const out = [];
   for (let i = 0; i + 1 < spans.length; i++) {
     const gap = lower.slice(spans[i].end, spans[i + 1].start).trim();
     const between = gap === "and" && /(?<![a-z])between\s*$/.test(lower.slice(0, spans[i].start));
     if ((between || ["to", "-", "\u2013"].includes(gap)) && spans[i].value < spans[i + 1].value) {
-      out.push([spans[i].value, spans[i + 1].value]);
+      out.push([spans[i], spans[i + 1]]);
     }
   }
   return out;
@@ -364,7 +364,9 @@ const FILLER = /(?:[\s:(]|(?<![a-z])(?:of|a|an|the|total|is|be)(?![a-z]))*$/;
 // ("max" or "min")?
 function saysLimit(side, span, spans, lower) {
   const other = side === "max" ? "min" : "max";
-  if (rangesIn(spans, lower).some(([lo, hi]) => span.value === (side === "max" ? hi : lo))) {
+  // The number itself must stand in the range: the same value elsewhere in
+  // the sentence is another number.
+  if (rangesIn(spans, lower).some(([lo, hi]) => span === (side === "max" ? hi : lo))) {
     return true;
   }
   const lead = lower.slice(0, span.start).replace(FILLER, "");

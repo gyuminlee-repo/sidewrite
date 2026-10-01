@@ -479,3 +479,62 @@ test("the words that put the order in doubt are a list the code reads; each one 
     assert.equal(kind(`Methods, then Results (${phrase}).`, rule), "count", phrase);
   }
 });
+
+// ---- the same number twice in one sentence
+//
+// A range confirms a direction only for the number that stands in it, not for
+// the same value written somewhere else in the sentence.
+
+const SAME_TWICE =
+  "The abstract needs 150 to 250 words and the introduction needs at least 250 words.";
+const SAME_TWICE_KEYS = "Provide 3 to 5 keywords and at least 5 tables.";
+
+const OWN_RANGE = [
+  [SAME_TWICE, words("abstract", { min: 150, max: 250 })],
+  [SAME_TWICE, words("introduction", { min: 250 })],
+  [SAME_TWICE_KEYS, { target: "keywords", min: 3, max: 5 }],
+  [SAME_TWICE_KEYS, { target: "tables", min: 5 }],
+  [
+    "The summary has at least 200 words; the conclusions have 100 to 200 words.",
+    words("conclusion", { min: 100, max: 200 }),
+  ],
+];
+
+const OTHER_RANGE = {
+  "the upper end of another section's range": [SAME_TWICE, words("introduction", { max: 250 })],
+  "the upper end of the keyword range for tables": [SAME_TWICE_KEYS, { target: "tables", max: 5 }],
+  "the upper end of a later range": [
+    "The summary has at least 200 words; the conclusions have 100 to 200 words.",
+    words("abstract", { max: 200 }),
+  ],
+  "the lower end of an earlier range": [
+    "Provide 4 to 6 keywords, and no more than 4 tables.",
+    { target: "tables", min: 4 },
+  ],
+  "the upper end of a range read as a minimum next to another number": [
+    "Use 2 to 4 tables and at least 4 keywords.",
+    { target: "tables", min: 4 },
+  ],
+};
+
+test("the same number twice: at least five cases the code must accept and five it must not", () => {
+  assert.ok(OWN_RANGE.length >= 5 && Object.keys(OTHER_RANGE).length >= 5);
+});
+
+for (const [sentence, rule] of OWN_RANGE) {
+  test(`a count rule stands on its own number: ${JSON.stringify(rule)} in ${JSON.stringify(sentence)}`, () => {
+    assert.deepEqual(one(sentence, rule).warnings, []);
+    assert.equal(kind(sentence, rule), "count");
+  });
+}
+
+for (const [name, [sentence, rule]] of Object.entries(OTHER_RANGE)) {
+  test(`no count rule from ${name}`, () => {
+    const r = one(sentence, rule);
+    assert.deepEqual(r.candidates[0].check, { type: "llm" });
+    assert.match(
+      r.warnings[0],
+      /^s1: the sentence does not say that \d+ is (?:an upper|a lower) limit/,
+    );
+  });
+}
