@@ -83,6 +83,40 @@ export function rewriteCommand(cmd, map) {
   return out;
 }
 
+// What to do with the Word process the runner started, from the answer of
+// word-com.ps1 quit. action: "none" | "kill" | "leave"; fail: the run fails.
+//   kill   only when quit ran (so every open document was in the run folder
+//          and was closed unsaved) and the process is still there.
+//   leave  quit refused because a document outside the run folder is open
+//          in that Word, or the open documents are unknown (the COM call
+//          failed): unsaved work of the user may be in it, Word stays up.
+export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = true }) {
+  if (!pid || preexisting.includes(pid)) return { action: "none", fail: false, reason: "" };
+  const dir =
+    String(runDir ?? "")
+      .replace(/\\+$/, "")
+      .toLowerCase() + "\\";
+  const docs = Array.isArray(quit?.documents) ? quit.documents : null;
+  const outside = (docs ?? []).filter((d) => !String(d).toLowerCase().startsWith(dir));
+  if (quit?.refused || outside.length) {
+    return {
+      action: "leave",
+      fail: true,
+      reason: `Word ${pid} left running: documents outside the run folder are open (${(quit?.outside ?? outside).join(", ")})`,
+    };
+  }
+  if (quit?.ok === true && docs) {
+    if (quit.exited === true) return { action: "none", fail: false, reason: "" };
+    return { action: "kill", fail: false, reason: `Word ${pid} still alive after quit` };
+  }
+  if (!alive) return { action: "none", fail: false, reason: "" };
+  return {
+    action: "leave",
+    fail: true,
+    reason: `Word ${pid} left running: its open documents are unknown (${quit?.error ?? "no answer from quit"})`,
+  };
+}
+
 const has = (s, sub) => String(s ?? "").includes(sub);
 
 // R1.1 all Accepted, R1.2 all Rejected, R1.3 first change Edited by you.

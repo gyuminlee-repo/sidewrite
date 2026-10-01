@@ -66,6 +66,12 @@ Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
   without saving and only when every open document is in the run folder; the
   runner then checks that the started process id is gone and that every Word
   process that was running before is still there.
+- When `quit` refuses (a document outside the run folder is open in the Word
+  the runner started) or cannot say which documents are open, the runner does
+  not stop that Word: it stays up, `result.json` lists it under
+  `cleanup.left_running`, and the run exits non-zero. The process is stopped
+  by force only when `quit` ran on run-folder documents and the process is
+  still there.
 
 ## Files
 

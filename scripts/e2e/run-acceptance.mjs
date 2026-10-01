@@ -9,7 +9,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { badgesMatch, buildComPlan, judge, minimalFind, rewriteCommand, table } from "./judge.mjs";
+import {
+  badgesMatch,
+  buildComPlan,
+  cleanupDecision,
+  judge,
+  minimalFind,
+  rewriteCommand,
+  table,
+} from "./judge.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
@@ -111,9 +119,18 @@ function powershell(script, args, timeoutMs = 300_000) {
   const line = out.replace(/\r/g, "").trim().split("\n").filter(Boolean).pop();
   return JSON.parse(line);
 }
-function com(action, extra = []) {
-  return powershell("word-com.ps1", ["-Doc", winPath(DOC), "-Action", action, ...extra]);
+function com(action, extra = [], doc = DOC) {
+  return powershell("word-com.ps1", ["-Doc", winPath(doc), "-Action", action, ...extra]);
 }
+const psList = (cmd) =>
+  execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" })
+    .replace(/\r/g, "")
+    .trim()
+    .split(",")
+    .filter(Boolean)
+    .map(Number);
+const wordPids = () =>
+  psList("(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','");
 
 let pane = (step, args = {}) => {
   const argsFile = path.join(RUN, `args-${step}.json`);
@@ -250,16 +267,7 @@ async function main() {
   if (listening(WS_PORT) || listening(HTTP_PORT))
     die(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
 
-  const ps = (cmd) =>
-    execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { cwd: RUN, encoding: "utf8" })
-      .replace(/\r/g, "")
-      .trim();
-  record.word.preexisting = ps(
-    "(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','",
-  )
-    .split(",")
-    .filter(Boolean)
-    .map(Number);
+  record.word.preexisting = wordPids();
 
   execFileSync(
     "python3",
@@ -375,42 +383,52 @@ async function main() {
   });
 }
 
-async function cleanup() {
-  const pid = record.word.launch?.pid;
-  if (pid && !record.word.preexisting?.includes(pid)) {
-    try {
-      record.cleanup.quit = com("quit", ["-AllowDir", winPath(RUN), "-ExpectPid", String(pid)]);
-    } catch (e) {
-      record.cleanup.quit = { ok: false, error: e.message };
-    }
-    if (!record.cleanup.quit?.exited) {
-      // Only the process this run started, by its id.
-      try {
-        execFileSync("powershell.exe", [
-          "-NoProfile",
-          "-Command",
-          `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
-        ]);
-        record.cleanup.stopped_pid = pid;
-      } catch {}
-    }
-  }
-  await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
+// Close the Word this run started (pid, with `doc` open in it). It is stopped
+// by force only when quit ran and the process stayed (cleanupDecision); a
+// refused quit leaves Word and its documents alone and fails the run.
+function quitWord(pid, doc, key = "quit") {
+  if (!pid) return;
+  let quit;
   try {
-    const left = execFileSync(
-      "powershell.exe",
-      [
+    quit = com("quit", ["-AllowDir", winPath(RUN), "-ExpectPid", String(pid)], doc);
+  } catch (e) {
+    quit = { ok: false, error: e.message };
+  }
+  record.cleanup[key] = quit;
+  let alive = true;
+  try {
+    alive = wordPids().includes(pid);
+  } catch {}
+  const d = cleanupDecision({
+    pid,
+    preexisting: record.word.preexisting ?? [],
+    quit,
+    runDir: winPath(RUN),
+    alive,
+  });
+  if (d.action === "kill") {
+    try {
+      execFileSync("powershell.exe", [
         "-NoProfile",
         "-Command",
-        "(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','",
-      ],
-      { encoding: "utf8" },
-    )
-      .replace(/\r/g, "")
-      .trim()
-      .split(",")
-      .filter(Boolean)
-      .map(Number);
+        `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+      ]);
+      (record.cleanup.stopped_pids ??= []).push(pid);
+    } catch {}
+  }
+  if (d.action === "leave") {
+    (record.cleanup.left_running ??= []).push({ pid, reason: d.reason });
+    console.error(`run-acceptance: ${d.reason}`);
+  }
+  if (d.fail) rows.push({ step: `cleanup: Word ${pid}`, result: "FAIL", got: d.reason });
+}
+
+async function cleanup() {
+  const pid = record.word.launch?.pid;
+  quitWord(pid, DOC);
+  await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
+  try {
+    const left = wordPids();
     record.cleanup.word_after = left;
     record.cleanup.preexisting_alive = (record.word.preexisting ?? []).every((p) =>
       left.includes(p),
