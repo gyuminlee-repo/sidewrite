@@ -286,21 +286,31 @@ export function inManuscriptScope(item) {
 // forbid-list regex items (expect "absent"). LLM-checked forbid items cannot
 // be pre-checked. A must-stay rule (expect "present") is not pre-checked
 // either: an edit that deletes its phrase is applied, and the ledger check
-// reports it afterwards.
-function forbidRules(ledger) {
+// reports it afterwards. A rule whose regex does not compile is not among
+// the rules: it is listed as broken, and applyTrackedEdit (review-tools.mjs)
+// refuses the edit instead of reading the missing rule as "no hit".
+function precheckRules(ledger) {
   const rules = [];
+  const broken = [];
   for (const item of ledger ?? []) {
     if (item.kind !== "forbid" || item.check?.type !== "regex") continue;
     if (!inManuscriptScope(item)) continue;
     if ((item.check.expect ?? "absent") !== "absent") continue;
     try {
       rules.push({ id: item.id, re: compileCheck(item.check) });
-    } catch {
-      continue;
+    } catch (e) {
+      broken.push({ id: item.id, error: e.message });
     }
   }
-  return rules;
+  return { rules, broken };
 }
+
+const forbidRules = (ledger) => precheckRules(ledger).rules;
+
+// [{ id, error }] of the pre-check rules that cannot be compiled. The input
+// schema refuses such a rule (revision-store.mjs LedgerItemSchema); a file
+// from before that check can still hold one.
+export const brokenForbidRules = (ledger) => precheckRules(ledger).broken;
 
 // Ids of the pre-check rules that match `text` (the new text on its own).
 export function forbidHits(ledger, text) {

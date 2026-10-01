@@ -8,7 +8,7 @@
 // query() starts (daemon/index.mjs:1062) and the session lives across turns.
 
 import { z } from "zod";
-import { forbidHits, forbidHitsAfterEdit } from "./ledger-check.mjs";
+import { forbidHits, forbidHitsAfterEdit, brokenForbidRules } from "./ledger-check.mjs";
 import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 
@@ -204,6 +204,18 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   // after the edit (a forbidden phrase formed with the words next to it).
   // Without a known target every occurrence of `find` is tried.
   const ledger = (await deps.getLedger?.(at)) ?? [];
+  // A forbid rule that cannot be compiled cannot be checked: the edit is
+  // refused, not passed. An approved exception does not lift it; the rule
+  // is fixed or removed in the Review tab.
+  const broken = brokenForbidRules(ledger);
+  if (broken.length) {
+    const ids = broken.map((b) => b.id);
+    deps.log?.(`[review] refused ${turn.ref}: forbid rule(s) ${ids.join(",")} do not compile`);
+    return fail(
+      `Not applied: forbidden rule(s) ${ids.join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}). No edit is applied until the author fixes or removes the rule in the Review tab. Do not retry; tell the author.`,
+      { code: "ForbidRuleBroken", broken_rules: ids },
+    );
+  }
   const around = forbidHitsAfterEdit(ledger, target === null ? current : [current[target]], {
     find: args.find,
     text: newText,

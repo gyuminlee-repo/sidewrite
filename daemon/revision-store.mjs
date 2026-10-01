@@ -13,6 +13,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { toLocalPath } from "./workspace.mjs";
+import { compileCheck } from "./ledger-check.mjs";
 
 export const REVISION_VERSION = 1;
 
@@ -28,6 +29,16 @@ const RegexCheck = z.object({
   expect: z.enum(["absent", "present"]).default("absent"),
 });
 const LlmCheck = z.object({ type: z.literal("llm") });
+// A regex check as a rule may be entered: pattern and flags must compile
+// the way the checker compiles them (ledger-check.mjs compileCheck). Letters
+// that are each allowed can still be refused together ("ii").
+const CompiledRegexCheck = RegexCheck.superRefine((check, ctx) => {
+  try {
+    compileCheck(check);
+  } catch (e) {
+    ctx.addIssue({ code: "custom", path: ["pattern"], message: `invalid regex: ${e.message}` });
+  }
+});
 
 const Rationale = z.object({
   what: z.string().min(1),
@@ -144,25 +155,37 @@ const Violation = z.object({
   missing: z.boolean().optional(),
 });
 
-export const LedgerItemSchema = z.object({
-  id: z.string().regex(/^L\d+$/),
-  kind: z.enum(["instruction", "forbid"]),
-  text: z.string().min(1),
-  scope: z.enum(["manuscript", "response", "supplement"]).default("manuscript"),
-  check: z.discriminatedUnion("type", [RegexCheck, LlmCheck]),
-  // skipped: outside the manuscript scope, not checked against the manuscript.
-  // unsure: an LLM check could not judge some paragraphs and found no violation.
-  status: z
-    .enum(["unchecked", "ok", "violations", "error", "skipped", "unsure"])
-    .default("unchecked"),
-  violation_count: z.number().int().nonnegative().default(0),
-  checked_at: z.string().nullable().default(null),
-  // L10: violations of the last check keyed by paragraph hash, and the
-  // hashes of every paragraph that check covered (null: never checked).
-  violations: z.array(Violation).default([]),
-  unsure: z.array(Unsure).default([]),
-  checked_hashes: z.array(z.string()).nullable().default(null),
-});
+const ledgerItem = (regexCheck) =>
+  z.object({
+    id: z.string().regex(/^L\d+$/),
+    kind: z.enum(["instruction", "forbid"]),
+    text: z.string().min(1),
+    scope: z.enum(["manuscript", "response", "supplement"]).default("manuscript"),
+    check: z.discriminatedUnion("type", [regexCheck, LlmCheck]),
+    // skipped: outside the manuscript scope, not checked against the manuscript.
+    // unsure: an LLM check could not judge some paragraphs and found no violation.
+    status: z
+      .enum(["unchecked", "ok", "violations", "error", "skipped", "unsure"])
+      .default("unchecked"),
+    violation_count: z.number().int().nonnegative().default(0),
+    checked_at: z.string().nullable().default(null),
+    // L10: violations of the last check keyed by paragraph hash, and the
+    // hashes of every paragraph that check covered (null: never checked).
+    violations: z.array(Violation).default([]),
+    unsure: z.array(Unsure).default([]),
+    checked_hashes: z.array(z.string()).nullable().default(null),
+  });
+
+// A rule as it comes in (ledger_add, a ledger_update that carries a check,
+// an import): its regex must compile.
+export const LedgerItemSchema = ledgerItem(CompiledRegexCheck);
+// A rule as the file holds it. A file written before the schema compiled
+// the pattern can hold one that does not; refusing it here would lock the
+// author out of the whole review file (loadRevision and saveRevision both
+// parse with RevisionSchema). The file loads and saves, the ledger check
+// reports the rule as an error, and a tracked edit is refused while such a
+// forbid rule is active (ledger-check.mjs brokenForbidRules).
+const StoredLedgerItem = ledgerItem(RegexCheck);
 
 const External = z.object({
   id: z.string().regex(/^X\d+$/),
@@ -180,7 +203,7 @@ export const RevisionSchema = z.object({
   manuscript: z.string(),
   updated_at: z.string(),
   comments: z.array(Comment).default([]),
-  ledger: z.array(LedgerItemSchema).default([]),
+  ledger: z.array(StoredLedgerItem).default([]),
   // Highest L-number ever given out. null: a file from before the counter.
   ledger_seq: z.number().int().nonnegative().nullable().default(null),
   // L4: paragraph texts (reviewed view) at the last status refresh, and the
@@ -640,7 +663,10 @@ export function updateLedgerItem(rev, id, patch) {
         checked_at: null,
       }
     : {};
-  next.ledger[i] = LedgerItemSchema.parse({ ...old, ...patch, ...reset, id });
+  // A patch without a check (a check result, a new text) is stored on the
+  // rule as the file holds it, also on one whose regex does not compile.
+  const schema = "check" in patch ? LedgerItemSchema : StoredLedgerItem;
+  next.ledger[i] = schema.parse({ ...old, ...patch, ...reset, id });
   return next;
 }
 
