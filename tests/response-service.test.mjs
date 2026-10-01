@@ -1441,3 +1441,96 @@ test("response_export removes only files it made: a file that takes the name aft
   ]);
   await t.cleanup();
 });
+
+// An earlier letter under the plain name, each file with a content of its own.
+const OLD = {
+  "paper.response.docx": "old docx",
+  "paper.response.model.json": '{"old":"model"}\n',
+  "paper.response.manuscript.json": '["old manuscript"]\n',
+};
+async function withOldLetter(py) {
+  const t = await setup({ py });
+  await ready(t);
+  for (const [name, text] of Object.entries(OLD)) await writeFile(join(t.dir, name), text);
+  const plain = async () =>
+    Object.fromEntries(
+      await Promise.all(
+        Object.keys(OLD).map(async (name) => [name, await readFile(join(t.dir, name), "utf8")]),
+      ),
+    );
+  // Every file the export left, the daemon's own two aside.
+  const left = async () =>
+    (await t.files()).filter((f) => !["paper.revision.json", "paper.render.pdf"].includes(f));
+  return { t, plain, left };
+}
+const docxTool = (answer) =>
+  fakePy({
+    docx: async (args) => {
+      const out = args[args.indexOf("--out") + 1];
+      const r = args.includes("--overwrite") ? answer : null;
+      if (r) return r;
+      await writeFile(out, "docx");
+      return { ok: true, code: 0, json: { ok: true, path: out, paragraphs: 6 } };
+    },
+  });
+
+test("response_export with overwrite: the old letter and its sidecars stay a set, wherever the write stops", async () => {
+  // The docx is open in Word: nothing of the old set is touched, a new set is written.
+  const locked = await withOldLetter(
+    docxTool({ ok: false, code: 3, json: { ok: false, code: "locked", error: "in use" } }),
+  );
+  let r = await locked.t.ask("response_export", { ...WITH_DOC, format: "docx", overwrite: true });
+  assert.deepEqual([r.ok, basename(r.path)], [true, "paper.response-2.docx"]);
+  assert.deepEqual(await locked.plain(), OLD);
+  assert.deepEqual(await locked.left(), [
+    "paper.response-2.docx",
+    "paper.response-2.manuscript.json",
+    "paper.response-2.model.json",
+    "paper.response.docx",
+    "paper.response.manuscript.json",
+    "paper.response.model.json",
+  ]);
+  await locked.t.cleanup();
+
+  // The writer fails, or cannot run at all: the old set as it was, nothing else.
+  for (const answer of [
+    { ok: false, code: 1, json: { ok: false, error: "disk full" } },
+    { ok: false, code: null, json: null, error: "python3 not found" },
+  ]) {
+    const failed = await withOldLetter(docxTool(answer));
+    r = await failed.t.ask("response_export", { ...WITH_DOC, format: "docx", overwrite: true });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /disk full|python3 not found/);
+    assert.deepEqual(await failed.plain(), OLD);
+    assert.deepEqual(await failed.left(), Object.keys(OLD).sort());
+    await failed.t.cleanup();
+  }
+
+  // Written: all three are the new ones.
+  const done = await withOldLetter(fakePy());
+  r = await done.t.ask("response_export", { ...WITH_DOC, format: "docx", overwrite: true });
+  assert.deepEqual([r.ok, basename(r.path)], [true, "paper.response.docx"]);
+  const now = await done.plain();
+  assert.equal(now["paper.response.docx"], "docx");
+  assert.equal(JSON.parse(now["paper.response.model.json"]).paragraphs.length, 6);
+  assert.deepEqual(
+    JSON.parse(now["paper.response.manuscript.json"]),
+    ACCEPTED.paragraphs.map(viewText),
+  );
+  assert.deepEqual(await done.left(), Object.keys(OLD).sort());
+  await done.t.cleanup();
+
+  // Written, and the verifier says no: the new docx is there with its own
+  // sidecars (the error names the file), not with the old ones.
+  const bad = await withOldLetter(
+    fakePy({ verify: { ok: false, code: 1, json: { ok: false, failures: [{ axis: "colour" }] } } }),
+  );
+  r = await bad.t.ask("response_export", { ...WITH_DOC, format: "docx", overwrite: true });
+  assert.match(r.error, /failed verification \(colour\)\. The file is at .*paper\.response\.docx/);
+  const kept = await bad.plain();
+  assert.equal(kept["paper.response.docx"], "docx");
+  assert.equal(JSON.parse(kept["paper.response.model.json"]).paragraphs.length, 6);
+  assert.notEqual(kept["paper.response.manuscript.json"], OLD["paper.response.manuscript.json"]);
+  assert.deepEqual(await bad.left(), Object.keys(OLD).sort());
+  await bad.t.cleanup();
+});

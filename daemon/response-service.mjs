@@ -19,9 +19,10 @@
 // once per request (at(key)) and never again after an await; a failure is an
 // error reply, never a silent default.
 
-import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   localDocPath,
@@ -30,7 +31,6 @@ import {
   sidecarPath,
   loadRevision,
   withRevision,
-  writeJsonAtomic,
   findComment,
   applyStates,
   setResponse,
@@ -94,6 +94,11 @@ const letterGroup = (docx) => ({
   model: docx.replace(/\.docx$/, ".model.json"),
   manuscript: docx.replace(/\.docx$/, ".manuscript.json"),
 });
+
+// A name of this process next to `path`, for a file that is moved to `path`
+// once the write it belongs to is done (as writeJsonAtomic names its own).
+const ownName = (path) =>
+  join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
 
 // The files of an export are written one request at a time per manuscript
 // (two panes may have the same document open): the second request looks for
@@ -315,34 +320,38 @@ export function createResponseService({
       // Without overwrite a sidecar is created, never replaced: a file that
       // took the name since the look is someone else's and stays. `mine` are
       // the files this request made; only they are ever removed.
+      //
+      // With overwrite the old letter is a set of three files, and the docx
+      // is the one that may refuse (open in Word). The sidecars are written
+      // under names of our own first and take the place of the old ones only
+      // after the docx has replaced the old docx: until then the old set is
+      // whole, and a write that stops leaves it as it was.
       const mine = [];
       const dropMine = () => Promise.all(mine.map((p) => unlink(p).catch(() => {})));
-      if (replace) {
-        await writeJsonAtomic(paths.model, model);
-        await writeJsonAtomic(paths.manuscript, manuscript);
-      } else {
-        let taken = false;
-        for (const [path, data] of [
-          [paths.model, model],
-          [paths.manuscript, manuscript],
-        ]) {
-          try {
-            await writeFile(path, JSON.stringify(data, null, 2) + "\n", { flag: "wx" });
-            mine.push(path);
-          } catch (e) {
-            await dropMine();
-            if (e.code !== "EEXIST") throw e;
-            taken = true;
-            break;
-          }
+      const first = replace
+        ? { model: ownName(paths.model), manuscript: ownName(paths.manuscript) }
+        : paths;
+      let taken = false;
+      for (const [path, data] of [
+        [first.model, model],
+        [first.manuscript, manuscript],
+      ]) {
+        try {
+          await writeFile(path, JSON.stringify(data, null, 2) + "\n", { flag: "wx" });
+          mine.push(path);
+        } catch (e) {
+          await dropMine();
+          if (replace || e.code !== "EEXIST") throw e;
+          taken = true;
+          break;
         }
-        if (taken) continue;
       }
+      if (taken) continue;
       let w;
       try {
         w = await py("response_docx.py", [
           "--model",
-          paths.model,
+          first.model,
           "--out",
           paths.docx,
           ...(replace ? ["--overwrite"] : []),
@@ -362,7 +371,19 @@ export function createResponseService({
         await dropMine();
         throw new Error(w.json.error ?? w.error ?? "the letter could not be written");
       }
-      if (!replace) mine.push(paths.docx);
+      if (replace) {
+        // The new docx is in place: its sidecars follow at once, before the
+        // verifier runs, so the docx is never left with the old ones.
+        try {
+          await rename(first.model, paths.model);
+          await rename(first.manuscript, paths.manuscript);
+        } catch (e) {
+          throw new Error(
+            `The letter was written to ${paths.docx}, but its model and manuscript list could not be put next to it: ${e.message}`,
+          );
+        }
+        mine.length = 0;
+      } else mine.push(paths.docx);
       const v = await py("response_verify.py", [
         "--docx",
         paths.docx,
