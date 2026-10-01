@@ -1161,7 +1161,7 @@ test("ledger suggestions: a checklist from the review text; Add selected imports
 
 // P15 "Propose all": one review turn per open comment, the next one only
 // after the turn_done of the one before.
-async function proposeAllSetup() {
+async function proposeAllSetup({ providersReady } = {}) {
   const { createTurnState } = await import("../taskpane/shared/turn-state.js");
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
@@ -1191,7 +1191,9 @@ async function proposeAllSetup() {
   const fail = {};
   // doc.comments: the comments Word reports in the next snapshot.
   const doc = { comments: [] };
-  const sendRequest = async (type, payload) => {
+  const sent = []; // [type, payload, opts] of every request
+  const sendRequest = async (type, payload, opts) => {
+    sent.push([type, payload, opts]);
     if (fail[type]) {
       const error = fail[type];
       delete fail[type];
@@ -1215,6 +1217,7 @@ async function proposeAllSetup() {
       return () => turn.endIf(id);
     },
     isTurnInFlight: () => turn.inFlight,
+    providersReady,
   });
   await pane.reload();
   const $ = (id) => document.getElementById(id);
@@ -1230,7 +1233,7 @@ async function proposeAllSetup() {
       ...(error ? { error } : {}),
     });
   };
-  return { pane, turn, proposals, fail, doc, $, wait, endTurn };
+  return { pane, turn, proposals, sent, fail, doc, $, wait, endTurn };
 }
 
 test("Propose all sends the next review_propose only after turn_done; an error stops the queue", async () => {
@@ -1711,4 +1714,59 @@ test("a Review action clicked while the stored provider is being confirmed waits
   // Nothing to wait for: the next click goes straight through.
   await t.$("review-split").click();
   assert.equal(t.requests.filter((r) => r.type === "review_split").length, 2);
+});
+
+// Codex review of stage 2.5: Propose all did not wait for the daemon to
+// confirm the stored provider, as every other action does. Its request then
+// timed out in the pane while the daemon still waited at its gate, and the
+// turn the author saw fail could start later.
+test("Propose all waits for the stored provider to be confirmed before its first request", async () => {
+  let confirm;
+  let pending = new Promise((r) => (confirm = r));
+  const t = await proposeAllSetup({ providersReady: () => pending });
+  try {
+    const before = t.sent.length;
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    assert.equal(t.sent.length, before, "nothing is sent while the provider is not confirmed");
+    assert.equal(
+      t.$("review-message").textContent,
+      "Waiting for the daemon to confirm the stored provider choice...",
+    );
+    // A second press while it waits starts no second run.
+    const again = t.$("review-propose-all").click();
+    pending = null;
+    confirm();
+    await t.wait();
+    await again;
+    assert.deepEqual(t.proposals, [["R1.1", 0]]);
+    assert.equal(t.$("review-propose-stop").hidden, false);
+    for (const ref of ["R1.1", "R1.3", "R2.1"]) {
+      t.endTurn(ref);
+      await t.wait();
+    }
+    await all;
+    assert.equal(t.$("review-message").textContent, "Propose all: 3 of 3 proposed.");
+    assert.equal(t.proposals.length, 3);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// The pane says how long it waits for the answer of review_propose, and
+// waits exactly that long: the daemon starts no turn for a request the pane
+// has given up (review-service.mjs).
+test("review_propose carries the time the pane waits for its answer", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    const [, payload, opts] = t.sent.find(([type]) => type === "review_propose");
+    assert.equal(payload.wait_ms, 10_000);
+    assert.deepEqual(opts, { timeoutMs: 10_000 });
+    t.endTurn("R1.1");
+    await t.wait();
+  } finally {
+    await t.pane.reload();
+  }
 });
