@@ -508,6 +508,22 @@ const steps = {
     return { seconds: Math.round((Date.now() - started) / 1000), ...(await view(page)) };
   },
 
+  // "Allow exception" of a blocked edit, pressed and confirmed: the row of
+  // comment a.ref that reads "Blocked by <a.blocked_by>:". The daemon sends
+  // the stored edit through the guarded write once more; an edit that is
+  // refused again ends with its reason on the message line (an error).
+  async "allow-exception"(page, a) {
+    const row = () =>
+      card(page, a.ref).locator(".review-blocked", { hasText: `Blocked by ${a.blocked_by}:` });
+    await clearMessage(page);
+    await row().locator("button", { hasText: "Allow exception" }).click();
+    await row().locator("button", { hasText: "Apply despite" }).click();
+    // An error ends the wait (the refusal is one); an edit that went in
+    // leaves no message and the step runs out of time.
+    await waitMessage(page, 180_000, "forbidden rule");
+    return view(page);
+  },
+
   async "clean-tool"(page) {
     await clearMessage(page);
     await page.click("#review-clean-tool");

@@ -1156,9 +1156,11 @@ test("the pane steps wait for the message their own action ends with", async () 
   const waits = [...driver.matchAll(/waitMessage\(page, [^,]+, "((?:[^"\\]|\\.)*)"\)/g)].map((m) =>
     JSON.parse(`"${m[1]}"`),
   );
-  assert.deepEqual(waits, ["^Split by ", "candidate rule\\(s\\) by "]);
+  assert.deepEqual(waits, ["^Split by ", "forbidden rule", "candidate rule\\(s\\) by "]);
   assert.match("Split by regex: 5 comment(s). Edit, then Save.", new RegExp(waits[0]));
-  assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[1]));
+  assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[2]));
+  // allow-exception: the refusal of the forbid guard, as the daemon words it.
+  assert.ok(read("../daemon/review-tools.mjs").includes("matches forbidden rule(s) ${open.join("));
   const HOLD = "Waiting for the daemon to confirm the stored provider choice...";
   for (const w of waits) assert.doesNotMatch(HOLD, new RegExp(w));
   assert.ok(pane.includes("say(`Split by ${r.method}"));

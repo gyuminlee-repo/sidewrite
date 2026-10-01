@@ -72,6 +72,19 @@ Word COM outcomes, the verify command exit codes and the cleanup record). The
 daemon log goes to `--log` (default `/tmp/daemon-<stage>-e2e.log`; a second
 daemon started for the forbid-list knob writes `-knob.log`).
 
+Stage 2 shows the forbid guard without a model (S2-23, marker
+`s2-forbid-block`). After the review turns the run puts a blocked edit on
+file for R1.3 that holds the forbidden word of L2 and names L1 as the rule it
+waits for (`FORBID_GUARD_EDIT` in `judge.mjs`, written with the store's own
+`addBlocked` while no request is running), and presses "Allow exception" in
+the pane. The daemon sends the stored edit through the same guarded write as
+an edit of a turn; the exception lifts L1 only, so L2 must refuse it:
+`[review] blocked R1.3 by=L2` in the log, the refusal on the message line, a
+blocked edit recorded by the daemon, no change and no new tracked change in
+Word. The run then takes its own item off the file. The two steps that show
+whether the model avoids the word (`propose R1.3` and the knob run) stay, and
+S2-23 no longer depends on them.
+
 Verify commands are rewritten before they run (`rewriteVerify` in
 `judge.mjs`): `--plan-dir` (default `/tmp/<stage>-run`) becomes the run
 folder, `cd <--plan-repo> ` becomes this checkout, `--plan-log` (default

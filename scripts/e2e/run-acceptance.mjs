@@ -10,6 +10,12 @@ import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  addBlocked,
+  dropBlocked,
+  loadRevision,
+  saveRevision,
+} from "../../daemon/revision-store.mjs";
 import { parseArgs } from "node:util";
 import {
   anonymizeEvidence,
@@ -27,6 +33,9 @@ import {
   formatEvidence,
   guidelineEvidence,
   insertTarget,
+  FORBID_GUARD_EDIT,
+  FORBID_GUARD_SEED_RULE,
+  forbidBlockEvidence,
   JUDGES,
   judge,
   langEvidence,
@@ -408,6 +417,50 @@ function marker(name, evidence) {
 }
 
 // ---- the run ---------------------------------------------------------------
+// S2-23 without a model: an edit that puts "novel" into the paragraph of R1.3
+// is sent to the guarded write of the daemon (review-tools.mjs
+// applyTrackedEdit) and must be refused by L2 before Word. The only way from
+// the pane to that function without a turn is "Allow exception" of a blocked
+// edit (review_override), which sends the stored edit once more and lifts
+// only the rules the item names. So an item is put on file for R1.3 that
+// names L1, not L2 (the store's own addBlocked, written while no request is
+// running), the pane presses its button, and L2 has to refuse it: the same
+// check and the same log line as for an edit of a turn. The item is taken
+// off the file again; the blocked edit the daemon recorded itself stays.
+async function forbidGuard() {
+  const seeded = addBlocked(await loadRevision(REVISION, winPath(DOC)), "R1.3", {
+    args: FORBID_GUARD_EDIT,
+    blocked_by: [FORBID_GUARD_SEED_RULE],
+  });
+  await saveRevision(REVISION, seeded.revision);
+  const seedId = seeded.blocked.id;
+  note("refresh", pane("refresh"), { label: "refresh (forbid guard item on file)" });
+  const wordBefore = com("state");
+  const at = readLog(daemonLog).length;
+  const step = pane("allow-exception", { ref: "R1.3", blocked_by: FORBID_GUARD_SEED_RULE });
+  const evidence = forbidBlockEvidence({
+    step,
+    log: readLog(daemonLog).slice(at),
+    revision: JSON.parse(fs.readFileSync(REVISION, "utf8")),
+    before: seeded.revision,
+    word: com("state"),
+    wordBefore,
+    seedId,
+  });
+  marker("s2-forbid-block", evidence);
+  record.forbid_guard = { seed: seedId, step, evidence };
+  rows.push({
+    step: "forbid guard: an edit with novel sent to R1.3",
+    result: evidence.pass ? "PASS" : "FAIL",
+    got: `${Object.entries(evidence.checks)
+      .map(([k, v]) => `${k} ${v}`)
+      .join("; ")} | ${evidence.message ?? "-"}`,
+  });
+  const cleaned = dropBlocked(await loadRevision(REVISION, winPath(DOC)), "R1.3", seedId);
+  if (cleaned) await saveRevision(REVISION, cleaned);
+  save();
+}
+
 async function propose(ref, label) {
   const before = count(daemonLog, /^\[agent\] turn complete/gm);
   const r = pane("propose", { ref });
@@ -494,6 +547,7 @@ async function main() {
     await propose("R1.3", "propose R1.3 (forbid list off)");
     record.knob = { blocked: /^\[review\] blocked R1\.3 by=L2$/m.test(readLog(KNOB_LOG)) };
   }
+  await forbidGuard();
   note("refresh", pane("refresh"), { label: "refresh before Word" });
 
   // The author in Word (procedure 10).
