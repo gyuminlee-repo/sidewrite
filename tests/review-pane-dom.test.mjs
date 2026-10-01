@@ -1967,3 +1967,145 @@ test("Add rationale comment: the text comes from the daemon, Word gets the comme
   assert.equal(t.$("review-message").textContent, "R1.1-1: rationale comment added.");
   assert.equal(buttons().length, 0, "the change has its comment now");
 });
+
+// Codex review (P2): "Add rationale comment" pressed twice quickly ran twice
+// at once: Word got two comments and the daemon refused the second id, which
+// left a comment no change has. A button that writes to Word runs once at a
+// time; a press while it runs does nothing.
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+};
+const tick = () => new Promise((r) => setTimeout(r, 5));
+
+test("Add rationale comment: a second press while it runs adds no second comment", async () => {
+  const change = {
+    id: "R1.1-1",
+    kind: "replace",
+    state: "pending",
+    find: "degrees",
+    text: "degrees Celsius",
+    paragraph_id: "U9",
+    paragraph_index: 9,
+    word_comment_id: null,
+    comment_missing: "CommentInsertFailed",
+    rationale: { what: "w", why: "y", addresses: "a" },
+  };
+  const rev = (changes) => ({
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes,
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  });
+  let gate = deferred();
+  let answer = { ok: false, code: "CommentAnchorMissing", message: "no place for the comment" };
+  const wordCalls = [];
+  const t = await setup({
+    revision: rev([change]),
+    respond: {
+      review_comment_text: (p) => ({
+        ok: true,
+        change_id: p.change_id,
+        comment_text: "[R1.1] w / y / a",
+        known_comment_ids: [],
+        change: { kind: "replace", find: "degrees", text: "degrees Celsius", paragraph_index: 9 },
+      }),
+      review_comment_set: () => ({
+        ok: true,
+        revision: rev([{ ...change, word_comment_id: "77", comment_missing: null }]),
+      }),
+    },
+    word: {
+      addChangeComment: async (a) => {
+        wordCalls.push(a);
+        await gate.promise;
+        return answer;
+      },
+    },
+  });
+  const buttons = () =>
+    findAll(t.$("review-comments"), (n) => n.textContent === "Add rationale comment");
+  const sent = (type) => t.requests.filter((r) => r.type === type).length;
+
+  // A run that fails: the button can be pressed again afterwards.
+  const failing = buttons()[0].click();
+  await tick();
+  assert.equal(buttons()[0].disabled, true, "disabled while it runs");
+  gate.resolve();
+  await failing;
+  assert.match(t.$("review-message").textContent, /no place for the comment/);
+  assert.equal(buttons()[0].disabled, false, "enabled again after a failed run");
+  assert.equal(wordCalls.length, 1);
+
+  // Two presses, the second while Word is still adding the comment.
+  gate = deferred();
+  answer = { ok: true, word_comment_id: "77", existed: false };
+  const first = buttons()[0].click();
+  await tick();
+  const second = buttons()[0].click();
+  await tick();
+  assert.equal(wordCalls.length, 2, "one more call to Word, not two");
+  gate.resolve();
+  await Promise.all([first, second]);
+  assert.equal(wordCalls.length, 2);
+  assert.equal(sent("review_comment_text"), 2);
+  assert.equal(sent("review_comment_set"), 1);
+  assert.equal(t.$("review-message").textContent, "R1.1-1: rationale comment added.");
+  assert.equal(buttons().length, 0);
+});
+
+test("Refresh status, Clean up tool comments and Delete all run once at a time", async () => {
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const revision = { comments: [], ledger: [] };
+  const gates = { snapshot: deferred(), clean: deferred(), read: deferred() };
+  const calls = { snapshot: 0, clean: 0, read: 0 };
+  const t = await setup({
+    revision,
+    respond: {
+      review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+    },
+    word: {
+      collectReviewSnapshot: async () => {
+        calls.snapshot += 1;
+        await gates.snapshot.promise;
+        return { paragraphs: [], comments: [] };
+      },
+      deleteToolComments: async () => {
+        calls.clean += 1;
+        await gates.clean.promise;
+        return { deleted_ids: [], before: [], after: [] };
+      },
+      readAllComments: async () => {
+        calls.read += 1;
+        await gates.read.promise;
+        return [];
+      },
+    },
+  });
+  for (const [id, name] of [
+    ["review-refresh", "snapshot"],
+    ["review-clean-tool", "clean"],
+    ["review-delete-all", "read"],
+  ]) {
+    const first = t.$(id).click();
+    await tick();
+    assert.equal(t.$(id).disabled, true, `${id} is disabled while it runs`);
+    const second = t.$(id).click();
+    await tick();
+    assert.equal(calls[name], 1, `${id}: the second press does nothing`);
+    gates[name].resolve();
+    await Promise.all([first, second]);
+    assert.equal(t.$(id).disabled, false, `${id} is enabled again`);
+    assert.equal(calls[name], 1);
+  }
+  assert.equal(t.requests.filter((r) => r.type === "review_refresh").length, 1);
+});
