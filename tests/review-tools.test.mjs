@@ -479,3 +479,111 @@ test("requirement_ids: cite a request handled in part; empty only when unrelated
   assert.match(desc, /empty only when the change answers none of them/i);
   assert.doesNotMatch(desc, /not sure/);
 });
+
+// Codex review 12: forbid "novel substrate"; "This is a novel material.";
+// replacing "material" with "substrate" was applied with ok:true.
+const PHRASE = {
+  id: "L4",
+  kind: "forbid",
+  text: "novel substrate 금지",
+  check: { type: "regex", pattern: "novel substrate", flags: "i", expect: "absent" },
+};
+const crossDeps = (ctx) => {
+  const d = deps();
+  d.getLedger = async () => [PHRASE];
+  d.getReviewContext = async () => ({ requirements: [], comment_text: "", ...ctx });
+  return d;
+};
+
+test("forbid hit across the edit boundary: blocked through the same flow, and an override applies it", async () => {
+  const d = crossDeps({ paragraphs: ["This is a novel material.", "It grew slowly."] });
+  const args = { comment_ref: "R1.3", find: "material", replace: "substrate", rationale: R };
+  const r = await applyTrackedEdit(d, args, { ref: "R1.3" });
+  assert.deepEqual([r.ok, r.blocked_by, r.blocked_id], [false, ["L4"], "R1.3-b1"]);
+  assert.match(r.message, /Rephrase/);
+  assert.equal(d.calls.length, 0);
+  assert.equal(d.edits.length, 0);
+  assert.deepEqual(d.blocked[0].blocked_by, ["L4"]);
+  assert.equal(d.blocked[0].args.replace, "substrate");
+  assert.equal(d.lines[0], "[review] blocked R1.3 by=L4");
+  // The author approves the exception: the stored edit goes through.
+  const ok = await applyTrackedEdit(
+    d,
+    d.blocked[0].args,
+    { ref: "R1.3" },
+    {
+      override: { blocked_by: ["L4"] },
+    },
+  );
+  assert.equal(ok.ok, true);
+  assert.deepEqual(d.edits[0][1].override_of, ["L4"]);
+  // Insertion and deletion forms.
+  const ins = await applyTrackedEdit(
+    crossDeps({ paragraphs: ["This is a novel."] }),
+    { comment_ref: "R1.3", find: "novel", insert_after: " substrate", rationale: R },
+    { ref: "R1.3" },
+  );
+  assert.deepEqual(ins.blocked_by, ["L4"]);
+  const del = await applyTrackedEdit(
+    crossDeps({ paragraphs: ["It used a novel bright substrate."] }),
+    { comment_ref: "R1.3", find: "bright ", replace: "", rationale: R },
+    { ref: "R1.3" },
+  );
+  assert.deepEqual(del.blocked_by, ["L4"]);
+});
+
+test("an edit next to or away from an existing forbidden phrase, or one that removes it, is applied", async () => {
+  const paragraphs = ["A novel substrate grows. The medium was warm material."];
+  for (const [find, replace] of [
+    ["warm", "hot"], // elsewhere in the paragraph
+    ["novel substrate", "new substrate"], // removes it
+    [" grows", " grew"], // right after it
+  ]) {
+    const d = crossDeps({ paragraphs });
+    const r = await applyTrackedEdit(
+      d,
+      { comment_ref: "R1.3", find, replace, rationale: R },
+      { ref: "R1.3" },
+    );
+    assert.equal(r.ok, true, `${find} -> ${replace}`);
+    assert.equal(d.blocked.length, 0);
+  }
+});
+
+// The paragraph texts are those of the last refresh. A change recorded since
+// then is put into them first, so two edits in a row cannot form the phrase
+// (new -> novel, then material -> substrate).
+test("forbid hit across the boundary of an earlier change of the same turn", async () => {
+  const recent = (find, text, extra = {}) => ({
+    kind: "replace",
+    find,
+    text,
+    narrowed_from: null,
+    created_at: "2026-01-01T00:00:01.000Z",
+    ...extra,
+  });
+  const d = crossDeps({
+    paragraphs: ["This is a new material."],
+    recent_changes: [recent("new", "novel")],
+  });
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.3", find: "material", replace: "substrate", rationale: R },
+    { ref: "R1.3" },
+  );
+  assert.deepEqual([r.ok, r.blocked_by], [false, ["L4"]]);
+  // A narrowed change is put in by the find/replace the model asked for.
+  const { currentTexts } = await import("../daemon/review-tools.mjs");
+  assert.deepEqual(
+    currentTexts(
+      ["Held at 30 degrees all day.", "Other."],
+      [
+        recent("degrees", "°C", { narrowed_from: { find: "30 degrees", text: "30 °C" } }),
+        recent("all day", " long", { kind: "insert" }),
+        recent("Other.", "", { kind: "delete" }),
+        recent("not in the text", "x"),
+      ],
+    ),
+    ["Held at 30 °C all day long.", ""],
+  );
+});

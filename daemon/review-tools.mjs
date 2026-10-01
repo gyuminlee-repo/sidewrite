@@ -8,7 +8,7 @@
 // query() starts (daemon/index.mjs:1062) and the session lives across turns.
 
 import { z } from "zod";
-import { forbidHits } from "./ledger-check.mjs";
+import { forbidHits, forbidHitsAfterEdit } from "./ledger-check.mjs";
 import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 
@@ -74,7 +74,7 @@ export const TRACKED_EDIT_DESCRIPTION =
   "Review turns only. Apply ONE tracked change (replace, delete, or pure insertion) and attach its rationale comment. " +
   'Replace/delete: give `find` and `replace` ("" deletes). Insertion: give `find` (anchor) and `insert_after`. ' +
   "`find` must occur exactly once in the document; if it occurs more than once, pass `paragraph_hint` (a paragraph ID from office_find). " +
-  "Returns ok:false with blocked_by when the new text matches the forbid list of the author; then rephrase, do not retry the same text.";
+  "Returns ok:false with blocked_by when the new text, alone or together with the words next to it, matches the forbid list of the author; then rephrase, do not retry the same text.";
 
 export const trackedEditShape = {
   comment_ref: z
@@ -152,8 +152,10 @@ function fail(message, extra = {}) {
 // a late tool_result will carry; `record(result)` records that result the
 // same way as an answer in time (review-service.mjs lateToolResult);
 // `attempt` is the change as it would read in the document (unknownAttempt).
-// getReviewContext returns { requirements, comment_text, paragraphs } for the
-// L2 sources (manuscript snapshot texts and the comment) and the L5 ids.
+// getReviewContext returns { requirements, comment_text, paragraphs,
+// recent_changes } for the L2 sources (manuscript snapshot texts and the
+// comment), the L5 ids, and the forbid check of the text around the edit
+// (recent_changes: changes recorded since that snapshot, oldest first).
 // turn: { ref } of the current review turn, or null.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
@@ -187,15 +189,22 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     );
   }
 
+  // Forbid list: the new text on its own, and the paragraph as it will read
+  // after the edit (a forbidden phrase formed with the words next to it).
   const ledger = (await deps.getLedger?.()) ?? [];
-  const hits = forbidHits(ledger, newText);
+  const around = forbidHitsAfterEdit(ledger, currentTexts(ctx.paragraphs, ctx.recent_changes), {
+    find: args.find,
+    text: newText,
+    kind,
+  });
+  const hits = [...new Set([...forbidHits(ledger, newText), ...around])];
   const excepted = override?.blocked_by ?? [];
   const open = hits.filter((id) => !excepted.includes(id));
   if (open.length) {
     const blocked = await deps.onBlocked?.({ ref: turn.ref, args: edit, blocked_by: open });
     deps.log?.(`[review] blocked ${turn.ref} by=${open.join(",")}`);
     return fail(
-      `Not applied: the new text matches forbidden rule(s) ${open.join(", ")}. Rephrase without it; the author can approve an exception in the Review tab.`,
+      `Not applied: the new text, alone or with the words next to it, matches forbidden rule(s) ${open.join(", ")}. Rephrase without it; the author can approve an exception in the Review tab.`,
       { blocked_by: open, blocked_id: blocked?.id ?? null },
     );
   }
@@ -284,6 +293,29 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   } finally {
     release?.();
   }
+}
+
+// The paragraphs as they read now: the texts of the last status refresh with
+// the changes recorded since then put in (a narrowed change by the find and
+// replace the model asked for). A change whose find is not exactly once in
+// the texts is left out.
+export function currentTexts(texts, changes) {
+  const out = (texts ?? []).map(normalizeParaText);
+  for (const ch of changes ?? []) {
+    const f = String(ch.narrowed_from?.find ?? ch.find ?? "")
+      .replace(/\u0005/g, "")
+      .replace(/\s+/g, " ");
+    if (!f.trim()) continue;
+    const at = out.flatMap((t, k) => (t.includes(f) ? [k] : []));
+    if (at.length !== 1) continue;
+    const t = out[at[0]];
+    const i = t.indexOf(f);
+    if (t.indexOf(f, i + 1) !== -1) continue;
+    const cut = !ch.narrowed_from && ch.kind === "insert" ? i + f.length : i;
+    out[at[0]] =
+      t.slice(0, cut) + (ch.narrowed_from?.text ?? ch.text ?? "") + t.slice(i + f.length);
+  }
+  return out;
 }
 
 // The change an unanswered tracked edit would have recorded, with the

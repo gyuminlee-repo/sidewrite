@@ -577,3 +577,85 @@ test("LLM check: a quote that differs only in case or spacing is located; an emp
     ["violations", 1, 0],
   );
 });
+
+// Codex review 12: the forbid pre-check read only the replacement string, so
+// a forbidden phrase formed across the edit boundary passed (forbid "novel
+// substrate"; "This is a novel material."; material -> substrate).
+test("forbidHitsAfterEdit: a forbidden phrase the edit forms with the words next to it", async () => {
+  const { forbidHitsAfterEdit } = await import("../daemon/ledger-check.mjs");
+  const rule = (pattern, flags = "", extra = {}) => ({
+    id: "L1",
+    kind: "forbid",
+    text: "t",
+    check: { type: "regex", pattern, flags, expect: "absent" },
+    ...extra,
+  });
+  const PHRASE = [rule("novel substrate")];
+  const WORD = [rule(String.raw`\bnovel\b`, "i")];
+  const hit = (ledger, texts, find, text, kind = "replace") =>
+    forbidHitsAfterEdit(ledger, texts, { find, text, kind });
+
+  // Created across the boundary: blocked.
+  const created = [
+    // the Codex reproduction
+    [PHRASE, ["This is a novel material."], "material", "substrate", "replace"],
+    // pure insertion after an anchor
+    [PHRASE, ["This is a novel."], "novel", " substrate", "insert"],
+    // partial replace: only the tail of the phrase is new
+    [PHRASE, ["It used a novel carbon source."], "carbon source", "substrate mix", "replace"],
+    // a deletion that joins two words into the phrase
+    [PHRASE, ["It used a novel bright substrate."], "bright ", "", "delete"],
+    // a deletion that turns a longer word into the forbidden one
+    [WORD, ["The novelty is clear."], "ty", "", "delete"],
+    // regex with flags, whitespace class across the boundary
+    [
+      [rule(String.raw`NOVEL\s+substrate`, "i")],
+      ["A Novel material."],
+      "material",
+      "Substrate",
+      "replace",
+    ],
+    // `find` occurs in two paragraphs (paragraph_hint picks one): either may be the one
+    [PHRASE, ["A plain material.", "A novel material."], "material", "substrate", "replace"],
+  ];
+  for (const [ledger, texts, find, text, kind] of created) {
+    assert.deepEqual(hit(ledger, texts, find, text, kind), ["L1"], `${texts[0]} / ${find}`);
+  }
+
+  // Not created by this edit: passes.
+  const kept = [
+    // a violation elsewhere in the paragraph, unrelated edit
+    [PHRASE, ["A novel substrate grows. The medium was warm."], "warm", "hot", "replace"],
+    // a violation right next to the edit that the edit does not touch
+    [WORD, ["A novel material."], "material", "substrate", "replace"],
+    // the same rule already matched at this place before the edit
+    [[rule(String.raw`novel \w+`)], ["A novel material."], "material", "substrate", "replace"],
+    // the edit removes the violation
+    [PHRASE, ["A novel substrate."], "novel substrate", "new substrate", "replace"],
+    [PHRASE, ["A novel substrate."], "substrate", "material", "replace"],
+    [PHRASE, ["A novel substrate."], " substrate", "", "delete"],
+    // `find` is not in the known paragraphs: nothing to say here
+    [PHRASE, ["Another paragraph."], "material", "substrate", "replace"],
+    [PHRASE, [], "material", "substrate", "replace"],
+  ];
+  for (const [ledger, texts, find, text, kind] of kept) {
+    assert.deepEqual(hit(ledger, texts, find, text, kind), [], `${texts[0]} / ${find}`);
+  }
+
+  // Same rule filter as forbidHits: forbid, regex, expect absent, manuscript scope.
+  const P = ["This is a novel material."];
+  const others = [
+    rule("novel substrate", "", { kind: "instruction" }),
+    rule("novel substrate", "", { scope: "response" }),
+    { id: "L1", kind: "forbid", text: "t", check: { type: "llm" } },
+    { id: "L1", kind: "forbid", text: "t", check: { type: "regex", pattern: "(", flags: "" } },
+    // A must-stay ("present") rule is not pre-checked: deleting its phrase
+    // directly is not blocked either, the ledger check reports it afterwards.
+    rule("This is a novel material", "", {
+      kind: "instruction",
+      check: { type: "regex", pattern: "This is a novel material", flags: "", expect: "present" },
+    }),
+  ];
+  for (const item of others) assert.deepEqual(hit([item], P, "material", "substrate"), []);
+  console.log(`forbidHitsAfterEdit corpus: ${created.length} created, ${kept.length} not created`);
+});

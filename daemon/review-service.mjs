@@ -260,14 +260,23 @@ export function createReviewService({
     return {
       log,
       getLedger: async () => (await load(key)).ledger,
-      // L2 sources and L5 ids for office_tracked_edit.
+      // L2 sources and L5 ids for office_tracked_edit. recent_changes: the
+      // changes recorded since the snapshot (earlier edits of this turn), so
+      // the forbid check reads the paragraphs as they are now.
       getReviewContext: async (ref) => {
         const rev = await load(key);
         const c = findComment(rev, ref);
+        const since = rev.snapshot?.taken_at;
         return {
           requirements: c?.requirements ?? [],
           comment_text: c?.text ?? "",
           paragraphs: rev.snapshot?.paragraphs ?? [],
+          recent_changes: since
+            ? rev.comments
+                .flatMap((x) => x.changes)
+                .filter((ch) => ch.created_at > since)
+                .sort((a, b) => (a.created_at < b.created_at ? -1 : 1))
+            : [],
         };
       },
       onEdit: async ({ ref, change }) => {

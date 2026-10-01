@@ -257,24 +257,74 @@ export function inManuscriptScope(item) {
   return (item?.scope ?? "manuscript") === "manuscript";
 }
 
-// Ids of manuscript-scope forbid-list regex items (expect "absent") that
-// match `text`. LLM-checked forbid items cannot be pre-checked and are
-// skipped here.
-export function forbidHits(ledger, text) {
-  const hits = [];
+// The rules a tracked edit is pre-checked against: manuscript-scope
+// forbid-list regex items (expect "absent"). LLM-checked forbid items cannot
+// be pre-checked. A must-stay rule (expect "present") is not pre-checked
+// either: an edit that deletes its phrase is applied, and the ledger check
+// reports it afterwards.
+function forbidRules(ledger) {
+  const rules = [];
   for (const item of ledger ?? []) {
     if (item.kind !== "forbid" || item.check?.type !== "regex") continue;
     if (!inManuscriptScope(item)) continue;
     if ((item.check.expect ?? "absent") !== "absent") continue;
-    let re;
     try {
-      re = compileCheck(item.check);
+      rules.push({ id: item.id, re: compileCheck(item.check) });
     } catch {
       continue;
     }
-    if (findAll(re, String(text ?? "")).length) hits.push(item.id);
   }
-  return hits;
+  return rules;
+}
+
+// Ids of the pre-check rules that match `text` (the new text on its own).
+export function forbidHits(ledger, text) {
+  return forbidRules(ledger)
+    .filter(({ re }) => findAll(re, String(text ?? "")).length)
+    .map(({ id }) => id);
+}
+
+const collapse = (s) =>
+  String(s ?? "")
+    .replace(/\u0005/g, "")
+    .replace(/\s+/g, " ");
+
+// Matches of `re` in `text` that overlap or touch the range [a, b].
+// Touching counts: a deletion can end a word right at its edge ("novelty"
+// without "ty").
+const matchesAt = (re, text, a, b) =>
+  findAll(re, text).filter((m) => m.match && m.start <= b && m.start + m.match.length >= a).length;
+
+// Ids of the pre-check rules that the edit would newly break in the text
+// around it: the forbidden phrase is formed by the new text together with
+// the words next to it (forbid "novel substrate", "a novel material",
+// material -> substrate), or by a deletion that joins two words.
+// texts: the paragraphs as they read now; edit: { find, text, kind } with
+// kind replace | delete | insert (text is then inserted after find).
+// A rule counts only when it has more matches at the place of the edit after
+// it than before: a violation that was already there, next to the edit or
+// elsewhere in the paragraph, does not block, and removing one passes.
+// Every occurrence of `find` is tried (a paragraph_hint may pick any of
+// them). A `find` that is in none of the texts gives no hit.
+export function forbidHitsAfterEdit(ledger, texts, { find, text, kind }) {
+  const rules = forbidRules(ledger);
+  const f = collapse(find);
+  const n = collapse(text);
+  if (!rules.length || !f.trim()) return [];
+  const hits = new Set();
+  for (const raw of texts ?? []) {
+    const t = normalizeParaText(raw);
+    for (let i = t.indexOf(f); i !== -1; i = t.indexOf(f, i + 1)) {
+      const end = i + f.length;
+      const start = kind === "insert" ? end : i;
+      const after = t.slice(0, start) + n + t.slice(end);
+      for (const { id, re } of rules) {
+        if (matchesAt(re, after, start, start + n.length) > matchesAt(re, t, start, end))
+          hits.add(id);
+      }
+    }
+  }
+  return rules.map(({ id }) => id).filter((id) => hits.has(id));
 }
 
 // ---- L10: incremental check ------------------------------------------------
