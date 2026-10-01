@@ -59,7 +59,22 @@ test("a provider key is passed to the key store and nowhere else", () => {
 // confirmed it in this connection.
 test("judgments and review turns wait for the pane's confirmed provider; hello starts over", () => {
   // The router asks the selection, which waits and throws: never the sync default.
-  assert.match(code, /getChoice: \(key\) => selection\.ready\(key, "oneshot"\)/);
+  assert.match(code, /getChoice: \(key, role\) => selection\.ready\(key, role\)/);
+  // Writing without a model of its own: the best Claude model of the account.
+  assert.match(
+    code,
+    /claudeDefault: \(role\) =>\s*role === "writing" \? bestClaudeModel\(modelCache\.current\(\)\) : ONESHOT_MODEL/,
+  );
+  // The stored writing choice is restored with the other two.
+  assert.match(
+    code,
+    /\{ turn: pick\(msg\.turn\), writing: pick\(msg\.writing\), oneshot: pick\(msg\.oneshot\) \}/,
+  );
+  // A session with no model chosen runs on the best one, not on sonnet.
+  assert.match(
+    code,
+    /return resolveModelChoice\(modelByKey\.get\(key\), modelCache\.current\(\)\);/,
+  );
   assert.match(code, /turnGate: \(key\) => selection\.ready\(key, "turn"\)/);
   // A new connection has no confirmed choice.
   const hello = code.slice(code.indexOf("async function onPaneConnect"));

@@ -55,8 +55,8 @@ test("translate: the selection goes to the model with the language, and the answ
     assert.match(t.asked[0].system, /Translate into Korean/);
     assert.equal(t.asked[0].prompt, TEXT);
     assert.equal(t.asked[0].expectJson, false);
-    // The pane's provider is pinned once for the job, with the prose model.
-    assert.deepEqual(t.pins, [{ key: "k", options: { claudeModel: "sonnet" } }]);
+    // The pane's writing choice is pinned once for the job.
+    assert.deepEqual(t.pins, [{ key: "k", options: { role: "writing" } }]);
   } finally {
     await t.done();
   }
