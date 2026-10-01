@@ -34,14 +34,18 @@ export function modelLabel({ provider, model }, models) {
   return m ? `${name} · ${m}` : name;
 }
 
+// A model name without what does not tell models apart: a context suffix
+// ("[1m]") and a date at the end of an id ("-20251001").
 const bare = (s) =>
   String(s ?? "")
     .replace(/\[[^\]]*\]$/, "")
+    .replace(/-\d{8}$/, "")
     .toLowerCase();
 
 // Did another model run than the one asked for? true only when that can be
-// told: the account's list says what the asked one resolves to, or, without
-// it, the id that ran does not hold the name asked for.
+// told: the account's list says what the asked one resolves to; without it,
+// a full claude-* id must be the id that ran, and a short name (an alias, the
+// tag of a local model) must be in it.
 export function ranOther(asked, ran, models) {
   if (!asked || !ran) return false;
   const a = bare(asked);
@@ -49,7 +53,7 @@ export function ranOther(asked, ran, models) {
   if (a === r) return false;
   const row = (models ?? []).find((m) => bare(m.value) === a);
   if (row?.resolvedModel) return bare(row.resolvedModel) !== r;
-  return !r.includes(a);
+  return a.startsWith("claude-") || !r.includes(a);
 }
 
 // One kind of work: what its last request ran on; while there was none, the
