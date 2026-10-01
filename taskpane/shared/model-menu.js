@@ -22,3 +22,11 @@ export function modelMenuOptions(models, current) {
 export function isStoredModelValid(v) {
   return typeof v === "string" && v !== "default" && /^[A-Za-z0-9][\w.:\-[\]]{0,80}$/.test(v);
 }
+
+// The daemon answers set_model with the model it will use (it checks the
+// choice against the account's list). A line for the chat when that is not
+// the model the pane asked for, else null.
+export function effectiveModelNote(requested, effective) {
+  if (!requested || !effective || requested === effective) return null;
+  return `Model "${requested}" is not available for this account. Using ${effective}.`;
+}

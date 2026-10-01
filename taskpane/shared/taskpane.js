@@ -65,7 +65,7 @@ import {
   toolExcelSetRowHeight,
 } from "./tools-excel.js";
 import { isInOrUnder, docDirFromActiveUrl } from "./paths.js";
-import { modelMenuOptions, isStoredModelValid } from "./model-menu.js";
+import { modelMenuOptions, isStoredModelValid, effectiveModelNote } from "./model-menu.js";
 
 // Daemon endpoints. The HTTP server that loaded this taskpane is on
 // HTTP_PORT; the WebSocket bridge is on WS_PORT (one less by daemon convention).
@@ -148,6 +148,7 @@ let connState = "idle";
 let connLabel = "Connecting…";
 let liveModel = null; // SDK-reported model id of the running loop
 let pendingModelShort = null; // target short name while a switch restarts
+let accountModels = null; // models_list of the daemon, once it answered
 
 function shortModelName(idOrAlias) {
   const s = String(idOrAlias || "");
@@ -560,11 +561,18 @@ async function loadModelMenu() {
     $m.title = `Model list unavailable (${e.message}); showing the built-in choices`;
     return;
   }
-  $m.replaceChildren(...modelMenuOptions(r.models, settings.model).map(modelOption));
+  accountModels = r.models;
+  fillModelMenu();
   $m.title =
     r.source === "sdk"
       ? "Models your Claude account can use"
       : `Model list unavailable (${r.error}); aliases only`;
+}
+
+function fillModelMenu() {
+  const $m = document.getElementById("composer-model");
+  if (!$m || !accountModels) return;
+  $m.replaceChildren(...modelMenuOptions(accountModels, settings.model).map(modelOption));
   $m.value = settings.model;
 }
 
@@ -572,7 +580,29 @@ async function loadModelMenu() {
 // loop, so changing it mid-conversation triggers a resuming restart
 // (daemon side); on first connect it's just recorded for the lazy start.
 function sendModel() {
-  if (wsReady) wsSend({ type: "set_model", model: settings.model || "sonnet" });
+  if (!wsReady) return;
+  const asked = settings.model || "sonnet";
+  // The daemon waits for the account's model list before it answers.
+  sendRequest("set_model", { model: asked }, { timeoutMs: 30_000 }).then(
+    (r) => applyEffectiveModel(asked, r.model),
+    (e) => console.warn(`[model] set_model for ${asked} got no answer: ${e.message}`),
+  );
+}
+
+// The daemon answers with the model it will use. When that is not the one
+// asked for (not in the account's list), the pane takes the daemon's model:
+// the dropdown, the stored setting and the indicator show it, and one line
+// in the chat says so.
+function applyEffectiveModel(asked, effective) {
+  const note = effectiveModelNote(asked, effective);
+  if (!note || settings.model !== asked) return; // kept, or another choice was made meanwhile
+  settings.model = effective;
+  saveSettings(settings);
+  fillModelMenu(); // drops the "(not in list)" row of the refused choice
+  applySettings();
+  pendingModelShort = null;
+  renderConnection();
+  appendNotice(note);
 }
 
 document.getElementById("setting-show-diagnostics").addEventListener("change", (e) => {
