@@ -71,6 +71,7 @@ import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
+  currentTexts,
   narrowedAttempt,
   formatRationaleComment,
   TOOL_COMMENT_PREFIX,
@@ -227,6 +228,12 @@ export function createReviewService({
   afterRefresh = null,
   clock = Date.now,
   getModel = () => null,
+  // The manuscript and the session of a pane (review-prompt.mjs
+  // manuscriptBlock): manuscriptSeen(key) gives the paragraph hashes the
+  // session was last given, or null; manuscriptGiven(key, hashes) is called
+  // when a turn that carries the manuscript is queued.
+  manuscriptSeen = () => null,
+  manuscriptGiven = () => {},
   sendEvent = () => {},
   log = console.log,
   env = process.env,
@@ -660,7 +667,7 @@ export function createReviewService({
     }
   }
 
-  async function buildFor(d, ref, paragraphs) {
+  async function buildFor(d, ref, paragraphs, key) {
     const rev = await load(d);
     const comment = findComment(rev, ref);
     if (!comment) throw new Error(`No reviewer comment ${ref}. Save the comment list first.`);
@@ -669,6 +676,21 @@ export function createReviewService({
       comment,
       // What the other comments of the review ask and what is on record for them.
       others: rev.comments,
+      // The manuscript of the last status refresh, with the changes
+      // recorded since put in.
+      manuscript: rev.snapshot
+        ? {
+            paragraphs: currentTexts(
+              rev.snapshot.paragraphs,
+              rev.comments
+                .flatMap((c) => c.changes)
+                .filter((ch) => ch.created_at > rev.snapshot.taken_at)
+                .sort((a, b) => (a.created_at < b.created_at ? -1 : 1)),
+            ),
+            ids: rev.snapshot.ids,
+            seen: manuscriptSeen(key),
+          }
+        : null,
       paragraphs: Array.isArray(paragraphs) ? paragraphs : [],
       ledger: rev.ledger,
       lang: profile.rationale_lang,
@@ -776,7 +798,7 @@ export function createReviewService({
     },
     async review_preview(msg, key) {
       const d = at(key);
-      const { built } = await buildFor(d, msg.ref, msg.paragraphs);
+      const { built } = await buildFor(d, msg.ref, msg.paragraphs, key);
       log(
         formatPromptLog(msg.ref, built, { paragraphs: msg.paragraphs?.length ?? 0, preview: true }),
       );
@@ -795,7 +817,7 @@ export function createReviewService({
         );
       }
       const d = at(key);
-      const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs);
+      const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs, key);
       // A turn in which no edit can be applied is not started: every
       // office_tracked_edit of it would be refused (review-tools.mjs
       // applyTrackedEdit: TaskPaneOutdated, ForbidRuleBroken), the turn
@@ -814,6 +836,8 @@ export function createReviewService({
         );
       }
       pushTurn(key, host, built.text, { ref: msg.ref });
+      // The session of the pane has the manuscript as of this turn.
+      if (built.manuscript.mode !== "none") manuscriptGiven(key, built.manuscript.hashes);
       turnHolds.get(key)?.();
       turnHolds.set(
         key,

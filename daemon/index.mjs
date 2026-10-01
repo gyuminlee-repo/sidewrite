@@ -326,6 +326,13 @@ const reviewTurnByKey = new Map();
 // model is fixed per agent loop, so a change while a loop is live triggers
 // a resuming restart (see the set_model handler).
 const modelByKey = new Map();
+// What the session of a pane was given of the manuscript in a review turn
+// (review-prompt.mjs manuscriptBlock): pane key -> { hashes, fresh }. fresh:
+// given in a turn that starts the session itself (a first turn, or the
+// restart after a model fallback); that start keeps it. Any other start of
+// a session, and a compaction of its history, forgets it: the next review
+// turn then carries the whole manuscript again.
+const manuscriptByKey = new Map();
 // The models the signed-in account can use (model-list.mjs), fetched once at
 // start and kept for ten minutes. Until it is known, and when the fetch
 // fails, the three aliases and well-formed claude-* ids are accepted.
@@ -521,6 +528,7 @@ function onPaneClose(key) {
   explicitWorkspaceKeys.delete(key);
   loopRestartByKey.delete(key);
   modelByKey.delete(key);
+  manuscriptByKey.delete(key);
   selection.drop(key);
   startQueue.delete(key);
 }
@@ -596,6 +604,12 @@ const oneshotRouter = createOneshotRouter({
   log: console.log,
 });
 
+// Will the next turn of this pane start (or restart) its session?
+const startsSession = (key) => {
+  const s = sessionFor(key);
+  return !s || s.settled || !!s.fellBackTo;
+};
+
 const review = createReviewService({
   getContext: (key) => bridge.getContext(key),
   callTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key),
@@ -625,6 +639,8 @@ const review = createReviewService({
   // A review turn starts only with a confirmed provider for review turns.
   turnGate: (key) => selection.ready(key, "turn"),
   getModel: (key) => modelArgFor(key),
+  manuscriptSeen: (key) => (startsSession(key) ? null : (manuscriptByKey.get(key)?.hashes ?? null)),
+  manuscriptGiven: (key, hashes) => manuscriptByKey.set(key, { hashes, fresh: startsSession(key) }),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
   // The answers of the response letter that a change of the manuscript made
   // out of date (same rule as the Response tab).
@@ -1251,6 +1267,11 @@ async function startSessionForFolder(
   // triggered the lazy start) — clearing here would drop it, leaving
   // userMessageStream awaiting forever and the SDK with no first input
   // (no init, taskpane stuck on "Working…").
+  // The manuscript a review turn gave: this start keeps it only when that
+  // turn is what starts the session.
+  const given = manuscriptByKey.get(key);
+  if (given?.fresh) given.fresh = false;
+  else manuscriptByKey.delete(key);
   const prior = sessionFor(key);
   if (prior) {
     prior.abortController.abort();
@@ -1504,6 +1525,11 @@ function handleAgentMessage(msg, session) {
             console.warn("[daemon] Could not save session id:", err.message),
           );
         }
+      } else if (msg.subtype === "compact_boundary") {
+        // The history was summarized: the manuscript an earlier turn gave
+        // may be gone from it, so the next review turn gives it again.
+        console.log(`[agent] system/${msg.subtype}`);
+        if (session?.key) manuscriptByKey.delete(session.key);
       } else if (msg.subtype === "model_refusal_fallback") {
         // The CLI ran a refused request again on another model. The pane is
         // told at once. For the session the swap lasts: it is recorded

@@ -3,6 +3,7 @@
 
 import { randomBytes } from "node:crypto";
 import { inManuscriptScope } from "./ledger-check.mjs";
+import { paragraphHash } from "./doc-diff.mjs";
 
 // Rules 2 to 4 are a policy pack ("review_scope": keep to what the reviewer
 // asked, no revision history in the manuscript, facts only). A journal
@@ -110,8 +111,114 @@ export function reviewOverview(comments, ref, { limit = OVERVIEW_CHARS } = {}) {
   return block([...rows, more(others.length - rows.length)], all.slice(0, rows.length));
 }
 
+// The manuscript for a review turn: every paragraph of the last status
+// refresh as "[id] text" (headings and captions are paragraphs like any
+// other), so the turn starts from the whole paper as a person would.
+//
+// Budget. MANUSCRIPT_CHARS is the most characters the block takes. Assumed:
+// about 4 characters per token for English prose (a 10,000-word paper with
+// its reference list is near 80,000 characters, 20,000 tokens), so the
+// default leaves room for a paper several times that size in a 200,000-token
+// context. Over the budget the reference list goes first (a comment about a
+// reference is rare, and the list can be read with office_read_paragraphs),
+// then the end of the paper is cut; both are said in the block.
+// The reference list: the paragraphs after a line that is only "References"
+// (or Bibliography, Literature cited, Works cited) up to a line that starts
+// another part (figure legends, tables, supplementary or supporting
+// material, appendix, acknowledgements) or a caption ("Figure 1.", "Table
+// 2"). A paper with another heading for its list keeps it.
+//
+// seen: the paragraph hashes of the manuscript as this session was last
+// given it, or null. The session keeps its turns, so a full copy in each of
+// 20 turns would fill its context; a session that has the manuscript gets
+// only the paragraphs that read differently now. Another number of
+// paragraphs gives all of it again (index ids may have moved).
+//
+// { mode: "none" | "full" | "changed" | "same", lines, hashes, shown,
+//   references_omitted, cut }.
+export const MANUSCRIPT_CHARS = 240_000;
+const REFERENCES_HEAD =
+  /^(references?|reference list|bibliography|literature cited|works cited)\s*:?$/i;
+const NEXT_PART =
+  /^(fig(ure)?s?\b|tables?\b|schemes?\b|supplementa|supporting|appendi|acknowledg|\(?(fig(ure)?|table)\.?\s*s?\d)/i;
+const MANUSCRIPT_HEAD =
+  "Manuscript, as it reads with every tracked change applied: one paragraph per line as [id] text, headings and captions included. An id is what paragraph_hint takes.";
+
+export function manuscriptBlock({ paragraphs, ids = null, seen = null, limit = MANUSCRIPT_CHARS }) {
+  const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
+  const idOf = (i) => ids?.[i] ?? `p${i}`;
+  const row = (i) => `[${idOf(i)}] ${texts[i]}`;
+  const hashes = texts.map(paragraphHash);
+  const none = { lines: [], hashes, shown: 0, references_omitted: 0, cut: 0 };
+  const filled = texts.flatMap((t, i) => (t.trim() ? [i] : []));
+  if (!filled.length) return { mode: "none", ...none };
+  if (Array.isArray(seen) && seen.length === hashes.length) {
+    const changed = filled.filter((i) => seen[i] !== hashes[i]);
+    if (!changed.length) {
+      return {
+        mode: "same",
+        ...none,
+        lines: [
+          "The manuscript was given earlier in this conversation with its paragraph ids; it reads the same now.",
+        ],
+      };
+    }
+    return {
+      mode: "changed",
+      ...none,
+      lines: [
+        "The manuscript was given earlier in this conversation with its paragraph ids. These paragraphs read differently now (the others are as given):",
+        ...changed.map(row),
+      ],
+      shown: changed.length,
+    };
+  }
+  const size = (lines) => lines.join("\n").length;
+  let lines = [MANUSCRIPT_HEAD, ...filled.map(row)];
+  if (size(lines) <= limit) return { mode: "full", ...none, lines, shown: filled.length };
+  // Over the budget: without the reference list.
+  const head = filled.find((i) => REFERENCES_HEAD.test(texts[i].trim()));
+  let kept = filled;
+  let references = 0;
+  if (head !== undefined) {
+    const after = filled.filter((i) => i > head);
+    const end = after.find((i) => NEXT_PART.test(texts[i].trim()));
+    const list = after.filter((i) => end === undefined || i < end);
+    references = list.length;
+    const gone = new Set(list);
+    kept = filled.filter((i) => !gone.has(i));
+    const note = `(reference list not shown: ${references} paragraphs; read it with office_read_paragraphs when a comment is about a reference)`;
+    lines = [MANUSCRIPT_HEAD, ...kept.flatMap((i) => (i === head ? [row(i), note] : [row(i)]))];
+    if (size(lines) <= limit) {
+      return { mode: "full", ...none, lines, shown: kept.length, references_omitted: references };
+    }
+  }
+  // Still over: the end is cut.
+  const cutNote = (n) =>
+    `(the manuscript is cut here: ${n} more paragraphs are not shown; read them with office_read_paragraphs)`;
+  const out = [MANUSCRIPT_HEAD];
+  let shown = 0;
+  for (const i of kept) {
+    if (size([...out, row(i), cutNote(kept.length - shown - 1)]) > limit) break;
+    out.push(row(i));
+    shown += 1;
+  }
+  out.push(cutNote(kept.length - shown));
+  return {
+    mode: "full",
+    ...none,
+    lines: out,
+    shown,
+    references_omitted: references,
+    cut: kept.length - shown,
+  };
+}
+
 export function buildReviewPrompt({
   comment,
+  // { paragraphs, ids, seen }: the manuscript of the last status refresh as
+  // it reads now, and what the session already has (manuscriptBlock).
+  manuscript = null,
   // Every comment of the review (the one of the turn is left out).
   others = [],
   paragraphs = [],
@@ -125,7 +232,15 @@ export function buildReviewPrompt({
   const instructions = inScope.filter((i) => i.kind === "instruction");
   const forbidAll = inScope.filter((i) => i.kind === "forbid");
   const forbids = includeForbid ? forbidAll : [];
-  const lines = [`[Review turn ${comment.ref}]`, ...commentBlock(comment, fence), ""];
+  // The manuscript comes first: it is the part that stays the same from
+  // turn to turn (the fence of the comment below is new in every prompt).
+  const paper = manuscriptBlock(manuscript ?? { paragraphs: [] });
+  const lines = [
+    ...(paper.lines.length ? [...paper.lines, ""] : []),
+    `[Review turn ${comment.ref}]`,
+    ...commentBlock(comment, fence),
+    "",
+  ];
   // L5: the separate requests of this comment; every change names the ones it answers.
   const reqs = comment.requirements ?? [];
   if (reqs.length) {
@@ -146,7 +261,9 @@ export function buildReviewPrompt({
       lines.push(`- id=${p.id ?? "?"} index=${p.index ?? "?"}: ${p.text}`);
   } else {
     lines.push(
-      "No paragraphs were selected. Locate the text with office_find or office_read_paragraphs first.",
+      paper.mode === "none"
+        ? "No paragraphs were selected. Locate the text with office_find or office_read_paragraphs first."
+        : "No paragraphs were selected: the manuscript above is where to look. Read a paragraph again with office_read_paragraphs only when an edit is refused because the paragraph changed.",
     );
   }
   lines.push("", "Author instructions:");
@@ -166,6 +283,14 @@ export function buildReviewPrompt({
     section: comment.section || null,
     // The other comments the overview names.
     overviewRefs: overview.refs,
+    // How the manuscript went in, and its paragraph hashes (for the next turn).
+    manuscript: {
+      mode: paper.mode,
+      shown: paper.shown,
+      references_omitted: paper.references_omitted,
+      cut: paper.cut,
+      hashes: paper.hashes,
+    },
   };
 }
 
@@ -175,6 +300,7 @@ export function formatPromptLog(ref, built, { paragraphs = 0, preview = false } 
     `[review] prompt ${ref} instructions=${ids(built.instructionIds)} forbid=${ids(built.forbidIds)}` +
     ` omitted_forbid=${ids(built.omittedForbidIds)} paragraphs=${paragraphs}` +
     `${built.section ? ` section=${JSON.stringify(built.section)}` : ""}` +
-    `${built.overviewRefs?.length ? ` overview=${built.overviewRefs.length}` : ""}${preview ? " (preview)" : ""}`
+    `${built.overviewRefs?.length ? ` overview=${built.overviewRefs.length}` : ""}` +
+    `${built.manuscript && built.manuscript.mode !== "none" ? ` manuscript=${built.manuscript.mode}:${built.manuscript.shown}` : ""}${preview ? " (preview)" : ""}`
   );
 }
