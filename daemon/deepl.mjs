@@ -3,7 +3,10 @@
 // Never throws; returns { ok, text?, error?, route: "deepl" }. Neither the
 // key nor any text is logged or put into an error message.
 //
-// Checked against the DeepL docs: the hosts, the "DeepL-Auth-Key" header,
+// Only DeepL API Free is used: a key that does not end in ":fx" is refused
+// and no request is made.
+//
+// Checked against the DeepL docs: the free host, the "DeepL-Auth-Key" header,
 // the ":fx" suffix of a free key and the JSON body. Not checked: what 403,
 // 429 and 456 mean exactly, and the terms of the free plan. So any message
 // the service sends is shown as it came.
@@ -15,13 +18,17 @@
 export const DEEPL_NOTICE =
   "This feature sends the selected text from this PC to DeepL (deepl.com). Check DeepL's free-plan terms yourself before you turn it on.";
 
-const FREE = "https://api-free.deepl.com";
-const PAID = "https://api.deepl.com";
+export const DEEPL_FREE_ONLY = "Only DeepL API Free keys are supported (the key ends in ':fx').";
 
-// The host follows the key the user stored. `override` is a local stub in tests.
-export function deeplBase(key, override) {
-  if (override) return String(override).replace(/\/+$/, "");
-  return String(key).endsWith(":fx") ? FREE : PAID;
+const FREE = "https://api-free.deepl.com";
+
+// A DeepL API Free key ends in ":fx". No other kind of key is used: this
+// tool offers no paid service.
+export const isFreeKey = (key) => typeof key === "string" && /\S:fx$/.test(key);
+
+// The free host. `override` is the address of a local stub in tests.
+export function deeplBase(override) {
+  return override ? String(override).replace(/\/+$/, "") : FREE;
 }
 
 export function translationRoute({ settings, key } = {}) {
@@ -43,6 +50,7 @@ export async function deeplTranslate({
   const fail = (error) => ({ ok: false, error, route: "deepl" });
   if (enabled !== true) return fail("DeepL is off. Turn it on in Setup; the text leaves this PC.");
   if (!key) return fail("DeepL has no key. Enter one in Setup.");
+  if (!isFreeKey(key)) return fail(DEEPL_FREE_ONLY);
   const body = String(text ?? "");
   if (!body.trim()) return fail("Select some text first.");
   if (!TARGET.test(String(target ?? ""))) return fail("DeepL needs a target language code.");
@@ -52,7 +60,7 @@ export async function deeplTranslate({
   let res;
   let data = null;
   try {
-    res = await fetchFn(`${deeplBase(key, base)}/v2/translate`, {
+    res = await fetchFn(`${deeplBase(base)}/v2/translate`, {
       method: "POST",
       headers: { Authorization: `DeepL-Auth-Key ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ text: [body], target_lang }),

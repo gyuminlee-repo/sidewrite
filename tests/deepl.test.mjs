@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deeplTranslate, deeplBase, translationRoute, DEEPL_NOTICE } from "../daemon/deepl.mjs";
+import { readFile } from "node:fs/promises";
+import {
+  deeplTranslate,
+  deeplBase,
+  isFreeKey,
+  translationRoute,
+  DEEPL_NOTICE,
+  DEEPL_FREE_ONLY,
+} from "../daemon/deepl.mjs";
 
 const KEY = "0000-test-key:fx";
 const SECRET_TEXT = "The culture reached a plateau after four days.";
@@ -44,10 +52,31 @@ test("a free key posts to the free endpoint with the auth header and a JSON body
   assert.deepEqual(JSON.parse(calls[0].init.body), { text: [SECRET_TEXT], target_lang: "KO" });
 });
 
-test("the endpoint follows the key: ':fx' is the free plan, anything else the other host", () => {
-  assert.equal(deeplBase("abc:fx"), "https://api-free.deepl.com");
-  assert.equal(deeplBase("abc"), "https://api.deepl.com");
-  assert.equal(deeplBase("abc:fx", "http://127.0.0.1:9"), "http://127.0.0.1:9");
+test("only the free host exists; a local stub address can stand in for it", () => {
+  assert.equal(deeplBase(), "https://api-free.deepl.com");
+  assert.equal(deeplBase("http://127.0.0.1:9/"), "http://127.0.0.1:9");
+});
+
+test("a key that is not an API Free key is refused before any request", async () => {
+  assert.equal(DEEPL_FREE_ONLY, "Only DeepL API Free keys are supported (the key ends in ':fx').");
+  for (const key of ["0000-test-key", "0000-test-key:fx ", "0000:fxx", ":fx-0000", "FX"]) {
+    const { fetchFn, calls } = fakeFetch(ok);
+    const r = await ask({ fetchFn, key });
+    assert.deepEqual(r, { ok: false, error: DEEPL_FREE_ONLY, route: "deepl" }, key);
+    // Not even through a stub address.
+    await ask({ fetchFn, key, base: "http://127.0.0.1:9" });
+    assert.equal(calls.length, 0, key);
+  }
+  assert.deepEqual(
+    [isFreeKey("a:fx"), isFreeKey("a"), isFreeKey(""), isFreeKey(null)],
+    [true, false, false, false],
+  );
+});
+
+test("the module names no paid host", async () => {
+  const src = await readFile(new URL("../daemon/deepl.mjs", import.meta.url), "utf8");
+  assert.deepEqual(src.match(/https?:\/\/[^\s"'`)]+/g), ["https://api-free.deepl.com"]);
+  assert.ok(!src.includes("api.deepl.com"));
 });
 
 test("the target language is sent in upper case; a bad one is refused before any request", async () => {
