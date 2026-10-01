@@ -427,7 +427,9 @@ const steps = {
 
   // Choose a provider (and a model) for a role: a.role "turn" | "oneshot",
   // a.id, a.model. A provider that is not in the menu or is disabled there
-  // is not chosen; `refused` then holds the text of its menu row.
+  // is not chosen; `refused` then holds the text of its menu row. The first
+  // choice of a proposing provider (Codex) for review turns shows a notice of
+  // what will be sent; the step agrees to it and returns its text (`notice`).
   async "select-provider"(page, a) {
     await openProviders(page);
     const menu = `#provider-${a.role}`;
@@ -460,13 +462,24 @@ const steps = {
       if (m) m.textContent = "";
     });
     await page.selectOption(menu, a.id);
+    const notice = await page.evaluate(() => {
+      const n = document.getElementById("providers-notice");
+      if (!n || n.hidden) return null;
+      return document.getElementById("providers-notice-text")?.textContent ?? "";
+    });
+    if (notice !== null) await page.click("#providers-notice-use");
     await settled({ id: a.id });
     if (a.model && !(await text(page, "#providers-message"))) {
       await page.selectOption(`${menu}-model`, a.model);
       await settled({ id: a.id, model: a.model });
     }
     const v = await providersView(page);
-    return { role: a.role, selected: v.selection[a.role], message: v.message };
+    return {
+      role: a.role,
+      selected: v.selection[a.role],
+      message: v.message,
+      ...(notice !== null ? { notice } : {}),
+    };
   },
 
   // ---- stage 2.5: Review tab ----

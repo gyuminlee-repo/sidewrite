@@ -3,7 +3,7 @@
 `run-acceptance.mjs` runs a Review tab acceptance procedure end to end:
 daemon, a separate Word process, the task pane clicks, the author's Word
 steps, and the feature_list verify commands. It has two flows, stage 2
-(`S2-18..S2-34`, the default) and stage 2.5 (`--stage s25`, `S25-30..S25-41`).
+(`S2-18..S2-34`, the default) and stage 2.5 (`--stage s25`, `S25-30..S25-45`).
 
 ## Prerequisites
 
@@ -60,7 +60,7 @@ in it are removed at the start (`stale_markers_removed` in `result.json`).
 
 The stage is the prefix of the feature ids and of the markers, and it
 chooses the flow: `s2` or `s25`. `--stage s25` sets it (the features then
-default to `S25-30..S25-41`); without it the stage is read from `--features`
+default to `S25-30..S25-45`); without it the stage is read from `--features`
 (default `S2-18..S2-34`). A range stays in one stage.
 
 ## Stage 2.5
@@ -71,7 +71,7 @@ node scripts/e2e/run-acceptance.mjs --stage s25 \
   --playwright-core 'D:\path\to\node_modules\playwright-core' \
   --feature-list <stage 2.5 feature_list.json> \
   --plan-repo <repo path the feature_list commands cd into> \
-  --conditional S25-33,S25-34,S25-35,S25-36
+  --conditional S25-42,S25-43,S25-44,S25-45
 ```
 
 The copy of the manuscript is `paper.docx`, so the files the feature list
@@ -89,31 +89,38 @@ judgments). The steps and what each feature is judged from:
 | (no feature id) | daemon stopped and started again, `split` as soon as the pane is back                   | `s25-restart-split`: the stored provider restored, the split's judgments on it, no judgment or receipt of another provider |
 | S25-39          | `import-ledger` (fixture), `export-ledger`, `import-ledger` (the exported file)         | the step rows; the feature reads `paper.ledger.json` and the `[review] ledger import` log line                             |
 | S25-40          | `suggest-ledger` on `tests/fixtures/fake_review_rules.txt`, ticking "cell-free extract" | `s25-ledger-suggest`: the candidate ticked, added, and in the ledger                                                       |
-| S25-33          | `select-provider turn=codex`, `propose R1.1`                                            | `s25-codex-turn`: the turn started and ended with code 0, the endpoint was called, a change with its comment               |
-| S25-34          | `propose R1.3` (asks for a word rule L2 forbids)                                        | `s25-codex-guard`: `document_changes` = recorded changes that hold the word (0 to pass)                                    |
-| S25-36          | `propose-stop R1.4`                                                                     | `s25-cli-stop`: Stop pressed mid-turn, pane Ready, no `codex exec --json` process left                                     |
-| S25-35          | `select-provider turn=antigravity`, `propose R1.2`                                      | `s25-agy-turn`: as S25-33                                                                                                  |
+| S25-42          | `select-provider turn=codex` (agrees to the first-use notice), `propose R1.1`           | `s25-proposal-turn`: the turn ended `outcome=ok` with a change applied, each change has its comment, Word holds them       |
+| S25-45          | the same turn                                                                           | `s25-proposal-receipt`: one `proposal_batch` line for R1.1, model `codex:...`, applied ids on file, no text of a change    |
+| S25-44          | `propose-stop R1.4` (Stop after 6 s)                                                    | `s25-proposal-stop`: Stop pressed, no change and no attempt of R1.4 on file, no `codex exec --json` process left           |
+| S25-43          | `propose R1.3` (asks for a word a ledger rule forbids), again with the forbid list off  | `s25-proposal-guard`: `[review] blocked R1.3`, the turn stopped there, the word in no change and no tracked change of Word |
 | S25-37          | `propose-all` (with Claude)                                                             | `s25-propose-all`: `overlaps`, `proposed`, `open_before`                                                                   |
 | S25-38          | Word COM deletes a sentence, `focus-refresh`                                            | `s25-focus-refresh`: the auto-refresh line changed and an outside change is listed                                         |
 | S25-41          | cleanup (Word quit, daemon stopped), then the verify commands                           | `s25-cleanup`: own Word gone, earlier Word processes alive, ports closed                                                   |
 
-When the pane does not offer Codex or Antigravity for review turns, the
-`select-provider turn=...` row is `SKIP`, no CLI turn is run, and the four
-evidence files carry `pass: false` with the pane's reason. With
-`--conditional` those features are then `SKIPPED-CONDITION-NOT-MET` (the log
-shows finished turns and no `[cli-turn] start`); without it they fail the
-run. The pane outputs these judgments were unit-tested with are written by
-hand in the form the driver returns: none was recorded from Word before the
-first stage 2.5 run.
+Codex is given no tools in a review turn: it returns a list of proposed
+changes and the daemon applies each one as a tracked change
+(`daemon/proposal-turns.mjs`). The S25-43 turn is run a second time with
+`CC_OFFICE_REVIEW_PROMPT_FORBID=0` (its log is `daemon-knob.log` next to the
+daemon log) when the first try proposed nothing a rule forbids; `--skip-knob`
+leaves that out. Antigravity is offered for nothing and has no step.
+
+When the pane does not offer Codex for review turns (not installed, not
+signed in), the `select-provider turn=codex` row is `SKIP`, no proposal turn
+is run, and the four evidence files carry `pass: false` with the pane's
+reason. With `--conditional` those features are then
+`SKIPPED-CONDITION-NOT-MET` in the feature table (the log shows finished
+turns and no `[proposal] prompt ... provider=codex:` line), which is not
+`PASS`; without it they fail the run. The pane outputs these judgments were
+unit-tested with are written by hand in the form the driver returns: none
+was recorded from Word before the first run with proposal turns.
 
 `--provider <id>` (claude, codex, antigravity; stage 2 flow) chooses the
 provider of the review turns in the pane's Providers section right after the
 Review tab opened (step `select-provider turn=<id>`). A provider the pane
 does not offer for review turns is not chosen: the step fails with the text
 of its menu row, and the turns run with Claude. Known conditions for
-`--conditional` in stage 2.5: `S25-33`, `S25-34` (a Codex review turn
-started), `S25-35` (an Antigravity review turn started), `S25-36` (any CLI
-review turn started), each read from `[cli-turn] start provider=...`.
+`--conditional` in stage 2.5: `S25-42` to `S25-45` (a proposal turn of Codex
+started), read from `[proposal] prompt ref=... provider=codex:...`.
 
 Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
 `--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
@@ -145,11 +152,12 @@ Stage 2.5:
 
 `judge.mjs` holds the expected texts of these steps (`JUDGES`) and the
 evidence builders of the stage 2.5 markers (`modelsEvidence`,
-`providersEvidence`, `ollamaSplitEvidence`, `cliTurnEvidence`,
-`guardEvidence`, `stopEvidence`, `proposeAllEvidence`, `focusEvidence`,
+`providersEvidence`, `ollamaSplitEvidence`, `proposalTurnEvidence`,
+`proposalReceiptEvidence`, `proposalStopEvidence`, `proposalGuardEvidence`,
+`proposeAllEvidence`, `focusEvidence`,
 `suggestEvidence`, `cleanupEvidence`).
-There is no step that registers the office tools with agy: the daemon
-registers them for the length of one agy review turn only.
+No step hands a CLI the office tools: a provider other than Claude never
+calls them.
 
 ## Resolved rationale comments
 

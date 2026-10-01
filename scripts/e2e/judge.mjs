@@ -174,17 +174,20 @@ export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = t
   };
 }
 
+// The log line of a proposal turn whose request was built (proposal-turns.mjs).
+const PROPOSAL_STARTED = /^\[proposal\] prompt ref=\S+ provider=codex:/m;
+
 // Features whose verify_command can pass only when something happened that
 // the run cannot force. trigger: the daemon log line of that event.
 export const CONDITIONS = {
   // A turn that ended on a Claude usage limit.
   "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
-  // A review turn run by a CLI provider. None starts when the provider is
-  // "judgments only" (the CLI will not call the office tools unattended).
-  "S25-33": { trigger: /^\[cli-turn\] start provider=codex /m },
-  "S25-34": { trigger: /^\[cli-turn\] start provider=codex /m },
-  "S25-35": { trigger: /^\[cli-turn\] start provider=antigravity /m },
-  "S25-36": { trigger: /^\[cli-turn\] start provider=/m },
+  // A proposal turn of Codex (S25-42..45). None starts when the pane does
+  // not offer Codex for review turns (not installed, not signed in).
+  "S25-42": { trigger: PROPOSAL_STARTED },
+  "S25-43": { trigger: PROPOSAL_STARTED },
+  "S25-44": { trigger: PROPOSAL_STARTED },
+  "S25-45": { trigger: PROPOSAL_STARTED },
 };
 const TURN_LOGGED = /^\[agent\] turn complete \(/m;
 
@@ -332,7 +335,9 @@ export function proposeAllEvidence({ message, log }) {
 
 // What a run uses when --features is not given.
 export function defaultFeatures(stage) {
-  const known = { s2: "S2-18..S2-34", s25: "S25-30..S25-41" };
+  // The range has gaps (features that were taken out of the list): the
+  // runner passes over an id the feature list does not have.
+  const known = { s2: "S2-18..S2-34", s25: "S25-30..S25-45" };
   if (!known[stage])
     throw new Error(`no default feature range for stage ${stage}: give --features`);
   return known[stage];
@@ -420,57 +425,114 @@ export function restartSplitEvidence({ provider, split, log, decisions }) {
   };
 }
 
-// What the log says about the review turns of one CLI provider.
-function cliTurnLog(provider, log) {
+const selectedFor = (select, provider) => select?.selected?.id === provider && !select?.refused;
+const commentOf = (revision, ref) => (revision?.comments ?? []).find((c) => c.ref === ref) ?? null;
+const changesOf = (revision, ref) => commentOf(revision, ref)?.changes ?? [];
+
+// What the log says about the proposal turns of `provider` on `ref`
+// (daemon/proposal-turns.mjs): started, and the done line of the last one.
+function proposalLog(provider, ref, log) {
   const text = String(log ?? "");
-  const p = escapeRe(provider);
+  const r = escapeRe(ref);
+  const done = [
+    ...text.matchAll(
+      new RegExp(
+        `^\\[proposal\\] done ref=${r} proposals=(\\d+) applied=(\\d+) rejected=(\\d+) skipped=(\\d+) stopped_at=(\\S+) outcome=(\\w+)$`,
+        "gm",
+      ),
+    ),
+  ].at(-1);
   return {
-    started: new RegExp(`^\\[cli-turn\\] start provider=${p} `, "m").test(text),
-    done: new RegExp(`^\\[cli-turn\\] done provider=${p} code=0 `, "m").test(text),
-    endpoint_calls: (text.match(/^\[mcp-http\] POST route=/gm) ?? []).length,
+    started: new RegExp(
+      `^\\[proposal\\] prompt ref=${r} provider=${escapeRe(provider)}:`,
+      "m",
+    ).test(text),
+    done: done
+      ? {
+          proposals: Number(done[1]),
+          applied: Number(done[2]),
+          rejected: Number(done[3]),
+          skipped: Number(done[4]),
+          stopped_at: done[5],
+          outcome: done[6],
+        }
+      : null,
   };
 }
-const selectedFor = (select, provider) => select?.selected?.id === provider && !select?.refused;
-const changesOf = (revision, ref) =>
-  (revision?.comments ?? []).find((c) => c.ref === ref)?.changes ?? [];
 
-// S25-33 (Codex) and S25-35 (Antigravity): one review turn of the provider on
-// `ref`. log: the daemon log lines of that turn; revision: the file after it.
-export function cliTurnEvidence({ provider, ref, select, log, revision }) {
+// S25-42: one proposal turn of the provider on `ref`. log: the daemon log
+// lines of that turn; revision: the review file after it; word: word-com.ps1
+// state after it ({ comments: [{ text }], revisions: [...] }). pass: the turn
+// ended well with at least one change applied, every change of the comment
+// has its rationale comment, and Word holds those comments and tracked changes.
+export function proposalTurnEvidence({ provider, ref, select, log, revision, word }) {
   const selected = selectedFor(select, provider);
-  const l = cliTurnLog(provider, selected ? log : "");
+  const l = proposalLog(provider, ref, selected ? log : "");
   const changes = changesOf(revision, ref);
+  const word_comments = (word?.comments ?? []).filter((c) =>
+    String(c?.text ?? "")
+      .trimStart()
+      .startsWith(`[${ref}]`),
+  ).length;
+  const word_revisions = (word?.revisions ?? []).length;
   return {
     pass:
       selected &&
       l.started &&
-      l.done &&
-      l.endpoint_calls > 0 &&
-      changes.length > 0 &&
-      changes.every((c) => c.word_comment_id != null),
+      l.done?.outcome === "ok" &&
+      l.done.applied > 0 &&
+      changes.length >= l.done.applied &&
+      changes.every((c) => c.word_comment_id != null) &&
+      word_comments >= changes.length &&
+      word_revisions > 0,
     provider,
     ref,
     ...l,
     changes: selected ? changes.length : 0,
+    word_comments,
+    word_revisions,
     ...(selected ? {} : { reason: refusal(select) }),
   };
 }
 
-// S25-34: a CLI turn on a comment whose request asks for a forbidden word.
-// document_changes: recorded changes of that comment whose new text holds the
-// word (must be 0: the edit is blocked, as in a Claude turn). The tool filter
-// of a CLI turn (no writer but office_tracked_edit) is tested in
-// tests/mcp-http.test.mjs and tests/review-turn-parity.test.mjs.
-export function guardEvidence({ provider, ref, forbidden, select, log, revision }) {
+// S25-43: a proposal turn on a comment that asks for a forbidden word. log:
+// the daemon log lines of the turn (and of its second try with the forbid
+// list left out of the prompt, when the first proposed nothing forbidden).
+// pass: a proposal was blocked by a forbid rule, the turn stopped there, the
+// blocked edit is in the review file, and the word is in no recorded change
+// (document_changes) and in no tracked change of Word (word_leaks).
+export function proposalGuardEvidence({ provider, ref, forbidden, select, log, revision, word }) {
   const selected = selectedFor(select, provider);
-  const l = cliTurnLog(provider, selected ? log : "");
+  const text = selected ? String(log ?? "") : "";
+  const l = proposalLog(provider, ref, text);
   const re = new RegExp(forbidden, "i");
+  const by = new RegExp(`^\\[review\\] blocked ${escapeRe(ref)} by=(\\S+)$`, "m").exec(text);
+  const stopped = new RegExp(
+    `^\\[proposal\\] stopped ref=${escapeRe(ref)} id=P\\d+ code=Blocked$`,
+    "m",
+  ).test(text);
   const leaked = changesOf(revision, ref).filter((c) => re.test(String(c.text ?? "")));
-  const document_changes = selected && l.done ? leaked.length : null;
+  const document_changes = selected ? leaked.length : null;
+  const blocked_items = (commentOf(revision, ref)?.blocked ?? []).filter(
+    (b) => (b.blocked_by ?? []).length > 0,
+  ).length;
+  const word_leaks = word
+    ? (word.revisions ?? []).filter((r) => re.test(String(r?.text ?? ""))).length
+    : null;
   return {
-    pass: document_changes === 0,
+    pass:
+      selected &&
+      !!by &&
+      stopped &&
+      document_changes === 0 &&
+      blocked_items > 0 &&
+      word_leaks === 0,
     document_changes,
-    blocked: new RegExp(`^\\[review\\] blocked ${escapeRe(ref)} by=`, "m").test(String(log ?? "")),
+    word_leaks,
+    blocked: !!by,
+    blocked_by: by?.[1] ?? null,
+    stopped,
+    blocked_items,
     provider,
     ref,
     ...l,
@@ -478,23 +540,85 @@ export function guardEvidence({ provider, ref, forbidden, select, log, revision 
   };
 }
 
-// S25-36. step: the `propose-stop` pane step; processes: CLI processes of
-// the provider still running after it.
-export function stopEvidence({ select, step, log, processes }) {
-  const provider = select?.selected?.id;
-  const selected = !!provider && provider !== "claude" && !select?.refused;
-  const started = selected && cliTurnLog(provider, log).started;
+// S25-44. step: the `propose-stop` pane step; revision: the review file
+// after it; processes: CLI processes of the provider still running. pass:
+// Stop was pressed while the turn ran and nothing of that turn is in the
+// review file (no change, no attempt that went to Word), and no CLI is left.
+// where: "daemon" when the daemon had started the turn (its done line must
+// then say stopped with nothing applied), "pane" when the pane had not sent
+// the request yet.
+export function proposalStopEvidence({ provider, ref, select, step, log, revision, processes }) {
+  const selected = selectedFor(select, provider);
+  const l = proposalLog(provider, ref, selected ? log : "");
+  const c = commentOf(revision, ref);
+  const changes = (c?.changes ?? []).length;
+  const attempts = (c?.blocked ?? []).length;
+  const ended = !l.started || (l.done?.outcome === "stopped" && l.done.applied === 0);
   return {
     pass:
       selected &&
-      started &&
       step?.stopped === true &&
-      step?.agent_status === "Ready" &&
+      ended &&
+      changes === 0 &&
+      attempts === 0 &&
       processes === 0,
     stopped: step?.stopped === true,
+    where: l.started ? "daemon" : "pane",
     agent_status: step?.agent_status ?? null,
-    started,
+    changes,
+    attempts,
     processes,
+    ...l,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// S25-45. decisions: the text of <stem>.decisions.jsonl; revision: the review
+// file. pass: exactly one proposal_batch line for the turn on `ref`, made by
+// the provider, whose applied proposals name changes the review file has,
+// and which holds no text of those changes (find or new text of 8 characters
+// or more).
+export function proposalReceiptEvidence({ provider, ref, select, decisions, revision }) {
+  const selected = selectedFor(select, provider);
+  const rows = [];
+  for (const line of String(decisions ?? "").split("\n")) {
+    if (!line.includes('"proposal_batch"')) continue;
+    let d = null;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      d = null; // a broken line is no receipt
+    }
+    if (d?.kind === "proposal_batch" && d.output?.ref === ref) rows.push({ d, line });
+  }
+  const first = rows[0] ?? null;
+  const changes = changesOf(revision, ref);
+  const ids = new Set(changes.map((c) => c.id));
+  const applied = (first?.d.output.proposals ?? [])
+    .filter((p) => p.outcome === "applied")
+    .map((p) => p.change_id);
+  const texts = changes
+    .flatMap((c) => [c.find, c.text])
+    .filter((t) => typeof t === "string" && t.length >= 8);
+  const leaks = first
+    ? texts.filter((t) => first.line.includes(JSON.stringify(t).slice(1, -1))).length
+    : 0;
+  const model = first?.d.model ?? null;
+  return {
+    pass:
+      selected &&
+      rows.length === 1 &&
+      String(model).startsWith(`${provider}:`) &&
+      /^[0-9a-f]{64}$/.test(String(first.d.input_fingerprint ?? "")) &&
+      applied.length > 0 &&
+      applied.every((id) => ids.has(id)) &&
+      leaks === 0,
+    lines: rows.length,
+    model,
+    applied,
+    leaks,
+    provider,
+    ref,
     ...(selected ? {} : { reason: refusal(select) }),
   };
 }
@@ -736,8 +860,8 @@ export const JUDGES = {
     got: `${r.title} | ${(r.options ?? []).map((o) => o.value).join(",")}`,
   }),
   "propose-stop": (r) => ({
-    pass: r.stopped === true && r.agent_status === "Ready",
-    expect: "Stop pressed while the turn ran; the pane is Ready again",
+    pass: r.stopped === true && /^(Ready|Stopped)$/.test(String(r.agent_status ?? "")),
+    expect: "Stop pressed while the turn ran; the pane is free again (Ready or Stopped)",
     got: r.stopped ? `stopped after ${r.seconds} s, status ${r.agent_status}` : String(r.reason),
   }),
   providers: (r) => {
