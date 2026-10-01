@@ -17,6 +17,11 @@ const linesOf = (s) =>
     .split(/\r?\n/)
     .filter((t) => t.trim());
 
+const squash = (s) =>
+  String(s ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+
 // R1.12 -> "12", E.2 -> "2".
 const commentNumber = (ref) => String(ref).slice(String(ref).lastIndexOf(".") + 1);
 
@@ -58,8 +63,19 @@ export function buildLetterModel(rev, profile, { gloss = false } = {}) {
 
     const r = c.response;
     const citations = (r?.citations ?? []).filter((cit) => !cit.problem);
-    const answer = linesOf(r?.text);
-    for (const t of answer.length ? answer : linesOf(c.declined?.reason)) add("response", t, body);
+    for (const t of linesOf(r?.text)) add("response", t, body);
+    // The author's reasons are part of the answer: the reason for declining
+    // the comment, then one for each declined request, in the order of the
+    // requests. A reason the answer text already gives word for word is not
+    // repeated; a reason of a request that is no longer listed is not written.
+    const said = [squash(r?.text)];
+    const byRequest = new Map((r?.declined_requirements ?? []).map((d) => [d.id, d.reason]));
+    const reasons = [c.declined?.reason, ...(c.requirements ?? []).map((q) => byRequest.get(q.id))];
+    for (const reason of reasons.map(squash)) {
+      if (!reason || said.some((s) => s.includes(reason))) continue;
+      said.push(reason);
+      add("response", reason, body);
+    }
     if (gloss && r?.gloss)
       add(
         "gloss",

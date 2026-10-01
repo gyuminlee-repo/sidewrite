@@ -263,12 +263,69 @@ test("a declined comment with its own answer keeps the answer; with changes it h
       .map((p) => [p.kind, p.text]),
     [
       ["response", "We respectfully keep the wording."],
+      ["response", "Out of scope."],
       ["declined", "[No change made]"],
       ["response", "Partly."],
       ["location", "[Revised in S]"],
       ["quote", "Q."],
     ],
   );
+});
+
+test("the reason of each declined request is written after the answer, in the answer colour", () => {
+  const comment = (declined_requirements, text = "We now state the unit.") =>
+    base({
+      ref: "R1.1",
+      reviewer: 1,
+      text: "State the unit, name the supplier and the lot.",
+      requirements: [
+        { id: "q1", text: "state the unit" },
+        { id: "q2", text: "name the supplier" },
+        { id: "q3", text: "name the lot" },
+      ],
+      response: { text, gloss: "Übersetzung.", declined_requirements, citations: [] },
+    });
+  const body = (c, opts) =>
+    buildLetterModel({ comments: [c] }, profile, opts)
+      .paragraphs.slice(3)
+      .map((p) => [p.kind, p.text, p.color]);
+  // In the order of the requests, not of the stored list.
+  const two = comment([
+    { id: "q3", reason: "The lot number was not kept." },
+    { id: "q2", reason: "The supplier was not recorded." },
+  ]);
+  assert.deepEqual(body(two), [
+    ["response", "We now state the unit.", "AA0000"],
+    ["response", "The supplier was not recorded.", "AA0000"],
+    ["response", "The lot number was not kept.", "AA0000"],
+  ]);
+  // The portal text holds them too; no "no change" line: the comment is not declined.
+  assert.match(
+    letterPlainText(buildLetterModel({ comments: [two] }, profile), 1),
+    /not recorded\./,
+  );
+  // Before the translation paragraph.
+  assert.deepEqual(
+    body(two, { gloss: true }).map(([kind]) => kind),
+    ["response", "response", "response", "gloss"],
+  );
+  // A reason the answer already gives word for word is not written twice.
+  const said = comment(
+    [{ id: "q2", reason: "The supplier  was not recorded." }],
+    "We now state the unit. The supplier was not recorded.",
+  );
+  assert.deepEqual(body(said), [
+    ["response", "We now state the unit. The supplier was not recorded.", "AA0000"],
+  ]);
+  // No reason, or a request that is no longer in the list: nothing to write.
+  const none = comment([
+    { id: "q2", reason: "  " },
+    { id: "q9", reason: "Left over from a request that was removed." },
+  ]);
+  assert.deepEqual(body(none), [["response", "We now state the unit.", "AA0000"]]);
+  // With no answer text at all the reasons are the answer.
+  const only = comment([{ id: "q2", reason: "The supplier was not recorded." }], "");
+  assert.deepEqual(body(only), [["response", "The supplier was not recorded.", "AA0000"]]);
 });
 
 test("the translation paragraph is written only when asked for", () => {
