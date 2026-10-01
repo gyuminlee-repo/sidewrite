@@ -1,4 +1,5 @@
-/* global Word */
+/* global Word, Office */
+import { bytesToBase64 } from "./response-view.js";
 import {
   normalizeParaText,
   computeAfterText,
@@ -1851,5 +1852,73 @@ export async function deleteToolComments() {
     for (const c of left.items) after[isToolComment(c.content) ? "tool" : "user"] += 1;
     const still = new Set(left.items.map((c) => String(c.id)));
     return { before, after, deleted_ids: doomed.filter((id) => !still.has(id)) };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Response letter: the rendered PDF and the heading list
+// ---------------------------------------------------------------------------
+
+const RENDER_PDF_SLICE_SIZE = 4 * 1024 * 1024;
+
+function officeAsync(fn) {
+  return new Promise((resolve, reject) => {
+    fn((res) => {
+      if (res.status === Office.AsyncResultStatus.Failed) reject(res.error);
+      else resolve(res.value);
+    });
+  });
+}
+
+// The open document as Word renders it to PDF, margin line numbers included.
+// A function of the pane, not an agent tool: the bytes go to the daemon for
+// the line numbers and never into a model context. Throws what Word reports.
+// The caller checks the size (response-view.js pdfTooLarge) before sending.
+export async function exportRenderPdf() {
+  const file = await officeAsync((cb) =>
+    Office.context.document.getFileAsync(
+      Office.FileType.Pdf,
+      { sliceSize: RENDER_PDF_SLICE_SIZE },
+      cb,
+    ),
+  );
+  try {
+    const parts = [];
+    let total = 0;
+    for (let i = 0; i < file.sliceCount; i++) {
+      const slice = await officeAsync((cb) => file.getSliceAsync(i, cb));
+      const bytes = slice.data instanceof Uint8Array ? slice.data : Uint8Array.from(slice.data);
+      parts.push(bytes);
+      total += bytes.length;
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      all.set(p, off);
+      off += p.length;
+    }
+    return { pdf_base64: bytesToBase64(all), byte_length: total, slice_count: file.sliceCount };
+  } finally {
+    try {
+      await officeAsync((cb) => file.closeAsync(cb));
+    } catch {
+      /* a close failure must not hide the export result */
+    }
+  }
+}
+
+// The headings of the document: [{ index, level, text }], index being the
+// paragraph index of collectReviewSnapshot (the snapshot has no styles).
+// Same rule as toolGetOutline.
+export async function collectHeadings() {
+  return await Word.run(async (context) => {
+    const { paragraphs } = await getParagraphsWithIds(context);
+    const out = [];
+    paragraphs.items.forEach((p, index) => {
+      const level = headingLevel(p.style);
+      const text = p.text.trim();
+      if (level > 0 && text) out.push({ index, level, text });
+    });
+    return out;
   });
 }
