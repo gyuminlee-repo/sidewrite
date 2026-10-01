@@ -254,6 +254,16 @@ test("onLine gets every complete line once, the last one at the end; kill() ends
   const r = await runCli("codex", [], { onLine: (l) => lines.push(l), spawnFn: f.spawnFn });
   assert.deepEqual(lines, ["one", "two", "three"]);
   assert.equal(r.stdout, "one\ntwo\r\nthree");
+  // A character cut by a chunk is put together again.
+  const cut = [];
+  const bytes = Buffer.from("가나\n");
+  const h = fakeSpawn((c) => {
+    c.stdout.emit("data", bytes.subarray(0, 2));
+    c.stdout.emit("data", bytes.subarray(2));
+    c.emit("close", 0, null);
+  });
+  await runCli("codex", [], { onLine: (l) => cut.push(l), spawnFn: h.spawnFn });
+  assert.deepEqual(cut, ["가나"]);
   assert.equal("killed" in r, false);
 
   const seen = [];
