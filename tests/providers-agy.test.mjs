@@ -19,10 +19,19 @@ const STREAM_LINES = read("agy_print_stream.jsonl").split("\n").filter(Boolean);
 
 const BYPASS = /dangerously|skip-permissions|accept-edits|bypass|yolo/i;
 
+// The stdout of a stream-json run: init (permission mode request-review),
+// then the given lines.
+const INIT =
+  '{"event":"init","conversation_id":"c","init":{"cwd":"/t","tools":[],"permission_mode":"request-review"}}';
+const result = (o) => JSON.stringify({ event: "result", result: o });
+const step = (o) => JSON.stringify({ event: "step_update", step_update: o });
+const out = (...lines) => ({ code: 0, stdout: [INIT, ...lines].join("\n"), stderr: "" });
+
 test("args: print mode, json, model, timeout, no slash commands; flags before name for mcp add", () => {
   const a = agyOneshotArgs({ prompt: "P", model: "gemini-3.8-flash-high", timeoutS: 120 });
   assert.deepEqual(a.slice(0, 2), ["-p", "P"]);
-  assert.ok(a.join(" ").includes("--output-format json"));
+  // A judgment is read as a stream too, so that a tool step is seen.
+  assert.ok(a.join(" ").includes("--output-format stream-json"));
   assert.ok(a.join(" ").includes("--model gemini-3.8-flash-high"));
   assert.ok(a.join(" ").includes("--print-timeout 120s"));
   assert.ok(a.includes("--disable-slash-commands"));
@@ -93,11 +102,11 @@ test("stream lines: another step type, a failed result, junk", () => {
 test("oneshot: prompt as one argument, empty cwd, JSON parsed, the same result shape as Claude", async () => {
   const run = async (cmd, args, opts) => {
     run.seen = { cmd, args, ...opts };
-    return { code: 0, stdout: PRINT_JSON, stderr: "" };
+    return { code: 0, stdout: STREAM_LINES.join("\n"), stderr: "" };
   };
   const r = await agyOneshot(
     { system: "S", prompt: "P", model: "gemini-3.8-flash-high", timeoutMs: 60_000 },
-    { runCli: run, bin: "agy", emptyDir: async () => "/tmp/empty" },
+    { runCli: run, bin: "agy", runDir: (fn) => fn("/tmp/empty") },
   );
   assert.deepEqual(r, { ok: true, text: '{"ok":true}', json: { ok: true } });
   assert.deepEqual(
@@ -108,32 +117,26 @@ test("oneshot: prompt as one argument, empty cwd, JSON parsed, the same result s
   assert.equal(run.seen.timeoutMs, 70_000, "the CLI's own timeout comes first");
   const text = await agyOneshot(
     { system: "", prompt: "", expectJson: false },
-    { runCli: run, emptyDir: async () => "/tmp/empty" },
+    { runCli: run, runDir: (fn) => fn("/tmp/empty") },
   );
   assert.deepEqual(text, { ok: true, text: '{"ok":true}' });
 });
 
 test("oneshot failures: exit code, not installed, a limit, not JSON, a prompt too long for one argument", async () => {
-  const d = (r) => ({ runCli: async () => r, emptyDir: async () => "/tmp/empty" });
+  const d = (r) => ({ runCli: async () => r, runDir: (fn) => fn("/tmp/empty") });
   const req = { system: "", prompt: "" };
   const bad = await agyOneshot(req, d({ code: 1, stdout: "", stderr: "boom" }));
   assert.match(bad.error, /agy exited 1: boom/);
   const missing = await agyOneshot(req, d({ code: -1, stdout: "", stderr: "not installed" }));
   assert.match(missing.error, /Antigravity CLI \(agy\) is not installed/);
-  const limit = await agyOneshot(
-    req,
-    d({ code: 0, stdout: '{"status":"ERROR","error":"quota exceeded"}' }),
-  );
+  const limit = await agyOneshot(req, d(out(result({ status: "ERROR", error: "quota exceeded" }))));
   assert.deepEqual([limit.ok, limit.limited.kind], [false, "rate_limit"]);
-  const notJson = await agyOneshot(
-    req,
-    d({ code: 0, stdout: '{"status":"SUCCESS","response":"hm"}' }),
-  );
+  const notJson = await agyOneshot(req, d(out(result({ status: "SUCCESS", response: "hm" }))));
   assert.deepEqual([notJson.ok, notJson.error, notJson.text], [false, "reply was not JSON", "hm"]);
   let ran = false;
   const long = await agyOneshot(
     { system: "", prompt: "x".repeat(130_000) },
-    { runCli: async () => ((ran = true), { code: 0, stdout: "" }), emptyDir: async () => "/t" },
+    { runCli: async () => ((ran = true), { code: 0, stdout: "" }), runDir: (fn) => fn("/t") },
   );
   assert.match(long.error, /too long/);
   assert.equal(ran, false);
@@ -169,4 +172,138 @@ test("stream lines: a tool of agy's own keeps its name", () => {
     ),
     [{ kind: "tool", name: "agy_view_file", input: { Path: "/x" } }],
   );
+});
+
+// ---- A judgment is watched: a tool step, a denied action or another
+// permission mode ends the run and its reply is discarded ----
+
+const streaming = (lines) => {
+  const run = async (cmd, args, opts) => {
+    run.seen = opts;
+    run.handed = [];
+    let killed = false;
+    for (const line of lines) {
+      if (killed) break;
+      run.handed.push(line);
+      opts.onLine?.(line, () => (killed = true));
+    }
+    run.killed = killed;
+    return {
+      code: killed ? -1 : 0,
+      stdout: run.handed.join("\n"),
+      stderr: "",
+      ...(killed && { killed }),
+    };
+  };
+  return run;
+};
+const USED = (name) =>
+  `Antigravity CLI (agy) used a tool (${name}) in a run that must not use any. Its reply was discarded.`;
+
+test("oneshot: the captured runs that used a tool are ended at the tool step", async () => {
+  const logs = [];
+  for (const [file, name] of [
+    ["agy_print_tool_probe.jsonl", "agy_run_command"],
+    ["agy_turn_denied.jsonl", "mcp__office__office_read_paragraphs"],
+  ]) {
+    const lines = read(file).split("\n").filter(Boolean);
+    const run = streaming(lines);
+    const r = await agyOneshot(
+      { system: "S", prompt: "P", expectJson: false },
+      { runCli: run, bin: "agy", runDir: (fn) => fn("/tmp/run"), log: (l) => logs.push(l) },
+    );
+    assert.deepEqual(r, { ok: false, tool_event: name, error: USED(name) }, file);
+    assert.equal(run.killed, true);
+    assert.ok(run.handed.length < lines.length, "ended before the run was over");
+  }
+  assert.deepEqual(logs, [
+    "[providers] tool event provider=antigravity name=agy_run_command",
+    "[providers] tool event provider=antigravity name=mcp__office__office_read_paragraphs",
+  ]);
+});
+
+test("oneshot: only the user's input and the answer are steps a judgment may have", async () => {
+  const d = (lines) => ({
+    runCli: streaming(lines),
+    runDir: (fn) => fn("/tmp/run"),
+    log: () => {},
+  });
+  const req = { system: "", prompt: "", expectJson: false };
+  const ok = result({ status: "SUCCESS", response: "fine" });
+  const answer = step({ state: "DONE", step_type: "agent_response", text_delta: "fine" });
+
+  const good = await agyOneshot(
+    req,
+    d([INIT, step({ state: "DONE", step_type: "user_input" }), answer, ok]),
+  );
+  assert.deepEqual(good, { ok: true, text: "fine" });
+
+  // A step type this code has never seen is a tool until it is known not to be.
+  const planning = await agyOneshot(
+    req,
+    d([INIT, step({ state: "ACTIVE", step_type: "planning" }), ok]),
+  );
+  assert.deepEqual(planning, { ok: false, tool_event: "planning", error: USED("planning") });
+
+  // A denied action with no tool step shown.
+  const denied = await agyOneshot(
+    req,
+    d([
+      INIT,
+      answer,
+      result({
+        status: "SUCCESS",
+        response: "fine",
+        denied_actions: [{ action: "read_url", display_name: "ReadUrlContent" }],
+      }),
+    ]),
+  );
+  assert.deepEqual(denied, {
+    ok: false,
+    tool_event: "ReadUrlContent",
+    error: USED("ReadUrlContent"),
+  });
+
+  // Another permission mode: ended at the first line, before any step.
+  const mode = '{"event":"init","init":{"permission_mode":"accept-edits"}}';
+  const run = streaming([mode, answer, ok]);
+  const other = await agyOneshot(req, { runCli: run, runDir: (fn) => fn("/t"), log: () => {} });
+  assert.deepEqual(other, {
+    ok: false,
+    error:
+      'agy started in permission mode "accept-edits", not "request-review". The run was ended and its reply discarded.',
+  });
+  assert.deepEqual([run.killed, run.handed.length], [true, 1]);
+
+  // No init line: the permission mode is not known, so the reply is not taken.
+  const blind = await agyOneshot(req, d([answer, ok]));
+  assert.deepEqual(blind, {
+    ok: false,
+    error: "agy did not say which permission mode it ran in. Its reply was discarded.",
+  });
+});
+
+test("oneshot: its directory, an environment without keys, and a signal that ends it", async () => {
+  const run = streaming(STREAM_LINES);
+  const ac = new AbortController();
+  const r = await agyOneshot(
+    { system: "S", prompt: "P", signal: ac.signal },
+    {
+      runCli: run,
+      runDir: (fn) => fn("/tmp/run-7"),
+      env: { PATH: "/bin", HOME: "/h", GEMINI_API_KEY: "k", CC_OFFICE_AGY_BIN: "/opt/agy" },
+    },
+  );
+  assert.deepEqual(r.json, { ok: true });
+  assert.equal(run.seen.cwd, "/tmp/run-7");
+  assert.deepEqual(run.seen.env, { PATH: "/bin", HOME: "/h" });
+  assert.equal(run.seen.signal, ac.signal);
+  const stopped = await agyOneshot(
+    { system: "", prompt: "" },
+    {
+      runCli: async () => ({ code: -1, stdout: "", stderr: "", aborted: true }),
+      runDir: (fn) => fn("/t"),
+    },
+  );
+  assert.deepEqual(stopped, { ok: false, aborted: true, error: "stopped" });
 });

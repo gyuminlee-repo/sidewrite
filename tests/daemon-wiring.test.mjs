@@ -71,3 +71,16 @@ test("judgments and review turns wait for the pane's confirmed provider; hello s
   assert.match(code, /restore_providers: async/);
   assert.match(code, /selection\.restore\(\s*key,/);
 });
+
+test("set_model: the list as it was before the wait decides whether a running session follows", () => {
+  const at = code.indexOf("set_model: async");
+  const body = code.slice(at, at + 1200);
+  assert.match(body, /const before = modelCache\.current\(\);/);
+  assert.ok(body.indexOf("modelCache.current()") < body.indexOf("await modelCache.get()"));
+  assert.match(
+    body,
+    /modelChange\(\{\s*prev,\s*requested,\s*before,\s*after: await modelCache\.get\(\),?\s*\}\)/,
+  );
+  assert.match(body, /if \(restart\)/);
+  assert.equal(/prev !== undefined && prev !== model/.test(body), false);
+});

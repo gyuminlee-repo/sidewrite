@@ -127,3 +127,36 @@ test("cache: a fallback result is kept only for the short fallback ttl", async (
   assert.equal((await cache.get()).source, "sdk");
   assert.equal(n, 2);
 });
+
+// set_model (Codex review of stage 2.5): on the first connection the stored
+// model is taken before the account's list is in, so a message sent
+// meanwhile starts a session on it. When the list then replaces it, the
+// session must follow: the pane shows the replacement.
+test("modelChange: a session that started on the stored model follows the model the list allows", async () => {
+  const { modelChange } = await import("../daemon/model-list.mjs");
+  const sdk = { source: "sdk", models: normalizeModels(SDK) };
+  // First connection, list not in yet (before: null): a well-formed id the
+  // account does not list would run until the list replaces it.
+  assert.equal(resolveModelChoice("claude-old-3", null), "claude-old-3");
+  assert.deepEqual(
+    modelChange({ prev: undefined, requested: "claude-old-3", before: null, after: sdk }),
+    {
+      model: "sonnet",
+      restart: true,
+    },
+  );
+  // First connection, nothing replaced: no restart.
+  for (const requested of ["opus", "claude-fable-5", ""]) {
+    const c = modelChange({ prev: undefined, requested, before: null, after: sdk });
+    assert.equal(c.restart, false, requested);
+  }
+  // A later choice: as before, a restart when the model changes.
+  assert.deepEqual(modelChange({ prev: "sonnet", requested: "opus", before: sdk, after: sdk }), {
+    model: "opus",
+    restart: true,
+  });
+  assert.equal(
+    modelChange({ prev: "opus", requested: "opus", before: sdk, after: sdk }).restart,
+    false,
+  );
+});

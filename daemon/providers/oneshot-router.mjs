@@ -58,7 +58,14 @@ export function createOneshotRouter({
     }
     const baseUrl = preset.baseUrl ?? stored.base_url;
     if (!baseUrl) return { ok: false, error: `No server URL for ${preset.label}.` };
-    return http({ ...req, baseUrl, apiKey: stored.key, model: choice.model });
+    return http({
+      ...req,
+      baseUrl,
+      apiKey: stored.key,
+      model: choice.model,
+      ...(preset.body && { body: preset.body }),
+      ...(preset.jsonBody && { jsonBody: preset.jsonBody }),
+    });
   }
 
   async function pin(key) {

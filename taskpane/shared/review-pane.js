@@ -48,6 +48,10 @@ const CONNECTION_LOST =
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 // "Propose all": the longest wait for the end of one review turn.
 const TURN_WAIT_MS = 30 * 60_000;
+// How long the pane waits for the answer of review_propose (taskpane.js
+// sendRequest waits as long by default); the request says so (wait_ms).
+const PROPOSE_WAIT_MS = 10_000;
+const PROVIDER_WAIT = "Waiting for the daemon to confirm the stored provider choice...";
 
 export function initReviewPane({
   sendRequest,
@@ -137,7 +141,7 @@ export function initReviewPane({
         // daemon that would have to guess.
         const confirming = providersReady();
         if (confirming) {
-          say("Waiting for the daemon to confirm the stored provider choice...");
+          say(PROVIDER_WAIT);
           await confirming;
         }
         say("");
@@ -147,6 +151,27 @@ export function initReviewPane({
       }
       render();
     };
+  // An action that writes to Word runs once at a time: a press while it
+  // runs does nothing (two runs at once made two rationale comments, one of
+  // them recorded nowhere). button(): the element to show as disabled, as it
+  // is in the page at that moment (a render replaces the buttons of a card).
+  const writing = new Set();
+  const once =
+    (key, fn, button = () => null) =>
+    async (...a) => {
+      if (writing.has(key)) return;
+      writing.add(key);
+      const pressed = button();
+      if (pressed) pressed.disabled = true;
+      try {
+        await fn(...a);
+      } finally {
+        writing.delete(key);
+        const now = button();
+        if (now) now.disabled = false;
+      }
+    };
+  const rationaleButtons = new Map(); // change id -> its button in the page
 
   // ---- rendering ----------------------------------------------------------
   // "Propose changes" buttons of the last render; setTurnBusy flips them when
@@ -232,25 +257,32 @@ export function initReviewPane({
         class: "btn-secondary btn-small",
         text: "Add rationale comment",
       });
+      const key = `rationale ${ch.id}`;
+      add.disabled = writing.has(key);
+      rationaleButtons.set(ch.id, add);
       add.addEventListener(
         "click",
-        guard(async () => {
-          const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
-          const t = await ask("review_comment_text", { ref, change_id: ch.id });
-          const r = await word.addChangeComment({
-            ...t.change,
-            comment_text: t.comment_text,
-            known_comment_ids: t.known_comment_ids,
-          });
-          if (!r.ok)
-            throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
-          await ask("review_comment_set", {
-            ref,
-            change_id: ch.id,
-            word_comment_id: r.word_comment_id,
-          });
-          say(`${ch.id}: rationale comment added.`);
-        }),
+        once(
+          key,
+          guard(async () => {
+            const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
+            const t = await ask("review_comment_text", { ref, change_id: ch.id });
+            const r = await word.addChangeComment({
+              ...t.change,
+              comment_text: t.comment_text,
+              known_comment_ids: t.known_comment_ids,
+            });
+            if (!r.ok)
+              throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
+            await ask("review_comment_set", {
+              ref,
+              change_id: ch.id,
+              word_comment_id: r.word_comment_id,
+            });
+            say(`${ch.id}: rationale comment added.`);
+          }),
+          () => rationaleButtons.get(ch.id),
+        ),
       );
       wrap.append(add);
     }
@@ -663,7 +695,13 @@ export function initReviewPane({
       // (L4) and the new words of the turn are checked against it (L2).
       await refresh();
       const done = state.turnsDone;
-      const r = await ask("review_propose", { ref, paragraphs });
+      // wait_ms: how long this pane waits for the answer. The daemon starts
+      // no turn for a request that waited longer at its gate.
+      const r = await ask(
+        "review_propose",
+        { ref, paragraphs, wait_ms: PROPOSE_WAIT_MS },
+        PROPOSE_WAIT_MS,
+      );
       if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);
       else if (state.turnsDone !== done) state.reviewTurnOpen = false; // its turn_done came first
     } catch (e) {
@@ -727,6 +765,15 @@ export function initReviewPane({
   // line of each refresh until its own summary.
   $("review-propose-all").addEventListener("click", async () => {
     if (queue.running || isTurnInFlight()) return;
+    // As guard() does for every other action: nothing is sent before the
+    // daemon has confirmed the stored provider.
+    const confirming = providersReady();
+    if (confirming) {
+      say(PROVIDER_WAIT);
+      await confirming;
+      if (queue.running || isTurnInFlight()) return; // a second press, meanwhile
+      say("");
+    }
     const refs = queueRefs(state.revision);
     if (!refs.length) return say("No open comment to propose changes for.", true);
     const running = queue.run(refs);
@@ -869,7 +916,10 @@ export function initReviewPane({
       if (r.warnings?.length) say(r.warnings.join(" "));
     }),
   );
-  $("review-refresh").addEventListener("click", guard(refresh));
+  $("review-refresh").addEventListener(
+    "click",
+    once("refresh", guard(refresh), () => $("review-refresh")),
+  );
   $("review-check-all").addEventListener(
     "click",
     guard(() => runLedgerCheck([])),
@@ -976,12 +1026,16 @@ export function initReviewPane({
   }
   $("review-clean-tool").addEventListener(
     "click",
-    guard(async () => {
-      const r = await word.deleteToolComments();
-      await markCleaned(r.deleted_ids);
-      const rep = cleanupReport(r.before, r.after);
-      say(rep.text, !rep.ok);
-    }),
+    once(
+      "clean-tool",
+      guard(async () => {
+        const r = await word.deleteToolComments();
+        await markCleaned(r.deleted_ids);
+        const rep = cleanupReport(r.before, r.after);
+        say(rep.text, !rep.ok);
+      }),
+      () => $("review-clean-tool"),
+    ),
   );
   // Delete ALL comments: first press shows the counts, second press reads
   // the comments again, backs up that fresh list and deletes the backed-up
@@ -990,50 +1044,54 @@ export function initReviewPane({
   // (taskpane.js context-error note), so the confirmation is inline.
   $("review-delete-all").addEventListener(
     "click",
-    guard(async () => {
-      const btn = $("review-delete-all");
-      const offer = (comments) => {
-        const n = countComments(comments);
-        state.backupShown = { comments, n };
-        btn.textContent = `Back up and delete ${n.total} comments (tool ${n.tool}, yours ${n.user})`;
-        return n;
-      };
-      if (!state.backupShown) {
-        offer(await word.readAllComments());
-        return;
-      }
-      const current = await word.readAllComments();
-      const diff = compareCommentLists(state.backupShown.comments, current);
-      if (!diff.same) {
-        const n = offer(current);
-        throw new Error(
-          `Comments changed since the count was shown (${diff.text}). Nothing deleted. Press again to back up and delete ${n.total}.`,
-        );
-      }
-      state.backupShown = null;
-      btn.textContent = "Delete ALL comments...";
-      const backup = buildCommentsBackup(current, { manuscript: state.path });
-      const b = await ask("comments_backup", { backup });
-      if (b.count !== current.length || b.reply_count !== backup.reply_count)
-        throw new Error(
-          `Backup holds ${b.count} comments and ${b.reply_count} replies, expected ${current.length} and ${backup.reply_count}. Nothing deleted.`,
-        );
-      // Only the backed-up threads, and only those unchanged since the
-      // backup: a comment added or edited while the backup was written stays.
-      const plan = await word.deleteBackedUpComments(backup.comments);
-      const left = new Set((await word.listComments()).comments.map((c) => String(c.id)));
-      await markCleaned(plan.delete_ids.filter((id) => !left.has(String(id))));
-      const rep = deleteAllReport({
-        shown: current.length,
-        backedUp: b.count,
-        deleted: plan.delete_ids.length,
-        changed: plan.changed_ids.length,
-        missing: plan.missing_ids.length,
-        addedAfter: plan.new_ids.length,
-        stillThere: plan.delete_ids.filter((id) => left.has(id)).length,
-      });
-      say(`${rep.text}. Backup: ${b.path}`, !rep.ok);
-    }),
+    once(
+      "delete-all",
+      guard(async () => {
+        const btn = $("review-delete-all");
+        const offer = (comments) => {
+          const n = countComments(comments);
+          state.backupShown = { comments, n };
+          btn.textContent = `Back up and delete ${n.total} comments (tool ${n.tool}, yours ${n.user})`;
+          return n;
+        };
+        if (!state.backupShown) {
+          offer(await word.readAllComments());
+          return;
+        }
+        const current = await word.readAllComments();
+        const diff = compareCommentLists(state.backupShown.comments, current);
+        if (!diff.same) {
+          const n = offer(current);
+          throw new Error(
+            `Comments changed since the count was shown (${diff.text}). Nothing deleted. Press again to back up and delete ${n.total}.`,
+          );
+        }
+        state.backupShown = null;
+        btn.textContent = "Delete ALL comments...";
+        const backup = buildCommentsBackup(current, { manuscript: state.path });
+        const b = await ask("comments_backup", { backup });
+        if (b.count !== current.length || b.reply_count !== backup.reply_count)
+          throw new Error(
+            `Backup holds ${b.count} comments and ${b.reply_count} replies, expected ${current.length} and ${backup.reply_count}. Nothing deleted.`,
+          );
+        // Only the backed-up threads, and only those unchanged since the
+        // backup: a comment added or edited while the backup was written stays.
+        const plan = await word.deleteBackedUpComments(backup.comments);
+        const left = new Set((await word.listComments()).comments.map((c) => String(c.id)));
+        await markCleaned(plan.delete_ids.filter((id) => !left.has(String(id))));
+        const rep = deleteAllReport({
+          shown: current.length,
+          backedUp: b.count,
+          deleted: plan.delete_ids.length,
+          changed: plan.changed_ids.length,
+          missing: plan.missing_ids.length,
+          addedAfter: plan.new_ids.length,
+          stillThere: plan.delete_ids.filter((id) => left.has(id)).length,
+        });
+        say(`${rep.text}. Backup: ${b.path}`, !rep.ok);
+      }),
+      () => $("review-delete-all"),
+    ),
   );
 
   // ---- P15: automatic refresh ----------------------------------------------------

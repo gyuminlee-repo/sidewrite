@@ -116,7 +116,7 @@ test("oneshot: last agent message parsed as JSON, exit code kept on failure", as
   };
   const r = await codexOneshot(
     { system: "S", prompt: "P", model: "gpt-6.1-sol" },
-    { runCli: run, bin: "codex", emptyDir: async () => "/tmp/empty" },
+    { runCli: run, bin: "codex", runDir: (fn) => fn("/tmp/empty") },
   );
   assert.deepEqual([r.ok, r.json], [true, { a: 1 }]);
   assert.equal(run.seen.stdin, "S\n\nP");
@@ -127,7 +127,7 @@ test("oneshot: last agent message parsed as JSON, exit code kept on failure", as
     { system: "", prompt: "" },
     {
       runCli: async () => ({ code: 2, stdout: "", stderr: "boom" }),
-      emptyDir: async () => "/tmp/empty",
+      runDir: (fn) => fn("/tmp/empty"),
     },
   );
   assert.match(bad.error, /codex exited 2: boom/);
@@ -136,7 +136,7 @@ test("oneshot: last agent message parsed as JSON, exit code kept on failure", as
 test("oneshot on the captured runs: a config warning is not a failure; out of credits is a limit", async () => {
   const deps = (lines, code) => ({
     runCli: async () => ({ code, stdout: lines.join("\n"), stderr: "" }),
-    emptyDir: async () => "/tmp/empty",
+    runDir: (fn) => fn("/tmp/empty"),
   });
   const ok = await codexOneshot({ system: "S", prompt: "P" }, deps(OK_LINES, 0));
   assert.deepEqual([ok.ok, ok.json], [true, { ok: true }]);
@@ -147,7 +147,7 @@ test("oneshot on the captured runs: a config warning is not a failure; out of cr
 });
 
 test("oneshot: text mode, not JSON, no answer, timeout, not installed", async () => {
-  const d = (r) => ({ runCli: async () => r, emptyDir: async () => "/tmp/empty" });
+  const d = (r) => ({ runCli: async () => r, runDir: (fn) => fn("/tmp/empty") });
   const say = (t) =>
     JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: t } });
   const text = await codexOneshot(
@@ -201,4 +201,203 @@ test("parse: a finished tool call, and a tool error that is not about approval",
     '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"office","tool":"office_tracked_edit","arguments":{},"result":null,"error":{"message":"Blocked by L1"},"status":"failed"}}',
   );
   assert.deepEqual([blocked.kind, blocked.approval], ["tool_error", false]);
+});
+
+// ---- A judgment runs with Codex's tools off, and a run that shows a tool
+// item anyway is ended and its reply discarded ----
+
+const ISOLATION_OFF = [
+  "plugins",
+  "apps",
+  "hooks",
+  "shell_tool",
+  "unified_exec",
+  "browser_use",
+  "computer_use",
+  "multi_agent",
+  "image_generation",
+  "skill_search",
+  "tool_suggest",
+  "view_image",
+  "memories",
+  "goals",
+  "sleep_tool",
+  "shell_snapshot",
+];
+
+test("judgment args: every tool feature off, no exec rules, no web search", () => {
+  const a = codexOneshotArgs({ model: "m", cwd: "/t" });
+  const off = a.flatMap((x, i) => (x === "--disable" ? [a[i + 1]] : []));
+  assert.deepEqual(off, ISOLATION_OFF);
+  assert.ok(a.includes("--ignore-rules"));
+  assert.deepEqual(a.slice(a.indexOf("-c"), a.indexOf("-c") + 2), ["-c", 'web_search="disabled"']);
+  assert.equal(a.includes("--enable"), false);
+  assert.equal(a.at(-1), "-");
+  // The switches Codex has for a tool are all there: the request it builds
+  // with them (read without a model call) has no shell, MCP, web or image tool.
+  const seen = JSON.parse(
+    readFileSync(new URL("./fixtures/codex_request_tools.json", import.meta.url), "utf8"),
+  );
+  assert.ok(seen.today.nested_in_exec.includes("exec_command"));
+  assert.deepEqual(seen.final_set.nested_in_exec, ["apply_patch", "clock__curr_time"]);
+});
+
+test("toolEventOf: only an answer and a notice are items a judgment may have", async () => {
+  const { toolEventOf } = await import("../daemon/providers/codex.mjs");
+  const item = (type, extra = {}, ev = "item.started") =>
+    JSON.stringify({ type: ev, item: { id: "i", type, ...extra } });
+  assert.equal(toolEventOf(item("agent_message", { text: "x" }, "item.completed")), null);
+  assert.equal(toolEventOf(item("error", { message: "notice" }, "item.completed")), null);
+  assert.equal(toolEventOf('{"type":"turn.completed"}'), null);
+  assert.equal(toolEventOf("not json"), null);
+  assert.equal(
+    toolEventOf(item("mcp_tool_call", { server: "office", tool: "office_find" })),
+    "mcp__office__office_find",
+  );
+  assert.equal(toolEventOf(item("command_execution", { command: "echo hi" })), "codex_shell");
+  // A type this code has never seen is a tool until it is known not to be.
+  assert.equal(toolEventOf(item("web_search", { query: "q" })), "web_search");
+  assert.equal(toolEventOf(item("file_change", {}, "item.updated")), "file_change");
+  assert.equal(toolEventOf(item("collab_tool_call", {})), "collab_tool_call");
+  // Output of the model itself, not a tool: a reasoning summary and its to-do list.
+  assert.equal(toolEventOf(item("reasoning", { text: "t" }, "item.completed")), null);
+  assert.equal(toolEventOf(item("todo_list", { items: [] }, "item.updated")), null);
+  assert.equal(toolEventOf('{"type":"item.started","item":{}}'), "unknown item");
+});
+
+// A runner that hands the lines over one by one, as runCli does, and stops
+// when kill() is called.
+const streaming = (lines) => {
+  const run = async (cmd, args, opts) => {
+    run.seen = opts;
+    run.handed = [];
+    let killed = false;
+    for (const line of lines) {
+      if (killed) break;
+      run.handed.push(line);
+      opts.onLine?.(line, () => (killed = true));
+    }
+    run.killed = killed;
+    return {
+      code: killed ? -1 : 0,
+      stdout: run.handed.join("\n"),
+      stderr: "",
+      ...(killed && { killed }),
+    };
+  };
+  return run;
+};
+
+test("oneshot: a run that uses a tool is ended at that item and its reply is discarded", async () => {
+  const logs = [];
+  for (const [file, name] of [
+    ["codex_exec_turn_approval.jsonl", "mcp__office__office_tracked_edit"],
+    ["codex_exec_tool_probe.jsonl", "codex_shell"],
+  ]) {
+    const lines = fixture(file);
+    const run = streaming(lines);
+    const r = await codexOneshot(
+      { system: "S", prompt: "SECRET PARAGRAPH", expectJson: false },
+      { runCli: run, bin: "codex", runDir: (fn) => fn("/tmp/run"), log: (l) => logs.push(l) },
+    );
+    assert.deepEqual(r, {
+      ok: false,
+      tool_event: name,
+      error: `Codex CLI used a tool (${name}) in a run that must not use any. Its reply was discarded.`,
+    });
+    assert.equal(run.killed, true, file);
+    assert.ok(run.handed.length < lines.length, "ended before the run was over");
+  }
+  assert.deepEqual(logs, [
+    "[providers] tool event provider=codex name=mcp__office__office_tracked_edit",
+    "[providers] tool event provider=codex name=codex_shell",
+  ]);
+
+  // A runner that gives the output only at the end: the reply is discarded all the same.
+  const late = await codexOneshot(
+    { system: "", prompt: "", expectJson: false },
+    {
+      runCli: async () => ({
+        code: 0,
+        stdout: fixture("codex_exec_tool_probe.jsonl").join("\n"),
+        stderr: "",
+      }),
+      runDir: (fn) => fn("/tmp/run"),
+      log: () => {},
+    },
+  );
+  assert.deepEqual([late.ok, late.tool_event], [false, "codex_shell"]);
+});
+
+test("oneshot: the captured run with the tools off answers; its directory, environment and signal", async () => {
+  const run = streaming(fixture("codex_exec_isolated.jsonl"));
+  const ac = new AbortController();
+  const r = await codexOneshot(
+    { system: "S", prompt: "P", signal: ac.signal },
+    {
+      runCli: run,
+      bin: "codex",
+      runDir: (fn) => fn("/tmp/run-1"),
+      env: { PATH: "/bin", HOME: "/h", OPENAI_API_KEY: "sk", CC_OFFICE_KEY_OPENROUTER: "k" },
+    },
+  );
+  assert.deepEqual(r.json, {
+    labels: [
+      { i: 1, type: "request" },
+      { i: 2, type: "other" },
+    ],
+  });
+  assert.equal(run.killed, false);
+  assert.equal(run.seen.cwd, "/tmp/run-1");
+  assert.deepEqual(run.seen.env, { PATH: "/bin", HOME: "/h" });
+  assert.equal(run.seen.signal, ac.signal);
+
+  const stopped = await codexOneshot(
+    { system: "", prompt: "" },
+    {
+      runCli: async () => ({ code: -1, stdout: "", stderr: "", aborted: true }),
+      runDir: (fn) => fn("/tmp/run"),
+    },
+  );
+  assert.deepEqual(stopped, { ok: false, aborted: true, error: "stopped" });
+});
+
+// Codex review of cli-isolation (P1): a model that prints a reasoning summary
+// is not using a tool. The kinds of item `codex exec --json` has were read
+// from the installed binary (codex.mjs says where); the captured run is real
+// (made-up puzzle, reasoning effort high, summary detailed).
+test("oneshot: a reasoning summary before the answer is not a tool; a tool after it still is", async () => {
+  const lines = fixture("codex_exec_reasoning.jsonl");
+  assert.ok(lines.some((l) => JSON.parse(l).item?.type === "reasoning"));
+  const d = (run) => ({ runCli: run, runDir: (fn) => fn("/tmp/run"), log: () => {} });
+  const run = streaming(lines);
+  const r = await codexOneshot({ system: "S", prompt: "P" }, d(run));
+  assert.deepEqual([r.ok, r.json.pours], [true, 2]);
+  assert.equal(run.killed, false);
+
+  const reasoning =
+    '{"type":"item.completed","item":{"id":"i1","type":"reasoning","text":"**x**"}}';
+  const plan =
+    '{"type":"item.started","item":{"id":"i2","type":"todo_list","items":[{"text":"answer","completed":false}]}}';
+  const answer = '{"type":"item.completed","item":{"id":"i9","type":"agent_message","text":"{}"}}';
+  const quiet = await codexOneshot(
+    { system: "", prompt: "" },
+    d(streaming([reasoning, plan, answer, '{"type":"turn.completed"}'])),
+  );
+  assert.deepEqual([quiet.ok, quiet.json], [true, {}]);
+
+  for (const [tool, name] of [
+    [
+      '{"type":"item.started","item":{"id":"i3","type":"command_execution","command":"ls"}}',
+      "codex_shell",
+    ],
+    ['{"type":"item.started","item":{"id":"i3","type":"web_search","query":"q"}}', "web_search"],
+    ['{"type":"item.started","item":{"id":"i3","type":"file_change","changes":[]}}', "file_change"],
+    ['{"type":"item.started","item":{"id":"i3","type":"something_new"}}', "something_new"],
+  ]) {
+    const after = streaming([reasoning, tool, answer]);
+    const bad = await codexOneshot({ system: "", prompt: "" }, d(after));
+    assert.deepEqual([bad.ok, bad.tool_event, after.killed], [false, name, true], name);
+    assert.equal(after.handed.length, 2, "ended at the tool, before the answer");
+  }
 });

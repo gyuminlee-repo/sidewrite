@@ -18,6 +18,9 @@ const ORIGIN = process.env.E2E_PANE_ORIGIN || "http://127.0.0.1:47834";
 const TURN_TIMEOUT = Number(process.env.E2E_TURN_TIMEOUT_MS || 20 * 60_000);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// The daemon keeps a model list that failed for 60 s (daemon/model-list.mjs
+// fallbackTtlMs); asking again sooner gets the same fallback.
+const MODELS_RETRY_AFTER_MS = 61_000;
 
 async function connect(timeoutMs = 120_000) {
   const { chromium } = require(PW);
@@ -357,20 +360,35 @@ const steps = {
 
   // The rows of #composer-model once the daemon's list (or its failure) is
   // in: taskpane.js loadModelMenu sets the tooltip either way.
+  //
+  // The list comes from the account and can be late once; the pane then
+  // shows the aliases, which is right for the pane and wrong for this check.
+  // An unavailable list is asked for once more: after the daemon's fallback
+  // has run out the pane is loaded again (it asks for the list when it
+  // connects) and brought back to the Review tab. `retried` and
+  // `first_title` say that this happened.
   async models(page) {
-    await page.waitForFunction(
-      () =>
-        /^(Models your Claude account|Model list unavailable)/.test(
-          document.getElementById("composer-model")?.title ?? "",
-        ),
-      null,
-      { timeout: 90_000, polling: 200 },
-    );
-    return page.$eval("#composer-model", (m) => ({
-      title: m.title,
-      selected: m.value,
-      options: [...m.options].map((o) => ({ value: o.value, label: o.textContent.trim() })),
-    }));
+    const read = async () => {
+      await page.waitForFunction(
+        () =>
+          /^(Models your Claude account|Model list unavailable)/.test(
+            document.getElementById("composer-model")?.title ?? "",
+          ),
+        null,
+        { timeout: 90_000, polling: 200 },
+      );
+      return page.$eval("#composer-model", (m) => ({
+        title: m.title,
+        selected: m.value,
+        options: [...m.options].map((o) => ({ value: o.value, label: o.textContent.trim() })),
+      }));
+    };
+    const first = await read();
+    if (!/^Model list unavailable/.test(first.title)) return first;
+    await page.waitForTimeout(MODELS_RETRY_AFTER_MS);
+    await page.reload();
+    await steps["open-review"](page);
+    return { ...(await read()), retried: true, first_title: first.title };
   },
 
   // Propose changes on one comment, then press Stop while the turn runs
@@ -598,19 +616,24 @@ const steps = {
   view,
 };
 
-(async () => {
-  const [step, argsFile] = process.argv.slice(2);
-  const fn = steps[step];
-  if (!fn) throw new Error(`unknown step ${step}`);
-  const a = argsFile ? JSON.parse(fs.readFileSync(argsFile, "utf8")) : {};
-  const { browser, page } = await connect();
-  try {
-    const out = await fn(page, a);
-    process.stdout.write(JSON.stringify({ ok: true, step, ...out }) + "\n");
-  } finally {
-    await browser.close().catch(() => {});
-  }
-})().catch((e) => {
-  process.stdout.write(JSON.stringify({ ok: false, error: String(e?.message ?? e) }) + "\n");
-  process.exit(1);
-});
+// Loaded by a test, the steps are only handed over; run as a program, one
+// step is done.
+module.exports = { steps, MODELS_RETRY_AFTER_MS };
+if (require.main === module) {
+  (async () => {
+    const [step, argsFile] = process.argv.slice(2);
+    const fn = steps[step];
+    if (!fn) throw new Error(`unknown step ${step}`);
+    const a = argsFile ? JSON.parse(fs.readFileSync(argsFile, "utf8")) : {};
+    const { browser, page } = await connect();
+    try {
+      const out = await fn(page, a);
+      process.stdout.write(JSON.stringify({ ok: true, step, ...out }) + "\n");
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  })().catch((e) => {
+    process.stdout.write(JSON.stringify({ ok: false, error: String(e?.message ?? e) }) + "\n");
+    process.exit(1);
+  });
+}
