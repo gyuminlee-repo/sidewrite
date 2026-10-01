@@ -59,10 +59,15 @@ function Shape($doc) {
   $paras = @()
   $inline = @()
   $fields = @()
+  $codes = @()
   foreach ($x in $doc.Paragraphs) {
     $paras += [string]$x.Range.Text
     $inline += [int]$x.Range.InlineShapes.Count
     $fields += [int]$x.Range.Fields.Count
+    # code, U+001F, result, U+001E for every field of the paragraph
+    $code = ""
+    foreach ($f in $x.Range.Fields) { $code += [string]$f.Code.Text + [char]31 + [string]$f.Result.Text + [char]30 }
+    $codes += $code
   }
   $tables = @()
   foreach ($t in $doc.Tables) {
@@ -78,7 +83,10 @@ function Shape($doc) {
   }
   $marks = @()
   foreach ($b in $doc.Bookmarks) { $marks += [ordered]@{ name = [string]$b.Name; text = [string]$b.Range.Text } }
-  return [ordered]@{ paragraphs = $paras; inline = $inline; fields = $fields; tables = $tables; bookmarks = $marks }
+  return [ordered]@{
+    paragraphs = $paras; inline = $inline; fields = $fields; codes = $codes; tables = $tables; bookmarks = $marks
+    comments = [int]$doc.Comments.Count; footnotes = [int]$doc.Footnotes.Count; endnotes = [int]$doc.Endnotes.Count
+  }
 }
 
 function RunJob($app, $job) {

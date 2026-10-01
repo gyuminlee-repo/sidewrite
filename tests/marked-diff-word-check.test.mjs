@@ -44,9 +44,24 @@ const good = () => ({
   color: job(shape([]), { raw: { paragraphs: 4, tables: 1 } }),
 });
 
-test("the selection is fixed, 30 to 45 pairs, and covers every kind of change", () => {
-  assert.ok(PAIRS.length >= 30 && PAIRS.length <= 45, String(PAIRS.length));
-  for (const k of ["cell-merge", "picture", "field"]) assert.ok(KINDS.includes(k), k);
+test("the selection is fixed, 30 to 80 pairs, and covers every kind of change", () => {
+  assert.ok(PAIRS.length >= 30 && PAIRS.length <= 80, String(PAIRS.length));
+  for (const k of [
+    "cell-merge",
+    "picture",
+    "field",
+    "citation",
+    "field-result",
+    "bibliography",
+    "sign",
+    "picture-deleted",
+    "footnote",
+    "equation-kept",
+    "comment",
+    "content-control",
+    "simple-field",
+  ])
+    assert.ok(KINDS.includes(k), k);
   assert.equal(new Set(PAIRS.map((p) => p.name)).size, PAIRS.length);
   assert.deepEqual(uncovered(), []);
   for (const p of PAIRS) for (const k of p.covers) assert.ok(KINDS.includes(k), `${p.name}: ${k}`);
@@ -163,6 +178,44 @@ test("paragraphs are compared by their pictures and fields too", () => {
   assert.match(
     compareStructure({ ...shape(["One.\r"]), inline: [0] }, p([0, 1], [0, 0])),
     /^paragraph count: /,
+  );
+});
+
+test("paragraphs are compared by the code and the result of their fields", () => {
+  const p = (...codes) => ({ ...shape(["One.\r", "Two.\r"]), fields: [1, 0], codes });
+  const cite = (shown) => ` ADDIN INVENTED {"n":1} \u001f${shown}\u001e`;
+  assert.equal(compareStructure(p(cite("[1]"), ""), p(cite("[1]"), "")), null);
+  assert.equal(
+    compareStructure(p(cite("[2]"), ""), p(cite("[1]"), "")),
+    `paragraph fields 1: expected ${show(cite("[1]"))}, got ${show(cite("[2]"))}`,
+  );
+  // A report without the codes (an older script) compares as before.
+  assert.equal(
+    compareStructure({ ...shape(["One.\r"]), fields: [1] }, { ...shape(["One.\r"]), fields: [1] }),
+    null,
+  );
+});
+
+test("notes are counted on both sides, comments only where asked", () => {
+  const d = (footnotes, comments) => ({ ...shape(["One.\r"]), footnotes, endnotes: 0, comments });
+  assert.equal(compareStructure(d(1, 2), d(1, 2)), null);
+  assert.equal(compareStructure(d(0, 2), d(1, 2)), "footnotes: expected 1, got 0");
+  assert.equal(compareStructure(d(1, 0), d(1, 2)), "comments: expected 2, got 0");
+  assert.equal(compareStructure(d(1, 0), d(1, 2), { comments: false }), null);
+});
+
+test("after reject-all the comments are those of the clean document, not of the baseline", () => {
+  // A comment is no tracked change: the output has the clean document's, and rejecting keeps them.
+  const a = good();
+  a.clean = job({ ...CLEAN, comments: 1 });
+  a.accept = job({ ...CLEAN, comments: 1 }, { raw: { paragraphs: 4, tables: 1 } });
+  a.base = job({ ...BASE, comments: 0 });
+  a.reject = job({ ...BASE, bookmarks: CLEAN.bookmarks, comments: 1 });
+  assert.deepEqual(judgePair(a).failures, []);
+  a.reject = job({ ...BASE, bookmarks: CLEAN.bookmarks, comments: 0 });
+  assert.equal(
+    judgePair(a).first,
+    "reject-all has 0 comment(s), the clean document 1 (a comment is no tracked change and stays)",
   );
 });
 

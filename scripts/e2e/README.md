@@ -121,7 +121,7 @@ no daemon, no port and no task pane.
 node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
 ```
 
-- For 45 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
+- For 73 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
   pair covers: `PAIRS` in `marked-diff-word-lib.mjs`) it writes the baseline and
   the clean document under `<base-dir>/mdw-<time>/pairs/<nn>/` and runs the tool
   in both modes.
@@ -130,16 +130,19 @@ node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
   path, and in that Word opens each file read-only, without a repair and
   without dialogs. The track-changes output is opened twice: once for
   `Revisions.AcceptAll()`, once for `Revisions.RejectAll()`. The structure is
-  read each time (the text of every paragraph and how many pictures and
-  fields it holds, every table with its rows, columns, cell texts, whether
-  cells are merged (`Table.Uniform`) and where each cell stands, every
-  bookmark with its text) and the document is
+  read each time (the text of every paragraph, how many pictures and fields
+  it holds and the code and result of each field, every table with its rows,
+  columns, cell texts, whether cells are merged (`Table.Uniform`) and where
+  each cell stands, every bookmark with its text, and the number of
+  comments, footnotes and endnotes) and the document is
   closed without saving. The clean and the baseline document are read the
   same way; the colour output is opened and its paragraphs and tables counted.
 - A pair passes when Word opens every file without an error and without
   changing it on the way in, no revision is left, accept-all equals the clean
   document, reject-all equals the baseline, and the colour output has the
-  paragraphs and tables of the track-changes output.
+  paragraphs and tables of the track-changes output. Comments are the
+  exception on the reject side: a comment is no tracked change, so after
+  reject-all the document must still have the comments of the clean document.
 - Word is quit only when every document open in it is under the run folder;
   the cleanup rules are those of the acceptance run above. A Word that was
   already running is never touched.

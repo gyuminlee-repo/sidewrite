@@ -3,11 +3,13 @@
 // how one pair is judged. No Word, no files.
 //
 // A structure is what marked-diff-word.ps1 reads from an open document:
-// { paragraphs: [text], inline: [n], fields: [n],
+// { paragraphs: [text], inline: [n], fields: [n], codes: [text],
 //   tables: [{ rows, columns, uniform, cells: [text], at: ["row,column"] }],
-//   bookmarks: [{ name, text }] }. inline and fields are, for every
-// paragraph, the number of its inline shapes (pictures, objects) and of its
-// fields. uniform is Word's Table.Uniform (false when cells are merged), at
+//   bookmarks: [{ name, text }], comments, footnotes, endnotes }. inline
+// and fields are, for every paragraph, the number of its inline shapes
+// (pictures, objects) and of its fields; codes is, for every paragraph, the
+// code and the result of each of its fields (code, U+001F, result, U+001E).
+// comments, footnotes and endnotes are counts of the whole document. uniform is Word's Table.Uniform (false when cells are merged), at
 // the row and column index of every cell: a cell that was merged into the
 // one above it is not there. The texts are Word's own (Range.Text), so
 // a paragraph ends in "\r", a cell in "\r\u0007", and breaks are the control
@@ -45,6 +47,16 @@ export const KINDS = [
   "cell-merge",
   "picture",
   "field",
+  "citation",
+  "field-result",
+  "bibliography",
+  "sign",
+  "picture-deleted",
+  "footnote",
+  "equation-kept",
+  "comment",
+  "content-control",
+  "simple-field",
 ];
 
 // The pairs, by their name in tests/marked_diff_corpus.py, with the kinds each
@@ -95,6 +107,34 @@ export const PAIRS = [
   ["a merged cell split again", ["cell-merge"]],
   ["a paragraph with a picture added", ["picture", "paragraph-added"]],
   ["a paragraph with a field added", ["field", "paragraph-added"]],
+  ["a word changed next to a citation", ["citation"]],
+  ["words changed on both sides of a citation", ["citation"]],
+  ["a citation added", ["citation"]],
+  ["a citation deleted", ["citation"]],
+  ["the shown text of a citation changed", ["citation", "field-result"]],
+  ["a paragraph with citations deleted", ["citation", "paragraph-deleted"]],
+  ["a paragraph with a citation added", ["citation", "paragraph-added"]],
+  ["a word changed in a caption with a number and a cross-reference", ["field"]],
+  ["the result of a cross-reference changed", ["field-result"]],
+  ["a word changed in a paragraph with a hard hyphen, a symbol and a return", ["sign"]],
+  ["a symbol taken out", ["sign"]],
+  ["a word changed in a paragraph with a picture", ["picture"]],
+  ["a picture swapped for another", ["picture-deleted"]],
+  ["a paragraph with a picture deleted", ["picture-deleted", "paragraph-deleted"]],
+  ["a table with a picture that lost a row", ["picture-deleted", "table-row"]],
+  ["a footnote in the changed paragraph", ["footnote"]],
+  ["a footnote in a deleted paragraph", ["footnote", "paragraph-deleted"]],
+  ["a footnote swapped for another", ["footnote"]],
+  ["a word changed in a paragraph with an equation", ["equation-kept"]],
+  ["a word changed in a paragraph with a comment", ["comment"]],
+  ["a comment added in a changed paragraph", ["comment"]],
+  ["a comment only in the baseline, the paragraph changed", ["comment"]],
+  ["the first entry of a bibliography reworded", ["bibliography"]],
+  ["the first entry of a bibliography replaced", ["bibliography"]],
+  ["an entry added to a bibliography", ["bibliography"]],
+  ["a word changed in a paragraph with a simple field", ["simple-field"]],
+  ["a simple field added to a paragraph", ["simple-field"]],
+  ["a word changed in a paragraph with a content control", ["content-control"]],
 ].map(([name, covers]) => ({ name, covers }));
 
 // Kinds of KINDS that no pair covers.
@@ -129,9 +169,10 @@ function firstCountDifference(what, got, want) {
   return null;
 }
 
-// What differs between two structures, as one line, or null. `bookmarks`:
-// compare them too (the accept side: the output carries the clean document's).
-export function compareStructure(got, want, { bookmarks = true } = {}) {
+// What differs between two structures, as one line, or null. `bookmarks`
+// and `comments`: compare them too (the accept side: the output carries the
+// clean document's).
+export function compareStructure(got, want, { bookmarks = true, comments = true } = {}) {
   const paragraphs = firstTextDifference("paragraph", got.paragraphs ?? [], want.paragraphs ?? []);
   if (paragraphs) return paragraphs;
   for (const [key, what] of [
@@ -140,6 +181,13 @@ export function compareStructure(got, want, { bookmarks = true } = {}) {
   ]) {
     const d = firstCountDifference(what, got[key] ?? [], want[key] ?? []);
     if (d) return d;
+  }
+  const codes = firstTextDifference("paragraph fields", got.codes ?? [], want.codes ?? []);
+  if (codes) return codes;
+  for (const key of ["footnotes", "endnotes", ...(comments ? ["comments"] : [])]) {
+    if ((got[key] ?? 0) !== (want[key] ?? 0)) {
+      return `${key}: expected ${want[key] ?? 0}, got ${got[key] ?? 0}`;
+    }
   }
   const [gt, wt] = [got.tables ?? [], want.tables ?? []];
   if (gt.length !== wt.length) return `table count: expected ${wt.length}, got ${gt.length}`;
@@ -209,8 +257,14 @@ export function judgePair({ tool, accept, reject, clean, base, color }) {
       if (d) failures.push(`accept-all is not the clean document: ${d}`);
     }
     if (r && inputs) {
-      const d = compareStructure(reject.shape, base.shape, { bookmarks: false });
+      const d = compareStructure(reject.shape, base.shape, { bookmarks: false, comments: false });
       if (d) failures.push(`reject-all is not the baseline: ${d}`);
+      const [left, kept] = [reject.shape.comments ?? 0, clean.shape.comments ?? 0];
+      if (left !== kept) {
+        failures.push(
+          `reject-all has ${left} comment(s), the clean document ${kept} (a comment is no tracked change and stays)`,
+        );
+      }
     }
   }
   if (tool?.color === 0 && opened(color, "the colour output")) {
