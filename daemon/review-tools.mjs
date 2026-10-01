@@ -14,6 +14,10 @@ import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
+// The capability a task pane must name in its hello to be sent a tracked
+// edit (taskpane/shared/tools-word.js PANE_CAPS): it compares the paragraph
+// with expected_before_hash before it edits.
+export const TARGET_HASH_CAP = "target_hash";
 
 // Read-only Word tools stay available in a review turn.
 export const REVIEW_READ_TOOLS = new Set([
@@ -148,7 +152,8 @@ function fail(message, extra = {}) {
 //         onAttempt({ref, args, attempt}) -> {id, end()}, onEdit({ref, change, attempt_id}),
 //         onNotApplied({ref, attempt_id}), onBlocked({ref, args, blocked_by}),
 //         onOutcomeUnknown({id, ref, record, attempt, attempt_id}),
-//         holdRef(ref) -> release, log }
+//         onRecordFailed({ref, attempt_id}), onStaleTarget({ref}),
+//         paneChecksTarget() -> boolean, holdRef(ref) -> release, log }
 // onAttempt: called before Word, with the edit and the form it would have in
 // the document; it writes them to the review file and returns the id of
 // that attempt (end(): the call is over). When it throws, Word is not
@@ -280,6 +285,17 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       unsourced_terms: unsourced,
     }),
   });
+  // A task pane that does not compare the paragraph before the edit (it was
+  // loaded before the daemon was updated; its hello names no target_hash)
+  // would apply the edit unchecked. It is sent nothing. A pane that is not
+  // connected reads the same here; the answer holds for both.
+  if (deps.paneChecksTarget && !deps.paneChecksTarget(at)) {
+    deps.log?.(`[review] refused ${turn.ref}: task pane without ${TARGET_HASH_CAP}`);
+    return fail(
+      "Not applied: the task pane is older than the daemon (or not connected) and does not check the paragraph before an edit, so nothing was sent to Word. Tell the author to reload the task pane (close and reopen it); then propose the edit again.",
+      { code: "TaskPaneOutdated" },
+    );
+  }
   let pre;
   try {
     pre =
@@ -329,7 +345,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         { code: "StaleTarget", paragraph_index: r.paragraph_index ?? null },
       );
     }
-    return recordApplied(deps, turn.ref, r, {
+    const out = await recordApplied(deps, turn.ref, r, {
       at,
       attemptId,
       texts: current,
@@ -343,6 +359,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       find: args.find,
       commentMissing,
     });
+    if (out.code === "AppliedNotRecorded") {
+      // The task pane is told (its status line). The call is over first, so
+      // the attempt reads as unowned when the pane loads the file again.
+      pre?.end?.();
+      await Promise.resolve(
+        deps.onRecordFailed?.({ ref: turn.ref, attempt_id: attemptId, at }),
+      ).catch(() => {});
+    }
+    return out;
   };
 
   // The comment stays in the list until the answer is recorded (or handed

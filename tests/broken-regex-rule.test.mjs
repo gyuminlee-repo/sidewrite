@@ -150,7 +150,7 @@ test("service: ledger_add and ledger_update refuse a broken regex; a stored one 
   const doc = join(dir, "paper.docx");
   const calls = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
     callTool: null,
     pushTurn: () => {},
     log: () => {},

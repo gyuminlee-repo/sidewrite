@@ -29,6 +29,7 @@ import {
   toolResolveComment,
   toolHeaderFooter,
   toolTrackedEdit,
+  PANE_CAPS,
   collectReviewSnapshot,
   selectionParagraphs,
   selectCommentById,
@@ -653,6 +654,9 @@ function sendHello() {
     host: HOST,
     active_doc: activeDocUrl,
     pane_id: panePersistId,
+    // What this build of the task pane can do; the daemon sends a tracked
+    // edit only to a pane that names "target_hash" (bridge.mjs caps).
+    caps: PANE_CAPS,
     selection: attachSelection ? lastSelection : null,
     track_changes_mode: settings.trackChangesMode || "always",
   });

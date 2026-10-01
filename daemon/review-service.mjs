@@ -9,7 +9,7 @@
 //   ledger_add, ledger_update, ledger_remove, ledger_check, comments_backup
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
-//     | "late_result_recorded" | "stale_target" | "job_done", ... }
+//     | "late_result_recorded" | "stale_target" | "record_failed" | "job_done", ... }
 // Jobs (JOB_TYPES): the reply is { ok: true, accepted: true, job_id } at once
 // and the result follows as { event: "job_done", job_id, result }, result
 // being what the reply would have held ({ ok: true, ... } or { ok: false,
@@ -59,7 +59,7 @@ import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental } from "./ledger-check.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
-import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
+import { applyTrackedEdit, TOOL_COMMENT_PREFIX, TARGET_HASH_CAP } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
 
 async function exists(p) {
@@ -263,6 +263,8 @@ export function createReviewService({
     };
     return {
       key,
+      // What the task pane said it can do, as of now (bridge.mjs caps).
+      caps: getContext(key)?.caps ?? [],
       get doc() {
         return need().doc;
       },
@@ -429,6 +431,13 @@ export function createReviewService({
         sendEvent(key, { type: "review_event", event: "edit_blocked", ref, blocked: saved });
       },
       holdRef: (ref, d = at(key)) => hold(d, ref),
+      // Does the task pane compare the paragraph before a tracked edit? One
+      // that does not say so in its hello is sent no edit.
+      paneChecksTarget: (d = at(key)) => d.caps.includes(TARGET_HASH_CAP),
+      // Word applied the edit and its record could not be saved.
+      onRecordFailed: async ({ ref, attempt_id }) => {
+        sendEvent(key, { type: "review_event", event: "record_failed", ref, attempt_id });
+      },
       // The task pane refused an edit because its paragraph is not as the
       // snapshot here has it. The snapshot comes from the task pane only
       // (review_refresh), so it is asked to refresh.

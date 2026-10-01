@@ -804,6 +804,17 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         load()
           .catch((e) => say(e.message, true))
           .finally(render);
+      } else if (msg.event === "record_failed") {
+        // The load turns the attempt into an unanswered edit in the list.
+        load()
+          .catch(() => {})
+          .finally(() => {
+            render();
+            say(
+              `${msg.ref}: the edit was applied in Word but saving its record failed; press Refresh status to match them again.`,
+              true,
+            );
+          });
       } else if (msg.event === "stale_target") {
         // A tracked edit was refused: its paragraph is no longer as the
         // daemon has it. A refresh gives the daemon the document as it is.

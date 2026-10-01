@@ -69,7 +69,7 @@ function service(dir, call = async () => APPLIED) {
     return call(name, args, calls.length);
   };
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
     callTool,
     pushTurn: () => {},
     sendEvent: (key, obj) => events.push(obj),

@@ -1522,6 +1522,13 @@ export async function toolHeaderFooter({ which, text }) {
 // inserted range is removed by reject).
 // ---------------------------------------------------------------------------
 
+// Capabilities this task pane reports in its hello (taskpane.js sendHello).
+// target_hash: toolTrackedEdit compares the paragraph with
+// expected_before_hash before it edits. The daemon sends office_tracked_edit
+// only to a pane that names it (review-tools.mjs TARGET_HASH_CAP): a pane
+// loaded before the daemon was updated would apply the edit unchecked.
+export const PANE_CAPS = ["target_hash"];
+
 // Tool: office_tracked_edit. Always tracked, whatever the
 // track-changes mode setting (taskpane.js dispatches it without writeArgs()).
 // narrow ({ find, replace }, from daemon/edit-facts.mjs narrowEdit, L3): the

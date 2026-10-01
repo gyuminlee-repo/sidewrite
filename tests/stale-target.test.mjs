@@ -311,7 +311,7 @@ async function world() {
   const calls = [];
   const callTool = async (name, args) => (calls.push(args), toolTrackedEdit(args));
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
     callTool,
     pushTurn: () => {},
     sendEvent: (key, obj) => events.push(obj),
