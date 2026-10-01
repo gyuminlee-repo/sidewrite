@@ -2187,12 +2187,15 @@ test("turn_done with a notice: the line of the status check ends with it", async
   }
 });
 
-test("the Stop button tells the Review tab before it tells the daemon", async () => {
+// A turn stopped in the pane never reached the daemon: stop_agent is not
+// sent for it. With nothing of its own to stop, the daemon would stop the
+// pane's idle Claude session instead.
+test("the Stop button asks the Review tab first and tells the daemon only when the turn is there", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../taskpane/shared/taskpane.js", import.meta.url), "utf8");
   const at = src.indexOf('$stopAgent?.addEventListener("click"');
-  const body = src.slice(at, at + 400);
-  assert.match(body, /reviewPane\?\.onStop\?\.\(\);/);
+  const body = src.slice(at, at + 500);
+  assert.match(body, /if \(reviewPane\?\.onStop\?\.\(\)\) return;/);
   assert.ok(
     body.indexOf("reviewPane?.onStop?.()") < body.indexOf('wsSend({ type: "stop_agent" })'),
   );
