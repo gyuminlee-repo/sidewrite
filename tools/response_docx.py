@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write a response letter .docx from a paragraph model. Standard library only.
 
-  python3 tools/response_docx.py --model model.json --out letter.docx
+  python3 tools/response_docx.py --model model.json --out letter.docx [--overwrite]
 
 Model: {"font": str|null, "size_pt": number|null,
         "paragraphs": [{"kind": str, "text": str, "color": "RRGGBB"|null}]}
@@ -10,8 +10,12 @@ One paragraph per model row, one run per paragraph. The run carries the
 colour; headings (kinds in BOLD) are bold. The same model always gives the
 same bytes (fixed zip timestamps), so a re-export without changes is no diff.
 
-Prints one JSON line. Exit 0 written, 3 the target is locked (open in Word),
-1 any other error.
+A file that is already at --out is never replaced unless --overwrite is given:
+the caller picks another name. With --overwrite the old file is replaced in
+one step.
+
+Prints one JSON line. Exit 0 written, 4 the target exists (no --overwrite),
+3 the target is locked (open in Word), 1 any other error.
 """
 
 import argparse
@@ -51,6 +55,10 @@ STAMP = (2000, 1, 1, 0, 0, 0)
 
 class Locked(Exception):
     """The target file cannot be replaced: another program holds it open."""
+
+
+class Exists(Exception):
+    """There is a file at the target already and overwrite was not asked for."""
 
 
 def run_xml(text, color=None, bold=False, font=None, size_pt=None):
@@ -94,30 +102,44 @@ def write_zip(path, parts):
             z.writestr(info, data.encode("utf-8") if isinstance(data, str) else data)
 
 
-def write_docx(model, out):
+def write_docx(model, out, overwrite=False):
     """Write the letter to `out` and return the paragraph count.
+
+    Without `overwrite` the name is taken exclusively first: a file that is
+    already there, whoever wrote it, raises Exists and is left as it is, and
+    of two writers of one new name exactly one wins. With `overwrite` the old
+    file is replaced.
 
     The zip is written to a temp file of this call's own in the folder of
     `out` (same file system, so the move over `out` is atomic) and created
-    exclusively: two writers of one path never share a temp file, and a file
-    that was already there is never touched. Only that own file is cleaned up.
+    exclusively: two writers never share a temp file, and a file that was
+    already there is never touched. Only what this call created is cleaned up.
     """
     xml = document_xml(model)  # raises before anything is written
     out = str(out)
     folder, base = os.path.split(os.path.abspath(out))
-    tmp = os.path.join(folder, ".%s.%d.%s.tmp" % (base, os.getpid(), uuid.uuid4().hex))
-    with open(tmp, "xb") as fh:  # from here on the file is ours
+    reserved = False
+    if not overwrite:
         try:
+            os.close(os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
+        except FileExistsError as e:
+            raise Exists(out) from e
+        reserved = True  # an empty file of ours holds the name
+    tmp = os.path.join(folder, ".%s.%d.%s.tmp" % (base, os.getpid(), uuid.uuid4().hex))
+    done = False
+    try:
+        with open(tmp, "xb") as fh:  # from here on the temp file is ours
             write_zip(fh, [("[Content_Types].xml", CONTENT_TYPES), ("_rels/.rels", RELS), ("word/document.xml", xml)])
-            fh.close()
-            try:
-                os.replace(tmp, out)
-            except PermissionError as e:
-                raise Locked(str(e)) from e
-        finally:
-            fh.close()
-            if os.path.exists(tmp):
-                os.remove(tmp)
+        try:
+            os.replace(tmp, out)
+        except PermissionError as e:
+            raise Locked(str(e)) from e
+        done = True
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        if reserved and not done and os.path.exists(out):
+            os.remove(out)
     return len(model["paragraphs"])
 
 
@@ -125,11 +147,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--overwrite", action="store_true", help="replace a file that is already at --out")
     a = ap.parse_args(argv)
     try:
         with open(a.model, encoding="utf-8") as fh:
             model = json.load(fh)
-        n = write_docx(model, a.out)
+        n = write_docx(model, a.out, overwrite=a.overwrite)
+    except Exists as e:
+        print(json.dumps({"ok": False, "code": "exists", "error": "file exists: %s" % e}))
+        return 4
     except Locked as e:
         print(json.dumps({"ok": False, "code": "locked", "error": str(e)}))
         return 3

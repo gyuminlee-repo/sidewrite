@@ -49,7 +49,7 @@ class VerifyTest(unittest.TestCase):
         (self.dir / "model.json").write_text(json.dumps(model), encoding="utf-8")
         (self.dir / "manuscript.json").write_text(json.dumps(manuscript), encoding="utf-8")
         docx = self.dir / "letter.docx"
-        rd.write_docx(model if docx_model is None else docx_model, docx)
+        rd.write_docx(model if docx_model is None else docx_model, docx, overwrite=True)
         if mutate:
             with zipfile.ZipFile(docx) as z:
                 parts = [(n, z.read(n)) for n in z.namelist()]

@@ -220,7 +220,7 @@ class ReadTest(unittest.TestCase):
 
     def test_letter_without_colours_proposes_none(self):
         plain = {"paragraphs": [dict(p, color=None) for p in PRIOR["paragraphs"]]}
-        rd.write_docx(plain, self.path)
+        rd.write_docx(plain, self.path, overwrite=True)
         out = rr.propose(rr.paragraphs(self.path), {})
         self.assertEqual(out["overrides"].get("colors"), None)
         self.assertEqual(out["previous"], {})
@@ -231,14 +231,14 @@ class ReadTest(unittest.TestCase):
         letter = {"paragraphs": [
             row("Editor"), row("Comment 1"), row("Shorten the title."), row("The title is at the limit.", "C00000"),
             row("Reviewer #1"), row("Comment 1"), row("State the unit."), row("We now state the unit.", "C00000")]}
-        rd.write_docx(letter, self.path)
+        rd.write_docx(letter, self.path, overwrite=True)
         ps = rr.paragraphs(self.path)
         out = rr.propose(ps, {})
         self.assertEqual(out["previous"], {"E.1": "The title is at the limit.", "R1.1": "We now state the unit."})
         self.assertEqual(out["evidence"]["notes"], [])
         # The label of the profile, when the letter uses another word.
         letter["paragraphs"][0]["text"] = "Handling editor:"
-        rd.write_docx(letter, self.path)
+        rd.write_docx(letter, self.path, overwrite=True)
         ps = rr.paragraphs(self.path)
         self.assertIn("R1.1 occurs twice; the first answer is kept", rr.propose(ps, {})["evidence"]["notes"])
         out = rr.propose(ps, {"response_letter": {"editor_label": "Handling Editor"}})
@@ -246,7 +246,7 @@ class ReadTest(unittest.TestCase):
         # A sentence that starts with the word is no heading.
         letter["paragraphs"][0]["text"] = "Reviewer #2"
         letter["paragraphs"][6]["text"] = "Editor comments on the unit were the same."
-        rd.write_docx(letter, self.path)
+        rd.write_docx(letter, self.path, overwrite=True)
         self.assertEqual(sorted(rr.propose(rr.paragraphs(self.path), {})["previous"]), ["R1.1", "R2.1"])
 
     def test_head_patterns_of_the_profile_are_used_when_they_fit_the_letter(self):
@@ -254,7 +254,7 @@ class ReadTest(unittest.TestCase):
             {"kind": "x", "text": "Referee report 3", "color": None},
             {"kind": "x", "text": "Issue 4. Too long.", "color": None},
             {"kind": "x", "text": "Shortened.", "color": "C00000"}]}
-        rd.write_docx(letter, self.path)
+        rd.write_docx(letter, self.path, overwrite=True)
         ps = rr.paragraphs(self.path)
         self.assertEqual(rr.propose(ps, {})["previous"], {})
         profile = {"reviewer_head": r"^Referee report (\d+)", "comment_head": r"^Issue (\d+)\."}

@@ -120,7 +120,7 @@ class BuildTest(unittest.TestCase):
         self.assertEqual((code, rep["code"]), (3, "locked"))
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["model.json"])
 
-    def test_two_writes_to_one_path_at_once_both_succeed(self):
+    def test_two_overwriting_writes_to_one_path_at_once_both_succeed(self):
         out = self.dir / "letter.docx"
         models = [{"paragraphs": [{"kind": "response", "text": t * 200, "color": None}]} for t in "AB"]
         # Both writers have written their temp file before either moves it.
@@ -135,7 +135,7 @@ class BuildTest(unittest.TestCase):
 
         def work(model):
             try:
-                rd.write_docx(model, out)
+                rd.write_docx(model, out, overwrite=True)
             except Exception as e:  # noqa: BLE001  (the test reports whatever went wrong)
                 errors.append(repr(e))
 
@@ -162,7 +162,7 @@ class BuildTest(unittest.TestCase):
         # Also when the write fails.
         with mock.patch.object(rd.os, "replace", side_effect=PermissionError("in use")):
             with self.assertRaises(rd.Locked):
-                rd.write_docx(MODEL, out)
+                rd.write_docx(MODEL, out, overwrite=True)
         self.assertEqual(other.read_text(encoding="utf-8"), "not ours")
 
     def test_a_failed_write_leaves_no_temp_file_and_keeps_the_old_letter(self):
@@ -177,9 +177,71 @@ class BuildTest(unittest.TestCase):
 
         with mock.patch.object(rd, "write_zip", half_written):
             with self.assertRaises(OSError):
-                rd.write_docx({"paragraphs": [{"kind": "response", "text": "new", "color": None}]}, out)
+                rd.write_docx({"paragraphs": [{"kind": "response", "text": "new", "color": None}]}, out, overwrite=True)
         self.assertEqual([p.name for p in self.dir.iterdir()], ["letter.docx"])
         self.assertEqual(out.read_bytes(), before)
+
+    def test_an_existing_letter_is_not_replaced_unless_asked(self):
+        out = self.dir / "letter.docx"
+        rd.write_docx(MODEL, out)
+        before = out.read_bytes()
+        other = {"paragraphs": [{"kind": "response", "text": "second", "color": None}]}
+        with self.assertRaises(rd.Exists):
+            rd.write_docx(other, out)
+        self.assertEqual(out.read_bytes(), before)
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["letter.docx"])
+        # Any file of that name counts, also one this tool did not write.
+        mine = self.dir / "notes.docx"
+        mine.write_text("my own file", encoding="utf-8")
+        with self.assertRaises(rd.Exists):
+            rd.write_docx(other, mine)
+        self.assertEqual(mine.read_text(encoding="utf-8"), "my own file")
+        self.assertEqual(rd.write_docx(other, out, overwrite=True), 1)
+        self.assertIn("second", zipfile.ZipFile(out).read("word/document.xml").decode("utf8"))
+
+    def test_two_writes_to_one_new_path_at_once_one_wins_whole(self):
+        out = self.dir / "letter.docx"
+        models = [{"paragraphs": [{"kind": "response", "text": t * 200, "color": None}]} for t in "AB"]
+        start = threading.Barrier(2, timeout=10)
+        results = []
+
+        def work(model):
+            start.wait()
+            try:
+                rd.write_docx(model, out)
+                results.append("written")
+            except rd.Exists:
+                results.append("exists")
+
+        threads = [threading.Thread(target=work, args=(m,)) for m in models]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(results), ["exists", "written"])
+        z = zipfile.ZipFile(out)
+        self.assertIsNone(z.testzip())
+        self.assertIn(z.read("word/document.xml").decode("utf8"), [rd.document_xml(m) for m in models])
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["letter.docx"])
+
+    def test_cli_exit_4_when_the_target_exists_and_overwrite_replaces_it(self):
+        model = self.dir / "model.json"
+        model.write_text(json.dumps(MODEL), encoding="utf-8")
+        out = self.dir / "letter.docx"
+        self.assertEqual(run_main(["--model", str(model), "--out", str(out)])[0], 0)
+        before = out.read_bytes()
+        code, rep = run_main(["--model", str(model), "--out", str(out)])
+        self.assertEqual((code, rep["ok"], rep["code"]), (4, False, "exists"))
+        self.assertEqual(out.read_bytes(), before)
+        code, rep = run_main(["--model", str(model), "--out", str(out), "--overwrite"])
+        self.assertEqual((code, rep["ok"]), (0, True))
+
+    def test_a_failed_first_write_leaves_no_empty_file_behind(self):
+        out = self.dir / "letter.docx"
+        with mock.patch.object(rd.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                rd.write_docx(MODEL, out)
+        self.assertEqual(list(self.dir.iterdir()), [])
 
 
 if __name__ == "__main__":
