@@ -15,11 +15,20 @@ const P = (index, text) => ({ index, text });
 const DOC = [
   P(0, "The secret body sentence must never leave this PC."),
   P(1, "References"),
-  P(2, "Kim A, Lee B. 2019. Growth of invented cells on methane. J Invent Results 4:10-20. https://doi.org/10.1000/abc."),
+  P(
+    2,
+    "Kim A, Lee B. 2019. Growth of invented cells on methane. J Invent Results 4:10-20. https://doi.org/10.1000/abc.",
+  ),
   P(3, "Nam F. 2016. A paper that does not exist. J Invent Results 1:1-2. doi:10.1000/gone"),
-  P(4, "Park C. 2020. Carbon flux in a made-up strain. J Invent Results 5:30-41. https://doi.org/10.1000/title"),
+  P(
+    4,
+    "Park C. 2020. Carbon flux in a made-up strain. J Invent Results 5:30-41. https://doi.org/10.1000/title",
+  ),
   P(5, "Choi D. 2018. Enzymes of an imaginary pathway. J Invent Results 3:1-9."),
-  P(6, "Yoon E. 2021. Yields of a fictional reactor. J Invent Results 6:50-58. https://doi.org/10.1000/year"),
+  P(
+    6,
+    "Yoon E. 2021. Yields of a fictional reactor. J Invent Results 6:50-58. https://doi.org/10.1000/year",
+  ),
   P(7, ""),
   P(8, "Supplementary material"),
   P(9, "Another secret sentence after the list."),
@@ -185,7 +194,12 @@ test("requests are sequential and at most five a second", async () => {
 
 test("a 429 waits as long as Retry-After says and asks again", async () => {
   const c = clock();
-  const busy = { ok: false, status: 429, headers: { get: (h) => (h.toLowerCase() === "retry-after" ? "7" : null) }, json: async () => null };
+  const busy = {
+    ok: false,
+    status: 429,
+    headers: { get: (h) => (h.toLowerCase() === "retry-after" ? "7" : null) },
+    json: async () => null,
+  };
   const { fetchFn, calls } = fakeCrossref({ script: { 1: busy } });
   const r = await run({ fetchFn, now: c.now, sleep: c.sleep });
   assert.equal(r.ok, true);
@@ -229,7 +243,10 @@ test("a wrong first author, a failing server and an empty search each get their 
       throw new Error("ENOTFOUND api.crossref.org");
     },
   });
-  assert.deepEqual([broken.rows[0].verdict, /ENOTFOUND/.test(broken.rows[0].detail)], ["error", true]);
+  assert.deepEqual(
+    [broken.rows[0].verdict, /ENOTFOUND/.test(broken.rows[0].detail)],
+    ["error", true],
+  );
 });
 
 test("a search hit with another title is not offered as a candidate", async () => {
@@ -249,5 +266,8 @@ test("the log has the status only: no address, no entry text", async () => {
 });
 
 test("the notice says what leaves this PC", () => {
-  assert.match(CROSSREF_NOTICE, /sends each reference entry and your contact e-mail from this PC to Crossref/);
+  assert.match(
+    CROSSREF_NOTICE,
+    /sends each reference entry and your contact e-mail from this PC to Crossref/,
+  );
 });

@@ -128,7 +128,11 @@ export async function checkReferences({
         res = await fetchFn(url);
       } catch (e) {
         log(`[crossref] ${kind} status=failed`);
-        return { error: String(e?.message ?? e).split(address).join("<e-mail>") };
+        return {
+          error: String(e?.message ?? e)
+            .split(address)
+            .join("<e-mail>"),
+        };
       }
       log(`[crossref] ${kind} status=${res.status}`);
       if (res.status === 429) {
