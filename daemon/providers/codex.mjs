@@ -89,7 +89,6 @@ import { parseJsonReply } from "../oneshot.mjs";
 import { runCli as defaultRunCli, childEnv, resolveCliBin, withRunDir } from "./cli-exec.mjs";
 
 const LIMIT_RE = /(usage limit|rate limit|quota|too many requests|out of credits|\b429\b)/i;
-const toml = (s) => JSON.stringify(String(s));
 
 function baseArgs({ model, cwd }) {
   return [
@@ -102,21 +101,6 @@ function baseArgs({ model, cwd }) {
     "-C",
     cwd,
     ...(model ? ["-m", model] : []),
-  ];
-}
-
-// A review turn: the office tools come from the daemon's MCP endpoint of
-// this turn (mcpUrl); its token is read from the environment of the child
-// (CC_OFFICE_MCP_TOKEN), so it is in no argument and no config file. The
-// prompt comes on stdin ("-").
-export function codexTurnArgs({ model, cwd, mcpUrl }) {
-  return [
-    ...baseArgs({ model, cwd }),
-    "-c",
-    `mcp_servers.office.url=${toml(mcpUrl)}`,
-    "-c",
-    'mcp_servers.office.bearer_token_env_var="CC_OFFICE_MCP_TOKEN"',
-    "-",
   ];
 }
 

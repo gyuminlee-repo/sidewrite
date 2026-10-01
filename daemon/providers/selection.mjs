@@ -43,6 +43,7 @@ const ROW_FIELDS = [
   "default_enabled",
   "available",
   "turn_ready",
+  "turn_mode",
   "turn_note",
   "reason",
   "models",

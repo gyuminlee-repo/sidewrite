@@ -17,8 +17,8 @@
 //
 // The task pane sees the events of a Claude turn: tool_use_announce per
 // edit, then turn_complete; endTurn is the last thing a turn does.
-// sendText(text, key), sendEvent(obj, key), endTurn(key, outcome) as in
-// cli-turns.mjs.
+// sendText(text, key), sendEvent(obj, key), endTurn(key, outcome): the
+// argument order of the bridge (proposalTurnsFor below).
 //
 // One receipt per turn (decision-log.mjs, kind proposal_batch), also for a
 // turn that failed or was stopped: ids, codes and outcomes, no text of the

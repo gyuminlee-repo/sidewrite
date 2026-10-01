@@ -1,13 +1,16 @@
 // Provider presets (P14), in three tiers:
 //   subscription  a CLI the user is signed in to (Claude Agent SDK, Codex,
-//                 Antigravity). Can run review turns and one-shot judgments.
+//                 Antigravity). Review turns and one-shot judgments.
 //   local         Ollama on this machine. One-shot judgments only.
 //   key           an API key the user enters (provider-keys.json or an
 //                 environment variable). One-shot judgments only, and off
 //                 until the user turns it on: the manuscript leaves the
 //                 machine under that provider's terms.
-// Review turns need tool calls; a key or local provider has no tool loop in
-// this stage, so `roles` leaves "turn" out for them.
+// A review turn runs in one of two ways (turnMode): Claude calls the office
+// tools itself; Codex is given no tools and proposes changes the daemon
+// applies (proposal-turns.mjs). Antigravity is offered for nothing
+// (probe.mjs says why). A key or local provider runs no review turn in this
+// stage, so `roles` leaves "turn" out for them.
 //
 // policy: one line shown next to the provider in the task pane. "(unverified)"
 // marks a statement taken from a search summary, not from the provider's own

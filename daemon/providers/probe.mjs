@@ -1,12 +1,15 @@
 // Which providers can be used right now, and why not (P14). One row per
 // preset for the task pane:
 //   { id, tier, label, roles, policy, default_enabled,
-//     available, turn_ready, reason, models, has_key, key_source, base_url? }
+//     available, turn_ready, turn_mode, turn_note, reason, models, has_key,
+//     key_source, base_url? }
 // available: one-shot judgments can go to it. turn_ready: review turns can.
 // reason: why not, or a note for an available one; null when there is
 // nothing to say. models: [{ value, displayName }].
 //
 // turn_note: why review turns are off for an available provider, or null.
+// turn_mode: how a review turn of the provider runs (registry.mjs turnMode:
+// "agent" for Claude, "proposal" for Codex), or null when it runs none.
 //
 // A probe only reads: `codex login status`, `agy models`, `agy mcp list`, GET requests, the
 // Codex model cache, and whether a key is stored. It never
@@ -38,30 +41,9 @@ const MAX_MODELS = 200;
 export const AGY_NOT_OFFERED =
   "Not offered: the built-in tools of Antigravity CLI (agy) cannot be switched off, so manuscript text would sit next to them.";
 
-// Why a CLI provider is not offered for review turns. Checked with the real
-// CLIs on 2026-10-01 against the daemon's MCP endpoint, with the read-only
-// sandbox and no approval flag (tests/fixtures/codex_exec_turn_approval.jsonl,
-// agy_turn_denied.jsonl): each refused the office tool call itself. This
-// add-in never passes a flag that skips an approval, so Codex stays a
-// provider for judgments. The text quotes what the CLI said.
-export const TURN_BLOCKED = Object.freeze({
-  codex:
-    'Judgments only. Codex CLI will not call the office tools without an approval: "MCP tool call requires approval, but approval policy is never".',
-  antigravity: AGY_NOT_OFFERED,
-});
-const NO_TOOL_LOOP = "Judgments only: no tool loop for this provider in this stage.";
-
-// CC_OFFICE_CLI_TURNS: a comma list of CLI providers to offer for review
-// turns all the same, for a test after a CLI changed its approval rules. It
-// adds no flag to any command; the CLI still decides on each tool call.
-function cliTurnsTried(env) {
-  return new Set(
-    String(env.CC_OFFICE_CLI_TURNS ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s in TURN_BLOCKED),
-  );
-}
+// A provider without review turns (registry.mjs roles): the note of its row.
+const NO_REVIEW_TURNS =
+  "Judgments only: review turns are not offered for this provider in this stage.";
 
 // { code, stdout, stderr, timedOut }. Rejects only when the command cannot
 // be started (ENOENT: not installed).
@@ -282,7 +264,6 @@ export async function probeAll({
   deadlineMs = DEADLINE_MS,
 } = {}) {
   const deps = { claudeModels, execFileFn, readFileFn, fetchFn, env };
-  const tried = cliTurnsTried(env);
   return Promise.all(
     PRESETS.map(async (preset) => {
       let stored = { key: null, base_url: null, source: null };
@@ -305,14 +286,6 @@ export async function probeAll({
       clearTimeout(timer);
       const available = found.available === true;
       const base_url = preset.baseUrl ?? stored.base_url ?? null;
-      const blocked = preset.id in TURN_BLOCKED && !tried.has(preset.id);
-      const turn_note = !canRun(preset, "turn")
-        ? NO_TOOL_LOOP
-        : blocked
-          ? TURN_BLOCKED[preset.id]
-          : tried.has(preset.id)
-            ? "Offered for review turns because CC_OFFICE_CLI_TURNS lists it."
-            : null;
       return {
         id: preset.id,
         tier: preset.tier,
@@ -321,8 +294,9 @@ export async function probeAll({
         policy: preset.policy,
         default_enabled: preset.defaultEnabled,
         available,
-        turn_ready: available && canRun(preset, "turn") && !blocked && found.turn_ready === true,
-        turn_note,
+        turn_ready: available && canRun(preset, "turn") && found.turn_ready === true,
+        turn_mode: canRun(preset, "turn") ? (preset.turnMode ?? null) : null,
+        turn_note: canRun(preset, "turn") ? null : NO_REVIEW_TURNS,
         reason: found.reason ?? null,
         models: found.models ?? [],
         has_key: !!stored.key,

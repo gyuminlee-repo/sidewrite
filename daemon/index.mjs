@@ -35,8 +35,6 @@ import { createProviderSelection, providersListReply } from "./providers/selecti
 import { chatOneshot } from "./providers/openai-compat.mjs";
 import { codexOneshot } from "./providers/codex.mjs";
 import { agyOneshot } from "./providers/agy.mjs";
-import { createMcpHttp } from "./mcp-http.mjs";
-import { createCliTurns } from "./cli-turns.mjs";
 import { proposalTurnsFor } from "./proposal-turns.mjs";
 import { presetById } from "./providers/registry.mjs";
 import {
@@ -150,27 +148,7 @@ function sendError(req, res, status, headline, requestedPath) {
   }
 }
 
-// The office tools for a CLI provider's review turn (mcp-http.mjs), set
-// once the review service exists (below). Until then /mcp/ is not served.
-let mcpHttp = null;
-
 const http = createServer(async (req, res) => {
-  // /mcp/<route> first: it has its own checks (loopback peer and Host, no
-  // Origin, the route's bearer token) and takes no part in the CORS and
-  // OPTIONS handling of the task pane files below.
-  const mcpPath = (req.url || "/").split("?")[0];
-  if (mcpPath.startsWith("/mcp/")) {
-    try {
-      if (mcpHttp && (await mcpHttp.handle(req, res, mcpPath))) return;
-    } catch (e) {
-      console.warn("[mcp-http] request failed:", e?.message ?? e);
-      if (!res.headersSent) res.writeHead(500);
-      res.end();
-      return;
-    }
-    res.writeHead(404).end();
-    return;
-  }
   // Restrictive CORS: only the taskpane's same origin (HTTP_ORIGIN) gets the
   // Access-Control-Allow-Origin header. Other origins (malicious web pages
   // running in a regular browser tab) hit a no-CORS-header response and the
@@ -641,21 +619,6 @@ const review = createReviewService({
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
 });
 
-// Review turns of a CLI provider: the MCP endpoint they call and their
-// runner. A route is open only while its turn runs (cli-turns.mjs).
-mcpHttp = createMcpHttp({
-  bridge: { callTaskpaneTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key) },
-  getReviewTurn: (key) => reviewTurnByKey.get(key) ?? null,
-  trackedEditDeps: (key) => review.trackedEditDeps(key),
-});
-const cliTurns = createCliTurns({
-  mcpHttp,
-  baseUrl: HTTP_ORIGIN,
-  sendText: (text, key) => bridge.sendAssistantText(text, key),
-  sendEvent: (event, key) => bridge.sendAssistantEvent(event, key),
-  endTurn: (key, outcome) => endTurnState(key, outcome),
-});
-
 // Clear per-turn state when a turn ends for any reason. outcome: how it
 // ended ({ ok: true } or { ok: false, error }); a review turn's turn_done
 // carries it to the task pane.
@@ -784,10 +747,6 @@ const bridge = createBridge({
       // neither is an SDK session. After this answer no change of that
       // turn goes to Word (proposal-turns.mjs stop).
       if (review.cancelStarting(key) || proposalTurns.stop(key)) {
-        reply({ type: "stop_agent_result", ok: true, request_id: msg.request_id });
-        return;
-      }
-      if (cliTurns.stop(key)) {
         reply({ type: "stop_agent_result", ok: true, request_id: msg.request_id });
         return;
       }
@@ -1632,14 +1591,14 @@ if (process.send) {
 }
 
 // Keep process alive even when nothing is happening.
-// A running CLI review turn is stopped first: that also takes the turn's
-// office entry (route and token) out of the agy settings.
+// A running proposal turn is stopped first: its request to the provider is
+// aborted and what Word already answered is recorded.
 function shutdown() {
   console.log("\n[daemon] Shutting down");
   const bye = () => process.exit(0);
   const limit = setTimeout(bye, 8_000);
   limit.unref?.();
-  Promise.all([cliTurns.shutdown(), proposalTurns.shutdown()]).then(bye, bye);
+  proposalTurns.shutdown().then(bye, bye);
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
