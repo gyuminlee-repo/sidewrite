@@ -18,11 +18,8 @@
 // turns approvals or the sandbox off. The user's ~/.codex/config.toml is
 // kept: without it the sign-in has no model provider and the run fails.
 
-import { mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { parseJsonReply } from "../oneshot.mjs";
-import { runCli as defaultRunCli } from "./cli-exec.mjs";
+import { runCli as defaultRunCli, emptyWorkDir } from "./cli-exec.mjs";
 
 const LIMIT_RE = /(usage limit|rate limit|quota|too many requests|out of credits|\b429\b)/i;
 const toml = (s) => JSON.stringify(String(s));
@@ -100,13 +97,6 @@ export function parseCodexLine(line) {
   }
 }
 
-// An empty directory for a judgment: the CLI gets nothing to read there.
-async function defaultEmptyDir() {
-  const dir = join(tmpdir(), "cc-office-oneshot-cwd");
-  await mkdir(dir, { recursive: true });
-  return dir;
-}
-
 // The contract of oneshot.mjs runOneshot: { ok, text, json?, error?,
 // limited? }; never throws. System and prompt go as one stdin text (the CLI
 // has no separate system prompt).
@@ -115,7 +105,7 @@ export async function codexOneshot(
   {
     runCli = defaultRunCli,
     bin = process.env.CC_OFFICE_CODEX_BIN || "codex",
-    emptyDir = defaultEmptyDir,
+    emptyDir = emptyWorkDir,
   } = {},
 ) {
   let r;

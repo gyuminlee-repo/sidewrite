@@ -11,8 +11,19 @@
 // reads a piped stdin would otherwise wait for it forever.
 
 import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+
+// An empty directory to run a judgment in: the CLI finds nothing to read
+// there and no project instructions.
+export async function emptyWorkDir() {
+  const dir = join(tmpdir(), "cc-office-oneshot-cwd");
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
 
 export function runCli(
   cmd,
