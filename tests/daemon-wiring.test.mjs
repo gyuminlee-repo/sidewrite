@@ -79,7 +79,7 @@ test("set_model: the list as it was before the wait decides whether a running se
   assert.ok(body.indexOf("modelCache.current()") < body.indexOf("await modelCache.get()"));
   assert.match(
     body,
-    /modelChange\(\{ prev, requested, before, after: await modelCache\.get\(\) \}\)/,
+    /modelChange\(\{\s*prev,\s*requested,\s*before,\s*after: await modelCache\.get\(\),?\s*\}\)/,
   );
   assert.match(body, /if \(restart\)/);
   assert.equal(/prev !== undefined && prev !== model/.test(body), false);
