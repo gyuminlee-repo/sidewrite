@@ -52,10 +52,21 @@ async function clearMessage(page) {
     m.hidden = true;
   });
 }
-async function waitMessage(page, timeout = 120_000) {
+// until (a RegExp source): the message this step's own action ends with. The
+// line also shows messages that are not that: "Waiting for the daemon to
+// confirm the stored provider choice..." while a click is held right after a
+// (re)connect, and the result of an earlier action that ended late. With
+// `until`, only a message that matches it or an error (form-error) ends the
+// wait.
+async function waitMessage(page, timeout = 120_000, until = null) {
   await page.waitForFunction(
-    () => document.getElementById("review-message").textContent.trim() !== "",
-    null,
+    (pattern) => {
+      const m = document.getElementById("review-message");
+      const t = m.textContent.trim();
+      if (t === "") return false;
+      return !pattern || m.classList.contains("form-error") || new RegExp(pattern).test(t);
+    },
+    until,
     { timeout, polling: 200 },
   );
   return text(page, "#review-message");
@@ -177,7 +188,7 @@ const steps = {
     if (a.review_file) await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
     await clearMessage(page);
     await page.click("#review-split");
-    const message = await waitMessage(page, 10 * 60_000);
+    const message = await waitMessage(page, 10 * 60_000, "^Split by ");
     const refs = await page.$$eval(".review-draft-row .review-ref", (ns) => ns.map((n) => n.value));
     return { message, draft_refs: refs };
   },
@@ -463,7 +474,7 @@ const steps = {
     if (a.review_file) await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
     await clearMessage(page);
     await page.click("#ledger-suggest-review");
-    const suggest_message = await waitMessage(page, 10 * 60_000);
+    const suggest_message = await waitMessage(page, 10 * 60_000, "candidate rule\\(s\\) by ");
     const rows = page.locator("#ledger-candidates label");
     const n = await rows.count();
     const candidates = [];

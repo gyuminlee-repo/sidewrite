@@ -1119,3 +1119,87 @@ test("trackedPlaced: every tracked run of every paragraph is found in Word's par
   assert.equal(trackedPlaced(good, 3).pass, false);
   assert.equal(trackedPlaced([], 0).pass, false);
 });
+
+// The first run against Word (2026-10-01): the split step came back on the
+// line the pane shows while a click is held after a reconnect, and the
+// suggest step on the late result of that split. Neither is the result of
+// the step; the pane steps now wait for their own message.
+test("a held click or another action's late message is not the result of the step", async () => {
+  const { JUDGES, restartSplitEvidence, suggestEvidence } =
+    await import("../scripts/e2e/judge.mjs");
+  const refs = ["E.1", "R1.1", "R1.2", "R1.3", "R1.4", "R1.5"];
+  const held = {
+    ok: true,
+    message: "Waiting for the daemon to confirm the stored provider choice...",
+    draft_refs: refs, // the rows of the split before the restart
+  };
+  const log = [
+    "[providers] restore turn=ready oneshot=ready provider=ollama",
+    "[providers] judgment provider=ollama model=ollama:qwen3.5:9b",
+  ].join("\n");
+  const decisions =
+    '{"kind":"requirement_extract","model":"ollama:qwen3.5:9b","output":{"requests":null}}\n';
+  assert.equal(JUDGES.split(held).pass, false);
+  // Read at that moment: the daemon has logged nothing yet.
+  assert.equal(
+    restartSplitEvidence({ provider: "ollama", split: held, log: "", decisions: "" }).pass,
+    false,
+  );
+  // Even with the log and the receipt of a split that ended later.
+  assert.equal(
+    restartSplitEvidence({ provider: "ollama", split: held, log, decisions }).pass,
+    false,
+  );
+
+  // After the wait: the message of the split itself. A requirement extraction
+  // that failed is a warning in it and a receipt of that provider all the same.
+  const done = {
+    ok: true,
+    message:
+      "Split by regex. Text before the first reviewer (usually the editor letter) is kept as E.1. Delete it if it asks for nothing. requirement extraction failed: reply was not JSON; add them by hand",
+    draft_refs: refs,
+  };
+  assert.equal(JUDGES.split(done).pass, true);
+  const e = restartSplitEvidence({ provider: "ollama", split: done, log, decisions });
+  assert.deepEqual(
+    [e.pass, e.restored, e.judgments, e.receipt_models],
+    [true, true, { ollama: 1 }, ["ollama:qwen3.5:9b"]],
+  );
+
+  // The suggest step that read the split's late message: no candidate yet.
+  const early = {
+    ok: true,
+    suggest_message: done.message,
+    candidates: [],
+    message: "",
+    ledger: [],
+  };
+  assert.equal(suggestEvidence({ step: early, pick: "cell-free extract", before: 3 }).pass, false);
+  const waited = {
+    ok: true,
+    suggest_message: "1 candidate rule(s) by regex. Tick the ones to keep, then Add selected.",
+    candidates: [{ label: 'Forbid "cell-free extract"', checked: true }],
+    message: "Added 1 ledger rule(s), skipped 0 already in the ledger.",
+    ledger: ["L1", "L2", "L3", 'L4 forbid "cell-free extract"'],
+  };
+  assert.equal(suggestEvidence({ step: waited, pick: "cell-free extract", before: 3 }).pass, true);
+});
+
+// The patterns the pane steps wait for are the messages review-pane.js writes.
+test("the pane steps wait for the message their own action ends with", async () => {
+  const fs = await import("node:fs");
+  const read = (p) => fs.readFileSync(new URL(p, import.meta.url), "utf8");
+  const driver = read("../scripts/e2e/pane-driver.cjs");
+  const pane = read("../taskpane/shared/review-pane.js");
+  const waits = [...driver.matchAll(/waitMessage\(page, [^,]+, "((?:[^"\\]|\\.)*)"\)/g)].map((m) =>
+    JSON.parse(`"${m[1]}"`),
+  );
+  assert.deepEqual(waits, ["^Split by ", "candidate rule\\(s\\) by "]);
+  assert.match("Split by regex: 5 comment(s). Edit, then Save.", new RegExp(waits[0]));
+  assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[1]));
+  const HOLD = "Waiting for the daemon to confirm the stored provider choice...";
+  for (const w of waits) assert.doesNotMatch(HOLD, new RegExp(w));
+  assert.ok(pane.includes("say(`Split by ${r.method}"));
+  assert.ok(pane.includes("candidate rule(s) by ${r.method}."));
+  assert.ok(pane.includes(`say("${HOLD}")`));
+});
