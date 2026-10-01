@@ -63,7 +63,7 @@ import {
 } from "./revision-classify.mjs";
 import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
-import { checkLedgerIncremental } from "./ledger-check.mjs";
+import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import { applyTrackedEdit, TOOL_COMMENT_PREFIX, TARGET_HASH_CAP } from "./review-tools.mjs";
@@ -650,7 +650,24 @@ export function createReviewService({
     async review_propose(msg, key, host) {
       await turnGate(key);
       const d = at(key);
-      const { built, comment } = await buildFor(d, msg.ref, msg.paragraphs);
+      const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs);
+      // A turn in which no edit can be applied is not started: every
+      // office_tracked_edit of it would be refused (review-tools.mjs
+      // applyTrackedEdit: TaskPaneOutdated, ForbidRuleBroken), the turn
+      // would be spent, and a "Propose all" run would spend one for every
+      // comment after it. As the answer of this request the refusal is
+      // shown by a task pane of any age and ends its run.
+      if (!d.caps.includes(TARGET_HASH_CAP)) {
+        throw new Error(
+          "This task pane is older than the daemon and does not check the paragraph before an edit, so no change would be applied. Reload the task pane (close and reopen it), then propose again.",
+        );
+      }
+      const broken = brokenForbidRules(rev.ledger);
+      if (broken.length) {
+        throw new Error(
+          `Forbidden rule(s) ${broken.map((b) => b.id).join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}), so no change would be applied. Fix or remove the rule in the Instruction ledger, then propose again.`,
+        );
+      }
       pushTurn(key, host, built.text, { ref: msg.ref });
       turnHolds.get(key)?.();
       turnHolds.set(

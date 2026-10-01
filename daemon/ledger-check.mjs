@@ -207,6 +207,12 @@ export function readLlmReply(json, batchId, n) {
   };
 }
 
+// What a one-shot runner answers when the model wrote something that is no
+// JSON (oneshot.mjs and every provider under providers/ use this text). A
+// transport failure that mentions JSON ("the reply was not JSON from the
+// server") is another error and is not asked again.
+const NOT_JSON = "reply was not JSON";
+
 // The usable reply to one batch, or { error }. A reply in the wrong form
 // (also one that is no JSON) is asked for once more.
 async function askBatch(item, batch, oneshot) {
@@ -222,8 +228,8 @@ async function askBatch(item, batch, oneshot) {
       const read = readLlmReply(r.json, batchId, batch.length);
       if (!read.problem) return read;
       problem = read.problem;
-    } else if (/not JSON/i.test(String(r.error))) {
-      problem = String(r.error);
+    } else if (r.error === NOT_JSON) {
+      problem = NOT_JSON;
     } else {
       return { error: r.error };
     }
