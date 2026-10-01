@@ -191,3 +191,65 @@ test("pin: a choice that cannot be resolved sends nothing anywhere and every req
   assert.equal(lines.join("\n").includes("secret manuscript"), false);
   assert.ok(lines.every((l) => l.startsWith("[providers] judgment refused: ")));
 });
+
+// A proposal turn runs on the provider chosen for review turns, not on the
+// one for judgments: handleFor(choice) gives the same handle as pin, for a
+// choice the caller already holds. A run of it can be ended (signal), and a
+// provider that fails is the answer: no other provider is tried.
+test("handleFor: the handle of a given choice; the signal reaches the provider; nothing falls back", async () => {
+  const lines = [];
+  const { router, calls } = make(
+    { p: { id: "ollama", model: "qwen3.5:9b" } },
+    {
+      log: (l) => lines.push(l),
+      codex: async (req) => {
+        calls.push(["codex", req]);
+        return req.signal?.aborted
+          ? { ok: false, aborted: true, error: "stopped" }
+          : { ok: false, error: "codex exited 1: boom" };
+      },
+    },
+  );
+  const h = router.handleFor({ id: "codex", model: "gpt-6.1-sol" });
+  assert.deepEqual([h.provider, h.model], ["codex", "codex:gpt-6.1-sol"]);
+  assert.deepEqual(
+    [h.provider, h.model],
+    await router.pin("x").then(() =>
+      // The same labels pin gives for that choice.
+      createOneshotRouter({
+        claude: async () => ({}),
+        codex: async () => ({}),
+        antigravity: async () => ({}),
+        http: async () => ({}),
+        keys: { get: async () => null },
+        getChoice: () => ({ id: "codex", model: "gpt-6.1-sol" }),
+      })
+        .pin("k")
+        .then((p) => [p.provider, p.model]),
+    ),
+  );
+  const failed = await h.run({ system: "S", prompt: "P" });
+  assert.deepEqual(failed, { ok: false, error: "codex exited 1: boom" });
+  assert.deepEqual(
+    calls.map((c) => c[0]),
+    ["codex"],
+    "the pane's judgment provider and Claude are not asked instead",
+  );
+  const ac = new AbortController();
+  ac.abort();
+  const stopped = await h.run({ system: "S", prompt: "P", signal: ac.signal });
+  assert.deepEqual(stopped, { ok: false, aborted: true, error: "stopped" });
+  assert.equal(calls.at(-1)[1].signal, ac.signal);
+  assert.equal(calls.at(-1)[1].model, "gpt-6.1-sol");
+  // The line of a run says what it is for and holds no text of the request.
+  assert.deepEqual(lines, [
+    "[providers] proposal provider=codex model=codex:gpt-6.1-sol",
+    "[providers] proposal provider=codex model=codex:gpt-6.1-sol",
+  ]);
+  assert.equal(router.handleFor(null).model, "haiku");
+  const thrower = make({}, { codex: async () => Promise.reject(new Error("spawn failed")) });
+  assert.deepEqual(await thrower.router.handleFor({ id: "codex", model: null }).run({}), {
+    ok: false,
+    error: "spawn failed",
+  });
+});

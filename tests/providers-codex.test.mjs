@@ -401,3 +401,40 @@ test("oneshot: a reasoning summary before the answer is not a tool; a tool after
     assert.equal(after.handed.length, 2, "ended at the tool, before the answer");
   }
 });
+
+// A proposal turn gives the form of its reply as a JSON Schema: the file is
+// written into the directory of that run and named with --output-schema.
+test("oneshot: a schema is written into the run directory and handed to the CLI", async () => {
+  const written = [];
+  const run = streaming(fixture("codex_exec_isolated.jsonl"));
+  let args = null;
+  const schema = { type: "object", properties: {}, additionalProperties: false };
+  await codexOneshot(
+    { system: "S", prompt: "P", schema },
+    {
+      runCli: (bin, a, opts) => ((args = a), run(bin, a, opts)),
+      runDir: (fn) => fn("/tmp/run-9"),
+      writeFile: async (file, text) => void written.push([file, text]),
+    },
+  );
+  assert.deepEqual(written, [["/tmp/run-9/schema.json", JSON.stringify(schema)]]);
+  const at = args.indexOf("--output-schema");
+  assert.equal(args[at + 1], "/tmp/run-9/schema.json");
+  assert.equal(args.at(-1), "-");
+  assert.deepEqual(
+    args.filter((a, i) => i !== at && i !== at + 1),
+    codexOneshotArgs({ cwd: "/tmp/run-9" }),
+    "nothing else changes",
+  );
+  // Without a schema nothing is written and the arguments are as before.
+  written.length = 0;
+  await codexOneshot(
+    { system: "S", prompt: "P" },
+    {
+      runCli: (bin, a, opts) => ((args = a), run(bin, a, opts)),
+      runDir: (fn) => fn("/tmp/run-9"),
+      writeFile: async (file, text) => void written.push([file, text]),
+    },
+  );
+  assert.deepEqual([written.length, args.includes("--output-schema")], [0, false]);
+});

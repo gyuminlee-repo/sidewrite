@@ -196,3 +196,38 @@ test("the temperature is the preset's (body): 0 unless it says otherwise, none w
   await chatOneshot({ ...REQ, body: { temperature: null } }, { fetchFn: f });
   assert.equal("temperature" in reply.seen.body, false);
 });
+
+// A request can be ended from outside (a Stop in a proposal turn): the fetch
+// is aborted and the answer says so, apart from a timeout.
+test("signal: an aborted request answers aborted, before the fetch and while it runs", async () => {
+  const hang = (url, init) =>
+    new Promise((_, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason)));
+  const ac = new AbortController();
+  const running = chatOneshot({ ...REQ, signal: ac.signal, timeoutMs: 5_000 }, { fetchFn: hang });
+  setTimeout(() => ac.abort(), 10);
+  assert.deepEqual(await running, { ok: false, aborted: true, error: "stopped" });
+  let called = false;
+  const before = await chatOneshot(
+    { ...REQ, signal: AbortSignal.abort() },
+    { fetchFn: async () => ((called = true), { ok: true, status: 200, json: async () => ({}) }) },
+  );
+  assert.deepEqual(before, { ok: false, aborted: true, error: "stopped" });
+  assert.equal(called, false, "nothing is sent for a request that is stopped already");
+  // While the body is read.
+  const ac2 = new AbortController();
+  const body = await chatOneshot(
+    { ...REQ, signal: ac2.signal },
+    {
+      fetchFn: async (url, init) => ({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((_, rej) => {
+            init.signal.addEventListener("abort", () => rej(init.signal.reason));
+            ac2.abort();
+          }),
+      }),
+    },
+  );
+  assert.deepEqual(body, { ok: false, aborted: true, error: "stopped" });
+});
