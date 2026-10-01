@@ -109,3 +109,41 @@ test("L5 prompt: cite every request a change handles, even in part; empty only w
   assert.match(text, /empty only when the change answers none of them/i);
   assert.doesNotMatch(text, /not sure/);
 });
+
+// The split takes a section label off its line and stores it as
+// comment.section; the prompt names it, or "this section" has no meaning.
+test("the section of a comment is named right after the comment header", () => {
+  const abstract = { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "Abstract" };
+  const { text, section } = buildReviewPrompt({ comment: abstract });
+  assert.ok(
+    text.startsWith(
+      "[Review turn R1.1]\nReviewer 1, comment R1.1 (verbatim):\nSection of the review this comment is under: Abstract\n<<<\nShorten this section.\n>>>\n",
+    ),
+    text,
+  );
+  assert.equal(section, "Abstract");
+  const round = buildReviewPrompt({
+    comment: { ...abstract, ref: "R1.4", section: "Round 2 / Minor comments" },
+  });
+  assert.ok(
+    round.text.includes(
+      "comment R1.4 (verbatim):\nSection of the review this comment is under: Round 2 / Minor comments\n<<<\n",
+    ),
+  );
+  // No section: the prompt is as it was.
+  const plain = buildReviewPrompt({ comment });
+  assert.ok(!plain.text.includes("Section of the review"));
+  assert.ok(plain.text.includes(`comment R1.3 (verbatim):\n<<<\n${comment.text}\n>>>`));
+  assert.equal(plain.section, null);
+});
+
+test("formatPromptLog names the section when the comment has one", () => {
+  const b = buildReviewPrompt({
+    comment: { ref: "R1.4", reviewer: 1, text: "x", section: "Round 2 / Minor comments" },
+    ledger,
+  });
+  assert.equal(
+    formatPromptLog("R1.4", b, { paragraphs: 2 }),
+    '[review] prompt R1.4 instructions=L1,L3 forbid=L2 omitted_forbid=- paragraphs=2 section="Round 2 / Minor comments"',
+  );
+});

@@ -114,6 +114,9 @@ const Comment = z.object({
   ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
   reviewer: z.number().int().nonnegative(),
   text: z.string(),
+  // Label of the part of the review the comment is in ("Minor comments"),
+  // from the split. Refs do not carry it: numbers go on across sections.
+  section: z.string().optional(),
   requirements: z.array(Requirement).default([]),
   status: z.enum(["pending", "in_progress", "done"]).default("pending"),
   changes: z.array(ChangeSchema).default([]),
@@ -314,10 +317,12 @@ export function replaceComments(rev, incoming, keep = new Set()) {
     if (seen.has(c.ref)) throw new Error(`Duplicate comment ref ${c.ref}`);
     seen.add(c.ref);
     const old = findComment(rev, c.ref);
+    const section = c.section ?? old?.section;
     list.push({
       ref: c.ref,
       reviewer: c.reviewer,
       text: c.text,
+      ...(section && { section }),
       requirements: Array.isArray(c.requirements)
         ? numberRequirements(old?.requirements ?? [], c.requirements, [`q${requirementSeq(old)}`])
         : clone(old?.requirements ?? []),
@@ -341,7 +346,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
 }
 
 // Put a comment back so a change or blocked edit can be recorded under it
-// when the comment was removed anyway. from: { reviewer, text, requirements }
+// when the comment was removed anyway. from: { reviewer, text, section, requirements }
 // the daemon still holds, or null for the ref alone.
 export function restoreComment(rev, ref, from = null) {
   const m = /^(?:R(\d+)|E)\.\d+$/.exec(ref);
@@ -352,6 +357,7 @@ export function restoreComment(rev, ref, from = null) {
       ref,
       reviewer: from?.reviewer ?? (m[1] ? Number(m[1]) : 0),
       text: from?.text ?? "",
+      ...(from?.section && { section: from.section }),
       requirements: clone(from?.requirements ?? []),
       status: "in_progress",
     }),

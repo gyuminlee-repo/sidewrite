@@ -1102,6 +1102,15 @@ body {
 .review-ref {
   width: 5em;
 }
+.review-section {
+  flex: 1 1 8em;
+  min-width: 0;
+}
+.review-comment-section {
+  flex: 1 1 100%;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
 .review-comment {
   border-top: 1px solid var(--border, #ddd);
   padding-top: 6px;

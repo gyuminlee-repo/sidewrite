@@ -1,0 +1,160 @@
+{
+  "family": "combined_heads",
+  "cases": [
+    {
+      "name": "reviewer comma comment colon",
+      "kind": "positive",
+      "text": "Reviewer 1, Comment 1: Add units.\nReviewer 1, Comment 2: State n.\nReviewer 2, Comment 1: Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R2.1": "Add error bars."
+      }
+    },
+    {
+      "name": "reviewer hash dash comment, text on the next line",
+      "kind": "positive",
+      "text": "Reviewer #2 - Comment 3\nAdd units.\nReviewer #2 - Comment 4\nState n.",
+      "refs": ["R2.3", "R2.4"],
+      "texts": {
+        "R2.3": "Add units.",
+        "R2.4": "State n."
+      }
+    },
+    {
+      "name": "R reviewer C comment",
+      "kind": "positive",
+      "text": "R2C3: Add units.\nR2C4: State n.",
+      "refs": ["R2.3", "R2.4"],
+      "texts": {
+        "R2.3": "Add units.",
+        "R2.4": "State n."
+      }
+    },
+    {
+      "name": "reviewer point without a mark",
+      "kind": "positive",
+      "text": "Reviewer 2 Point 1\nAdd units.\n\nReviewer 2 Point 2\nState n.",
+      "refs": ["R2.1", "R2.2"],
+      "texts": {
+        "R2.1": "Add units.",
+        "R2.2": "State n."
+      }
+    },
+    {
+      "name": "referee Q",
+      "kind": "positive",
+      "text": "Referee 1 Q2: Add units.\nReferee 1 Q3: State n.",
+      "refs": ["R1.2", "R1.3"],
+      "texts": {
+        "R1.2": "Add units.",
+        "R1.3": "State n."
+      }
+    },
+    {
+      "name": "response letter with the answers under each comment",
+      "kind": "positive",
+      "text": "Reviewer 1, Comment 1: Add units.\nResponse: We added the units.\n\nReviewer 1, Comment 2: State n.\nResponse: Done.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nResponse: We added the units.",
+        "R1.2": "State n.\nResponse: Done."
+      }
+    },
+    {
+      "name": "letter before combined heads is E.1",
+      "kind": "positive",
+      "text": "Dear Author,\n\nReviewer 1, Comment 1: Add units.\nReviewer 1, Comment 2: State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Dear Author,",
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "sentence on the head line without a mark",
+      "kind": "positive",
+      "text": "Reviewer 2 Point 1 The units are missing.\nReviewer 2 Point 2 The value of n is not stated.",
+      "refs": ["R2.1", "R2.2"],
+      "texts": {
+        "R2.1": "The units are missing.",
+        "R2.2": "The value of n is not stated."
+      }
+    },
+    {
+      "name": "Korean reviewer and comment",
+      "kind": "positive",
+      "text": "\uc2ec\uc0ac\uc704\uc6d0 1 \uc758\uacac 1: \ub2e8\uc704\ub97c \ud45c\uae30\ud574 \uc8fc\uc2ed\uc2dc\uc624.\n\uc2ec\uc0ac\uc704\uc6d0 1 \uc758\uacac 2: \ubc18\ubcf5 \uc218\ub97c \uba85\uc2dc\ud574 \uc8fc\uc2ed\uc2dc\uc624.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "\ub2e8\uc704\ub97c \ud45c\uae30\ud574 \uc8fc\uc2ed\uc2dc\uc624."
+      }
+    },
+    {
+      "name": "first comment on the reviewer head line, plain heads after it",
+      "kind": "positive",
+      "text": "Reviewer 1: Comment 1: Add units.\nComment 2: State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "combined head words inside a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nAs noted under Reviewer 1, Comment 2, the units are missing.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nAs noted under Reviewer 1, Comment 2, the units are missing."
+      }
+    },
+    {
+      "name": "combined head words then prose",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer 1, Comment 2 was answered in the cover letter.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer 1, Comment 2 was answered in the cover letter."
+      }
+    },
+    {
+      "name": "reviewer point then prose",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer 2 Point 1 of the first round still applies.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer 2 Point 1 of the first round still applies."
+      }
+    },
+    {
+      "name": "referee Q then prose",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReferee 1 Q2 and Q3 overlap with this comment.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReferee 1 Q2 and Q3 overlap with this comment."
+      }
+    },
+    {
+      "name": "R C strain name",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nR2C3 strain was used as the control.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nR2C3 strain was used as the control."
+      }
+    },
+    {
+      "name": "possessive after the comment number",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer 1 Comment 2's wording is unclear to me.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer 1 Comment 2's wording is unclear to me."
+      }
+    }
+  ]
+}

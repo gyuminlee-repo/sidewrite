@@ -129,6 +129,15 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       const body = el("textarea", { rows: "3" });
       body.value = c.text;
       body.addEventListener("input", () => (c.text = body.value));
+      // The part of the review the comment is under ("Abstract", "Round 2").
+      // The split takes that label off its line, so it is shown and kept here.
+      const section = el("input", {
+        type: "text",
+        class: "review-section",
+        placeholder: "Section (optional)",
+      });
+      section.value = c.section ?? "";
+      section.addEventListener("input", () => (c.section = section.value));
       // L5: what the comment asks for, one per line (empty after a regex split).
       const reqs = el("textarea", {
         rows: "2",
@@ -146,7 +155,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         state.draft.splice(i, 1);
         render();
       });
-      box.append(el("div", { class: "review-draft-row" }, ref, body, reqs, drop));
+      box.append(el("div", { class: "review-draft-row" }, ref, section, body, reqs, drop));
     });
     $("review-draft-actions").hidden = state.draft.length === 0;
   }
@@ -423,6 +432,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           propose,
           preview,
         ),
+        c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
         reqs,
         saveReqs,
@@ -654,6 +664,9 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           ref: c.ref,
           reviewer,
           text: c.text.trim(),
+          // Always sent: "" for an empty field clears a label stored by an
+          // earlier save (a missing key would keep it).
+          section: (c.section ?? "").trim(),
           requirements: requirementsFromText(c.requirementsText),
         };
       });

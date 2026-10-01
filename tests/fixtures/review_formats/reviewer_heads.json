@@ -1,0 +1,233 @@
+{
+  "family": "reviewer_heads",
+  "cases": [
+    {
+      "name": "hash number",
+      "kind": "positive",
+      "text": "Reviewer #1\n1. Add units.\n2. State n.\n\nReviewer #2\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"]
+    },
+    {
+      "name": "number colon",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 2:\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"]
+    },
+    {
+      "name": "colon number with stock label lines (ScholarOne)",
+      "kind": "positive",
+      "text": "Reviewer: 1\n\nComments to the Author\n1. Add units.\n2. State n.\n\nReviewer: 2\n\nComments to the Author\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "R1.1": "Add units."
+      }
+    },
+    {
+      "name": "upper case",
+      "kind": "positive",
+      "text": "REVIEWER 1\n1. Add units.\n2. State n.\n\nREVIEWER 2\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"]
+    },
+    {
+      "name": "referee and referee hash",
+      "kind": "positive",
+      "text": "Referee 1\n1. Add units.\n2. State n.\n\nReferee #2\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"]
+    },
+    {
+      "name": "letters A and B map to 1 and 2",
+      "kind": "positive",
+      "text": "Reviewer A\n1. Add units.\n2. State n.\n\nReviewer B\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"]
+    },
+    {
+      "name": "anonymous in brackets",
+      "kind": "positive",
+      "text": "Reviewer 2 (Anonymous)\n1. Add units.\n2. State n.",
+      "refs": ["R2.1", "R2.2"]
+    },
+    {
+      "name": "remarks to the author in brackets (Nature)",
+      "kind": "positive",
+      "text": "Reviewer #1 (Remarks to the Author):\n1. Add units.\n2. State n.\n\nReviewer #2 (Remarks to the Author):\nThe study is sound. Please add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "R2.1": "The study is sound. Please add error bars."
+      }
+    },
+    {
+      "name": "unnumbered ScholarOne label before a numbered head",
+      "kind": "positive",
+      "text": "Reviewer(s)' Comments to Author:\n\nReviewer: 1\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"]
+    },
+    {
+      "name": "unnumbered ScholarOne label alone is reviewer 1",
+      "kind": "positive",
+      "text": "Reviewer(s)' Comments to Author:\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"]
+    },
+    {
+      "name": "report suffix and round line (MDPI)",
+      "kind": "positive",
+      "text": "Round 1\n\nReviewer 1 Report\n1. Add units.\n2. State n.\n\nReviewer 2 Report\n1. Add error bars.",
+      "refs": ["E.1", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "Round 1"
+      }
+    },
+    {
+      "name": "comments from reviewer",
+      "kind": "positive",
+      "text": "Comments from Reviewer 2\n1. Add units.\n2. State n.",
+      "refs": ["R2.1", "R2.2"]
+    },
+    {
+      "name": "report of reviewer",
+      "kind": "positive",
+      "text": "Report of Reviewer 1\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"]
+    },
+    {
+      "name": "Korean simsawiwon",
+      "kind": "positive",
+      "text": "\uc2ec\uc0ac\uc704\uc6d0 1\n1. \ub2e8\uc704\ub97c \ud45c\uae30\ud574 \uc8fc\uc2ed\uc2dc\uc624.\n2. \ubc18\ubcf5 \uc218\ub97c \uba85\uc2dc\ud574 \uc8fc\uc2ed\uc2dc\uc624.\n\n\uc2ec\uc0ac\uc704\uc6d0 2\n1. \uc624\ucc28 \ub9c9\ub300\ub97c \ucd94\uac00\ud574 \uc8fc\uc2ed\uc2dc\uc624.",
+      "refs": ["R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "R2.1": "\uc624\ucc28 \ub9c9\ub300\ub97c \ucd94\uac00\ud574 \uc8fc\uc2ed\uc2dc\uc624."
+      }
+    },
+    {
+      "name": "Korean simsaja with colon",
+      "kind": "positive",
+      "text": "\uc2ec\uc0ac\uc790 1:\n1. Add units.\n2. State n.\n\n\uc2ec\uc0ac\uc790 2:\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"]
+    },
+    {
+      "name": "Korean reviewer loanword",
+      "kind": "positive",
+      "text": "\ub9ac\ubdf0\uc5b4 1\n1. Add units.\n2. State n.\n\n\ub9ac\ubdf0\uc5b4 2\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"]
+    },
+    {
+      "name": "Korean head with particle and label",
+      "kind": "positive",
+      "text": "\uc2ec\uc0ac\uc704\uc6d0 1\uc758 \uc758\uacac\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"]
+    },
+    {
+      "name": "text after the head colon is the preamble",
+      "kind": "positive",
+      "text": "Reviewer 1: Please report the sample size.\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.0": "Please report the sample size."
+      }
+    },
+    {
+      "name": "dash and stock label",
+      "kind": "positive",
+      "text": "Reviewer #3 - Comments to the Author\n1. Add units.\n2. State n.",
+      "refs": ["R3.1", "R3.2"]
+    },
+    {
+      "name": "reviewer word then prose",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer 2 raised the same point, which I support.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer 2 raised the same point, which I support."
+      }
+    },
+    {
+      "name": "reviewer letter then prose",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer A suggested a different control in the first round.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer A suggested a different control in the first round."
+      }
+    },
+    {
+      "name": "plural reviewers",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewers 1 and 2 both asked for this analysis.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewers 1 and 2 both asked for this analysis."
+      }
+    },
+    {
+      "name": "possessive after the number",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReferee 2's comment about the controls is also valid.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReferee 2's comment about the controls is also valid."
+      }
+    },
+    {
+      "name": "report of reviewer in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReport of Reviewer 1 was more critical than this one.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReport of Reviewer 1 was more critical than this one."
+      }
+    },
+    {
+      "name": "Korean counter after the number",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\n\uc2ec\uc0ac\uc704\uc6d0 1\uba85\uc774 \uc9c0\uc801\ud55c \ubc14\uc640 \uac19\uc774 \ub2e8\uc704\uac00 \ube60\uc838 \uc788\uc2b5\ub2c8\ub2e4.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\n\uc2ec\uc0ac\uc704\uc6d0 1\uba85\uc774 \uc9c0\uc801\ud55c \ubc14\uc640 \uac19\uc774 \ub2e8\uc704\uac00 \ube60\uc838 \uc788\uc2b5\ub2c8\ub2e4."
+      }
+    },
+    {
+      "name": "two reviewers in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer 1 and Reviewer 2 agree on this point.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer 1 and Reviewer 2 agree on this point."
+      }
+    },
+    {
+      "name": "reviewer comments in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer comments are addressed only in part.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer comments are addressed only in part."
+      }
+    },
+    {
+      "name": "lower-case letter is not a reviewer",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nReviewer a) and b) of the first round apply here.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nReviewer a) and b) of the first round apply here."
+      }
+    },
+    {
+      "name": "round in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nRound 2 of review should check the units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nRound 2 of review should check the units."
+      }
+    },
+    {
+      "name": "comments from reviewer in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nComments from Reviewer 2 were not shared with me.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nComments from Reviewer 2 were not shared with me."
+      }
+    }
+  ]
+}

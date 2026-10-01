@@ -1,0 +1,293 @@
+{
+  "family": "comment_heads",
+  "cases": [
+    {
+      "name": "number dot",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n3. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "number bracket",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1) Add units.\n2) State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "number in brackets",
+      "kind": "positive",
+      "text": "Reviewer 1:\n(1) Add units.\n(2) State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "Comment n colon",
+      "kind": "positive",
+      "text": "Reviewer 1:\nComment 1: Add units.\nComment 2: State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "Comment hash n",
+      "kind": "positive",
+      "text": "Reviewer 1:\nComment #1 Add units.\nComment #2 State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "Point n",
+      "kind": "positive",
+      "text": "Reviewer 1:\nPoint 1. Add units.\nPoint 2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "Q n",
+      "kind": "positive",
+      "text": "Reviewer 1:\nQ1. Add units.\nQ2: State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "C n colon",
+      "kind": "positive",
+      "text": "Reviewer 1:\nC1: Add units.\nC2: State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "R reviewer dot n without a reviewer head",
+      "kind": "positive",
+      "text": "R1.1: Add units.\nR1.2: State n.\nR2.1: Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "R2.1": "Add error bars."
+      }
+    },
+    {
+      "name": "R reviewer dash n without a reviewer head",
+      "kind": "positive",
+      "text": "R1-1: Add units.\nR1-2: State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "1a and 1b stay in comment 1",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Revise the Methods.\n1a. Add units.\n1b. State n.\n2. Add error bars.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Revise the Methods.\n1a. Add units.\n1b. State n."
+      }
+    },
+    {
+      "name": "lettered and roman sub-items stay inside",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Revise the Methods.\na) Add units.\nb) State n.\n2. Revise Fig. 2.\ni. Add error bars.\nii. Add a scale bar.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Revise the Methods.\na) Add units.\nb) State n.",
+        "R1.2": "Revise Fig. 2.\ni. Add error bars.\nii. Add a scale bar."
+      }
+    },
+    {
+      "name": "hyphen bullets",
+      "kind": "positive",
+      "text": "Reviewer 1:\n- Add units.\n- State n.\n- Add error bars.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "round bullets",
+      "kind": "positive",
+      "text": "Reviewer 1:\n\u2022 Add units.\n\u2022 State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "star bullets",
+      "kind": "positive",
+      "text": "Reviewer 1:\n* Add units.\n* State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "line and page heads keep their location",
+      "kind": "positive",
+      "text": "Reviewer 1:\nLine 123: the unit is missing.\nL130: typo in the strain name.\nPage 3, line 45: add a reference.\nLines 50-52: unclear.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.1": "Line 123: the unit is missing.",
+        "R1.2": "L130: typo in the strain name.",
+        "R1.3": "Page 3, line 45: add a reference.",
+        "R1.4": "Lines 50-52: unclear."
+      }
+    },
+    {
+      "name": "paragraphs separated by blank lines (weak split)",
+      "kind": "positive",
+      "strong": false,
+      "text": "Reviewer 1:\nThe units are missing in Table 1.\nPlease add them.\n\nThe number of replicates is not stated.\n\nPlease add error bars.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "The units are missing in Table 1.\nPlease add them.",
+        "R1.3": "Please add error bars."
+      }
+    },
+    {
+      "name": "Korean comment head",
+      "kind": "positive",
+      "text": "\uc2ec\uc0ac\uc704\uc6d0 1\n\uc758\uacac 1: \ub2e8\uc704\ub97c \ud45c\uae30\ud574 \uc8fc\uc2ed\uc2dc\uc624.\n\uc758\uacac 2: \ubc18\ubcf5 \uc218\ub97c \uba85\uc2dc\ud574 \uc8fc\uc2ed\uc2dc\uc624.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "\ub2e8\uc704\ub97c \ud45c\uae30\ud574 \uc8fc\uc2ed\uc2dc\uc624."
+      }
+    },
+    {
+      "name": "marker alone on its line",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1.\nAdd units.\n2.\nState n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "numbered list inside a Comment-head block",
+      "kind": "trap",
+      "text": "Reviewer 1:\nComment 1: Revise the Methods.\n  1. Add units.\n  2. State n.\nComment 2: Add error bars.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Revise the Methods.\n  1. Add units.\n  2. State n."
+      }
+    },
+    {
+      "name": "bullets inside a numbered comment",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Revise the Methods.\n- Add units.\n- State n.\n2. Add error bars.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Revise the Methods.\n- Add units.\n- State n."
+      }
+    },
+    {
+      "name": "lettered items alone are not comment heads",
+      "kind": "trap",
+      "strong": false,
+      "text": "Reviewer 1:\na) Add units.\nb) State n.",
+      "refs": ["R1.1"],
+      "texts": {
+        "R1.1": "a) Add units.\nb) State n."
+      }
+    },
+    {
+      "name": "Q10 is not a Q head",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nQ10 values were not reported.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nQ10 values were not reported."
+      }
+    },
+    {
+      "name": "C3 is not a C head",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nC3 plants were used as controls.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nC3 plants were used as controls."
+      }
+    },
+    {
+      "name": "R2 statistic and version are not R heads",
+      "kind": "trap",
+      "text": "Reviewer 1:\nComment 1: Add units.\nR2 = 0.95 is reported without a test.\nR2.5 of the package was used.\nComment 2: State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nR2 = 0.95 is reported without a test.\nR2.5 of the package was used."
+      }
+    },
+    {
+      "name": "line word in prose is not a line head",
+      "kind": "trap",
+      "text": "Reviewer 1:\nLine 12: add units.\nLine 30: state n.\nLine 5 of the abstract is also unclear.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.2": "Line 30: state n.\nLine 5 of the abstract is also unclear."
+      }
+    },
+    {
+      "name": "page footer is not a page head",
+      "kind": "trap",
+      "text": "Reviewer 1:\nLine 12: add units.\nPage 2 of 5\nLine 30: state n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Line 12: add units.\nPage 2 of 5"
+      }
+    },
+    {
+      "name": "indented bullets are sub-items",
+      "kind": "trap",
+      "text": "Reviewer 1:\n- Revise the Methods.\n    - Add units.\n    - State n.\n- Add error bars.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Revise the Methods.\n    - Add units.\n    - State n."
+      }
+    },
+    {
+      "name": "minus sign and significance star are not bullets",
+      "kind": "trap",
+      "text": "Reviewer 1:\n- Add units.\n-20 \u00b0C storage is not described.\n*p < 0.05 is not defined.\n- State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\n-20 \u00b0C storage is not described.\n*p < 0.05 is not defined."
+      }
+    },
+    {
+      "name": "one wrapped paragraph is kept whole",
+      "kind": "trap",
+      "strong": false,
+      "text": "Reviewer 1:\nThe units are missing in Table 1\nand the replicates are not stated.",
+      "refs": ["R1.1"]
+    }
+  ]
+}
