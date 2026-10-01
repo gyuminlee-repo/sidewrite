@@ -63,6 +63,11 @@ SENT_ABBREV = {'al', 'fig', 'figs', 'vs', 'eg', 'ie', 'ca', 'approx', 'no', 'nos
 RESCUE_MIN_RATIO = 0.60        # min word-token ratio to re-pair a moved (cross-block) baseline/clean paragraph pair (--rescue-ratio)
 EQ_ANCHOR_WEIGHT = 1.0         # weight of an exact-match anchor when it competes with rescued pairs (crossing anchors)
 SHORT_PARA_CHARS = 80          # a wholly struck baseline paragraph shorter than this (heading) keeps its own line
+# A break is one character of the paragraph text, so that the diff sees it. Each kind has its own character; all of
+# them are white space to the tokenizer and none of them can stand in the text of an XML file.
+BREAK_CHARS = {'\n': {}, '\f': {'type': 'page'}, '\x1d': {'type': 'column'},
+               '\x1c': {'clear': 'left'}, '\x1e': {'clear': 'right'}, '\x1f': {'clear': 'all'}}
+PAGE_BREAKS = '\f\x1d'            # page and column breaks: never written as deleted text (a struck break still breaks the page)
 SEP_CHAR = '\v'                # text form of the struck line break that separates baseline paragraphs inside one paragraph
 ABSORB_MIN_DICE = 0.25         # min content-word Dice for an unmatched neighbouring baseline paragraph to be struck inside a rewritten clean paragraph (--absorb)
 STOPWORDS = frozenset('the a an of and or to in on for with by from as at is are was were be been this that these those it its which who whom into than then also both each per not no'.split())
@@ -218,6 +223,14 @@ def accept_revisions(xml):
 
 
 # ---------------------------------------------------------------- paragraph reading
+def break_char(br):
+    """The character that stands for a w:br: by type (page, column) and, for a line break, by its clear attribute.
+    clear="none" is the default and reads like no attribute."""
+    kind, clear = br.get(q('type')), br.get(q('clear'))
+    want = {'type': kind} if kind in ('page', 'column') else {'clear': clear} if clear in ('left', 'right', 'all') else {}
+    return next(c for c, attrs in BREAK_CHARS.items() if attrs == want)
+
+
 class Para:
     """Text of a paragraph with per-character format handles (key, rPr element, hyperlink element)."""
     def __init__(self):
@@ -253,12 +266,9 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
             elif t == 'tab':
                 s = '\t'
             elif t == 'br':
-                if ch.get(q('type')) in ('page', 'column'):
-                    s = '\f'
-                elif ch.get(q('clear')) == 'none':  # separator written by this tool (see make_run)
+                s = break_char(ch)
+                if s == '\n' and ch.get(q('clear')) == 'none':  # separator written by this tool (see make_run)
                     s = SEP_CHAR
-                else:
-                    s = '\n'
             else:
                 para.special[t] += 1
                 continue
@@ -365,13 +375,13 @@ def diff_ops(bt, ct, merge_gap=None):
 
 
 def segments(ops, b, c):
-    """Turn ops into merged segments [(kind, text, key, rpr, link)]; deleted text never keeps a hyperlink or \\f."""
+    """Turn ops into merged segments [(kind, text, key, rpr, link)]; deleted text never keeps a hyperlink or a page or column break."""
     segs = []
     for kind, s, e in ops:
         src = b if kind == 'del' else c
         for i in range(s, e):
             ch = src.text[i]
-            if kind == 'del' and ch == '\f':
+            if kind == 'del' and ch in PAGE_BREAKS:
                 continue
             key, rpr, link = src.fmt[i]
             link = None if kind == 'del' else link
@@ -418,16 +428,15 @@ def make_run(kind, text, rpr, styles):
     if len(new):
         r.append(new)
     ttag = 'delText' if (tc and kind == 'del') else 't'
-    for part in re.split('([\t\n\f%s])' % SEP_CHAR, text):
+    for part in re.split('([\t%s%s])' % (''.join(BREAK_CHARS), SEP_CHAR), text):
         if part == '':
             continue
         if part == '\t':
             r.append(etree.Element(q('tab')))
-        elif part == '\n':
-            r.append(etree.Element(q('br')))
-        elif part == '\f':
+        elif part in BREAK_CHARS:
             br = etree.SubElement(r, q('br'))
-            br.set(q('type'), 'page')
+            for k, v in BREAK_CHARS[part].items():
+                br.set(q(k), v)
         elif part == SEP_CHAR:
             br = etree.SubElement(r, q('br'))
             br.set(q('clear'), 'none')
@@ -1234,6 +1243,11 @@ def read_only(p, kind):
     return read_para(p, lambda r: False, side=kind)
 
 
+def no_page_breaks(text):
+    """Text without its page and column breaks (deleted ones are not written, so the reject side is compared without them)."""
+    return ''.join(ch for ch in text if ch not in PAGE_BREAKS)
+
+
 def nonempty(texts):
     """Drop empty entries."""
     return [t for t in texts if t]
@@ -1294,10 +1308,10 @@ def verify(marked_xml, base_xml, clean_xml):
     """Paragraph-level two-way restoration and colour checks; returns dict with counts and failure list."""
     m, b, c = (etree.fromstring(x) for x in (marked_xml, base_xml, clean_xml))
     acc = nonempty([read_accept(p).text for p in para_list(m)])
-    orig_raw = nonempty([read_reject(p).text.replace('\f', '') for p in para_list(m)])
+    orig_raw = nonempty([no_page_breaks(read_reject(p).text) for p in para_list(m)])
     orig = nonempty([t.replace(SEP_CHAR, '') for t in orig_raw])
     new = nonempty([read_para(p, lambda r: False).text for p in para_list(c)])
-    old = nonempty([read_para(p).text.replace('\f', '') for p in para_list(b)])
+    old = nonempty([no_page_breaks(read_para(p).text) for p in para_list(b)])
     fails = []
     if len(acc) != len(new):
         fails.append('accept-all == clean: paragraph count %d vs %d' % (len(acc), len(new)))

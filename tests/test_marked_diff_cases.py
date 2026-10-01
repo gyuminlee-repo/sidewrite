@@ -519,5 +519,51 @@ class Bookmarks(Case):
         self.assertNotIn("WARNING", log)
 
 
+def with_break(attrs):
+    """edit(document): put a break with these attributes between two runs of paragraph 1."""
+
+    def edit(d):
+        p = d.paragraphs[1]
+        run = el("w:r")
+        run.append(el("w:br", **attrs))
+        p._p.append(run)
+        p.add_run("More text after the break.")
+
+    return edit
+
+
+class BreakKinds(Case):
+    """A break in a rewritten paragraph stays the break it was: line, page, column, with its clear attribute."""
+
+    KINDS = (
+        ({}, "<w:br/>"),
+        ({"type": "page"}, '<w:br w:type="page"/>'),
+        ({"type": "column"}, '<w:br w:type="column"/>'),
+        ({"clear": "all"}, '<w:br w:clear="all"/>'),
+        ({"clear": "left"}, '<w:br w:clear="left"/>'),
+        ({"type": "textWrapping", "clear": "right"}, '<w:br w:clear="right"/>'),
+    )
+
+    def test_a_break_keeps_its_kind_when_a_word_of_the_paragraph_changes(self):
+        for attrs, written in self.KINDS:
+            base = self.doc([P1, P2], with_break(attrs))
+            clean = self.doc([P1, P2_NEW], with_break(attrs))
+            for mode in ("color", "track_changes"):
+                with self.subTest(attrs=attrs, mode=mode):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    xml = doc_xml(out)
+                    self.assertEqual(xml.count("<w:br"), 1, xml[xml.index("<w:body"):][:900])
+                    self.assertIn(written, xml)
+
+    def test_a_break_of_another_kind_is_a_change(self):
+        base = self.doc([P1, P2], with_break({"type": "page"}))
+        clean = self.doc([P1, P2], with_break({"type": "column"}))
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertEqual(code, 0, log)
+        self.assertIn('<w:br w:type="column"/>', doc_xml(out))
+        self.assertGreater(summary["insert_runs"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
