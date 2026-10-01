@@ -634,6 +634,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           ref: c.ref,
           reviewer,
           text: c.text.trim(),
+          ...(c.section && { section: c.section }),
           requirements: requirementsFromText(c.requirementsText),
         };
       });

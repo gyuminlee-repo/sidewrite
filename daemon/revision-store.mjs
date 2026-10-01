@@ -106,6 +106,9 @@ const Comment = z.object({
   ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
   reviewer: z.number().int().nonnegative(),
   text: z.string(),
+  // Label of the part of the review the comment is in ("Minor comments"),
+  // from the split. Refs do not carry it: numbers go on across sections.
+  section: z.string().optional(),
   requirements: z.array(Requirement).default([]),
   status: z.enum(["pending", "in_progress", "done"]).default("pending"),
   changes: z.array(ChangeSchema).default([]),
@@ -298,10 +301,12 @@ export function replaceComments(rev, incoming, keep = new Set()) {
     if (seen.has(c.ref)) throw new Error(`Duplicate comment ref ${c.ref}`);
     seen.add(c.ref);
     const old = findComment(rev, c.ref);
+    const section = c.section ?? old?.section;
     list.push({
       ref: c.ref,
       reviewer: c.reviewer,
       text: c.text,
+      ...(section && { section }),
       requirements: Array.isArray(c.requirements)
         ? numberRequirements(old?.requirements ?? [], c.requirements, [`q${requirementSeq(old)}`])
         : clone(old?.requirements ?? []),

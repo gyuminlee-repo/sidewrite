@@ -13,15 +13,39 @@
 
 import { numberRequirements } from "./revision-store.mjs";
 
-// Defaults are stricter than the plain design patterns so body lines do not
-// start a new comment: "Reviewer 2 raised the same point" (reviewer word at
-// line start, followed by prose), "Q10 values" (temperature coefficient),
-// "3.5 mM" (decimal at line start).
+// Head patterns, one regex source per kind; a profile may replace any of
+// them. The first capture group of reviewerHead is the reviewer (a number, or
+// one capital letter: A is 1), of commentHead and listItem the comment number,
+// of sectionHead the section label. Defaults are stricter than the plain
+// design patterns so body lines do not start a new comment: "Reviewer 2
+// raised the same point" (reviewer word at line start, followed by prose),
+// "Q10 values" (temperature coefficient), "3.5 mM" (decimal at line start),
+// "2019. The" (a year), "Line 5 of the abstract" (no mark after the number),
+// "-20 °C" and "*p < 0.05" (no space after the sign).
+// The layouts covered are listed with their expected split in
+// tests/fixtures/review_formats.
 export const DEFAULT_PATTERNS = {
-  reviewerHead: String.raw`^\s*Reviewer\s*#?\s*(\d+)\b\s*(?:[:.)\-].*)?$`,
-  commentHead: String.raw`^\s*(?:(?:Comment|Point)\s*#?\s*(\d+)\b|Q\s*#?\s*(\d+)\s*[:.)])`,
-  listItem: String.raw`^\s*(\d+)[.)]\s`,
+  reviewerHead: String.raw`^\s*(?:(?:Comments?|Reports?|Remarks?)\s+(?:from|of|by)\s+(?:the\s+)?)?(?:Reviewer|Referee|심사\s*위원|심사자|리뷰어)\s*(?:#|No\.?|:)?\s*(\d+|[A-Z])(?:\s*\([^)]*\))?(?:\s*(?:Report|Comments?|Remarks?|의\s*의견|의견))?\s*(?:[:.)\-–].*)?$`,
+  editorHead: String.raw`^\s*(?:(?:(?:Comments?|Remarks?)\s+(?:from|of|by)\s+(?:the\s+)?)?(?:(?:Associate|Academic|Handling|Guest|Section|Managing|Senior|Deputy|Chief)\s+)?Editors?(?:-in-Chief|\s+in\s+Chief)?(?:['’]s?)?(?:\s+and\s+(?:the\s+)?(?:Reviewers?|Referees?)['’]?)?(?:\s+(?:Comments?|Remarks?|Decision|Report|Letter))?(?:\s+(?:to|for)\s+(?:the\s+)?Authors?)?|편집\s*위원장?(?:\s*의?\s*의견)?|편집장(?:\s*의?\s*의견)?)\s*(?=:|$)`,
+  sectionHead: String.raw`^\s*(?:(?:\d+|[IVX]+|[A-Z])[.)]\s+)?((?:Major|Minor|Specific|General|Other|Additional|Detailed|Technical|Main|Editorial|Further)\s+(?:comments?|points?|issues?|concerns?|remarks?|suggestions?|questions?|corrections?)|Major|Minor|주요\s*(?:의견|지적\s*사항|사항)|세부\s*(?:의견|사항)|일반\s*(?:의견|사항)|기타\s*(?:의견|사항)|총평|종합\s*의견|추가\s*의견)\s*(?:[:.]\s*$|:|$)`,
+  commentHead: String.raw`^\s*(?:(?:Comment|Point)\s*#?\s*(\d+)\b|(?:의견|질의|지적\s*사항)\s*(\d+)\s*(?:[:.)]|$)|[QC]\s*#?\s*(\d+)\s*[:.)]|R\s*\d+\s*[.\-]\s*(\d+)\s*(?:[:.)]|$))`,
+  listItem: String.raw`^\s*\(?(\d{1,3})[.)](?:\s|$)`,
+  lineHead: String.raw`^\s*(?:(?:Page|pp?\.)\s*\d+\s*[,;]?\s*)?(?:Lines?|ll?)\.?\s*\d+(?:\s*[-–~]\s*\d+)?\s*(?:[:,.)\-–]|$)|^\s*(?:Page|pp?\.)\s*\d+\s*[:,)\-–]`,
+  bullet: String.raw`^\s*[-*•–●◦·▪]\s+(?=\S)`,
 };
+
+function compile(patterns) {
+  const p = { ...DEFAULT_PATTERNS, ...patterns };
+  return {
+    reviewer: new RegExp(p.reviewerHead, "id"),
+    editor: new RegExp(p.editorHead, "i"),
+    section: new RegExp(p.sectionHead, "i"),
+    comment: new RegExp(p.commentHead, "i"),
+    list: new RegExp(p.listItem),
+    line: new RegExp(p.lineHead, "i"),
+    bullet: new RegExp(p.bullet),
+  };
+}
 
 function firstNumber(m) {
   for (let i = 1; i < m.length; i++) if (m[i] !== undefined) return Number(m[i]);
@@ -30,107 +54,331 @@ function firstNumber(m) {
 
 const HEAD_TRIM = /^[\s:.)\-]+/;
 
-// A journal's own label on the reviewer head line, not the reviewer's words.
-const STOCK_LABEL = /^(?:comments?|remarks?)\s+(?:to|for)\s+(?:the\s+)?(?:authors?|editors?)\W*$/i;
+// A journal's own label on or under a head line, not the reviewer's words.
+const STOCK_LABEL =
+  /^(?:(?:review(?:er)?\s+)?(?:reports?|comments?|remarks?)(?:\s+and\s+suggestions)?(?:\s+(?:to|for)\s+(?:the\s+)?(?:authors?|editors?))?|의\s*의견|의견)[^\w가-힣]*$/i;
+
+// "Reviewer(s)' Comments to Author:" (ScholarOne): reviewers start, no number.
+const ANON_REVIEWER =
+  /^\s*(?:Reviewer|Referee)s?(?:\(s\))?['’]?s?\s+(?:Comments?|Reports?)(?:\s+(?:to|for)\s+(?:the\s+)?Authors?)?\s*:?\s*$/i;
+
+// A comment marker "R2.3": its reviewer, used when the review has no reviewer head.
+const R_MARK = /^\s*R\s*(\d+)\s*[.\-]\s*\d+/i;
+
+// A letter closing on its own line, and the first words of a portal footer.
+const CLOSING =
+  /^\s*(?:(?:yours\s+)?(?:sincerely|faithfully|truly)(?:\s+yours)?|(?:with\s+)?(?:best|kind|warm)(?:est)?\s+(?:regards|wishes)|regards)\s*[,.]?\s*$/i;
+const FOOTER =
+  /^\s*(?:In compliance with data protection regulations|This (?:e-?mail|message) (?:and any|is intended|was sent|has been sent)|To ensure this e-?mail|#AU_)/i;
+
+// The line before ends inside a sentence that goes on with a number
+// ("... in Table" / "2. The legend"), so the number starts no comment.
+const WRAP_END =
+  /(?:\b(?:Figs?|Figures?|Tables?|Eqs?|Equations?|Refs?|Sections?|Secs?|Supplementary|lines?|pages?|steps?|and|or|of|in|to|at|from|by|than|about|approximately|approx|for|with|the)\.?|[A-Za-z]-)\s*$/i;
+
+// A short label line of the reviewer's own ("Abstract:", "Methods:").
+const SHORT_LABEL = /^\s*([^\s:.!?,;][^:.!?,;]{0,38}):\s*$/;
+
+const QUOTE = /^\s*(?:>\s?)+/;
+
+// Full-width forms and odd spaces as ASCII, one UTF-16 unit for one, so an
+// index into the folded line is an index into the line as pasted. Only used
+// to match; the comment text keeps the pasted characters.
+const fold = (line) =>
+  line
+    .replace(/[！-～]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[   　]/g, " ");
+
+const trimHead = (raw) => raw.slice(HEAD_TRIM.exec(fold(raw))?.[0].length ?? 0);
+
+// Lines of the review. An email quote mark is taken off when every line has one.
+function sourceLines(text) {
+  const lines = String(text ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n");
+  const full = lines.filter((l) => l.trim());
+  return full.length && full.every((l) => QUOTE.test(l))
+    ? lines.map((l) => l.replace(QUOTE, ""))
+    : lines;
+}
+
+// Text after a head label on its line; a bracket ("(Anonymous)") and a stock
+// label give "".
+function labelRest(raw) {
+  const rest = trimHead(raw.replace(/^\s*\([^)]*\)/, "")).trim();
+  return STOCK_LABEL.test(fold(rest)) ? "" : rest;
+}
 
 // Text on a reviewer head line after the reviewer number ("Reviewer 1: Please
 // report n." gives "Please report n."; a stock label gives ""). The regex
 // needs the d flag.
 function reviewerRest(m, line) {
   const end = m.indices?.[1]?.[1];
-  const rest = end == null ? "" : line.slice(end).replace(HEAD_TRIM, "").trim();
-  return STOCK_LABEL.test(rest) ? "" : rest;
+  return end == null ? "" : labelRest(line.slice(end));
 }
+
+// 3 for "3", 2 for "B"; null for anything else ("a" under the i flag).
+const reviewerNumber = (s) =>
+  /^\d+$/.test(s ?? "") ? Number(s) : /^[A-Z]$/.test(s ?? "") ? s.charCodeAt(0) - 64 : null;
+
+const indent = (s) => /^\s*/.exec(s)[0].replace(/\t/g, "    ").length;
 
 export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
   return splitBlocks(text, patterns).comments;
 }
 
-// Regex split plus the refs of reviewer blocks kept whole and of kept
-// preambles. Text after a reviewer head on its line is the block's first
-// body line. A block opened by a reviewer head with body text but no comment
-// head is one comment R{reviewer}.1 (no numbered comment of that block can
-// share the ref), so a reviewer who did not number the points is not
-// dropped. When the review has a reviewer head, the text before the first
-// one (the editor letter) is one comment E.1 with reviewer 0, and a
-// reviewer preamble before the block's first comment head is R{reviewer}.0.
-// Both are kept even when they only greet; the user deletes them. Without
-// any reviewer head the text before the first comment head is dropped.
+// The regex split. Returns the comments, the refs of reviewer blocks kept
+// whole (unsplit), the kept preambles (preserved), the refs of editor text
+// after a reviewer (late), the refs split only at blank lines (weak) and
+// `over`: every line of the review without the head labels the split took
+// off, for the check of text in no comment.
+//
+// Blocks. A reviewer head opens a reviewer block, an editor head an editor
+// block. Text after a head on its line is the block's first body line. When
+// the review has a head, the text before the first one (the editor letter)
+// is one editor comment. A letter closing ("Sincerely,") or a portal footer
+// inside a reviewer block opens an editor block too, so a signature is not
+// part of the last comment. Until the next blank line a closing also keeps
+// the lines under it from being read as heads ("Editor-in-Chief").
+//
+// Comments of a block. Section heads ("Major comments", "Minor comments", a
+// short label line such as "Abstract:" before a list) cut the block into
+// parts, and each comment keeps the label of its part as `section`. In each
+// part the first kind of head that occurs splits it: "Comment n" heads, then
+// numbered items, then line or page heads, then bullets. Heads of a later
+// kind are body text, and so are lettered items ("a)", "i."), "1a.", an
+// item indented deeper than the first one, a numbered list after a line
+// that ends with a colon, a number lower than the comment before it, and a
+// number after a line that ends inside a sentence ("in Table").
+//
+// Refs. E.{k} for editor comments, k counting up in reading order.
+// R{reviewer}.{n} for reviewer comments: n is the number of the head.
+// When the numbers start again (a new section, or "1." after "3." with no
+// section head), the part goes on from the highest number so far, so
+// Major 1-3 and Minor 1-2 are R1.1 to R1.5. A head with no number (a line
+// head, a bullet, a paragraph) takes the next number. Numbers inside one
+// run are kept as written, so a doubled "Comment 1" gives a doubled ref and
+// a warning. R{reviewer}.0 is the text before the first comment of a
+// reviewer with a head; without any reviewer head that text is dropped (and
+// named by the check). A reviewer block with no head of any kind is split
+// at blank lines when it has more than one paragraph (a weak split: it does
+// not stop the model split), else kept whole as R{reviewer}.1.
 function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
-  const p = { ...DEFAULT_PATTERNS, ...patterns };
-  const reReviewer = new RegExp(p.reviewerHead, "id");
-  const reComment = new RegExp(p.commentHead, "i");
-  const reList = new RegExp(p.listItem);
-  const lines = String(text ?? "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n");
+  const re = compile(patterns);
+  const lines = sourceLines(text);
+  const over = lines.slice();
+  const txt = (i) => fold(over[i]);
+  const hasText = (idx) => idx.some((i) => over[i].trim());
 
   const blocks = [];
-  let cur = { reviewer: 1, lines: [], headed: false };
-  for (const line of lines) {
-    const m = reReviewer.exec(line);
-    if (m) {
-      blocks.push(cur);
-      const rest = reviewerRest(m, line);
-      cur = { reviewer: Number(m[1]), lines: rest ? [rest] : [], headed: true };
-    } else {
-      cur.lines.push(line);
+  let cur = { reviewer: 1, idx: [], headed: false };
+  let top = 0;
+  let reviewers = false;
+  let closed = false;
+  // An unnumbered reviewer label right before a numbered head is no block.
+  const open = (b) => {
+    if (!(cur.anon && !hasText(cur.idx) && b.numbered)) blocks.push(cur);
+    cur = b;
+    if (!b.editor) {
+      reviewers = true;
+      top = Math.max(top, b.reviewer);
     }
-  }
+  };
+  lines.forEach((line, i) => {
+    const s = fold(line);
+    if (!s.trim()) {
+      closed = false;
+      cur.idx.push(i);
+      return;
+    }
+    const m = closed ? null : re.reviewer.exec(s);
+    const number = m && reviewerNumber(m[1]);
+    const e = closed || number ? null : re.editor.exec(s);
+    const closing = CLOSING.test(s);
+    if (number) {
+      over[i] = reviewerRest(m, line);
+      open({ reviewer: number, headed: true, numbered: true, head: i, idx: [i] });
+    } else if (!closed && ANON_REVIEWER.test(s)) {
+      over[i] = "";
+      open({ reviewer: top + 1, headed: true, anon: true, head: i, idx: [i] });
+    } else if (e) {
+      over[i] = labelRest(line.slice(e[0].length));
+      open({ reviewer: 0, editor: true, headed: true, late: reviewers, head: i, idx: [i] });
+    } else if (cur.headed && !cur.editor && (closing || FOOTER.test(s))) {
+      open({ reviewer: 0, editor: true, letter: true, late: true, idx: [i] });
+      closed = closing;
+    } else {
+      if (closing) closed = true;
+      else if (cur.headed && !cur.editor && !hasText(cur.idx) && STOCK_LABEL.test(s.trim())) {
+        over[i] = "";
+      }
+      cur.idx.push(i);
+    }
+  });
   blocks.push(cur);
 
-  const out = [];
-  for (const b of blocks) {
-    if (!b.headed && blocks.length > 1) {
-      out.push({ reviewer: 0, editor: true, number: 1, lines: b.lines, kept: true });
-      continue;
-    }
-    // Explicit "Comment n" heads win; then numbered-list items are body text.
-    const head = b.lines.some((l) => reComment.test(l)) ? reComment : reList;
-    if (b.headed && b.lines.join("").trim() && !b.lines.some((l) => head.test(l))) {
-      out.push({ reviewer: b.reviewer, number: 1, lines: b.lines, whole: true });
-      continue;
-    }
+  // A short label line: after a blank line or the block head, before a head.
+  const isHead = (i) => ["comment", "list", "line", "bullet"].some((k) => re[k].test(txt(i)));
+  const shortLabel = (b, k) => {
+    const i = b.idx[k];
+    const m = i === b.head ? null : SHORT_LABEL.exec(txt(i));
+    if (!m || m[1].trim().split(/\s+/).length > 3 || isHead(i)) return null;
+    if (k > 0 && over[b.idx[k - 1]].trim()) return null;
+    const next = b.idx.slice(k + 1).find((j) => over[j].trim());
+    return next !== undefined && isHead(next) ? m[1].trim() : null;
+  };
+
+  // Heads of one part. Returns the lines before the first head and the items.
+  const partItems = (idx, mode) => {
+    const pre = [];
+    const items = [];
     let item = null;
-    let seq = 0;
-    const preamble = [];
-    for (const line of b.lines) {
-      const m = head.exec(line);
-      if (m && !item && b.headed) {
-        out.push({ reviewer: b.reviewer, number: 0, lines: preamble, kept: true });
+    let prev = 0;
+    let sub = null;
+    let topIndent = null;
+    let last = null;
+    let gap = true;
+    idx.forEach((i, k) => {
+      const s = txt(i);
+      if (!s.trim()) {
+        (item ? item.idx : pre).push(i);
+        gap = true;
+        return;
       }
-      if (m) {
-        if (item) out.push(item);
-        seq += 1;
-        item = {
-          reviewer: b.reviewer,
-          number: firstNumber(m) ?? seq,
-          lines: [line.slice(m[0].length)],
-        };
-      } else if (item) {
-        item.lines.push(line);
+      const m = re[mode].exec(s);
+      const n = m && (mode === "comment" || mode === "list") ? firstNumber(m) : null;
+      let body = !m;
+      let restart = false;
+      if (!body && (mode === "list" || mode === "bullet")) {
+        if (topIndent === null) topIndent = indent(s);
+        else if (item && indent(s) >= topIndent + 2) body = true;
+      }
+      if (!body && mode === "list" && n !== null) {
+        const before = last === null ? "" : txt(last);
+        // The same number comes again below: this one is the sub-item.
+        const later = () => idx.slice(k + 1).some((j) => Number(re.list.exec(txt(j))?.[1]) === n);
+        if (!gap && WRAP_END.test(before)) body = true;
+        else if (item && sub !== null && n === sub + 1 && (n !== prev + 1 || later())) {
+          sub = n;
+          body = true;
+        } else if (item && n === 1 && /:\s*$/.test(before)) {
+          sub = 1;
+          body = true;
+        } else if (item && n !== 1 && n <= prev) body = true;
+        else {
+          restart = !!item && n === 1;
+          sub = null;
+          prev = n;
+        }
+      }
+      if (!body) {
+        item = { n, restart, idx: [i] };
+        items.push(item);
+        if (mode !== "line") over[i] = trimHead(over[i].slice(m[0].length));
       } else {
-        preamble.push(line);
+        (item ? item.idx : pre).push(i);
+      }
+      last = i;
+      gap = false;
+    });
+    return { pre, items };
+  };
+
+  const paragraphs = (idx) => {
+    const out = [];
+    let p = null;
+    for (const i of idx) {
+      if (!over[i].trim()) p = null;
+      else if (p) p.push(i);
+      else out.push((p = [i]));
+    }
+    return out;
+  };
+
+  const blockRows = (b) => {
+    const base = b.editor ? { editor: true, late: !!b.late } : { reviewer: b.reviewer };
+    const parts = [{ idx: [] }];
+    b.idx.forEach((i, k) => {
+      const m = i === b.head ? null : re.section.exec(txt(i));
+      const label = m ? (m[1] ?? m[0]).replace(/\s+/g, " ").trim() : shortLabel(b, k);
+      if (label === null) return parts.at(-1).idx.push(i);
+      over[i] = m ? trimHead(over[i].slice(m[0].length)).trim() : "";
+      parts.push({ section: label, idx: [i] });
+    });
+    const modeOf = (p) =>
+      ["comment", "list", "line", "bullet"].find((k) => p.idx.some((i) => re[k].test(txt(i))));
+    if (!parts.some(modeOf)) {
+      if (b.editor) return [{ ...base, kept: true, idx: b.idx }];
+      const paras = parts.flatMap((p) =>
+        paragraphs(p.idx).map((idx) => ({ idx, section: p.section })),
+      );
+      if (paras.length > 1)
+        return paras.map((p, k) => ({ ...base, number: k + 1, weak: true, ...p }));
+      if (!b.headed) return [];
+      return [{ ...base, number: 1, whole: true, idx: b.idx, section: paras[0]?.section }];
+    }
+    const out = [];
+    const preamble = { ...base, number: 0, kept: true, idx: [] };
+    let max = 0;
+    for (const p of parts) {
+      const mode = modeOf(p);
+      const { pre, items } = mode ? partItems(p.idx, mode) : { pre: p.idx, items: [] };
+      if (hasText(pre)) {
+        if (out.length) out.push({ ...base, number: ++max, idx: pre, section: p.section });
+        else {
+          preamble.idx.push(...pre);
+          preamble.section ??= p.section;
+        }
+      }
+      let off = null;
+      for (const it of items) {
+        let number;
+        if (it.n === null) number = ++max;
+        else {
+          if (off === null || it.restart) off = it.n <= max ? max - it.n + 1 : 0;
+          number = it.n + off;
+          max = Math.max(max, number);
+        }
+        const r = !b.headed && mode === "comment" ? R_MARK.exec(fold(lines[it.idx[0]])) : null;
+        out.push({
+          ...base,
+          number,
+          idx: it.idx,
+          section: p.section,
+          ...(r && { reviewer: Number(r[1]) }),
+        });
       }
     }
-    if (item) out.push(item);
-  }
-  const rows = out
-    .map((c) => ({
-      whole: !!c.whole,
-      kept: !!c.kept,
+    return b.headed ? [preamble, ...out] : out;
+  };
+
+  let editors = 0;
+  const rows = blocks
+    .flatMap((b) =>
+      (!b.headed && blocks.length > 1) || b.letter
+        ? [{ editor: true, kept: true, late: !!b.late, idx: b.idx }]
+        : blockRows(b),
+    )
+    .map((r) => ({ ...r, text: trimHead(r.idx.map((i) => over[i]).join("\n")).trim() }))
+    .filter((r) => r.text)
+    .map((r) => ({
+      ...r,
       comment: {
-        ref: c.editor ? `E.${c.number}` : `R${c.reviewer}.${c.number}`,
-        reviewer: c.reviewer,
-        text: c.lines.join("\n").replace(HEAD_TRIM, "").trim(),
+        ref: r.editor ? `E.${++editors}` : `R${r.reviewer}.${r.number}`,
+        reviewer: r.editor ? 0 : r.reviewer,
+        text: r.text,
         requirements: [],
+        ...(r.section && { section: r.section }),
       },
-    }))
-    .filter((x) => x.comment.text);
+    }));
+  const refs = (key) => rows.filter((x) => x[key]).map((x) => x.comment.ref);
   return {
     comments: rows.map((x) => x.comment),
-    unsplit: rows.filter((x) => x.whole).map((x) => x.comment.ref),
+    unsplit: refs("whole"),
     preserved: rows.filter((x) => x.kept).map((x) => x.comment),
+    late: refs("late"),
+    weak: refs("weak"),
+    over,
   };
 }
 
@@ -143,6 +391,19 @@ const preservedWarnings = (comments, late = []) =>
         ? `Text before the first reviewer (usually the editor letter) is kept as ${c.ref}. Delete it if it asks for nothing.`
         : `Reviewer ${c.reviewer} text before the first numbered comment is kept as ${c.ref}. Delete it if it asks for nothing.`,
   );
+
+// refs: comments of a reviewer block with no head, split at blank lines.
+function weakWarnings(refs) {
+  const by = new Map();
+  for (const ref of refs) {
+    const n = ref.slice(1, ref.indexOf("."));
+    by.set(n, [...(by.get(n) ?? []), ref]);
+  }
+  return [...by].map(
+    ([n, list]) =>
+      `Reviewer ${n} text has no numbered comments; it was split at blank lines into ${list[0]} to ${list.at(-1)}. Join or split them by hand where a comment spans paragraphs.`,
+  );
+}
 
 const unsplitWarnings = (refs) =>
   refs.map(
@@ -183,24 +444,14 @@ const quoteUnits = (units, max = 80) =>
     .map((u) => `"${u.length > max ? `${u.slice(0, max - 3)}...` : u}"`)
     .join(", ") + (units.length > 3 ? ` and ${units.length - 3} more` : "");
 
-// Sentences of the review, without reviewer heads and comment heads (the
-// text after either on its line stays), that are inside none of the comments.
+// Sentences of the review, without the head labels the regex split takes
+// off (the text after a label on its line stays), that are inside none of
+// the comments.
 export function uncoveredText(text, comments, patterns) {
-  const p = { ...DEFAULT_PATTERNS, ...patterns };
-  const reReviewer = new RegExp(p.reviewerHead, "id");
-  const reComment = new RegExp(p.commentHead, "i");
-  const body = String(text ?? "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((l) => {
-      const r = reReviewer.exec(l);
-      if (r) return reviewerRest(r, l);
-      const m = reComment.exec(l);
-      return m ? l.slice(m[0].length).replace(HEAD_TRIM, "") : l;
-    })
-    .join("\n");
   const texts = comments.map((c) => squash(c.text));
-  return sentenceUnits(body).filter((u) => !texts.some((t) => t.includes(u)));
+  return sentenceUnits(splitBlocks(text, patterns).over.join("\n")).filter(
+    (u) => !texts.some((t) => t.includes(u)),
+  );
 }
 
 export const SPLIT_SYSTEM =
@@ -246,10 +497,7 @@ function validLabels(json, count) {
 // R{n}.0 for reviewer text before its first comment, R{n}.1 for a reviewer
 // with no comment start, otherwise the marker number or the next free one.
 function commentsFromLabels(src, labels, patterns) {
-  const p = { ...DEFAULT_PATTERNS, ...patterns };
-  const reReviewer = new RegExp(p.reviewerHead, "id");
-  const reComment = new RegExp(p.commentHead, "i");
-  const reList = new RegExp(p.listItem);
+  const { reviewer: reReviewer, comment: reComment, list: reList } = compile(patterns);
   const counts = Object.fromEntries(LINE_TYPES.map((t) => [t, 0]));
   const groups = [];
   const dropped = [];
@@ -330,8 +578,9 @@ function commentsFromLabels(src, labels, patterns) {
 
 // oneshot: (req) => Promise<{ ok, json, error }> (daemon/oneshot.mjs).
 // The regex result stands when its comment heads found more than one
-// comment; blocks kept whole and kept preambles do not count, so they cannot
-// hide a review the regex barely split. Kept-whole blocks and kept preambles
+// comment; blocks kept whole, kept preambles and comments split only at
+// blank lines do not count, so they cannot hide a review the regex barely
+// split. Kept-whole blocks and kept preambles
 // always come back as warnings.
 // A regex result ends with a check of the review text that is in no comment
 // (without a reviewer head the regex drops the text before the first comment
@@ -352,9 +601,13 @@ export async function splitReview(text, { patterns, oneshot } = {}) {
 }
 
 async function splitReviewInner(text, { patterns, oneshot } = {}) {
-  const { comments: regexOut, unsplit, preserved } = splitBlocks(text, patterns);
-  const whole = [...preservedWarnings(preserved), ...unsplitWarnings(unsplit)];
-  if (regexOut.length - unsplit.length - preserved.length > 1) {
+  const { comments: regexOut, unsplit, preserved, late, weak } = splitBlocks(text, patterns);
+  const whole = [
+    ...preservedWarnings(preserved, late),
+    ...unsplitWarnings(unsplit),
+    ...weakWarnings(weak),
+  ];
+  if (regexOut.length - unsplit.length - preserved.length - weak.length > 1) {
     return {
       method: "regex",
       comments: regexOut,
