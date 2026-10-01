@@ -255,7 +255,7 @@ test("a long guideline is asked in batches; one bad batch leaves no rule at all"
   assert.deepEqual([bad.candidates, bad.warnings], [[], [GUIDELINE_WARNING]]);
 });
 
-test("the invented guideline: twelve sentences, six counted rules, each one a sentence of the file", async () => {
+test("the invented guideline: twelve sentences, five counted rules, each one a sentence of the file", async () => {
   const guide = await readFile(new URL("./fixtures/fake_guideline.txt", import.meta.url), "utf8");
   assert.equal(splitSentences(guide).length, 12);
   const order = ["introduction", "methods", "results", "discussion"];
@@ -278,9 +278,11 @@ test("the invented guideline: twelve sentences, six counted rules, each one a se
   };
   const r = await extractGuidelineRules(guide, { oneshot: answering(labels), splitSentences });
   assert.equal(r.candidates.length, 9);
-  assert.equal(r.candidates.filter((c) => c.check.type === "count").length, 6);
-  assert.equal(r.warnings.length, 1);
-  assert.match(r.warnings[0], /s11\b/);
+  // s7 says "under 600 words": a strict limit is not turned into "at most 600".
+  assert.equal(r.candidates.filter((c) => c.check.type === "count").length, 5);
+  assert.equal(r.warnings.length, 2);
+  assert.match(r.warnings[0], /s7\b.*upper limit/);
+  assert.match(r.warnings[1], /s11\b/);
   for (const c of r.candidates) assert.ok(guide.includes(c.text));
 });
 

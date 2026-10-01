@@ -4,9 +4,10 @@
 // (the splitter is passed in), the model labels each sentence number with a
 // type and, for a countable limit, a few parameters from closed lists. A rule
 // candidate is the guideline sentence as written, and it cites that sentence.
-// A count rule whose number or section is not in its own sentence is not
-// kept as a count rule: the sentence stays as a model-checked rule and a
-// warning names it. A reply that is malformed, partial or carries any text
+// A count rule is kept only when its own sentence names the section, has
+// the number, counts the same thing with it and says in which direction the
+// number limits it; otherwise the sentence stays as a model-checked rule and
+// a warning says what was missing. A reply that is malformed, partial or carries any text
 // yields no candidate at all.
 //
 // Pure apart from the injected functions: oneshot({ system, prompt }) ->
@@ -93,18 +94,85 @@ function sentenceLabel(x) {
   ];
 }
 
-// What a count rule claims that its sentence does not say, or null.
-function unsupported(rule, sentence) {
-  if (rule.target === "section_order") {
-    const lower = sentence.toLowerCase();
-    const absent = rule.order.filter((name) => !lower.includes(name));
-    return absent.length ? `section ${absent.join(", ")}` : null;
-  }
-  const written = numbersIn(sentence);
-  for (const n of [rule.min, rule.max]) {
-    if (n !== undefined && !written.includes(n)) return `number ${n}`;
-  }
-  return null;
+// ---- what a count rule must find in its own sentence
+//
+// The number is not enough. The sentence must name the section (as a whole
+// word), the number must count the thing the rule counts ("250 words", not
+// "250 characters"; "8 figures", not "6 panels"), and the sentence must say
+// in which direction the number limits it. Whatever is not found keeps the
+// sentence as a model-checked rule, with a warning.
+
+// The words that name each section in running text.
+export const SECTION_TERMS = {
+  abstract: ["abstract", "summary"],
+  introduction: ["introduction", "background"],
+  methods: ["methods", "materials and methods", "experimental"],
+  results: ["results"],
+  discussion: ["discussion"],
+  conclusion: ["conclusion", "conclusions"],
+};
+
+// The words that name what each target counts. A number other than 1 needs
+// the plural ("6 figure panels" does not count figures).
+export const UNIT_WORDS = {
+  section_words: { plural: ["words"], singular: ["word"] },
+  keywords: { plural: ["keywords", "key words"], singular: ["keyword", "key word"] },
+  figures: { plural: ["figures"], singular: ["figure"] },
+  tables: { plural: ["tables"], singular: ["table"] },
+};
+
+// The words that say a number is an upper (max) or a lower (min) limit, the
+// number included. `before` stands right before the number ("at most 8",
+// "a maximum of 8"), `after` right after what is counted ("8 figures at
+// most."). Strict forms ("fewer than", "under", "more than") are left out on
+// purpose: they name a limit one off from the number.
+export const DIRECTION = {
+  max: {
+    before: [
+      "not exceed",
+      "no more than",
+      "not more than",
+      "at most",
+      "up to",
+      "maximum",
+      "limit",
+      "limited to",
+      "no longer than",
+      "not longer than",
+      "within",
+    ],
+    after: ["at most", "maximum", "or fewer", "or less"],
+  },
+  min: {
+    before: [
+      "at least",
+      "minimum",
+      "no fewer than",
+      "not fewer than",
+      "no less than",
+      "not less than",
+    ],
+    after: ["at least", "minimum", "or more"],
+  },
+};
+
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+const alt = (list) =>
+  [...list]
+    .sort((a, b) => b.length - a.length)
+    .map(esc)
+    .join("|");
+const wholeWord = (list, tail = "") => new RegExp(`(?<![a-z])(?:${alt(list)})${tail}(?![a-z])`);
+
+const NUMBER = /(?<![\d.,])(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?!\d|[.,]\d)/g;
+
+// The whole numbers a sentence writes in digits, with their places.
+function numberSpans(sentence) {
+  return [...String(sentence ?? "").matchAll(NUMBER)].map((m) => ({
+    value: Number(m[0].replace(/[,\s]/g, "")),
+    start: m.index,
+    end: m.index + m[0].length,
+  }));
 }
 
 // The whole numbers a sentence writes in digits. "1,000", "1 000" (also with
@@ -113,8 +181,102 @@ function unsupported(rule, sentence) {
 // ("2.5", "1,5", "1.000") is left out: it cannot be read as a whole number
 // with certainty.
 export function numbersIn(sentence) {
-  const re = /(?<![\d.,])(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?!\d|[.,]\d)/g;
-  return [...String(sentence ?? "").matchAll(re)].map((m) => Number(m[0].replace(/[,\s]/g, "")));
+  return numberSpans(sentence).map((s) => s.value);
+}
+
+const sectionNamed = (section, lower) => wholeWord(SECTION_TERMS[section], "s?").test(lower);
+
+// Does the number at `span` count the target's unit? "together" when figures
+// and tables are counted as one.
+function countsUnit(target, span, lower) {
+  const unit = UNIT_WORDS[target];
+  const after = lower.slice(span.end);
+  const units = alt(span.value === 1 ? [...unit.plural, ...unit.singular] : unit.plural);
+  const range = "(?:\\s*(?:to|and|or|-|\\u2013)\\s*(?:[a-z]+\\s+){0,3}?\\d[\\d,\\s]*)?";
+  const next = new RegExp(`^${range}(?:[\\s-]+[a-z]+)?[\\s-]+(?:${units})(?![a-z])`).exec(after);
+  if (next) {
+    const joined = /^\s*(?:and|or|&|\/)\s*(?:figures?|tables?)(?![a-z])/.test(
+      after.slice(next[0].length),
+    );
+    return joined && (target === "figures" || target === "tables") ? "together" : true;
+  }
+  // "a 250-word limit"
+  if (new RegExp(`^-(?:${alt(unit.singular)})(?![a-z])`).test(after)) return true;
+  // "The number of figures must not exceed 8."
+  const named = wholeWord([...unit.plural, ...unit.singular]).test(lower.slice(0, span.start));
+  return named && /^\s*(?:[.;,)\]]|$)/.test(after);
+}
+
+// [lower, upper] of every range the sentence writes: "4 to 6", "4-6",
+// "between 150 and 250".
+function rangesIn(spans, lower) {
+  const out = [];
+  for (let i = 0; i + 1 < spans.length; i++) {
+    const gap = lower.slice(spans[i].end, spans[i + 1].start).trim();
+    const between = gap === "and" && /(?<![a-z])between\s*$/.test(lower.slice(0, spans[i].start));
+    if ((between || ["to", "-", "\u2013"].includes(gap)) && spans[i].value < spans[i + 1].value) {
+      out.push([spans[i].value, spans[i + 1].value]);
+    }
+  }
+  return out;
+}
+
+const FILLER = /(?:[\s:(]|(?<![a-z])(?:of|a|an|the|total|is|be)(?![a-z]))*$/;
+
+// Does the sentence say that the number at `span` is a limit on `side`
+// ("max" or "min")?
+function saysLimit(side, span, spans, lower) {
+  const other = side === "max" ? "min" : "max";
+  if (rangesIn(spans, lower).some(([lo, hi]) => span.value === (side === "max" ? hi : lo))) {
+    return true;
+  }
+  const lead = lower.slice(0, span.start).replace(FILLER, "");
+  if (new RegExp(`(?<![a-z])(?:${alt(DIRECTION[side].before)})$`).test(lead)) return true;
+  const trail = new RegExp(
+    `^(?:[\\s-]+[a-z]+){0,2}\\s+(?:${alt(DIRECTION[side].after)})\\s*(?:[.;,)\\]]|$)`,
+  );
+  if (trail.test(lower.slice(span.end))) return true;
+  // One number in the sentence and words of one direction only: "The maximum
+  // length of the introduction is 600 words."
+  const has = (s) => wholeWord([...DIRECTION[s].before, ...DIRECTION[s].after]).test(lower);
+  return spans.length === 1 && has(side) && !has(other);
+}
+
+// What a count rule claims that its sentence does not say, or null.
+function unsupported(rule, sentence) {
+  const lower = sentence.toLowerCase();
+  if (rule.target === "section_order") {
+    const absent = rule.order.filter((name) => !sectionNamed(name, lower));
+    return absent.length ? `section ${absent.join(", ")} is not in the sentence` : null;
+  }
+  const spans = numberSpans(sentence);
+  for (const n of [rule.min, rule.max]) {
+    if (n !== undefined && !spans.some((s) => s.value === n)) {
+      return `number ${n} is not in the sentence`;
+    }
+  }
+  if (rule.section && !sectionNamed(rule.section, lower)) {
+    return `the section "${rule.section}" is not named in the sentence`;
+  }
+  const what = UNIT_WORDS[rule.target].plural[0];
+  for (const [side, n] of [
+    ["min", rule.min],
+    ["max", rule.max],
+  ]) {
+    if (n === undefined) continue;
+    const here = spans.filter((s) => s.value === n);
+    const counted = here.map((s) => countsUnit(rule.target, s, lower));
+    if (counted.includes("together") && !counted.includes(true)) {
+      return "the sentence counts figures and tables together";
+    }
+    const bound = here.filter((_, i) => counted[i] === true);
+    if (!bound.length) return `${n} does not count ${what} in the sentence`;
+    if (!bound.some((s) => saysLimit(side, s, spans, lower))) {
+      const limit = side === "max" ? "an upper limit" : "a lower limit";
+      return `the sentence does not say that ${n} is ${limit}`;
+    }
+  }
+  return null;
 }
 
 const none = () => ({ candidates: [], warnings: [GUIDELINE_WARNING] });
@@ -142,7 +304,7 @@ export function candidatesFromLabels(sentences, json, { offset = 0 } = {}) {
       const gap = unsupported(rule, sentence);
       if (gap) {
         warnings.push(
-          `s${offset + i + 1}: ${gap} is not in the sentence; kept as a rule the model checks, not as a count`,
+          `s${offset + i + 1}: ${gap}; kept as a rule the model checks, not as a count`,
         );
       } else {
         check = {
