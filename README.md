@@ -305,6 +305,29 @@ CC_OFFICE_SETTING_SOURCES=all CC_OFFICE_LOAD_USER_MCP=1 npm start
 
 The Review tab appends one JSON line per model decision (comment split, requirement sentence labels, LLM ledger check verdict, requirement link) to `<manuscript>.decisions.jsonl` next to the document. Each line holds a SHA-256 fingerprint of the input instead of its text, the model, a short output, and an empty `expected` field for a person to fill in later; delete the file whenever you like.
 
+### Response letter (Response tab, Word)
+
+The Response tab writes the point-by-point response letter from the review on the Review tab. The model writes only the prose of each answer. Which sentences are quoted, their section, their line numbers and every check are computed by code from the changes you accepted in Word; a change that is still pending or was rejected is not cited.
+
+1. **Responses.** One card per reviewer comment: write the answer or press Draft, and decline a comment or a single request with a reason (the letter prints the reason). A card says when changes of its comment still wait for a decision in Word.
+2. **Line numbers and checks.** "Update line numbers" has Word render the manuscript to PDF and reads the margin line numbers, so turn on continuous line numbers first (Layout > Line Numbers > Continuous). "Run checks" lists what fails (an unanswered comment, a quote that is not in the manuscript, line numbers older than the manuscript, a response-scope ledger rule) and what is only a warning.
+3. **Export.** The letter is written next to the manuscript as `<manuscript>.response.docx`, with `<manuscript>.response.model.json` (the paragraphs as written) and `<manuscript>.response.manuscript.json` (the manuscript paragraphs the quotes were checked against), and the written file is read back and verified. Plain text goes to one file per reviewer (`<manuscript>.response.R1.txt`, `.E.txt` for the editor). An existing file is never replaced: when the usual name is taken, or the file is open in Word, the export uses `-2`, `-3` and says so. While a check fails the export is held until you press "Export anyway".
+
+**Journal profile.** Frames, colours and limits of the letter come from a journal profile, a JSON file named `<name>.json`. It is looked up in this order: `journal_profiles/` next to the manuscript, the folders in `CC_OFFICE_PROFILE_DIRS`, `<CC_OFFICE_CONFIG_DIR>/journal_profiles/`, then the built-in `profiles/journal_profiles/` (`generic`, `example-elsevier`). Values of one paper (the profile name and overrides, for example the response language) are saved in `<manuscript>.revision.json` by "Save for this paper"; a `submission.json` next to the manuscript with the same two keys is the fallback. "Take colours and frames from an existing letter" reads a letter you wrote before and proposes overrides; nothing is saved until you apply them. The keys are described in `profiles/README.md`.
+
+**Language.** Responses and rationale comments are written in English unless the profile or the paper says otherwise (Response tab > Profile and language).
+
+| Variable                   | Default                   | Effect                                                                                                                               |
+| -------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `CC_OFFICE_PROFILE_DIRS`   | none                      | More profile folders, separated by `:`.                                                                                              |
+| `CC_OFFICE_PROFILE`        | `generic`                 | Profile name for a paper that names none.                                                                                            |
+| `CC_OFFICE_RATIONALE_LANG` | `English`                 | Language of the rationale comments when neither the paper nor the profile sets one.                                                  |
+| `CC_OFFICE_RESPONSE_MODEL` | `sonnet`                  | Claude model for drafting when the provider chosen in Setup is Claude and no model is picked there. Another provider is not changed. |
+| `CC_OFFICE_PYTHON`         | `python3`                 | Python executable for the letter tools.                                                                                              |
+| `CC_OFFICE_CONFIG_DIR`     | `~/.claude/office-addins` | Root of the user profile folder (`<dir>/journal_profiles`).                                                                          |
+
+**Requirements.** Python 3 on the machine the daemon runs on. Writing, reading and verifying the letter use the standard library only. Line numbers also need PyMuPDF (`pip install pymupdf`); without it the line numbers cannot be read, the line check fails, and the letter is written only with "Export anyway", without line numbers.
+
 ---
 
 ## Troubleshooting

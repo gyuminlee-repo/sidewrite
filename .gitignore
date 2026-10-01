@@ -28,3 +28,6 @@ tests/fixtures/*.comments_backup*.json
 tests/fixtures/*.response.*
 .codex-review-attempt
 __pycache__/
+
+# Words of the user's own that scripts/check-personal.sh also looks for
+.personal-patterns.local

@@ -1,0 +1,4 @@
+# Lines that scripts/check-personal.sh lets through, as fixed text matched
+# against a hit line "path:line:match". One per line, the reason above it.
+# A line with a user's own name or path does not belong here: remove the
+# value from the file instead.
