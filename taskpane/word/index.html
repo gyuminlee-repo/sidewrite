@@ -255,6 +255,35 @@
           <div class="form-error" id="context-error" hidden></div>
         </div>
 
+        <div class="setup-section" id="providers-root">
+          <h3>Providers</h3>
+          <p class="setup-help">
+            Which program proposes changes (review turns) and which one makes the short judgments
+            (splitting a review, checking requirements and the ledger). Only a provider that passed
+            its check can be chosen; the list below says why another cannot. API keys stay on this
+            computer, in the daemon's key file.
+          </p>
+          <div class="setting-row">
+            <div class="setting-text">
+              <div>Review turns</div>
+              <select id="provider-turn" class="setting-select"></select>
+              <select id="provider-turn-model" class="setting-select"></select>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-text">
+              <div>Judgments</div>
+              <select id="provider-oneshot" class="setting-select"></select>
+              <select id="provider-oneshot-model" class="setting-select"></select>
+            </div>
+          </div>
+          <div class="form-error" id="providers-message" hidden></div>
+          <div class="providers-list" id="providers-list"></div>
+          <button type="button" class="btn-secondary btn-small" id="providers-recheck">
+            Check again
+          </button>
+        </div>
+
         <div class="setup-section">
           <h3>Preferences</h3>
 

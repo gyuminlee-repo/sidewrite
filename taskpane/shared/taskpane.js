@@ -38,6 +38,7 @@ import {
   deleteToolComments,
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
+import { initProvidersPane } from "./providers-pane.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import {
   toolExcelGetSelectedRange,
@@ -127,6 +128,7 @@ let assistantTurnElem = null;
 let attachSelection = true;
 
 let reviewPane = null; // Review tab controller (Word), set in Office.onReady
+let providersPane = null; // Providers section of the Setup tab, set in Office.onReady
 
 function setComposerDisabled(disabled) {
   $send.disabled = disabled;
@@ -728,6 +730,9 @@ async function handleServerMessage(msg) {
       refreshWorkspaceFromDaemon();
       reviewPane?.reload();
       loadModelMenu();
+      // Also sends the stored provider choices again (the daemon keeps them
+      // per connection).
+      providersPane?.reload();
       break;
 
     case "transcript_replay":
@@ -1195,7 +1200,7 @@ Office.onReady((info) => {
       onTurnStarted: (note) => {
         appendNotice(note);
         const id = beginTurn();
-        setAgentStatus("working", "Proposing changes…");
+        setAgentStatus("working", providersPane?.turnLabel() ?? "Proposing changes…");
         return () => {
           if (turn.endIf(id)) setAgentStatus("idle", "Ready");
         };
@@ -1212,6 +1217,12 @@ Office.onReady((info) => {
         resolveComment: (id) => toolResolveComment({ comment_id: id, resolved: true }),
       },
     });
+  }
+
+  // Providers section of the Setup tab (the Excel page has none).
+  // Filled on welcome, which comes after the connect below.
+  if (document.getElementById("providers-root")) {
+    providersPane = initProvidersPane({ sendRequest, settings, saveSettings });
   }
 
   // Show the welcome card on first launch (per browser-storage, so it
