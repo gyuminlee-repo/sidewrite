@@ -1580,7 +1580,7 @@ test("tracked-edit context: changes recorded after the last refresh are given wi
     await t.ask("review_save_comments", { comments: COMMENTS });
     await t.ask("review_refresh", {
       snapshot: {
-        paragraphs: [{ index: 0, text: "This is a new material.", reviewed_text: null }],
+        paragraphs: [{ index: 0, id: "U0", text: "This is a new material.", reviewed_text: null }],
         comments: [],
       },
     });
@@ -1598,6 +1598,7 @@ test("tracked-edit context: changes recorded after the last refresh are given wi
     );
     const ctx = await deps.getReviewContext("R1.3");
     assert.deepEqual(ctx.paragraphs, ["This is a new material."]);
+    assert.deepEqual(ctx.paragraph_ids, ["U0"]); // for paragraph_hint
     assert.deepEqual(
       ctx.recent_changes.map((c) => [c.id, c.find, c.text]),
       [["R1.1-1", "new", "novel"]],

@@ -55,7 +55,7 @@ import {
 import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental } from "./ledger-check.mjs";
-import { snapshotTexts, outsideChanges } from "./doc-diff.mjs";
+import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
 
@@ -271,6 +271,7 @@ export function createReviewService({
           requirements: c?.requirements ?? [],
           comment_text: c?.text ?? "",
           paragraphs: rev.snapshot?.paragraphs ?? [],
+          paragraph_ids: rev.snapshot?.ids ?? null,
           recent_changes: since
             ? rev.comments
                 .flatMap((x) => x.changes)
@@ -516,7 +517,7 @@ export function createReviewService({
           next = r.revision;
           external = r.added;
         }
-        return setSnapshot(next, texts);
+        return setSnapshot(next, texts, new Date(), snapshotIds(snapshot));
       });
       for (const x of resolved) {
         forgetLate(x.tool_call_id);

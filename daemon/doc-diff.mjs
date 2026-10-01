@@ -27,6 +27,13 @@ export function snapshotTexts(snapshot) {
     .map((p) => normalizeParaText(p.reviewed_text ?? p.text));
 }
 
+// Their task pane ids in the same order (null where the pane sent none).
+export function snapshotIds(snapshot) {
+  return [...(snapshot?.paragraphs ?? [])]
+    .sort((a, b) => a.index - b.index)
+    .map((p) => p.id ?? null);
+}
+
 // Longest common subsequence of equal texts. Returns [{ old, new }] in
 // document order; old or new is null for a paragraph only on one side.
 // Paragraphs between two matches are paired in order as "modified".

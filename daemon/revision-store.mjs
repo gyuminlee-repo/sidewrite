@@ -175,7 +175,15 @@ export const RevisionSchema = z.object({
   // L4: paragraph texts (reviewed view) at the last status refresh, and the
   // changes found since then that no review change explains.
   snapshot: z
-    .object({ taken_at: z.string(), paragraphs: z.array(z.string()) })
+    .object({
+      taken_at: z.string(),
+      paragraphs: z.array(z.string()),
+      // Paragraph ids of the task pane at that refresh, same order (null per
+      // paragraph in a document with index ids; null: a file from before).
+      // A paragraph_hint of a tracked edit is one of them (review-tools.mjs
+      // editTarget).
+      ids: z.array(z.string().nullable()).nullable().default(null),
+    })
     .nullable()
     .default(null),
   external: z.array(External).default([]),
@@ -615,9 +623,13 @@ export function removeLedgerItem(rev, id) {
 
 export const EXTERNAL_KEEP = 100;
 
-export function setSnapshot(rev, paragraphs, now = new Date()) {
+export function setSnapshot(rev, paragraphs, now = new Date(), ids = null) {
   const next = clone(rev);
-  next.snapshot = { taken_at: now.toISOString(), paragraphs: [...paragraphs] };
+  next.snapshot = {
+    taken_at: now.toISOString(),
+    paragraphs: [...paragraphs],
+    ids: ids ? [...ids] : null,
+  };
   return next;
 }
 

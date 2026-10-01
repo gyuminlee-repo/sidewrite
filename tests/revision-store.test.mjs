@@ -351,7 +351,11 @@ test("L10 a changed rule drops the last check; a status patch keeps it", () => {
 
 test("L4 snapshot, outside changes with X-ids, cap and dismiss", () => {
   let rev = setSnapshot(base(), ["a", "b"], new Date("2026-04-04T00:00:00Z"));
-  assert.deepEqual(rev.snapshot, { taken_at: "2026-04-04T00:00:00.000Z", paragraphs: ["a", "b"] });
+  assert.deepEqual(rev.snapshot, {
+    taken_at: "2026-04-04T00:00:00.000Z",
+    paragraphs: ["a", "b"],
+    ids: null,
+  });
   const item = (i) => ({
     kind: "modified",
     paragraph_index: i,
@@ -587,4 +591,17 @@ test("a revision file without the counters gets them on load from every id it na
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("the snapshot keeps the paragraph ids of the task pane next to the texts", () => {
+  const at = new Date("2026-04-04T00:00:00Z");
+  let rev = setSnapshot(base(), ["a", "b"], at, ["U0", "U1"]);
+  assert.deepEqual(RevisionSchema.parse(rev).snapshot.ids, ["U0", "U1"]);
+  // Index-id documents have none; a file from before the field has null.
+  rev = setSnapshot(base(), ["a", "b"], at, [null, null]);
+  assert.deepEqual(RevisionSchema.parse(rev).snapshot.ids, [null, null]);
+  rev = setSnapshot(base(), ["a", "b"], at);
+  assert.equal(RevisionSchema.parse(rev).snapshot.ids, null);
+  const old = { ...rev, snapshot: { taken_at: at.toISOString(), paragraphs: ["a"] } };
+  assert.equal(RevisionSchema.parse(old).snapshot.ids, null);
 });

@@ -153,9 +153,11 @@ function fail(message, extra = {}) {
 // same way as an answer in time (review-service.mjs lateToolResult);
 // `attempt` is the change as it would read in the document (unknownAttempt).
 // getReviewContext returns { requirements, comment_text, paragraphs,
-// recent_changes } for the L2 sources (manuscript snapshot texts and the
-// comment), the L5 ids, and the forbid check of the text around the edit
-// (recent_changes: changes recorded since that snapshot, oldest first).
+// paragraph_ids, recent_changes } for the L2 sources (manuscript snapshot
+// texts and the comment), the L5 ids, and what is judged in the paragraph of
+// the edit before Word is called (paragraph_ids: the task pane ids of the
+// snapshot paragraphs, for paragraph_hint; recent_changes: changes recorded
+// since that snapshot, oldest first).
 // turn: { ref } of the current review turn, or null.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
@@ -189,10 +191,14 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     );
   }
 
+  // The paragraph Word will edit, when it can be told from here (editTarget).
+  const current = currentTexts(ctx.paragraphs, ctx.recent_changes);
+  const target = editTarget(current, ctx.paragraph_ids, args.find, args.paragraph_hint).index;
   // Forbid list: the new text on its own, and the paragraph as it will read
   // after the edit (a forbidden phrase formed with the words next to it).
+  // Without a known target every occurrence of `find` is tried.
   const ledger = (await deps.getLedger?.()) ?? [];
-  const around = forbidHitsAfterEdit(ledger, currentTexts(ctx.paragraphs, ctx.recent_changes), {
+  const around = forbidHitsAfterEdit(ledger, target === null ? current : [current[target]], {
     find: args.find,
     text: newText,
     kind,
@@ -221,7 +227,9 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   const lost =
     kind === "insert"
       ? []
-      : lostFacts(args.find, args.replace, { sentenceStart: startsSentence(args.find, texts) });
+      : lostFacts(args.find, args.replace, {
+          sentenceStart: startsSentence(args.find, target === null ? texts : [current[target]]),
+        });
   const unsourced =
     kind === "delete" ? [] : unsourcedTerms(newText, [...texts, ctx.comment_text ?? "", args.find]);
   const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
@@ -273,7 +281,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         tool_call_id: id,
         unknown_at: new Date().toISOString(),
         comment_text: commentText,
-        change: unknownAttempt(texts, {
+        change: unknownAttempt(current, target, {
           kind,
           find: args.find,
           text: newText,
@@ -295,6 +303,41 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   }
 }
 
+// The paragraph a tracked edit lands in, by the rule of toolTrackedEdit
+// (taskpane/shared/tools-word.js): with one hit of `find` in the document
+// that hit, the hint unread; with several hits, the paragraph the hint names
+// when it holds exactly one. tests/edit-target.test.mjs gives both sides the
+// same documents and compares the answers.
+// texts: paragraph texts in document order; ids: their task pane ids (null,
+// or null per paragraph, in a document with p<N> index ids).
+// Returns { index, code }: code is null with an index, else the error Word
+// answers with (NotFound, Ambiguous, HintNotFound) and index is null.
+export function editTarget(texts, ids, find, hint) {
+  const none = (code) => ({ index: null, code });
+  const f = String(find ?? "")
+    .replace(/\u0005/g, "")
+    .replace(/\s+/g, " ");
+  if (!f.trim()) return none("NotFound");
+  const counts = (texts ?? []).map((t) => String(t ?? "").split(f).length - 1);
+  const total = counts.reduce((a, b) => a + b, 0);
+  let index;
+  let hits = total;
+  if (total > 1 && hint) {
+    if ((ids ?? []).some((id) => id != null)) index = ids.indexOf(hint);
+    else {
+      const m = /^p(\d+)$/.exec(hint);
+      index = m && Number(m[1]) < counts.length ? Number(m[1]) : -1;
+    }
+    if (index === -1) return none("HintNotFound");
+    hits = counts[index];
+  } else {
+    index = counts.findIndex((n) => n > 0);
+  }
+  if (hits === 0) return none("NotFound");
+  if (hits > 1) return none("Ambiguous");
+  return { index, code: null };
+}
+
 // The paragraphs as they read now: the texts of the last status refresh with
 // the changes recorded since then put in (a narrowed change by the find and
 // replace the model asked for). A change whose find is not exactly once in
@@ -306,28 +349,30 @@ export function currentTexts(texts, changes) {
       .replace(/\u0005/g, "")
       .replace(/\s+/g, " ");
     if (!f.trim()) continue;
+    // The paragraph Word reported for the change; without one, the only
+    // paragraph that holds its find.
     const at = out.flatMap((t, k) => (t.includes(f) ? [k] : []));
-    if (at.length !== 1) continue;
-    const t = out[at[0]];
+    const k = at.includes(ch.paragraph_index) ? ch.paragraph_index : at.length === 1 ? at[0] : null;
+    if (k === null) continue;
+    const t = out[k];
     const i = t.indexOf(f);
     if (t.indexOf(f, i + 1) !== -1) continue;
     const cut = !ch.narrowed_from && ch.kind === "insert" ? i + f.length : i;
-    out[at[0]] =
-      t.slice(0, cut) + (ch.narrowed_from?.text ?? ch.text ?? "") + t.slice(i + f.length);
+    out[k] = t.slice(0, cut) + (ch.narrowed_from?.text ?? ch.text ?? "") + t.slice(i + f.length);
   }
   return out;
 }
 
 // The change an unanswered tracked edit would have recorded, with the
-// paragraph text it expects before and after, taken from the last status
-// refresh (texts). Without one paragraph that holds `find` once, before and
+// paragraph text it expects before and after: texts are the paragraphs as
+// they read now (currentTexts), target the index of the one Word edits
+// (editTarget) or null. Without a target that holds `find` once, before and
 // after stay empty and context null: a refresh then cannot tell whether the
 // edit is in the document (review-service.mjs resolveUnknownOverrides).
-export function unknownAttempt(texts, change) {
-  const hits = texts
-    .map((t, index) => ({ index, t, ctx: changeContext(t, change.find, { kind: change.kind }) }))
-    .filter((x) => x.ctx);
-  const one = hits.length === 1 ? hits[0] : null;
+export function unknownAttempt(texts, target, change) {
+  const t = target === null ? null : texts[target];
+  const ctx = t == null ? null : changeContext(t, change.find, { kind: change.kind });
+  const one = ctx ? { index: target, t, ctx } : null;
   let after = "";
   if (one) {
     const f = String(change.find)
