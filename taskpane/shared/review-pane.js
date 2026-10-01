@@ -137,10 +137,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         placeholder: "Section (optional)",
       });
       section.value = c.section ?? "";
-      section.addEventListener("input", () => {
-        c.section = section.value;
-        c.sectionEdited = true;
-      });
+      section.addEventListener("input", () => (c.section = section.value));
       // L5: what the comment asks for, one per line (empty after a regex split).
       const reqs = el("textarea", {
         rows: "2",
@@ -667,8 +664,9 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           ref: c.ref,
           reviewer,
           text: c.text.trim(),
-          // An emptied field is sent as "", which clears the stored label.
-          ...((c.sectionEdited || c.section) && { section: (c.section ?? "").trim() }),
+          // Always sent: "" for an empty field clears a label stored by an
+          // earlier save (a missing key would keep it).
+          section: (c.section ?? "").trim(),
           requirements: requirementsFromText(c.requirementsText),
         };
       });

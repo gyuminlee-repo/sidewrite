@@ -171,7 +171,9 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 //
 // Questionnaire letters. When a reviewer has more than one block and one of
 // them is only a short answer on its head line ("Reviewer #1: Partly", at
-// most 40 characters, no text under it), the longest other block of that
+// most 40 characters, no text under it, not starting with a comment head
+// that goes on with text: "1. Add units." is a comment, "3 - Partly" and "3."
+// are answers), the longest other block of that
 // reviewer is the review and the answers are form text. A block with text
 // under its head line is a review, whatever its head-line text ("Reviewer 1:
 // First round"), so two rounds of a reviewer stay reviewer comments. Form
@@ -211,8 +213,11 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // block is joined to it ("Round 2 / Minor comments"). Where the ref differs
 // from the number as written, the written number stays in the comment text.
 // Text before the first comment of a later block is a comment of its own
-// with the next number. One warning per reviewer names the blocks. Blocks
-// opened by combined heads carry their own numbers and are left as written.
+// with the next number. One warning per reviewer names the blocks. A later
+// block whose comments all keep their written numbers gets no "Block n"
+// label and no warning (one comment per head line: "Reviewer 1: 2. ...").
+// Blocks opened by combined heads carry their own numbers and are left as
+// written.
 // R{reviewer}.0 is the text before the first comment of the first block of a
 // reviewer with a head; without any reviewer head that text is dropped (and
 // named by the check). A reviewer block with no head of any kind is split
@@ -342,7 +347,18 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   // right before it is the pure answer of another reviewer: then it is the
   // last answer to a question, and the text under it is the next question
   // of a letter pasted without rule lines.
-  const short = (b) => over[b.head].trim() !== "" && over[b.head].trim().length <= 40;
+  // A head-line text that starts with a comment head and goes on with text
+  // ("1. Add units.", "(2) State n.", "- Add a control.", "Line 12: ...") is a
+  // comment of the reviewer, never an answer. A digit alone, or with anything
+  // but "." or ")" after it, is no comment head, so "3 - Partly", "1 (poor)",
+  // "4" and "3." are answers.
+  const comment = (b) =>
+    ["comment", "list", "line", "bullet"].some((k) => {
+      const m = re[k].exec(txt(b.head));
+      return m && txt(b.head).slice(m[0].length).trim() !== "";
+    });
+  const short = (b) =>
+    over[b.head].trim() !== "" && over[b.head].trim().length <= 40 && !comment(b);
   const pure = (b) => short(b) && !b.idx.some((i) => i !== b.head && over[i].trim());
   const tail = (b) => short(b) && !pure(b) && !over[b.idx[1]].trim();
   // The review among the blocks of one reviewer: the longest block that is
@@ -506,12 +522,22 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
         over[b.head] = "";
       }
     }
+    // "Block n" is only a stand-in label: it is taken back (in `done`) when
+    // every comment of the block has its number as written, so one comment
+    // per head line ("Reviewer 1: 2. State n.") is not a block of its own.
+    const standIn = later && round === null;
     if (later) {
       round ??= `Block ${nth}`;
       base.block = nth;
     }
     const sec = (label) => [round, label].filter(Boolean).join(" / ") || undefined;
     const done = (rows) => {
+      if (standIn && rows.filter((r) => hasText(r.idx)).every((r) => r.written)) {
+        for (const r of rows) {
+          r.block = undefined;
+          r.section = r.section === round ? undefined : r.section?.replace(`${round} / `, "");
+        }
+      }
       if (!b.editor) {
         tops.set(b.reviewer, Math.max(tops.get(b.reviewer) ?? 0, ...rows.map((r) => r.number)));
       }
@@ -572,11 +598,13 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
           // The number as written stays in the text where the ref differs.
           if (later && number !== it.n && it.raw !== undefined) over[it.idx[0]] = it.raw;
         }
+        const written = it.n !== null && number === it.n;
         const r = !b.headed && mode === "comment" ? R_MARK.exec(fold(lines[it.idx[0]])) : null;
         out.push({
           ...base,
           number,
           idx: it.idx,
+          written,
           section: sec(p.section),
           ...(r && { reviewer: Number(r[1]) }),
         });
