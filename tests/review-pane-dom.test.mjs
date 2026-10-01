@@ -2527,3 +2527,34 @@ test("Check revised paragraphs refreshes the status, runs the check and lists wh
   await rows[0].click();
   assert.deepEqual(selected, [2]);
 });
+
+// "Rewrite this paragraph" under a paragraph that holds three or more
+// changes: a review turn of the comment with the most changes there, told
+// which paragraph to write anew.
+test("Rewrite this paragraph starts a review turn that carries the paragraph", async () => {
+  const t = await proposeAllSetup({});
+  t.revision.consistency = {
+    checked_at: "2026-01-02T03:04:05.000Z",
+    model: null,
+    paragraphs: [{ index: 5, id: "p5", change_ids: ["R1.3-1", "R1.3-2", "R1.1-4"], many: true }],
+    findings: [],
+    warnings: [],
+  };
+  try {
+    await t.pane.reload();
+    const buttons = findAll(
+      t.$("review-consistency"),
+      (n) => n.textContent === "Rewrite this paragraph",
+    );
+    assert.equal(buttons.length, 1);
+    await buttons[0].click();
+    await t.wait();
+    const sent = t.sent.filter(([type]) => type === "review_propose").at(-1);
+    assert.deepEqual([sent[1].ref, sent[1].rewrite_paragraph, sent[1].paragraphs], ["R1.3", 5, []]);
+    t.endTurn("R1.3");
+    await t.wait();
+    await t.wait();
+  } finally {
+    await t.pane.reload();
+  }
+});

@@ -133,8 +133,8 @@ test("checkPrompt: the paragraph in a fence, its changes, the comments they answ
         "Gene A was associated with growth. The deletion was not complemented.",
         ">>>F1",
         "Changes in paragraph 2:",
-        '- R1.1-1 (for R1.1) replace "is essential for" -> "was associated with": what R1.1-1',
-        '- R2.3-1 (for R2.3) insert after "growth." -> " The deletion was not complemented.": what R2.3-1',
+        '- R1.1-1 (for R1.1) now reads "was associated with": what R1.1-1',
+        '- R2.3-1 (for R2.3) now reads " The deletion was not complemented.": what R2.3-1',
       ].join("\n"),
     ),
     prompt,
@@ -433,4 +433,111 @@ test("view: the message after a check and the lines under the button", () => {
     },
   ]);
   assert.deepEqual(view.consistencyLines(null), []);
+});
+
+// The check reads what stands: the words a change took out are not shown to
+// it (a judged run read them as if they were still claimed). Two more things
+// it looks for: a claim one change withdrew and the paragraph still makes,
+// and a sentence that rests on what an open question to the author is about.
+test("checkPrompt: no words that were taken out; the open questions; the two further kinds", async () => {
+  const { CHECK_KINDS } = await import("../daemon/paragraph-check.mjs");
+  assert.deepEqual(CHECK_KINDS, [
+    "contradiction",
+    "conflict",
+    "review_as_source",
+    "claim_left",
+    "open_question",
+  ]);
+  const rev = structuredClone(REV);
+  rev.comments[0].changes.push(change("R1.1-7", 2, "This proves the role of gene A.", ""));
+  rev.comments[1].questions = [
+    {
+      id: "a1",
+      requirement_id: null,
+      question: "Was the deletion complemented?",
+      why: "w",
+      answer: "",
+    },
+    { id: "a2", requirement_id: null, question: "Answered already?", why: "w", answer: "Yes." },
+  ];
+  const prompt = checkPrompt(paragraphsToCheck(rev), rev.comments, "F1");
+  assert.equal(
+    prompt.includes("is essential for"),
+    false,
+    "the replaced words are not in the prompt",
+  );
+  assert.equal(prompt.includes("This proves the role"), false, "nor the deleted ones");
+  assert.ok(prompt.includes("- R1.1-7 (for R1.1) took words out: what R1.1-7"));
+  assert.match(
+    prompt,
+    /Each paragraph is given as it stands when every change is accepted; words a change took out are not part of it\./,
+  );
+  assert.match(
+    prompt,
+    /"claim_left": a claim that one of the changes withdrew or weakened is still made in the same paragraph/,
+  );
+  assert.match(
+    prompt,
+    /"open_question": a sentence rests on a measurement or a value that an open question to the author is about/,
+  );
+  assert.ok(
+    prompt.includes(
+      [
+        "Open questions to the author (not answered yet):",
+        "- [R2.3 a1] Was the deletion complemented?",
+      ].join("\n"),
+    ),
+  );
+  assert.equal(prompt.includes("Answered already?"), false);
+  // Without an open question there is no such block.
+  assert.equal(
+    checkPrompt(paragraphsToCheck(REV), REV.comments, "F1").includes(
+      "Open questions to the author",
+    ),
+    false,
+  );
+  const r = readFindings(
+    { findings: [{ p: 2, kind: "claim_left", detail: "Still says essential.", change_ids: [] }] },
+    paragraphsToCheck(REV),
+  );
+  assert.equal(r.findings[0].kind, "claim_left");
+});
+
+// "Rewrite this paragraph": a review turn for the comment with the most
+// changes in the paragraph, told to write it anew with office_tracked_rewrite.
+test("rewriteNote: the instruction a rewrite turn carries, with the paragraph as it stands", async () => {
+  const { rewriteNote } = await import("../daemon/paragraph-check.mjs");
+  const note = rewriteNote(REV, 5, "R1.1", "F1");
+  assert.ok(
+    note.startsWith(
+      "[Rewrite of paragraph p5]\nThis turn does one thing. Paragraph p5 holds 3 changes (R1.1-3, R1.1-4, R1.1-6), made for R1.1.",
+    ),
+    note,
+  );
+  assert.match(
+    note,
+    /Send it with office_tracked_rewrite \(comment_ref "R1\.1", paragraph_id "p5"\)/,
+  );
+  assert.match(note, /Make no other change in this turn\./);
+  assert.ok(note.includes("<<<F1\nThe mutant grew at half the rate in all media.\n>>>F1"));
+  assert.throws(
+    () => rewriteNote(REV, 4, "R1.1", "F1"),
+    /Paragraph 4 does not hold two or more changes/,
+  );
+});
+
+test("view: a paragraph with three or more changes offers the rewrite, for the comment with the most changes there", () => {
+  const consistency = {
+    paragraphs: [
+      { index: 2, id: "p2", change_ids: ["R1.1-1", "R2.3-1"], many: false },
+      { index: 5, id: "p5", change_ids: ["R2.3-4", "R1.1-3", "R1.1-4"], many: true },
+    ],
+    findings: [],
+    warnings: [],
+  };
+  const lines = view.consistencyLines(consistency);
+  assert.deepEqual(
+    lines.map((l) => [l.paragraph_index, l.rewrite_ref ?? null]),
+    [[5, "R1.1"]],
+  );
 });

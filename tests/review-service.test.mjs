@@ -2825,3 +2825,68 @@ test("the receipt of a recorded change names the model the session runs on", asy
     await t.cleanup();
   }
 });
+
+// A rewrite turn: review_propose with rewrite_paragraph adds the instruction
+// for that paragraph to the prompt of the turn.
+test("review_propose with rewrite_paragraph: the turn is told to write that paragraph anew", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const para = (text, index) => ({
+      index,
+      id: `p${index}`,
+      text,
+      reviewed_text: text,
+      w_ins: 0,
+      w_del: 0,
+    });
+    await t.ask("review_refresh", {
+      snapshot: {
+        paragraphs: ["Title", "The culture grew fast and was held warm at 30 degrees."].map(para),
+        comments: [],
+      },
+    });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({
+        ok: true,
+        word_comment_id: 5,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      }),
+    };
+    const R = { what: "w", why: "y", addresses: "a" };
+    for (const [find, replace] of [
+      ["grew fast", "grew slowly"],
+      ["held warm", "kept warm"],
+    ]) {
+      const r = await applyTrackedEdit(
+        deps,
+        { comment_ref: "R1.1", find, replace, rationale: R },
+        { ref: "R1.1" },
+      );
+      assert.equal(r.ok, true, r.message);
+    }
+    const r = await t.ask("review_propose", { ref: "R1.1", paragraphs: [], rewrite_paragraph: 1 });
+    assert.equal(r.ok, true, r.error);
+    const text = t.pushed.at(-1).text;
+    assert.match(
+      text,
+      /\n\n\[Rewrite of paragraph p1\]\nThis turn does one thing\. Paragraph p1 holds 2 changes \(R1\.1-1, R1\.1-2\), made for R1\.1\./,
+    );
+    assert.ok(text.includes("The culture grew slowly and was kept warm at 30 degrees."));
+    assert.ok(t.lines.includes("[review] rewrite turn R1.1 paragraph=1 changes=2"));
+    // A paragraph without two changes: no turn.
+    const bad = await t.ask("review_propose", {
+      ref: "R1.1",
+      paragraphs: [],
+      rewrite_paragraph: 0,
+    });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /Paragraph 0 does not hold two or more changes/);
+  } finally {
+    await t.cleanup();
+  }
+});

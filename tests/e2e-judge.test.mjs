@@ -1979,3 +1979,35 @@ test("judge check-paragraphs: the check ran to its message, with or without prob
   assert.equal(j("review_check_paragraphs failed", true), false);
   assert.equal(j("Accepted 0, rejected 0"), false);
 });
+
+test("judge refresh: the parts of a rewrite share a comment, so changes may outnumber comments", () => {
+  const j = (message) => judge("refresh", { message }).pass;
+  assert.equal(
+    j(
+      "Accepted 0, rejected 0, edited 0, pending 6, not found 0. Changes 6, expected tool comments 3, found 3.",
+    ),
+    true,
+  );
+  assert.equal(
+    j(
+      "Accepted 0, rejected 0, edited 0, pending 6, not found 0. Changes 6, expected tool comments 3, found 2 (MISMATCH: missing R1.2-1, unrecorded -)",
+    ),
+    false,
+  );
+  assert.equal(j("Changes 2, expected tool comments 3, found 3."), false);
+});
+
+test("judge rewrite-paragraph: the turn ran and left changes marked as a rewrite", () => {
+  const ok = {
+    message: "Proposed 4 changes for R1.3. Accepted 0",
+    message_error: false,
+    comments: [{ ref: "R1.3", changes: [{ flags: ["Rewrite"] }, { flags: [] }] }],
+  };
+  assert.equal(judge("rewrite-paragraph", ok, { ref: "R1.3" }).pass, true);
+  const none = { ...ok, comments: [{ ref: "R1.3", changes: [{ flags: [] }] }] };
+  assert.equal(judge("rewrite-paragraph", none, { ref: "R1.3" }).pass, false);
+  assert.equal(
+    judge("rewrite-paragraph", { ...ok, message_error: true }, { ref: "R1.3" }).pass,
+    false,
+  );
+});
