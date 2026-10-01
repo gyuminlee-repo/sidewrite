@@ -308,6 +308,107 @@ test("sentenceAt gives the sentence that holds the offset, or null", () => {
   assert.equal(sentenceAt(t, t.length + 5), null);
 });
 
+// ---- typed list numbers and bullets in the manuscript -------------------------
+
+test("a sentence keeps the typed number or bullet in front of it, as it stands in the manuscript", () => {
+  const t = "1. Cells were kept at 30 °C overnight. 2. Samples were drawn daily.";
+  const first = "1. Cells were kept at 30 °C overnight.";
+  const second = "2. Samples were drawn daily.";
+  // Every character belongs to a sentence, the number included.
+  assert.equal(sentenceAt(t, 0), first);
+  assert.equal(sentenceAt(t, 1), first);
+  assert.equal(sentenceAt(t, t.indexOf("Cells")), first);
+  assert.equal(sentenceAt(t, t.indexOf("2.")), second);
+  assert.equal(sentenceAt(t, t.indexOf("daily")), second);
+  for (const mark of ["- ", "* ", "• ", "(a) ", "b) ", "(12) "]) {
+    const item = `${mark}Cells were kept at 30 °C.`;
+    assert.equal(sentenceAt(item, 0), item, mark);
+    assert.equal(sentenceAt(item, item.length - 1), item, mark);
+  }
+  // Without such a mark nothing changes.
+  assert.equal(sentenceAt("Cells were kept. Samples were drawn.", 0), "Cells were kept.");
+  // A unit without a letter after the last sentence stays with that sentence.
+  const tail = "Cells were kept at 30 °C. (2)";
+  assert.equal(sentenceAt(tail, tail.length - 2), tail);
+  assert.equal(sentenceAt("12.", 0), null);
+});
+
+test("a change whose range holds the list number is quoted with it", () => {
+  const cite = (text, change) =>
+    citationsFor(
+      { changes: [{ id: "R1.1-1", paragraph_index: 0, state: "accepted", ...change }] },
+      { paragraphs: [{ index: 0, text }] },
+      [],
+    ).map((c) => [c.kind, c.quote, c.problem]);
+  // The whole paragraph was replaced: no context words on either side.
+  const whole = "1. Cells were kept at 30 °C.";
+  assert.deepEqual(
+    cite(whole, {
+      kind: "replace",
+      find: "1. Cells were kept at 30 degrees.",
+      text: whole,
+      context: { left: "", right: "" },
+    }),
+    [["revised", whole, null]],
+  );
+  // The range starts at the number; the words after it are the context.
+  const text = "1. Cultures were kept at 30 °C. 2. Samples were drawn daily.";
+  assert.deepEqual(
+    cite(text, {
+      kind: "replace",
+      find: "1. Cells",
+      text: "1. Cultures",
+      context: { left: "", right: " were kept at" },
+    }),
+    [["revised", "1. Cultures were kept at 30 °C.", null]],
+  );
+  // A change inside the second item; the quote is in the paragraph letter for letter.
+  const [[, quote]] = cite(text, {
+    kind: "replace",
+    find: "taken",
+    text: "drawn",
+    context: { left: "2. Samples were ", right: " daily." },
+  });
+  assert.equal(quote, "2. Samples were drawn daily.");
+  assert.ok(text.includes(quote));
+  // The context sides of one item agree on its sentence although one lies in the number.
+  assert.equal(
+    changeOffset("1. Flasks were kept at 30 °C. 2. Samples were drawn daily.", {
+      kind: "replace",
+      find: "Cells",
+      text: "Cultures",
+      state: "user_edited",
+      context: { left: "1. ", right: " were kept at" },
+    }),
+    3,
+  );
+});
+
+test("a quote with its list number is stale once the number is gone", () => {
+  const text = "1. Cells were kept at 30 °C.";
+  const c = {
+    changes: [
+      {
+        id: "R1.1-1",
+        kind: "replace",
+        find: "degrees",
+        text: "°C",
+        state: "accepted",
+        paragraph_index: 0,
+        context: { left: "kept at 30 ", right: "" },
+      },
+    ],
+  };
+  const snapshot = { paragraphs: [{ index: 0, text }] };
+  c.response = { citations: citationsFor(c, snapshot, []) };
+  assert.equal(c.response.citations[0].quote, text);
+  assert.deepEqual(staleReasons(c, snapshot, null), []);
+  assert.deepEqual(
+    staleReasons(c, { paragraphs: [{ index: 0, text: "Cells were kept at 30 °C." }] }, null),
+    ["quote_changed"],
+  );
+});
+
 test("keepLines carries a line range over only while the quote is the same", () => {
   const old = [
     {

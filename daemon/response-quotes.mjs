@@ -136,17 +136,31 @@ export function changeOffset(text, change) {
   return places.every((p) => sentenceAt(src, p) === sentence) ? places[0] : null;
 }
 
-// The sentence of `text` that holds `offset`, or null.
-export function sentenceAt(text, offset) {
+// [{ start, end }] of the sentences of `text`, as ranges of the text itself.
+// splitSentences is the splitter for review comments: it leaves a typed list
+// number or bullet off the sentence ("1. ", "- ", "(a) ") and drops units
+// without a letter. A manuscript quote must be the manuscript's own
+// characters, so what the splitter left out in front of a sentence goes back
+// to that sentence, and what it left out after the last one to the last.
+function sentenceSpans(text) {
+  const spans = [];
   let cursor = 0;
   for (const s of splitSentences(text)) {
-    const start = text.indexOf(s, cursor);
-    if (start === -1) return null;
-    if (start > offset) return null;
-    cursor = start + s.length;
-    if (offset < cursor) return s;
+    const at = text.indexOf(s, cursor);
+    if (at === -1) return [];
+    const lead = text.slice(cursor, at).search(/\S/);
+    spans.push({ start: lead === -1 ? at : cursor + lead, end: at + s.length });
+    cursor = at + s.length;
   }
-  return null;
+  if (spans.length && /\S/.test(text.slice(cursor)))
+    spans[spans.length - 1].end = text.trimEnd().length;
+  return spans;
+}
+
+// The sentence of `text` that holds `offset`, as it stands in the text, or null.
+export function sentenceAt(text, offset) {
+  const span = sentenceSpans(text).find((s) => s.start <= offset && offset < s.end);
+  return span ? text.slice(span.start, span.end) : null;
 }
 
 // A deletion that took whole sentences: it starts where a sentence starts
