@@ -637,6 +637,7 @@ CASES = {
     "a table at the end of the document": (variant(to_end("t1")), reword("a"), None),
     "a table at the end removed": (variant(to_end("t1")), del_para("t1"), None),
     "a table moved to the end": (variant(), to_end("t1"), None),
+    "a table moved between paragraphs": (variant(), move_para("t1", "g"), None),
     "the paragraph between two tables deleted": (variant(add_table("d")), del_para("d"), None),
     "a table and the paragraph before it deleted": (variant(), both(del_para("t1"), del_para("c")), None),
     "a table added and the paragraph before it split": (variant(), both(add_table("d"), split_para("c")), None),

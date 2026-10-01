@@ -110,3 +110,47 @@ Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
 | `word-launch.ps1`    | Windows      | Word with a CDP port on its pane                                                                   |
 | `word-com.ps1`       | Windows      | accept/reject, hand edits, comments, quit                                                          |
 | `embed_taskpane.py`  | WSL          | auto-open task pane parts in a copy                                                                |
+
+## Word as the judge of the marked copy
+
+`tools/build_marked_diff.py` checks its output with its own model of "accept
+all" and "reject all". `marked-diff-word-check.mjs` asks Word instead. It needs
+no daemon, no port and no task pane.
+
+```
+node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
+```
+
+- For 40 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
+  pair covers: `PAIRS` in `marked-diff-word-lib.mjs`) it writes the baseline and
+  the clean document under `<base-dir>/mdw-<time>/pairs/<nn>/` and runs the tool
+  in both modes.
+- `marked-diff-word.ps1` starts a Word process of its own on `anchor.docx` of
+  the run folder (`/n`), finds it through the Running Object Table by that
+  path, and in that Word opens each file read-only, without a repair and
+  without dialogs. The track-changes output is opened twice: once for
+  `Revisions.AcceptAll()`, once for `Revisions.RejectAll()`. The structure is
+  read each time (the text of every paragraph, every table with its rows,
+  columns and cell texts, every bookmark with its text) and the document is
+  closed without saving. The clean and the baseline document are read the
+  same way; the colour output is opened and its paragraphs and tables counted.
+- A pair passes when Word opens every file without an error and without
+  changing it on the way in, no revision is left, accept-all equals the clean
+  document, reject-all equals the baseline, and the colour output has the
+  paragraphs and tables of the track-changes output.
+- Word is quit only when every document open in it is under the run folder;
+  the cleanup rules are those of the acceptance run above. A Word that was
+  already running is never touched.
+- `--prepare-only` writes the pairs, the tool's output and `jobs.json` and
+  stops before Word. `--only "table,break"` keeps the pairs whose name has one
+  of these texts.
+- Output: one line per pair with the first difference, `result.json` in the run
+  folder, exit code 0 only when every pair passed and the Word of the run is
+  gone.
+
+| File                         | Runs on | Does                                                                                    |
+| ---------------------------- | ------- | --------------------------------------------------------------------------------------- |
+| `marked-diff-word-check.mjs` | WSL     | the whole check                                                                         |
+| `marked-diff-word-lib.mjs`   | WSL     | the pairs, the comparison, the verdict (tests: `tests/marked-diff-word-check.test.mjs`) |
+| `marked_diff_pairs.py`       | WSL     | the docx pairs from the corpus                                                          |
+| `marked-diff-word.ps1`       | Windows | Word: open, accept or reject all, read the structure, close without saving, quit        |
