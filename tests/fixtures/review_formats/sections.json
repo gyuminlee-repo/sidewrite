@@ -253,6 +253,140 @@
       "texts": {
         "R1.1": "Two things are missing in the\nMethods:\n1. the strain\n2. the medium"
       }
+    },
+    {
+      "name": "text under two sections before the first number: one comment per section",
+      "kind": "positive",
+      "text": "Reviewer 1:\nMajor comments\nThe design is sound but under-powered.\nMinor comments\nThe figures need work.\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.0": "The design is sound but under-powered.",
+        "R1.1": "The figures need work.",
+        "R1.2": "Add units.",
+        "R1.3": "State n."
+      },
+      "sections": {
+        "R1.0": "Major comments",
+        "R1.1": "Minor comments",
+        "R1.2": "Minor comments",
+        "R1.3": "Minor comments"
+      }
+    },
+    {
+      "name": "text before any section, then text under a section, then numbers",
+      "kind": "positive",
+      "text": "Reviewer 1: The study is useful.\nGeneral comments\nThe writing is clear.\nSpecific comments\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.0": "The study is useful.",
+        "R1.1": "The writing is clear.",
+        "R1.2": "Add units."
+      },
+      "sections": {
+        "R1.1": "General comments",
+        "R1.2": "Specific comments",
+        "R1.3": "Specific comments"
+      }
+    },
+    {
+      "name": "text under three sections, the numbers start in the third",
+      "kind": "positive",
+      "text": "Reviewer 1:\nGeneral comments\nThe topic is timely.\n\nMajor comments\nThe sample is small and this limits every claim.\n\nMinor comments\nA few details are missing.\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.1": "The sample is small and this limits every claim.",
+        "R1.2": "A few details are missing."
+      },
+      "sections": {
+        "R1.0": "General comments",
+        "R1.1": "Major comments",
+        "R1.2": "Minor comments",
+        "R1.3": "Minor comments",
+        "R1.4": "Minor comments"
+      }
+    },
+    {
+      "name": "editor block: text under two sections before the first number",
+      "kind": "positive",
+      "text": "Editor:\nGeneral comments\nThe topic fits the journal.\nSpecific comments\nPlease follow the template.\n1. Shorten the abstract.\n2. Add keywords.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "E.3", "E.4", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "The topic fits the journal.",
+        "E.2": "Please follow the template.",
+        "E.3": "Shorten the abstract."
+      },
+      "sections": {
+        "E.1": "General comments",
+        "E.2": "Specific comments",
+        "E.3": "Specific comments",
+        "E.4": "Specific comments"
+      }
+    },
+    {
+      "name": "later block of a reviewer: text under two sections before the first number",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 1: Round 2\nMajor comments\nThe revision helps.\nMinor comments\nSome points remain.\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"],
+      "texts": {
+        "R1.3": "The revision helps.",
+        "R1.4": "Some points remain.",
+        "R1.5": "1. Add error bars."
+      },
+      "sections": {
+        "R1.3": "Round 2 / Major comments",
+        "R1.4": "Round 2 / Minor comments",
+        "R1.5": "Round 2 / Minor comments"
+      }
+    },
+    {
+      "name": "a section heading with no text before the first number makes no comment",
+      "kind": "trap",
+      "text": "Reviewer 1:\nMajor comments\n\n1. Add a control.\nMinor comments\n\n1. Add units.",
+      "refs": ["R1.1", "R1.2"],
+      "sections": {
+        "R1.1": "Major comments",
+        "R1.2": "Minor comments"
+      }
+    },
+    {
+      "name": "two section headings in a row: no empty comment, the unused heading is named",
+      "kind": "trap",
+      "text": "Reviewer 1:\nMajor comments\nMinor comments\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "sections": {
+        "R1.1": "Minor comments",
+        "R1.2": "Minor comments"
+      },
+      "uncovered": ["Major comments"]
+    },
+    {
+      "name": "two paragraphs under one section before the numbers are one comment",
+      "kind": "trap",
+      "text": "Reviewer 1:\nGeneral comments\nThe topic is timely.\n\nThe writing is clear.\nSpecific comments\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.0": "The topic is timely.\n\nThe writing is clear."
+      },
+      "sections": {
+        "R1.0": "General comments",
+        "R1.1": "Specific comments",
+        "R1.2": "Specific comments"
+      }
+    },
+    {
+      "name": "text under a section after numbered comments takes the next number",
+      "kind": "trap",
+      "text": "Reviewer 1:\nMajor comments\n1. Add a control.\nMinor comments\nThe typos need fixing.\n1. Add units.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.2": "The typos need fixing.",
+        "R1.3": "Add units."
+      },
+      "sections": {
+        "R1.1": "Major comments",
+        "R1.2": "Minor comments",
+        "R1.3": "Minor comments"
+      }
     }
   ]
 }
