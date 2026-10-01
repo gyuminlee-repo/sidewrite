@@ -1,0 +1,470 @@
+#!/usr/bin/env node
+// Stage-2 review acceptance run without hands: daemon, a separate Word
+// process with a CDP port on its add-in pane, the Review tab steps, the
+// author's Word steps over COM, the feature_list verify commands, cleanup.
+// Runs from WSL; Word, its pane and COM are on Windows. See README.md.
+
+import { spawn, execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { badgesMatch, buildComPlan, judge, minimalFind, rewriteCommand, table } from "./judge.mjs";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPO = path.resolve(HERE, "../..");
+const WS_PORT = 47833;
+const HTTP_PORT = 47834;
+const OUTSIDE_SENTENCE =
+  "Across the replicates the plateau optical density ranged from 0.82 to 0.91.";
+const R13_REQUIREMENTS = [
+  "say how growth was followed",
+  "describe the synthetic carbon source as a novel substrate",
+];
+
+const { values: opt } = parseArgs({
+  options: {
+    "base-dir": { type: "string", default: process.env.E2E_BASE_DIR },
+    "run-dir": { type: "string" },
+    fixture: { type: "string", default: path.join(REPO, "tests/fixtures/review_manuscript.docx") },
+    review: { type: "string", default: path.join(REPO, "tests/fixtures/fake_review.txt") },
+    ledger: { type: "string", default: path.join(REPO, "tests/fixtures/review_ledger.json") },
+    manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
+    log: { type: "string", default: "/tmp/daemon-s2-e2e.log" },
+    "cdp-port": { type: "string", default: process.env.E2E_CDP_PORT ?? "9333" },
+    "win-node": {
+      type: "string",
+      default: process.env.E2E_WIN_NODE ?? "C:\\Program Files\\nodejs\\node.exe",
+    },
+    "playwright-core": { type: "string", default: process.env.E2E_PLAYWRIGHT_CORE },
+    "feature-list": { type: "string", default: process.env.E2E_FEATURE_LIST },
+    "plan-dir": { type: "string", default: process.env.E2E_PLAN_DIR },
+    "plan-repo": { type: "string", default: process.env.E2E_PLAN_REPO },
+    "plan-log": { type: "string", default: "/tmp/daemon-s2.log" },
+    features: { type: "string", default: "S2-18..S2-34" },
+    "skip-knob": { type: "boolean", default: false },
+    // Leave Word and the daemon running when a step fails, to look at them.
+    "keep-on-fail": { type: "boolean", default: false },
+  },
+});
+
+const die = (m) => {
+  console.error(`run-acceptance: ${m}`);
+  process.exit(2);
+};
+if (!opt["base-dir"] && !opt["run-dir"])
+  die("--base-dir (a folder on a Windows drive, WSL path) is required");
+if (!opt["playwright-core"])
+  die("--playwright-core (Windows path of a playwright-core package) is required");
+
+const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+const RUN = path.resolve(opt["run-dir"] ?? path.join(opt["base-dir"], `e2e-${stamp}`));
+const TOOLS = path.join(RUN, "tools");
+const OK_DIR = path.join(RUN, "ok");
+const DOC = path.join(RUN, "review_manuscript.docx");
+const REVISION = path.join(RUN, "review_manuscript.revision.json");
+const LOG = opt.log;
+const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
+const winPath = (p) => execFileSync("wslpath", ["-w", p], { encoding: "utf8" }).trim();
+const unixPath = (p) => execFileSync("wslpath", ["-u", p], { encoding: "utf8" }).trim();
+
+const record = {
+  run_dir: RUN,
+  started_at: new Date().toISOString(),
+  steps: [],
+  features: [],
+  word: {},
+  cleanup: {},
+};
+const rows = [];
+const save = () => fs.writeFileSync(path.join(RUN, "result.json"), JSON.stringify(record, null, 2));
+
+function note(step, result, extra = {}) {
+  const j = judge(extra.judge ?? step, result, extra.ctx ?? {});
+  const row = {
+    step: extra.label ?? step,
+    result: j.pass ? "PASS" : "FAIL",
+    expect: j.expect,
+    got: j.got,
+  };
+  rows.push(row);
+  record.steps.push({ ...row, raw: result });
+  save();
+  console.log(`${row.result}  ${row.step}  ${String(row.got).slice(0, 200)}`);
+  return result;
+}
+
+// ---- Windows calls -------------------------------------------------------
+function powershell(script, args, timeoutMs = 300_000) {
+  const out = execFileSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      winPath(path.join(TOOLS, script)),
+      ...args,
+    ],
+    { cwd: RUN, encoding: "utf8", timeout: timeoutMs, maxBuffer: 64 << 20 },
+  );
+  const line = out.replace(/\r/g, "").trim().split("\n").filter(Boolean).pop();
+  return JSON.parse(line);
+}
+function com(action, extra = []) {
+  return powershell("word-com.ps1", ["-Doc", winPath(DOC), "-Action", action, ...extra]);
+}
+
+let pane = (step, args = {}) => {
+  const argsFile = path.join(RUN, `args-${step}.json`);
+  fs.writeFileSync(argsFile, JSON.stringify(args));
+  let out;
+  try {
+    out = execFileSync(
+      unixPath(opt["win-node"]),
+      [winPath(path.join(TOOLS, "pane-driver.cjs")), step, winPath(argsFile)],
+      {
+        cwd: RUN,
+        encoding: "utf8",
+        timeout: 30 * 60_000,
+        maxBuffer: 64 << 20,
+        env: {
+          ...process.env,
+          PLAYWRIGHT_CORE: opt["playwright-core"],
+          E2E_CDP_PORT: opt["cdp-port"],
+          WSLENV: [process.env.WSLENV, "PLAYWRIGHT_CORE", "E2E_CDP_PORT"].filter(Boolean).join(":"),
+        },
+      },
+    );
+  } catch (e) {
+    out = e.stdout || JSON.stringify({ ok: false, error: e.message });
+  }
+  const line = String(out).replace(/\r/g, "").trim().split("\n").filter(Boolean).pop();
+  return JSON.parse(line);
+};
+
+// ---- daemon ----------------------------------------------------------------
+const listening = (port) => {
+  try {
+    return execFileSync("ss", ["-ltn"], { encoding: "utf8" }).includes(`127.0.0.1:${port} `);
+  } catch {
+    return false;
+  }
+};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms, what) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await fn()) return;
+    await sleep(500);
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+const readLog = (f) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "");
+const count = (f, re) => (readLog(f).match(re) ?? []).length;
+
+let daemon = null;
+let daemonLog = LOG;
+async function startDaemon(logFile, extraEnv = {}) {
+  const fd = fs.openSync(logFile, "w");
+  daemon = spawn(process.execPath, ["daemon/index.mjs"], {
+    cwd: REPO,
+    env: { ...process.env, CC_OFFICE_DEBUG: "1", ...extraEnv },
+    stdio: ["ignore", fd, fd],
+  });
+  daemonLog = logFile;
+  await until(
+    () => readLog(logFile).includes("HTTP server listening") && listening(WS_PORT),
+    30_000,
+    "daemon",
+  );
+}
+async function stopDaemon() {
+  if (!daemon || daemon.exitCode !== null) return;
+  daemon.kill("SIGTERM");
+  await until(
+    () => daemon.exitCode !== null || daemon.signalCode !== null,
+    10_000,
+    "daemon exit",
+  ).catch(() => daemon.kill("SIGKILL"));
+  await until(() => !listening(WS_PORT) && !listening(HTTP_PORT), 10_000, "ports free");
+}
+
+// ---- verify commands -------------------------------------------------------
+function featureIds(spec) {
+  const [a, b] = spec.split("..").map((s) => Number(s.replace(/^S2-/, "")));
+  const out = [];
+  for (let i = a; i <= (b ?? a); i++) out.push(`S2-${String(i).padStart(2, "0")}`);
+  return out;
+}
+function runFeatures() {
+  if (!opt["feature-list"]) return;
+  const list = JSON.parse(fs.readFileSync(opt["feature-list"], "utf8"));
+  const features = Array.isArray(list) ? list : list.features;
+  const map = {};
+  if (opt["plan-dir"]) map[opt["plan-dir"].replace(/\/$/, "")] = RUN;
+  if (opt["plan-repo"]) map[`cd ${opt["plan-repo"].replace(/\/$/, "")} `] = `cd ${REPO} `;
+  map[opt["plan-log"]] = LOG;
+  map[opt["plan-log"].replace(/\.log$/, "") + "-knob.log"] = KNOB_LOG;
+  map["/tmp/s2-"] = path.join(OK_DIR, "s2-");
+  for (const id of featureIds(opt.features)) {
+    const f = features.find((x) => x.id === id);
+    if (!f?.verify_command) continue;
+    const cmd = rewriteCommand(f.verify_command, map);
+    let code = 0;
+    try {
+      execFileSync("bash", ["-c", cmd], { stdio: "ignore", timeout: 300_000 });
+    } catch (e) {
+      code = e.status ?? 1;
+    }
+    record.features.push({ id, exit: code, command: cmd });
+    save();
+  }
+}
+
+// Marker files the procedure asks a person to create, written only from the
+// machine evidence saved next to them.
+function marker(name, evidence) {
+  fs.mkdirSync(OK_DIR, { recursive: true });
+  fs.writeFileSync(path.join(OK_DIR, `${name}.evidence.json`), JSON.stringify(evidence, null, 2));
+  if (evidence.pass) fs.writeFileSync(path.join(OK_DIR, `${name}.ok`), "");
+}
+
+// ---- the run ---------------------------------------------------------------
+async function propose(ref, label) {
+  const before = count(daemonLog, /^\[agent\] turn complete/gm);
+  const r = pane("propose", { ref });
+  await until(
+    () => count(daemonLog, /^\[agent\] turn complete/gm) > before,
+    60_000,
+    "turn complete",
+  ).catch(() => {});
+  const turnCompleted = count(daemonLog, /^\[agent\] turn complete/gm) > before;
+  return note("propose", r, { label: label ?? `propose ${ref}`, ctx: { ref, turnCompleted } });
+}
+
+async function main() {
+  fs.mkdirSync(TOOLS, { recursive: true });
+  for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1"])
+    fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
+  if (listening(WS_PORT) || listening(HTTP_PORT))
+    die(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
+
+  const ps = (cmd) =>
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { cwd: RUN, encoding: "utf8" })
+      .replace(/\r/g, "")
+      .trim();
+  record.word.preexisting = ps(
+    "(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','",
+  )
+    .split(",")
+    .filter(Boolean)
+    .map(Number);
+
+  execFileSync(
+    "python3",
+    [
+      path.join(HERE, "embed_taskpane.py"),
+      "--manifest",
+      opt.manifest,
+      "--src",
+      opt.fixture,
+      "--out",
+      DOC,
+    ],
+    { stdio: "inherit" },
+  );
+  await startDaemon(LOG);
+
+  const launch = powershell("word-launch.ps1", [
+    "-DocPath",
+    winPath(DOC),
+    "-Port",
+    opt["cdp-port"],
+    "-UserDataFolder",
+    winPath(path.join(RUN, "webview2")),
+  ]);
+  record.word.launch = launch;
+  if (launch.exited || record.word.preexisting.includes(launch.pid))
+    throw new Error(`Word launch failed: ${JSON.stringify(launch)}`);
+  save();
+
+  note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+  note("split", pane("split", { review_file: winPath(opt.review) }));
+  note("edit-draft", pane("edit-draft", { requirements: { "R1.3": R13_REQUIREMENTS } }));
+  note("ledger-add", pane("ledger-add", { ledger_file: winPath(opt.ledger) }));
+  note("check-all", pane("check-all"));
+  note("preview", pane("preview", { ref: "R1.3" }), { label: "preview R1.3" });
+  for (const ref of ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"]) await propose(ref);
+
+  // Knob: the model may avoid "novel" once it sees the forbidden list; then
+  // the block is shown with the list left out of the prompt (procedure 8).
+  if (!opt["skip-knob"] && !/^\[review\] blocked R1\.3 by=L2$/m.test(readLog(LOG))) {
+    await stopDaemon();
+    await startDaemon(KNOB_LOG, { CC_OFFICE_REVIEW_PROMPT_FORBID: "0" });
+    const win = winPath(DOC);
+    await until(() => readLog(KNOB_LOG).includes(`active doc: ${win}`), 120_000, "pane reconnect");
+    await sleep(3000);
+    await propose("R1.3", "propose R1.3 (forbid list off)");
+    record.knob = { blocked: /^\[review\] blocked R1\.3 by=L2$/m.test(readLog(KNOB_LOG)) };
+  }
+  note("refresh", pane("refresh"), { label: "refresh before Word" });
+
+  // The author in Word (procedure 10).
+  const revision = JSON.parse(fs.readFileSync(REVISION, "utf8"));
+  const plan = buildComPlan(revision);
+  const planFile = path.join(RUN, "com-plan.json");
+  fs.writeFileSync(planFile, JSON.stringify(plan, null, 2));
+  record.word.state_before = com("state");
+  const applied = com("apply", ["-PlanJson", winPath(planFile)]);
+  record.word.apply = applied;
+  rows.push({
+    step: "word: accept/reject/edit",
+    result: applied.ok ? "PASS" : "FAIL",
+    got: applied.results
+      .map(
+        (x) =>
+          `${x.change_id} ${x.op}${x.error ? ` ERR ${x.error}` : ""}${x.edited ? ` ${x.edited.from}->${x.edited.to}` : ""}`,
+      )
+      .join("; "),
+  });
+  if (!applied.ok && opt["keep-on-fail"]) throw new Error("Word COM apply failed");
+  const del = com("delete-text", ["-Text", OUTSIDE_SENTENCE]);
+  record.word.delete_text = del;
+  rows.push({
+    step: "word: delete outside sentence",
+    result: del.ok ? "PASS" : "FAIL",
+    got: del.removed ?? del.error,
+  });
+  save();
+
+  const after = note("refresh-after-user", pane("refresh"), { label: "refresh after Word" });
+  marker("s2-list-matches", { pass: after.ok !== false && badgesMatch(after).pass, view: after });
+
+  note("clean-tool", pane("clean-tool"));
+  note("refresh", pane("refresh"), { label: "refresh after cleanup", judge: "none" });
+  const added = com("add-comment", ["-Text", "Author note added for the delete-all check."]);
+  record.word.add_comment = added;
+  rows.push({
+    step: "word: add author comment",
+    result: added.ok ? "PASS" : "FAIL",
+    got: `comments=${added.comments}`,
+  });
+  note("delete-all", pane("delete-all"));
+  note("refresh", pane("refresh"), { label: "refresh after delete-all", judge: "none" });
+
+  // Evidence the procedure leaves to a person, judged from the files.
+  const final = JSON.parse(fs.readFileSync(REVISION, "utf8"));
+  const r15 = final.comments.find((c) => c.ref === "R1.5");
+  const r15Turn = record.steps.find((s) => s.step === "propose R1.5");
+  marker("s2-r15-declined", {
+    pass: r15?.changes.length === 0,
+    changes: r15?.changes.length,
+    assistant: r15Turn?.raw?.assistant,
+  });
+  const all = final.comments.flatMap((c) => c.changes);
+  marker("s2-narrow-minimal", {
+    pass: all.length > 0 && all.every(minimalFind),
+    changes: all.map((c) => ({
+      id: c.id,
+      kind: c.kind,
+      find: c.find,
+      text: c.text,
+      minimal: minimalFind(c),
+    })),
+  });
+}
+
+async function cleanup() {
+  const pid = record.word.launch?.pid;
+  if (pid && !record.word.preexisting?.includes(pid)) {
+    try {
+      record.cleanup.quit = com("quit", ["-AllowDir", winPath(RUN), "-ExpectPid", String(pid)]);
+    } catch (e) {
+      record.cleanup.quit = { ok: false, error: e.message };
+    }
+    if (!record.cleanup.quit?.exited) {
+      // Only the process this run started, by its id.
+      try {
+        execFileSync("powershell.exe", [
+          "-NoProfile",
+          "-Command",
+          `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+        ]);
+        record.cleanup.stopped_pid = pid;
+      } catch {}
+    }
+  }
+  await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
+  try {
+    const left = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        "(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','",
+      ],
+      { encoding: "utf8" },
+    )
+      .replace(/\r/g, "")
+      .trim()
+      .split(",")
+      .filter(Boolean)
+      .map(Number);
+    record.cleanup.word_after = left;
+    record.cleanup.preexisting_alive = (record.word.preexisting ?? []).every((p) =>
+      left.includes(p),
+    );
+    record.cleanup.own_word_gone = pid ? !left.includes(pid) : null;
+  } catch (e) {
+    record.cleanup.word_after_error = e.message;
+  }
+}
+
+let failed = null;
+try {
+  await main();
+} catch (e) {
+  failed = e;
+  record.error = String(e?.stack ?? e);
+  console.error(record.error);
+}
+// Another Word may have a pane connected to this daemon. Apart from its
+// hello, no log line may name a document outside the run folder.
+function isolationCheck() {
+  const own = [winPath(RUN), RUN];
+  const foreign = [LOG, KNOB_LOG]
+    .flatMap((f) => readLog(f).split("\n"))
+    .filter((l) => /\.docx\b/i.test(l) && !own.some((p) => l.includes(p)))
+    .filter((l) => !/^\[bridge\] hello received|^\[diag\] hello /.test(l));
+  record.isolation = { foreign_lines: foreign.slice(0, 20), count: foreign.length };
+  rows.push({
+    step: "no tool call on other documents",
+    result: foreign.length ? "FAIL" : "PASS",
+    got: foreign.length ? foreign[0] : "only hello lines name other documents",
+  });
+}
+
+// Verify commands first: S2-18 checks that the daemon still listens.
+isolationCheck();
+try {
+  runFeatures();
+} catch (e) {
+  record.features_error = String(e?.message ?? e);
+}
+if (failed && opt["keep-on-fail"]) {
+  record.cleanup.kept = { word_pid: record.word.launch?.pid, daemon_pid: daemon?.pid };
+  daemon?.unref();
+} else {
+  await cleanup();
+}
+record.finished_at = new Date().toISOString();
+save();
+console.log("\n" + table(rows));
+if (record.features.length) {
+  console.log("\nfeature  exit");
+  for (const f of record.features) console.log(`${f.id.padEnd(7)}  ${f.exit}`);
+}
+console.log(`\ncleanup: ${JSON.stringify(record.cleanup)}`);
+console.log(`result: ${path.join(RUN, "result.json")}`);
+process.exit(failed || rows.some((r) => r.result === "FAIL") ? 1 : 0);
