@@ -595,3 +595,13 @@ test("review file: txt and md, BOM and CRLF removed, size and type checked", () 
   assert.match(view.reviewTextFromFile({ name: "r.txt", size: 3_000_000, text: "" }).error, /2 MB/);
   assert.match(view.reviewTextFromFile({ name: "r.txt", size: 0, text: "  " }).error, /empty/);
 });
+
+test("ledger file: JSON with an items array, anything else is an error message", () => {
+  const item = { kind: "forbid", text: "no novel", check: { type: "llm" } };
+  const ok = view.ledgerImportFromJson(JSON.stringify({ note: "n", items: [item] }));
+  assert.deepEqual(ok, { ok: true, doc: { items: [item] }, count: 1 });
+  assert.match(view.ledgerImportFromJson("{ nope").error, /not JSON/);
+  assert.match(view.ledgerImportFromJson("[1]").error, /items/);
+  assert.match(view.ledgerImportFromJson('{"items":{}}').error, /items/);
+  assert.match(view.ledgerImportFromJson('{"items":[]}').error, /no items/);
+});

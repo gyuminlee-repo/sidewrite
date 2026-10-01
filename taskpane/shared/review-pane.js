@@ -27,6 +27,7 @@ import {
   progressText,
   reviewTextFromFile,
   REVIEW_FILE_MAX_BYTES,
+  ledgerImportFromJson,
 } from "./review-view.js";
 
 const UNKNOWN_HINT =
@@ -704,6 +705,35 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       }
       $("ledger-text").value = "";
       $("ledger-pattern").value = "";
+    }),
+  );
+  // P15: the ledger as a JSON file. Export writes <stem>.ledger.json next to
+  // the manuscript (the daemon answers its path); Import adds the rules of a
+  // picked file that the ledger does not hold yet.
+  async function importLedger(doc) {
+    const r = await ask("ledger_import", { doc, mode: "append" });
+    say(`Added ${r.added} ledger rule(s), skipped ${r.skipped} already in the ledger.`);
+  }
+  $("ledger-export").addEventListener(
+    "click",
+    guard(async () => {
+      const r = await ask("ledger_export");
+      say(`Exported ${r.count} ledger rule(s) to ${r.path}`);
+    }),
+  );
+  $("ledger-import").addEventListener("click", () => $("ledger-file-input").click());
+  $("ledger-file-input").addEventListener(
+    "change",
+    guard(async () => {
+      const input = $("ledger-file-input");
+      const f = input.files?.[0];
+      if (!f) return;
+      const text = f.size > REVIEW_FILE_MAX_BYTES ? "" : await f.text();
+      input.value = "";
+      if (f.size > REVIEW_FILE_MAX_BYTES) throw new Error(`${f.name} is larger than 2 MB.`);
+      const r = ledgerImportFromJson(text);
+      if (!r.ok) throw new Error(r.error);
+      await importLedger(r.doc);
     }),
   );
   // Tell the daemon which rationale comments the cleanup removed, so their

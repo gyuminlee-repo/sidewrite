@@ -452,3 +452,22 @@ export function reviewTextFromFile({ name, size, text }) {
   if (!t.trim()) return { ok: false, error: `${name} is empty.` };
   return { ok: true, text: t };
 }
+
+// ---- P15: ledger file --------------------------------------------------------
+
+// The text of a picked ledger file as the ledger_import payload. Only the
+// outer shape is checked here ({ items: [...] }, an exported ledger or a
+// hand-written list); the daemon checks every rule.
+export function ledgerImportFromJson(text) {
+  let data;
+  try {
+    data = JSON.parse(String(text ?? "").replace(/^\uFEFF/, ""));
+  } catch (e) {
+    return { ok: false, error: `The ledger file is not JSON (${e.message}).` };
+  }
+  if (!Array.isArray(data?.items)) {
+    return { ok: false, error: 'The ledger file needs an "items" list.' };
+  }
+  if (!data.items.length) return { ok: false, error: "The ledger file has no items." };
+  return { ok: true, doc: { items: data.items }, count: data.items.length };
+}

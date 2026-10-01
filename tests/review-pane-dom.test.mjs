@@ -876,3 +876,31 @@ test("Load review from file fills the paste box; a wrong type only shows an erro
   assert.match(t.$("review-message").textContent, /\.txt or \.md/);
   assert.equal(t.requests.filter((r) => r.type !== "review_load").length, 0, "no daemon request");
 });
+
+test("ledger: Export shows the file path; Import sends the items and reports added and skipped", async () => {
+  const revision = { comments: [], ledger: [] };
+  const item = { kind: "forbid", text: "no novel", scope: "manuscript", check: { type: "llm" } };
+  const t = await setup({
+    revision,
+    respond: {
+      ledger_export: () => ({ ok: true, path: "/m/paper.ledger.json", count: 2 }),
+      ledger_import: () => ({ ok: true, added: 1, skipped: 0, revision }),
+    },
+  });
+  await t.$("ledger-export").click();
+  assert.match(t.$("review-message").textContent, /2 ledger rule\(s\).*\/m\/paper\.ledger\.json/);
+
+  const input = t.$("ledger-file-input");
+  input.files = [{ name: "l.json", size: 50, text: async () => JSON.stringify({ items: [item] }) }];
+  await fire(input, "change");
+  assert.deepEqual(t.requests.find((r) => r.type === "ledger_import").payload, {
+    doc: { items: [item] },
+    mode: "append",
+  });
+  assert.match(t.$("review-message").textContent, /Added 1 ledger rule\(s\), skipped 0/);
+
+  input.files = [{ name: "l.json", size: 5, text: async () => "{ nope" }];
+  await fire(input, "change");
+  assert.match(t.$("review-message").textContent, /not JSON/);
+  assert.equal(t.requests.filter((r) => r.type === "ledger_import").length, 1);
+});

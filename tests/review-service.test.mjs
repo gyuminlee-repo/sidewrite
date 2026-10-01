@@ -1536,3 +1536,46 @@ test("review_comments_cleaned marks the change; refresh then keeps it and report
     await t.cleanup();
   }
 });
+
+// P15: the ledger as a JSON file next to the manuscript.
+test("ledger_export writes <stem>.ledger.json; ledger_import adds its rules and skips known ones", async () => {
+  const t = await setup();
+  try {
+    await t.ask("ledger_add", { item: NOVEL });
+    await t.ask("ledger_add", { item: IN_VITRO });
+    const x = await t.ask("ledger_export");
+    assert.deepEqual([x.ok, x.count, x.path], [true, 2, join(t.dir, "paper.ledger.json")]);
+    const file = JSON.parse(await readFile(x.path, "utf8"));
+    assert.equal(file.format, "manuscript-pane-ledger");
+    assert.deepEqual(
+      file.items.map((i) => Object.keys(i).sort()),
+      [
+        ["check", "kind", "scope", "text"],
+        ["check", "kind", "scope", "text"],
+      ],
+    );
+    assert.ok(t.lines.includes(`[review] ledger export path=${x.path} count=2`));
+
+    // Same rules again: nothing added.
+    const same = await t.ask("ledger_import", { doc: file });
+    assert.deepEqual([same.ok, same.added, same.skipped], [true, 0, 2]);
+    assert.ok(t.lines.includes("[review] ledger import added=0 skipped=2 mode=append"));
+
+    await t.ask("ledger_remove", { id: "L1" });
+    const back = await t.ask("ledger_import", { doc: file, mode: "append" });
+    assert.deepEqual([back.added, back.skipped], [1, 1]);
+    assert.deepEqual(
+      back.revision.ledger.map((i) => i.text),
+      [IN_VITRO.text, NOVEL.text],
+    );
+
+    const bad = await t.ask("ledger_import", { doc: { items: [{ kind: "forbid" }] } });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /item 1/);
+    const none = await t.ask("ledger_import", { doc: null });
+    assert.match(none.error, /items array/);
+    assert.equal((await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).ledger.length, 2);
+  } finally {
+    await t.cleanup();
+  }
+});

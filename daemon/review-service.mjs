@@ -6,7 +6,8 @@
 //   review_load, review_split, review_save_comments, review_set_status,
 //   review_set_requirements, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
-//   ledger_add, ledger_update, ledger_remove, ledger_check, comments_backup
+//   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
+//   ledger_import, comments_backup
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
 //     | "late_result_recorded" | "job_done", ... }
@@ -38,6 +39,9 @@ import {
   addLedgerItem,
   updateLedgerItem,
   removeLedgerItem,
+  ledgerExportDoc,
+  importLedgerItems,
+  sidecarPath,
   findComment,
   writeJsonAtomic,
   setRequirements,
@@ -628,6 +632,36 @@ export function createReviewService({
     },
     async ledger_remove(msg, key) {
       return { revision: await update(key, (rev) => removeLedgerItem(rev, msg.id)) };
+    },
+    // P15: rules only (no ids, no check results) to <stem>.ledger.json next
+    // to the manuscript; an older export of the same name is replaced.
+    async ledger_export(msg, key) {
+      const { doc } = docFor(key);
+      const out = ledgerExportDoc(await load(key));
+      const path = sidecarPath(doc, ".ledger.json");
+      await writeJsonAtomic(path, out);
+      log(`[review] ledger export path=${path} count=${out.items.length}`);
+      return { path, count: out.items.length };
+    },
+    // msg.doc: the parsed file ({ items: [{ kind, text, scope, check }] }).
+    // msg.mode: "append" (default; known rules are skipped) or "replace".
+    async ledger_import(msg, key) {
+      const mode = msg.mode ?? "append";
+      let added = [];
+      let skipped = [];
+      const revision = await update(key, (rev) => {
+        const r = importLedgerItems(rev, msg.doc?.items, { mode });
+        added = r.added;
+        skipped = r.skipped;
+        return r.revision;
+      });
+      log(`[review] ledger import added=${added.length} skipped=${skipped.length} mode=${mode}`);
+      return {
+        added: added.length,
+        skipped: skipped.length,
+        added_ids: added.map((i) => i.id),
+        revision,
+      };
     },
     async ledger_check(msg, key) {
       // Taken on arrival, before the file read: a check that reads the file
