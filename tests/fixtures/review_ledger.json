@@ -3,7 +3,7 @@
   "items": [
     {
       "kind": "instruction",
-      "text": "in vitro, in vivo, in situ are written without a hyphen (text proxy for the italic Latin-term rule)",
+      "text": "in vitro, in vivo, in situ are written without a hyphen (Latin phrases used as adverbs)",
       "scope": "manuscript",
       "check": {
         "type": "regex",

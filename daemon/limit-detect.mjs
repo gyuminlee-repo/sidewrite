@@ -12,7 +12,7 @@
 // assistant messages, is_error result messages), never on a normal model answer,
 // so a manuscript sentence about a "rate limit" cannot trip it.
 //
-// L8 (earlier revision sessions): a refusal and a turn that
+// L8 (a common failure mode of LLM-assisted revisions): a refusal and a turn that
 // ends with no answer at all are errors too. Refusal fields, SDK 0.3.285
 // sdk.d.ts: SDKModelRefusalNoFallbackMessage (system/model_refusal_no_fallback,
 // 5392), result stop_reason (5618, 5713). model_refusal_fallback (5355) retries

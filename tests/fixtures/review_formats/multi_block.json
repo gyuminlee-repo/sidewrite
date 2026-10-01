@@ -1,0 +1,178 @@
+{
+  "family": "multi_block",
+  "cases": [
+    {
+      "name": "three rounds of one reviewer with round lines",
+      "kind": "positive",
+      "text": "Reviewer 1 Report\n1. Add units.\n2. State n.\n\nRound 2\nReviewer 1 Report\n1. Add error bars.\n\nRound 3\nReviewer 1 Report\n1. Cite the method.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.2": "State n.",
+        "R1.3": "1. Add error bars.",
+        "R1.4": "1. Cite the method."
+      },
+      "sections": {
+        "R1.3": "Round 2",
+        "R1.4": "Round 3"
+      }
+    },
+    {
+      "name": "round label on the head line",
+      "kind": "positive",
+      "text": "Reviewer 1: Round 1\n1. Add units.\n2. State n.\n\nReviewer 1: Round 2\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.3": "1. Add error bars."
+      },
+      "sections": {
+        "R1.1": "Round 1",
+        "R1.2": "Round 1",
+        "R1.3": "Round 2"
+      }
+    },
+    {
+      "name": "blocks of two reviewers interleaved, no round label",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 2:\n1. Add error bars.\n\nReviewer 1:\n1. Cite the method.\n2. Add a scale bar.\n\nReviewer 2:\n1. Define the abbreviation.",
+      "refs": ["R1.1", "R1.2", "R2.1", "R1.3", "R1.4", "R2.2"],
+      "texts": {
+        "R1.4": "2. Add a scale bar.",
+        "R2.2": "1. Define the abbreviation."
+      },
+      "sections": {
+        "R1.3": "Block 2",
+        "R1.4": "Block 2",
+        "R2.2": "Block 2"
+      }
+    },
+    {
+      "name": "text before the first comment of a second block is a comment of its own",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 1:\nThank you for the revision.\n1. Add error bars.\n2. Cite the method.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"],
+      "texts": {
+        "R1.3": "Thank you for the revision.",
+        "R1.4": "1. Add error bars."
+      },
+      "sections": {
+        "R1.3": "Block 2",
+        "R1.4": "Block 2",
+        "R1.5": "Block 2"
+      }
+    },
+    {
+      "name": "a second block that goes on with the next numbers keeps them",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 1: Round 2\n3. Add error bars.\n4. Cite the method.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.3": "Add error bars."
+      },
+      "sections": {
+        "R1.3": "Round 2",
+        "R1.4": "Round 2"
+      }
+    },
+    {
+      "name": "sections inside a second block",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n\nReviewer 1: Round 2\nMajor comments\n1. Add error bars.\nMinor comments\n1. Cite the method.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.2": "1. Add error bars.",
+        "R1.3": "1. Cite the method."
+      },
+      "sections": {
+        "R1.2": "Round 2 / Major comments",
+        "R1.3": "Round 2 / Minor comments"
+      }
+    },
+    {
+      "name": "Korean round line",
+      "kind": "positive",
+      "text": "\uc2ec\uc0ac\uc704\uc6d0 1\n1. \ub2e8\uc704\ub97c \ud45c\uae30\ud574 \uc8fc\uc2ed\uc2dc\uc624.\n2. \ubc18\ubcf5 \uc218\ub97c \uba85\uc2dc\ud574 \uc8fc\uc2ed\uc2dc\uc624.\n\n2\ucc28 \uc2ec\uc0ac\n\uc2ec\uc0ac\uc704\uc6d0 1\n1. \uc624\ucc28 \ub9c9\ub300\ub97c \ucd94\uac00\ud574 \uc8fc\uc2ed\uc2dc\uc624.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "sections": {
+        "R1.3": "2\ucc28 \uc2ec\uc0ac"
+      }
+    },
+    {
+      "name": "bullets in a second block under a revision line",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nRevision 1\nReviewer 1:\n- Add error bars.\n- Cite the method.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.3": "Add error bars."
+      },
+      "sections": {
+        "R1.3": "Revision 1",
+        "R1.4": "Revision 1"
+      }
+    },
+    {
+      "name": "paragraphs in a second block",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 1:\nThe units are now given.\n\nThe value of n is still missing.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.4": "The value of n is still missing."
+      },
+      "sections": {
+        "R1.3": "Block 2",
+        "R1.4": "Block 2"
+      }
+    },
+    {
+      "name": "a doubled number inside one block is still doubled",
+      "kind": "trap",
+      "text": "Reviewer 1:\nComment 1: Add units.\nComment 1: State n.",
+      "refs": ["R1.1", "R1.1"]
+    },
+    {
+      "name": "combined heads of two reviewers in turn are not blocks",
+      "kind": "trap",
+      "text": "Reviewer 1, Comment 1: Add units.\nReviewer 2, Comment 1: Add error bars.\nReviewer 1, Comment 2: State n.",
+      "refs": ["R1.1", "R2.1", "R1.2"],
+      "texts": {
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "a round line before the first head is the letter",
+      "kind": "trap",
+      "text": "Round 1\n\nReviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 2:\n1. Add error bars.",
+      "refs": ["E.1", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "Round 1"
+      }
+    },
+    {
+      "name": "round words in a sentence are no round line",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nRound 2 of the assay gave other values.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nRound 2 of the assay gave other values."
+      }
+    },
+    {
+      "name": "a head-line text that is no round label is the preamble",
+      "kind": "trap",
+      "text": "Reviewer 1: Major revision\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.0": "Major revision"
+      }
+    },
+    {
+      "name": "questionnaire answers are not blocks of the reviewer",
+      "kind": "trap",
+      "text": "Reviewers' comments:\n\n1. Is the work sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n**********\n\n2. Review Comments\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "R1.1": "Add units."
+      }
+    }
+  ]
+}
