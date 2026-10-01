@@ -1154,50 +1154,67 @@ export function requirementPrompt(items) {
   ].join("\n");
 }
 
-// One label of a sentence: a type for a sentence without cut points; for
-// one with k cut points, k decisions and one type per part. null otherwise.
+// One label of a sentence as [cuts, types]: a type for a sentence without
+// cut points; for one with k cut points, k decisions and one type per part.
+// A label that does not have that form is read for what it does say (seen
+// with Haiku when it does not think first: one decision per part instead of
+// one per mark, or a plain type for a sentence with marks):
+//   - one valid type per part of a full split (k + 1 types): split at every mark;
+//   - else any valid type or list of types: the whole sentence, a request
+//     when one of them is.
+// null when it names no valid type at all.
 function sentenceLabel(x, sentence) {
   const k = clauseCuts(sentence).length;
-  if (!k) return REQUIREMENT_TYPES.includes(x.type) && !("cuts" in x) ? [[], [x.type]] : null;
+  const valid = (t) => REQUIREMENT_TYPES.includes(t);
   const { cuts, types } = x;
-  if (!Array.isArray(cuts) || cuts.length !== k) return null;
-  if (!cuts.every((c) => c === "split" || c === "keep")) return null;
-  const parts = 1 + cuts.filter((c) => c === "split").length;
-  if (!Array.isArray(types) || types.length !== parts) return null;
-  if (!types.every((t) => REQUIREMENT_TYPES.includes(t))) return null;
-  return [cuts, types];
+  const typed = Array.isArray(types) && types.length > 0 && types.every(valid);
+  if (
+    k &&
+    typed &&
+    Array.isArray(cuts) &&
+    cuts.length === k &&
+    cuts.every((c) => c === "split" || c === "keep") &&
+    types.length === 1 + cuts.filter((c) => c === "split").length
+  ) {
+    return [cuts, types];
+  }
+  if (k && typed && types.length === k + 1) return [new Array(k).fill("split"), types];
+  const said = typed ? types : valid(x.type) && !Array.isArray(types) ? [x.type] : null;
+  if (!said) return null;
+  return [new Array(k).fill("keep"), [said.includes("request") ? "request" : "other"]];
 }
 
-// The request texts per ref as { ref: [texts] }, or null unless every asked
-// sentence is there exactly once with a valid label and nothing else is.
+// The request texts per ref as { ref: [texts] }, for every comment whose
+// sentences each have exactly one usable label. A comment with a sentence
+// that is missing, doubled or has no usable label is left out; entries for
+// a ref or a sentence that was not asked about are passed over.
 function validSentenceLabels(json, items) {
-  const list = json?.sentences;
-  const total = items.reduce((n, it) => n + it.sentences.length, 0);
-  if (!Array.isArray(list) || list.length !== total) return null;
-  const labels = Object.fromEntries(items.map((it) => [it.ref, new Array(it.sentences.length)]));
-  const sentences = Object.fromEntries(items.map((it) => [it.ref, it.sentences]));
-  for (const x of list) {
-    const slots = Object.hasOwn(labels, x?.ref) ? labels[x.ref] : null;
-    const s = x?.s;
-    if (!slots || !Number.isInteger(s) || s < 1 || s > slots.length || slots[s - 1]) return null;
-    const label = sentenceLabel(x, sentences[x.ref][s - 1]);
-    if (!label) return null;
-    slots[s - 1] = label;
+  const list = Array.isArray(json?.sentences) ? json.sentences : [];
+  const out = {};
+  for (const it of items) {
+    const mine = list.filter((x) => x && typeof x === "object" && x.ref === it.ref);
+    const labels = it.sentences.map((sentence, i) => {
+      const of = mine.filter((x) => x.s === i + 1);
+      return of.length === 1 ? sentenceLabel(of[0], sentence) : null;
+    });
+    // A label that points at no sentence of the comment: the numbering of
+    // the reply cannot be trusted for this comment.
+    const stray = mine.some((x) => !Number.isInteger(x.s) || x.s < 1 || x.s > it.sentences.length);
+    if (stray || labels.some((l) => !l)) continue;
+    out[it.ref] = it.sentences.flatMap((sentence, i) => {
+      const [cuts, types] = labels[i];
+      return requirementParts(sentence, cuts).filter((_, n) => types[n] === "request");
+    });
   }
-  return Object.fromEntries(
-    items.map((it) => [
-      it.ref,
-      it.sentences.flatMap((sentence, i) => {
-        const [cuts, types] = labels[it.ref][i];
-        return requirementParts(sentence, cuts).filter((_, n) => types[n] === "request");
-      }),
-    ]),
-  );
+  return out;
 }
 
 // The most sentences one request labels. A real review of 25 comments in one
 // request ran into the time limit of a one-shot (120 s) and left every
-// comment without requirements; a batch of this size answers well inside it.
+// comment without requirements. The size alone did not help: with its
+// default thinking Haiku took 95 to 120 s for 22 sentences as for 40. The
+// request now asks for no thinking (about 10 s for 40 sentences, measured
+// on a made-up review of 25 comments).
 export const REQUIREMENT_BATCH_SENTENCES = 40;
 
 // items in their order, in batches of at most `max` sentences. A comment is
@@ -1221,15 +1238,16 @@ function requirementBatches(items, max = REQUIREMENT_BATCH_SENTENCES) {
 // are labelled by one-shots, a batch of comments each (requirementBatches),
 // one after the other; a request sentence, or a request part of a sentence
 // the model split at a cut point, becomes a requirement as written. A failed
-// call or a reply that does not label every sentence of its batch once
-// leaves the requirements of that batch empty, with a warning that names
-// its comments when there is more than one batch; the other batches and the
-// comments themselves are not touched. A usage limit ends the run: the
-// batches after it are not sent.
+// call leaves the requirements of its batch empty; a reply is read comment
+// by comment (validSentenceLabels), and a comment it does not label is left
+// empty. Either way a warning names the comments (not when the only batch
+// is lost whole), and one log line per request says how it went, with refs
+// and counts and no text. A usage limit ends the run: the batches after it
+// are not sent.
 // Returns { comments, warnings, asked, input, requests }: input is the
 // prompts (for a fingerprint), requests the count of requirements per ref
 // that was labelled; null when none was.
-export async function extractRequirements(comments, { oneshot } = {}) {
+export async function extractRequirements(comments, { oneshot, log = () => {} } = {}) {
   const none = { comments, warnings: [], asked: false, input: null, requests: null };
   if (!oneshot) return none;
   // A doubled ref (named in a split warning) is left for the user to renumber.
@@ -1251,8 +1269,16 @@ export async function extractRequirements(comments, { oneshot } = {}) {
   for (const [n, batch] of batches.entries()) {
     const input = requirementPrompt(batch);
     inputs.push(input);
-    const r = await oneshot({ system: REQUIREMENT_SYSTEM, prompt: input });
+    const r = await oneshot({
+      system: REQUIREMENT_SYSTEM,
+      prompt: input,
+      thinking: { type: "disabled" },
+    });
+    const head =
+      `[review] requirement extract batch ${n + 1}/${batches.length} comments=${batch.length}` +
+      ` sentences=${batch.reduce((k, it) => k + it.sentences.length, 0)}`;
     if (!r.ok) {
+      log(`${head} failed: ${r.error}`);
       // A usage limit will meet the next request too: it is not sent.
       const lost = r.limited ? batches.slice(n).flat() : batch;
       const of = batches.length > 1 ? ` for ${refsOf(lost)}` : "";
@@ -1261,11 +1287,16 @@ export async function extractRequirements(comments, { oneshot } = {}) {
       continue;
     }
     const labelled = validSentenceLabels(r.json, batch);
-    if (labelled) Object.assign(texts, labelled);
-    else {
+    Object.assign(texts, labelled);
+    const left = batch.filter((it) => !labelled[it.ref]);
+    log(
+      `${head} labelled=${batch.length - left.length}/${batch.length}` +
+        `${left.length ? ` unlabelled=${left.map((it) => it.ref).join(",")}` : ""}`,
+    );
+    if (left.length) {
       warnings.push(
-        batches.length > 1
-          ? `model could not label requirement sentences of ${refsOf(batch)}; add them by hand`
+        batches.length > 1 || left.length < batch.length
+          ? `model could not label requirement sentences of ${refsOf(left)}; add them by hand`
           : REQUIREMENT_WARNING,
       );
     }

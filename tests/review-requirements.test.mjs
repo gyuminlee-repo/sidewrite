@@ -408,12 +408,17 @@ for (const [name, label] of Object.entries({
   "a cut that is neither split nor keep": { cuts: ["maybe"], types: ["request"] },
   "types that do not match the parts": { cuts: ["split"], types: ["request"] },
 })) {
-  test(`S2-30: a reply with ${name} leaves requirements empty and warns`, async () => {
+  // (Before: the requirements were left empty. Now the label is read for
+  // what it says: a request, not split.)
+  test(`S2-30: a reply with ${name} keeps the sentence as one request`, async () => {
     const r = await extractRequirements([C("R1.3", R13)], {
       oneshot: labelled({ "R1.3": [label] }),
     });
-    assert.deepEqual(r.comments[0].requirements, []);
-    assert.deepEqual(r.warnings, [WARN]);
+    assert.deepEqual(
+      r.comments[0].requirements.map((q) => squash(q.text)),
+      [squash(R13)],
+    );
+    assert.deepEqual(r.warnings, []);
   });
 }
 
@@ -439,13 +444,13 @@ const BAD_CUTS = {
 const WHOLE = "Please state the unit, and describe the method.";
 const AFTER_BAD_CUTS = {
   "a type instead of cuts": [WHOLE],
-  "too many cut decisions": ["Please state the unit,", "and describe the method."],
+  "too many cut decisions": ["Please state the unit", "describe the method."],
   "no cut decision": [WHOLE],
   "a cut decision outside the choices": [WHOLE],
   "one type too few": [WHOLE],
-  "one type too many": ["Please state the unit,"],
+  "one type too many": ["Please state the unit"],
   "a part type outside the choices": null,
-  "cuts that are not a list": ["Please state the unit,", "and describe the method."],
+  "cuts that are not a list": ["Please state the unit", "describe the method."],
 };
 for (const [name, label] of Object.entries(BAD_CUTS)) {
   test(`a cut-mark reply with ${name} is read for what it says`, async () => {

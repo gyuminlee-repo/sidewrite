@@ -22,6 +22,12 @@ export function buildOneshotOptions({
   cwd = tmpdir(),
   abortController,
   env = process.env,
+  // The SDK's thinking setting for this request. Not set: the CLI default
+  // (adaptive thinking on the models that have it). A labelling job passes
+  // { type: "disabled" }: measured on Haiku 4.5, 40 sentences to label took
+  // 95 to 120 s and 11,000 to 13,000 output tokens for a 2,500-character
+  // reply with the default, which is the one-shot time limit.
+  thinking,
 }) {
   const executable = claudeExecutablePath(env);
   return {
@@ -34,6 +40,7 @@ export function buildOneshotOptions({
     strictMcpConfig: true,
     persistSession: false,
     maxTurns: 1,
+    ...(thinking ? { thinking } : {}),
     ...(executable ? { pathToClaudeCodeExecutable: executable } : {}),
     ...(abortController ? { abortController } : {}),
   };
@@ -62,7 +69,7 @@ export function parseJsonReply(text) {
 }
 
 export async function runOneshot(
-  { system, prompt, model = ONESHOT_MODEL, expectJson = true, timeoutMs = 120_000 },
+  { system, prompt, model = ONESHOT_MODEL, expectJson = true, timeoutMs = 120_000, thinking },
   { queryFn = sdkQuery, env = process.env } = {},
 ) {
   const abortController = new AbortController();
@@ -75,7 +82,7 @@ export async function runOneshot(
   try {
     for await (const msg of queryFn({
       prompt,
-      options: buildOneshotOptions({ system, model, abortController, env }),
+      options: buildOneshotOptions({ system, model, abortController, env, thinking }),
     })) {
       const lim = detectUsageLimit(msg);
       if (lim.limited && !limited) limited = lim;

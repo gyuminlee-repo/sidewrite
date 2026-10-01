@@ -791,7 +791,7 @@ export function createReviewService({
       }
       // L5: once the comments are known, whichever split made them. A save of
       // the edited list does not come here, so it never runs again on it.
-      const x = await extractRequirements(r.comments, { oneshot: shot });
+      const x = await extractRequirements(r.comments, { oneshot: shot, log });
       if (x.asked) {
         records.push(
           decisionRecord({
