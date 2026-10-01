@@ -185,6 +185,39 @@ const BAD = {
     ],
   },
   "text instead of labels": { requirements: ["Please add n."] },
+  // Class audit (Codex review 13): sentence and clause numbers.
+  "a sentence number out of range": {
+    sentences: [
+      { ref: "R1.1", s: 1, type: "other" },
+      { ref: "R1.1", s: 3, type: "request" },
+      { ref: "R1.2", s: 1, type: "request" },
+    ],
+  },
+  "a sentence number zero": {
+    sentences: [
+      { ref: "R1.1", s: 0, type: "other" },
+      { ref: "R1.1", s: 2, type: "request" },
+      { ref: "R1.2", s: 1, type: "request" },
+    ],
+  },
+  "a sentence number as text": {
+    sentences: [
+      { ref: "R1.1", s: "1", type: "other" },
+      { ref: "R1.1", s: 2, type: "request" },
+      { ref: "R1.2", s: 1, type: "request" },
+    ],
+  },
+  "cuts on a sentence without cut marks": {
+    sentences: [
+      { ref: "R1.1", s: 1, type: "other" },
+      { ref: "R1.1", s: 2, cuts: ["split"], types: ["request", "request"] },
+      { ref: "R1.2", s: 1, type: "request" },
+    ],
+  },
+  "an entry that is not an object": {
+    sentences: [{ ref: "R1.1", s: 1, type: "other" }, null, { ref: "R1.2", s: 1, type: "request" }],
+  },
+  "no sentences list": { sentences: "none" },
 };
 for (const [name, json] of Object.entries(BAD)) {
   test(`a reply with ${name} leaves requirements empty and warns`, async () => {
@@ -357,6 +390,30 @@ for (const [name, label] of Object.entries({
   test(`S2-30: a reply with ${name} leaves requirements empty and warns`, async () => {
     const r = await extractRequirements([C("R1.3", R13)], {
       oneshot: labelled({ "R1.3": [label] }),
+    });
+    assert.deepEqual(r.comments[0].requirements, []);
+    assert.deepEqual(r.warnings, [WARN]);
+  });
+}
+
+// Class audit (Codex review 13): labels of a sentence with cut marks. One
+// cut mark: exactly one decision, and one type per part after the splits.
+const CUT_ONE = [C("R1.3", "Please state the unit, and describe the method.")];
+const BAD_CUTS = {
+  "a type instead of cuts": { type: "request" },
+  "too many cut decisions": { cuts: ["split", "keep"], types: ["request", "request"] },
+  "no cut decision": { cuts: [], types: ["request"] },
+  "a cut decision outside the choices": { cuts: ["maybe"], types: ["request"] },
+  "one type too few": { cuts: ["split"], types: ["request"] },
+  "one type too many": { cuts: ["keep"], types: ["request", "other"] },
+  "a part type outside the choices": { cuts: ["split"], types: ["request", "question"] },
+  "cuts that are not a list": { cuts: "split", types: ["request", "request"] },
+};
+for (const [name, label] of Object.entries(BAD_CUTS)) {
+  test(`a cut-mark reply with ${name} leaves requirements empty and warns`, async () => {
+    assert.equal(clauseCuts(CUT_ONE[0].text).length, 1);
+    const r = await extractRequirements(CUT_ONE, {
+      oneshot: async () => ({ ok: true, json: { sentences: [{ ref: "R1.3", s: 1, ...label }] } }),
     });
     assert.deepEqual(r.comments[0].requirements, []);
     assert.deepEqual(r.warnings, [WARN]);

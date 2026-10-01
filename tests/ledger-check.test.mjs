@@ -176,6 +176,10 @@ test("LLM check: one call per batch, fabricated quotes and foreign indexes dropp
   assert.equal(calls.length, batchParagraphs(PARAS, 120).length);
   assert.equal(r.status, "violations");
   assert.equal(r.violations.length, 1);
+  // The entry for paragraph 99 (and, in the batches without it, the ones for
+  // paragraph 3) name no paragraph of the batch and their quotes are in none:
+  // every paragraph without a result of its own is unsure, not ok.
+  assert.deepEqual(r.unsure.map((u) => u.paragraph_index).sort(), [5, 7, 9]);
   assert.equal(calls[0], ledgerPrompt(LLM_ITEM, batchParagraphs(PARAS, 120)[0]));
 });
 
@@ -375,12 +379,13 @@ test("LLM check: a reply without a well-formed violations list is an error", asy
 // normal result. No confidence number is asked for or read.
 test("LLM check: unsure paragraphs are a result, and incremental checks read them again", async () => {
   const prompts = [];
+  // Answers for the paragraphs of the batch it was asked about.
   const oneshot = async (req) => {
     prompts.push(req);
-    return {
-      ok: true,
-      json: { violations: [], unsure: [{ paragraph_index: 5, reason: "cannot tell" }] },
-    };
+    const unsure = req.prompt.includes("\n[5] ")
+      ? [{ paragraph_index: 5, reason: "cannot tell" }]
+      : [];
+    return { ok: true, json: { violations: [], unsure } };
   };
   const r = await checkLlmItem(LLM_ITEM, PARAS, { oneshot });
   assert.equal(r.status, "unsure");
@@ -422,9 +427,11 @@ test("LLM check: violations outrank unsure in status; a malformed unsure list is
     }),
   });
   assert.equal(both.status, "violations");
+  // The entry for paragraph 99 names no paragraph of the batch: 7 and 9,
+  // which have no result of their own, are unsure too (Codex review 13).
   assert.deepEqual(
     both.unsure.map((u) => u.paragraph_index),
-    [5],
+    [5, 7, 9],
   );
   for (const [json, why] of [
     [{ violations: [], unsure: "x" }, /unsure/],
@@ -658,4 +665,171 @@ test("forbidHitsAfterEdit: a forbidden phrase the edit forms with the words next
   ];
   for (const item of others) assert.deepEqual(hit([item], P, "material", "substrate"), []);
   console.log(`forbidHitsAfterEdit corpus: ${created.length} created, ${kept.length} not created`);
+});
+
+// Codex review 13: an entry whose paragraph number is not in the batch was
+// dropped and the whole batch stored as ok, hashes cached (paragraph 0 holds
+// "a novel substrate"; the reply names that quote for paragraph 1).
+test("LLM check: a violation for a paragraph that was not asked about is placed by its quote, or leaves the batch unsure", async () => {
+  const paras = [
+    { index: 0, text: "It grew on a novel substrate.", reviewed_text: null },
+    { index: 4, text: "The medium was warm.", reviewed_text: null },
+    { index: 6, text: "Cells were counted twice.", reviewed_text: null },
+  ];
+  const reply = (json) => async () => ({ ok: true, json });
+  // The quote is in exactly one paragraph of the batch: the violation is its.
+  const placed = await checkLlmItem(LLM_ITEM, paras, {
+    oneshot: reply({
+      violations: [{ paragraph_index: 1, quote: "a novel substrate", reason: "r" }],
+    }),
+  });
+  assert.deepEqual(
+    [placed.status, placed.violations.map((v) => [v.paragraph_index, v.match]), placed.unsure],
+    ["violations", [[0, "a novel substrate"]], []],
+  );
+  // The quote is in no paragraph, or in more than one: no paragraph of the
+  // batch without a result of its own counts as ok.
+  for (const quote of ["a new substrate", "e"]) {
+    const verdicts = [];
+    const r = await checkLlmItem(LLM_ITEM, paras, {
+      oneshot: reply({
+        violations: [
+          { paragraph_index: 1, quote, reason: "r" },
+          { paragraph_index: 4, quote: "warm", reason: "r" },
+        ],
+      }),
+      onDecision: (d) => verdicts.push([d.paragraph_index, d.verdict]),
+    });
+    assert.equal(r.status, "violations");
+    assert.deepEqual(
+      r.violations.map((v) => v.paragraph_index),
+      [4],
+    );
+    assert.deepEqual(
+      r.unsure.map((u) => u.paragraph_index),
+      [0, 6],
+    );
+    assert.match(r.unsure[0].reason, /paragraph 1, which was not in the request/);
+    assert.deepEqual(verdicts, [
+      [0, "unsure"],
+      [4, "violation"],
+      [6, "unsure"],
+    ]);
+  }
+  // The same for an unsure entry with a number outside the batch.
+  const u = await checkLlmItem(LLM_ITEM, paras, {
+    oneshot: reply({ violations: [], unsure: [{ paragraph_index: 2, reason: "cannot tell" }] }),
+  });
+  assert.deepEqual([u.status, u.unsure.map((x) => x.paragraph_index)], ["unsure", [0, 4, 6]]);
+
+  // Nothing of it is cached: the next incremental check reads all three again.
+  const stray = reply({
+    violations: [{ paragraph_index: 1, quote: "a new substrate", reason: "r" }],
+  });
+  const [first] = await checkLedgerIncremental([LLM_ITEM], paras, { oneshot: stray });
+  assert.deepEqual([first.status, first.checked_hashes], ["unsure", []]);
+  const [next] = await checkLedgerIncremental(
+    [{ ...asStored(LLM_ITEM, first), unsure: first.unsure }],
+    paras,
+    { oneshot: reply({ violations: [] }) },
+  );
+  assert.deepEqual([next.mode, next.checked, next.status], ["incremental", 3, "ok"]);
+});
+
+// Class audit (Codex review 13): a reply that cannot be fully validated never
+// gives a cached pass. Each row is one way a ledger reply can be wrong.
+test("LLM check audit: no malformed or failed reply leaves checked_hashes with an unjudged paragraph", async () => {
+  const paras = [
+    { index: 0, text: "It grew on a novel substrate.", reviewed_text: null },
+    { index: 4, text: "The medium was warm.", reviewed_text: null },
+  ];
+  const json = (j) => async () => ({ ok: true, json: j });
+  const cases = [
+    // [name, oneshot, expected status, expected cached hash count]
+    [
+      "model call failed (limit, refusal, timeout)",
+      async () => ({ ok: false, error: "x" }),
+      "error",
+      null,
+    ],
+    ["reply is a JSON array", json([]), "error", null],
+    ["reply is an empty object", json({}), "error", null],
+    ["violations is not a list", json({ violations: "none" }), "error", null],
+    [
+      "entry without an index",
+      json({ violations: [{ quote: "warm", reason: "r" }] }),
+      "error",
+      null,
+    ],
+    [
+      "index is a fraction",
+      json({ violations: [{ paragraph_index: 0.5, quote: "warm", reason: "r" }] }),
+      "error",
+      null,
+    ],
+    ["unsure entry is a number", json({ violations: [], unsure: [4] }), "error", null],
+    [
+      "index outside the batch, quote nowhere",
+      json({ violations: [{ paragraph_index: 9, quote: "zz", reason: "r" }] }),
+      "unsure",
+      0,
+    ],
+    [
+      "negative index",
+      json({ violations: [{ paragraph_index: -1, quote: "zz", reason: "r" }] }),
+      "unsure",
+      0,
+    ],
+    [
+      "unsure index outside the batch",
+      json({ violations: [], unsure: [{ paragraph_index: 9, reason: "r" }] }),
+      "unsure",
+      0,
+    ],
+    [
+      "quote not in its paragraph",
+      json({ violations: [{ paragraph_index: 4, quote: "cold", reason: "r" }] }),
+      "unsure",
+      1,
+    ],
+    [
+      "empty quote",
+      json({ violations: [{ paragraph_index: 4, quote: "", reason: "r" }] }),
+      "unsure",
+      1,
+    ],
+    [
+      "index as a numeric string",
+      json({ violations: [{ paragraph_index: "4", quote: "warm", reason: "r" }] }),
+      "violations",
+      2,
+    ],
+    ["a clean pass", json({ violations: [] }), "ok", 2],
+  ];
+  for (const [name, oneshot, status, cached] of cases) {
+    const [o] = await checkLedgerIncremental([LLM_ITEM], paras, { oneshot });
+    assert.equal(o.status, status, name);
+    assert.equal(o.checked_hashes === null ? null : o.checked_hashes.length, cached, name);
+  }
+  // A later batch that fails does not keep the earlier batch as checked.
+  let n = 0;
+  const [half] = await checkLedgerIncremental([LLM_ITEM], paras, {
+    maxChars: 1,
+    oneshot: async () => (n++ ? { ok: false, error: "x" } : { ok: true, json: { violations: [] } }),
+  });
+  assert.deepEqual([half.status, half.checked_hashes], ["error", null]);
+  // Too many batches, or no runner: an error, nothing cached.
+  const [many] = await checkLedgerIncremental([LLM_ITEM], paras, {
+    maxChars: 1,
+    maxBatches: 1,
+    oneshot: json({ violations: [] }),
+  });
+  assert.deepEqual([many.status, many.checked_hashes], ["error", null]);
+  const [none] = await checkLedgerIncremental([LLM_ITEM], paras, {});
+  assert.deepEqual([none.status, none.checked_hashes], ["error", null]);
+  // A regex item whose pattern does not compile.
+  const badRegex = { ...IN_VITRO, check: { type: "regex", pattern: "(", flags: "" } };
+  const [re] = await checkLedgerIncremental([badRegex], paras);
+  assert.deepEqual([re.status, re.checked_hashes], ["error", null]);
+  console.log(`ledger reply audit: ${cases.length} reply shapes`);
 });

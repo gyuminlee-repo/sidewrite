@@ -187,9 +187,23 @@ export async function checkLlmItem(
     const before = { violations: violations.length, unsure: unsure.length };
     // Paragraphs with a reported violation whose quote is not in them.
     const unlocated = new Map();
+    // An entry that names a paragraph outside the batch and cannot be placed:
+    // the reply is about text that was not asked, so no paragraph of this
+    // batch counts as ok on the strength of it (Codex review 13).
+    let stray = null;
     for (const v of r.json.violations) {
-      const para = batch.find((p) => p.index === Number(v?.paragraph_index));
-      if (!para) continue;
+      let para = batch.find((p) => p.index === Number(v?.paragraph_index));
+      if (!para) {
+        // Its quote in exactly one paragraph of the batch says which one.
+        const holders = batch.filter(
+          (p) => locateQuote(viewText(p), String(v?.quote ?? "")) !== null,
+        );
+        if (holders.length !== 1) {
+          stray ??= v.paragraph_index;
+          continue;
+        }
+        para = holders[0];
+      }
       // A quote that is not in the paragraph is no evidence and is dropped:
       // the model must point at text.
       const match = locateQuote(viewText(para), String(v?.quote ?? ""));
@@ -207,6 +221,7 @@ export async function checkLlmItem(
     for (const u of r.json.unsure ?? []) {
       const para = batch.find((p) => p.index === Number(u.paragraph_index));
       if (para) unsure.push({ paragraph_index: para.index, reason: u.reason });
+      else stray ??= u.paragraph_index;
     }
     // A paragraph under both lists is unsure: no violation is kept for it,
     // and the incremental check reads it again (Codex review 9).
@@ -225,6 +240,16 @@ export async function checkLlmItem(
         reason: reason ? `${QUOTE_NOT_FOUND} (${reason})` : QUOTE_NOT_FOUND,
       });
       open.add(index);
+    }
+    if (stray !== null) {
+      for (const p of batch) {
+        if (hit.has(p.index) || open.has(p.index)) continue;
+        unsure.push({
+          paragraph_index: p.index,
+          reason: `model reply named paragraph ${stray}, which was not in the request; this paragraph has no result of its own`,
+        });
+        open.add(p.index);
+      }
     }
     decide(batch, (i) => (hit.has(i) ? "violation" : open.has(i) ? "unsure" : "ok"));
   }
