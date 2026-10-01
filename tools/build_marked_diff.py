@@ -4,8 +4,9 @@
 Colour mode (default): deleted text is struck through in --delete-rgb, inserted text is in --insert-rgb, everything
 else is unchanged. Track-changes mode (--mode track_changes): the same diff is written as Word revision marks
 (inserted runs inside w:ins, deleted runs inside w:del with w:delText), with --author and --date on every mark. The
-diff is the same in both modes; only the writer differs. The output is the clean docx with only word/document.xml
-replaced.
+diff is the same in both modes; only the writer differs. The output is the clean docx with word/document.xml
+replaced; parts of the baseline are added only when deleted content needs them (a deleted picture, the note of a
+deleted note reference).
 
 Structure is marked like text. A paragraph mark that is new (a new paragraph, a paragraph split in two) or gone (a
 deleted paragraph, two paragraphs joined, an empty paragraph that was removed) is an inserted or deleted paragraph
@@ -21,6 +22,19 @@ diffed word by word, and runs of paragraphs without a counterpart are re-paired 
 paragraph shows the sentences that stayed. A paragraph that moved (a re-sorted reference list, for example) is paired
 with its new place when it is similar enough.
 
+What a paragraph holds besides text is diffed like a word. A field (from its begin mark to its end mark, with the
+fields inside it; a w:fldSimple alike), a picture or another object, a note reference, a symbol, a hyphen that is
+no character, an equation: each is one unit, and two units are the same when they say the same (a field: its code
+and its result, however the code is cut into runs; a picture: the bytes it shows; a note reference: the text of
+its note). A unit that is the same in both documents stays as the clean document has it, also in the middle of a
+changed sentence. One that is new stands in w:ins with its own runs; one that is gone stands in w:del with the
+baseline's runs (field code as w:delInstrText), its picture or its note taken over from the baseline file. A
+citation whose shown text changed is the old field deleted and the new field inserted. In colour mode the runs
+of such a unit carry the insert colour or the strike and delete colour; a deleted field is still a field there,
+and a deleted picture is marked only in the formatting of its run. A field that runs over several paragraphs (a
+bibliography) is read by its ends: its begin with its code is one unit, its end another, and the paragraphs
+between are text. A comment keeps its place in a changed paragraph, like a bookmark.
+
 What is read how: pending tracked changes are carried out (accepted) in both files before they are compared, so the
 output holds this tool's marks only; pending cell insertions, deletions and merges are refused. Text that is struck through in the
 baseline is read as already deleted. In colour mode a clean file that already has struck-through text, or text in the
@@ -29,23 +43,25 @@ apart) and is refused.
 
 The result is checked before it is written: accepting every mark must give the clean document and rejecting every
 mark the baseline, in text and in structure: every paragraph (empty ones too) with its text, tabs and breaks by kind
-(line, page, column, clear) and with what it holds besides text, by kind and number (pictures, objects, fields,
-footnote and endnote references, equations, symbols); every table with its grid, its rows, its
-cells with their spans and merges, and the cell paragraphs; and on the accept side the text inside every bookmark,
-the number of comment marks of every paragraph and the order of paragraphs and tables. Comments are no tracked
-change: the output keeps the clean document's, and a comment of the baseline is not carried over. Not compared on the reject side: where a table stands
-among the paragraphs, and in colour mode page and column breaks (a deleted one is left out there, because a struck
-break would still break the page). The check itself is tested by damaging a copy. When a check fails nothing is
-written and the exit code is 1.
+(line, page, column, clear) and with what it holds besides text, unit by unit and by content (see above); every
+table with its grid, its rows, its cells with their spans and merges, and the cell paragraphs; and on the accept
+side the text inside every bookmark, the number of comment marks of every paragraph and the order of paragraphs and
+tables. Comments are no tracked change: the output keeps the clean document's, and a comment of the baseline is not
+carried over. Not compared on the reject side: where a table stands among the paragraphs, and in colour mode page
+and column breaks (a deleted one is left out there, because a struck break would still break the page). The check
+itself is tested by damaging a copy. When a check fails nothing is written and the exit code is 1.
 
-What is refused (exit 2) instead of written wrong: nested tables; a changed paragraph with a field, a footnote
-reference, a picture or another element that is not text, in the clean document or in the baseline, and a deleted
-baseline paragraph with one (the writer cannot rebuild such an element; a paragraph that differs only in such an
-element counts as changed, and one with the same text but other kinds of them is refused as well); a new paragraph
-with an equation or a simple field (w:fldSimple), which stand outside a run and cannot be marked as inserted; a paragraph of one document before a table or at
-the end of a cell or of the document where the other document has no paragraph at all (a paragraph mark cannot
-show that); pending cell insertions, deletions and merges. The output is never one of the inputs, and an output or report file
-that already exists is refused unless --overwrite is given (the write creates the name exclusively).
+What is refused (exit 2) instead of written wrong, each with the paragraph, its first words and the kind of the
+element: an equation that is new, gone or changed (it stands outside a run; the same holds for any other element
+outside a run that is no field), also when its paragraph is new or deleted; deleted content that points to a part
+of the baseline that cannot be copied on its own (a chart, a diagram), or to a note with links or pictures of its
+own. Further: nested tables; a paragraph of one document before a table or at the end of a cell or of the document
+where the other document has no paragraph at all (a paragraph mark cannot show that); pending cell insertions,
+deletions and merges; a file with characters of the private plane this tool uses for the units above. A clean
+paragraph whose runs stand inside a content control, a smart tag or a similar wrapper is not refused: it is not
+rewritten word by word, which would take the wrapper apart, but shown as a deleted paragraph and a new paragraph,
+with a warning. The output is never one of the inputs, and an output or report file that already exists is
+refused unless --overwrite is given (the write creates the name exclusively).
 
 Needs lxml.
 
@@ -57,9 +73,11 @@ import argparse
 import collections
 import copy
 import difflib
+import hashlib
 import itertools
 import json
 import os
+import posixpath
 import random
 import re
 import shutil
@@ -102,20 +120,36 @@ RPR_ORDER = ['rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps', 's
              'w', 'kern', 'position', 'sz', 'szCs', 'highlight', 'u', 'effect', 'bdr', 'shd', 'fitText',
              'vertAlign', 'rtl', 'cs', 'em', 'lang', 'eastAsianLayout', 'specVanish', 'oMath']
 TOKEN_RE = re.compile(r'\w*[^\W\d_]\w*|\d+(?:\.\d+)*|\w+|[^\w\s]')
-SAFE_CLEAN_TAGS = {'pPr', 'rPr', 'r', 't', 'tab', 'br', 'hyperlink', 'bookmarkStart', 'bookmarkEnd',
-                   'proofErr', 'lastRenderedPageBreak'}
-# Whatever a paragraph holds besides text, tabs and breaks (a picture, an object, a field mark or its code, a footnote
-# or endnote reference, an equation, a symbol, ...) is one INLINE_CHAR in the paragraph text, so
-# the diff sees that it is there, and it is counted by kind (Para.inline) for the structure check. The writer
-# cannot make such an element, so it never writes this character: a paragraph that would need it is refused.
-INLINE_CHAR = '\x02'
+R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+PKG_RELS = 'http://schemas.openxmlformats.org/package/2006/relationships'
+PKG_TYPES = 'http://schemas.openxmlformats.org/package/2006/content-types'
+# What a paragraph holds besides text, tabs and breaks is an atom: a field from its begin mark to its end mark, a
+# picture, an object, a note reference, a symbol, a hyphen that is no character, an equation. In the text the diff
+# reads, an atom is one character of a private plane, the same character for the same content (a field: its code
+# and its result; a picture: the bytes it shows; a note reference: what the note says), so the two documents agree
+# on an atom exactly when it says the same in both. Such a character is never written: the writer puts the atom's
+# own elements there, the clean document's for what stays or is new, the baseline's for what is deleted.
+ATOM_FIRST = 0xF0000
+ATOMS = {}                     # content of an atom -> its character
+ATOM_KIND = {}                 # character -> kind, for messages
+REL_DIGEST = {}                # relationship id -> what it points to (the bytes of a part, or an outside address)
+NOTE_DIGEST = {}               # (w:footnoteReference | w:endnoteReference, note id) -> what the note says
+BASE_RELS = {}                 # relationship id of the baseline -> where it points (load_rels)
+MOVED = set()                  # the relationship ids of the baseline that deleted content of the output uses
+NOTE_BODY = {}                 # (w:footnoteReference | w:endnoteReference, note id) -> the note element, of both files
+NOTE_PART = {}                 # 'footnotes' | 'endnotes' -> the name of that part in the clean file
+NOTE_MOVE = {}                 # (reference tag, id in the output) -> (reference tag, id in the baseline): notes taken over
+NOTE_NEXT = [2]                # the next free note id of the output
+BASE_PREFIX = 'bmd_'           # stands before every relationship id and note id of the baseline: an id says which file it is from
+_DOCPR_ID = itertools.count(1000000000)   # drawing ids for pictures taken over from the baseline
+NOTE_REFS = ('footnoteReference', 'endnoteReference')
 # Where a comment is anchored. A comment is no tracked change (Word keeps it when every change is rejected), so
 # these are not content: the output has the clean document's comments, checked on the accept side, and a baseline
 # comment is not carried over (the output has no comments part of the baseline); in a deleted paragraph it is
 # counted as dropped.
 COMMENT_TAGS = {'commentRangeStart', 'commentRangeEnd', 'commentReference'}
-NOT_INLINE = {'proofErr', 'lastRenderedPageBreak', 'bookmarkStart', 'bookmarkEnd', 'hyperlink', 'smartTag', 'sdt',
-              'sdtPr', 'sdtEndPr'} | COMMENT_TAGS   # wrappers and markers that are not content of their own
+WRAPPERS = ('smartTag', 'sdt', 'sdtContent', 'customXml', 'dir', 'bdo')   # hold runs: the reader looks inside
+SKIPPED = {'proofErr', 'lastRenderedPageBreak', 'sdtPr', 'sdtEndPr', 'smartTagPr', 'customXmlPr'}   # say nothing
 
 
 def q(tag):
@@ -240,6 +274,8 @@ def resolve_revisions(xml, side='accept'):
         if ln(e) in kept and e.getparent() is not None:
             for t in e.iter(q('delText')):
                 t.tag = q('t')
+            for t in e.iter(q('delInstrText')):
+                t.tag = q('instrText')
             for ch in list(e):
                 e.addprevious(ch)
             drop(e)
@@ -268,25 +304,139 @@ def break_char(br):
     return next(c for c, attrs in BREAK_CHARS.items() if attrs == want)
 
 
+def is_atom(ch):
+    return ord(ch) >= ATOM_FIRST
+
+
+def show(text, n=60):
+    """The start of a text for a message, with every atom as its kind."""
+    return ''.join('<%s>' % ATOM_KIND.get(ch, 'element') if is_atom(ch) else ch for ch in text[:n])
+
+
+def canon(el):
+    """What an element says, as nested tuples (tag, attributes, text, children). Left out: what changes from one
+    save to the next and what is formatting (revision save ids, drawing ids and names, run properties). A
+    relationship id stands as what it points to, a note id as what the note says; deleted text reads like text."""
+    tag = {'delText': 't', 'delInstrText': 'instrText'}.get(ln(el), ln(el))
+    if tag in ('rPr', 'pPr', 'bookmarkStart', 'bookmarkEnd') or tag in SKIPPED or tag in COMMENT_TAGS:
+        return None
+    attrs = []
+    for k, v in sorted(el.attrib.items()):
+        name = etree.QName(k)
+        local = name.localname
+        if local.startswith('rsid') or local in ('anchorId', 'editId', 'paraId', 'textId', 'dirty', 'fldLock', 'space'):
+            continue
+        if tag in ('docPr', 'cNvPr') and local in ('id', 'name'):
+            continue
+        if name.namespace == R_NS:
+            v = REL_DIGEST.get(v, v)
+        elif tag in NOTE_REFS and local == 'id':
+            v = NOTE_DIGEST.get((tag, v), v)
+        attrs.append((local, v))
+    kids = tuple(x for x in (canon(ch) for ch in el if isinstance(ch.tag, str)) if x is not None)
+    text = el.text or ''
+    return (tag, tuple(attrs), text if tag in ('t', 'instrText') else text.strip(), kids)
+
+
+def canon_seq(children):
+    """canon of a row of elements; text that is cut into several elements reads as one."""
+    out = []
+    for c in (canon(ch) for ch in children if isinstance(ch.tag, str)):
+        if c is None:
+            continue
+        if out and c[0] in ('t', 'instrText') and out[-1][0] == c[0]:
+            out[-1] = (c[0], (), out[-1][2] + c[2], ())
+        else:
+            out.append((c[0], (), c[2], ()) if c[0] in ('t', 'instrText') else c)
+    return tuple(out)
+
+
+class Atom:
+    """An element, or a whole field, that stands in the text of a paragraph as one character.
+
+    frags: [(the run it was read from, its rPr, [the children of that run that belong to the atom])]. el: the
+    element itself when it stands outside a run and is no field (an equation); such an atom can only be kept."""
+    def __init__(self, kind, link, el=None):
+        self.kind, self.link, self.el, self.frags, self.char, self.open = kind, link, el, [], None, False
+
+    def add(self, r, rpr, ch):
+        if self.frags and self.frags[-1][0] is r:
+            self.frags[-1][2].append(ch)
+        else:
+            self.frags.append((r, rpr, [ch]))
+
+    def children(self):
+        return [ch for _, _, chs in self.frags for ch in chs]
+
+    def close(self):
+        content = ('outside a run', canon(self.el)) if self.el is not None else (self.kind, canon_seq(self.children()))
+        if content not in ATOMS:
+            ATOMS[content] = chr(ATOM_FIRST + len(ATOMS))
+            ATOM_KIND[ATOMS[content]] = self.kind
+        self.char = ATOMS[content]
+
+
+def unfold_simple_field(fld):
+    """A w:fldSimple as runs with field marks (begin, code, separate, result, end): the form that can stand inside
+    w:ins and w:del. The new runs take the properties of the first run of the result."""
+    inner = [r for r in fld.iter(q('r')) if not any(a.tag == q('r') for a in r.iterancestors())]
+    rpr = inner[0].find(q('rPr')) if inner else None
+
+    def run(child):
+        r = etree.Element(q('r'))
+        if rpr is not None:
+            r.append(copy.deepcopy(rpr))
+        r.append(child)
+        return r
+
+    def mark(kind):
+        e = etree.Element(q('fldChar'))
+        e.set(q('fldCharType'), kind)
+        return run(e)
+
+    code = etree.Element(q('instrText'))
+    code.text = fld.get(q('instr')) or ''
+    code.set(XML_SPACE, 'preserve')
+    return [mark('begin'), run(code), mark('separate')] + [copy.deepcopy(r) for r in inner] + [mark('end')]
+
+
 class Para:
-    """Text of a paragraph with per-character format handles (key, rPr element, hyperlink element)."""
+    """Text of a paragraph with per-character format handles (key, rPr element, hyperlink element); for the
+    character of an atom the key and the rPr are the Atom."""
     def __init__(self):
         self.text = ''
         self.fmt = []
-        self.special = collections.Counter()
-        self.inline = collections.Counter()   # the elements that stand as INLINE_CHAR in the text, by kind
-        self.loose = collections.Counter()    # those of them that stand outside a run (a simple field, an equation)
-        self.marks = []     # bookmark markers: (element, text offset it sits at, enclosing hyperlink or None)
+        self.atoms = []                        # the atoms, in order
+        self.inline = collections.Counter()    # ... counted by kind
+        self.fixed = collections.Counter()     # what keeps the paragraph from being rewritten word by word
+        self.special = collections.Counter()   # comment marks, by tag
+        self.marks = []     # bookmark and comment markers: (element, text offset it sits at, enclosing hyperlink or None)
 
 
-def read_para(p, skip_rpr=is_struck, side='accept'):
+def read_para(p, skip_rpr=is_struck, side='accept', _open=frozenset()):
     """Read a paragraph; runs whose rPr satisfies skip_rpr are ignored.
 
     side selects how revision marks are read: 'accept' (w:ins kept, w:del dropped: the default, also the only reading
-    a colour-mode file needs), 'reject' (w:del kept as text, w:ins dropped), 'ins' / 'del' (only runs inside that mark)."""
+    a colour-mode file needs), 'reject' (w:del kept as text, w:ins dropped), 'ins' / 'del' (only runs inside that mark).
+
+    A field is one atom from its begin mark to its end mark (fields inside it included); a w:fldSimple is read as
+    the same field written with marks. A field that does not end in this paragraph (a bibliography runs over many
+    paragraphs) is an atom from its begin mark to its separate mark, and what follows is text like any other; an
+    end mark, or a separate mark, without a begin in this paragraph is an atom of its own. _open: the begin marks,
+    by number, that are known not to end here (the paragraph is read again when one is found)."""
     para = Para()
     parts = []
     interned = {}
+    state = {'field': None, 'depth': 0, 'begins': 0}
+
+    def put(atom):
+        para.atoms.append(atom)
+        para.fmt.append((atom, atom, atom.link))
+        parts.append(atom)                        # its character is known when it is closed
+
+    def finish(atom):
+        atom.close()
+        para.inline[atom.kind] += 1
 
     def add_run(r, link):
         rpr = r.find(q('rPr'))
@@ -297,8 +447,34 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
             interned[k] = (rpr_key(rpr), rpr, link)
         f = interned[k]
         for ch in r:
+            if not isinstance(ch.tag, str):
+                continue
             t = ln(ch)
             if t == 'rPr':
+                continue
+            cur = state['field']
+            mark = ch.get(q('fldCharType')) if t == 'fldChar' else None
+            if cur is not None:
+                cur.add(r, rpr, ch)
+                if link is not cur.link:
+                    para.fixed['a field that goes into or out of a link'] += 1
+                if mark == 'begin':
+                    state['depth'] += 1
+                elif mark == 'end':
+                    state['depth'] -= 1
+                elif not (mark == 'separate' and cur.open and state['depth'] == 1):
+                    continue
+                if mark == 'separate' or state['depth'] == 0:
+                    finish(cur)
+                    state['field'] = None
+                continue
+            if mark == 'begin':
+                state['begins'] += 1
+                cur = Atom('field', link)
+                cur.open, cur.n = state['begins'] in _open, state['begins']
+                cur.add(r, rpr, ch)
+                put(cur)
+                state['field'], state['depth'] = cur, 1
                 continue
             if t == 't' or t == 'delText':
                 s = ch.text or ''
@@ -306,21 +482,24 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
                 s = '\t'
             elif t == 'br':
                 s = break_char(ch)
-            else:
+            elif t == 'commentReference':             # a marker like a bookmark end: it keeps its place, in a run of its own
                 para.special[t] += 1
-                if t in NOT_INLINE:
-                    continue
-                para.inline[t] += 1
-                s = INLINE_CHAR
+                holder = etree.Element(q('r'))
+                if rpr is not None:
+                    holder.append(copy.deepcopy(rpr))
+                holder.append(copy.deepcopy(ch))
+                para.marks.append((holder, len(para.fmt), link))
+                continue
+            elif t in SKIPPED:
+                continue
+            else:
+                atom = Atom(t, link)
+                atom.add(r, rpr, ch)
+                put(atom)
+                finish(atom)
+                continue
             parts.append(s)
             para.fmt.extend([f] * len(s))
-
-    def inline(t, link):
-        """A paragraph-level element that is not text: one INLINE_CHAR."""
-        para.inline[t] += 1
-        para.loose[t] += 1
-        parts.append(INLINE_CHAR)
-        para.fmt.append(('', None, link))
 
     def walk(node, link, mark=None):
         for ch in node:
@@ -331,7 +510,6 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
                 if side in ('accept', 'reject') or mark == side:
                     add_run(ch, link)
             elif t == 'hyperlink':
-                para.special['hyperlink'] += 1
                 walk(ch, ch, mark)
             elif t == 'ins':
                 if side in ('accept', 'ins'):
@@ -339,23 +517,45 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
             elif t == 'del':
                 if side in ('reject', 'del'):
                     walk(ch, link, 'del')
-            elif t in ('smartTag', 'fldSimple', 'sdt', 'sdtContent'):
+            elif t == 'fldSimple':
+                runs = unfold_simple_field(ch)
+                if not (side in ('accept', 'reject') or mark == side) or skip_rpr(runs[0].find(q('rPr'))):
+                    continue
+                atom = Atom('field', link)
+                for r in runs:
+                    for c in r:
+                        if ln(c) != 'rPr':
+                            atom.add(r, r.find(q('rPr')), c)
+                if state['field'] is not None:
+                    para.fixed['a field inside a field'] += 1
+                put(atom)
+                finish(atom)
+            elif t in WRAPPERS:
                 if t != 'sdtContent':
-                    para.special[t] += 1
-                if t == 'fldSimple':
-                    inline(t, link)
+                    para.fixed[t] += 1
                 walk(ch, link, mark)
-            elif t in ('moveFrom', 'pPr'):
+            elif t in ('moveFrom', 'pPr') or t in SKIPPED:
                 continue
-            else:
-                para.special[t] += 1
-                if t in ('bookmarkStart', 'bookmarkEnd'):
-                    para.marks.append((ch, len(para.fmt), link))
-                elif t not in NOT_INLINE:
-                    inline(t, link)
+            elif t in ('bookmarkStart', 'bookmarkEnd', 'commentRangeStart', 'commentRangeEnd'):
+                if t in COMMENT_TAGS:
+                    para.special[t] += 1
+                para.marks.append((ch, len(para.fmt), link))
+            else:                                     # an equation, or whatever else stands outside a run
+                if not (side in ('accept', 'reject') or mark == side) or skip_rpr(None):
+                    continue
+                if state['field'] is not None:
+                    para.fixed['an element outside a run inside a field'] += 1
+                atom = Atom(t, link, el=ch)
+                put(atom)
+                finish(atom)
 
     walk(p, None)
-    para.text = ''.join(parts)
+    cur = state['field']
+    if cur is not None:
+        if not cur.open:
+            return read_para(p, skip_rpr, side, _open | {cur.n})
+        finish(cur)                                   # a field without a separate mark that does not end here
+    para.text = ''.join(x.char if isinstance(x, Atom) else x for x in parts)
     return para
 
 
@@ -383,7 +583,8 @@ def diff_ops(bt, ct, merge_gap=None):
     opc = difflib.SequenceMatcher(None, [t[0] for t in tb], [t[0] for t in tc], autojunk=False).get_opcodes()
     groups = []
     for k, (tag, i1, i2, j1, j2) in enumerate(opc):
-        if tag == 'equal' and 0 < k < len(opc) - 1 and (i2 - i1) <= merge_gap:
+        if tag == 'equal' and 0 < k < len(opc) - 1 and (i2 - i1) <= merge_gap \
+                and not any(is_atom(tb[x][0][0]) for x in range(i1, i2)):   # an atom that stays is never drawn into a change
             tag = 'replace'
         if tag != 'equal' and groups and groups[-1][0] != 'equal':
             groups[-1][2], groups[-1][4] = i2, j2
@@ -446,7 +647,8 @@ def segments(ops, b, c):
 
 def marked_string(segs):
     """Readable form: deletions [-..-], insertions {+..+}."""
-    return ''.join({'eq': '%s', 'del': '[-%s-]', 'ins': '{+%s+}'}[k] % t.replace('\t', '<TAB>').replace('\n', '<BR>').replace(SEP_CHAR, '<PARA>')
+    return ''.join({'eq': '%s', 'del': '[-%s-]', 'ins': '{+%s+}'}[k]
+                   % show(t, len(t)).replace('\t', '<TAB>').replace('\n', '<BR>').replace(SEP_CHAR, '<PARA>')
                    for k, t, *_ in segs)
 
 
@@ -460,13 +662,11 @@ def rev_mark(kind):
     return e
 
 
-def make_run(kind, text, rpr, styles):
-    """Build a w:r with the clean/baseline rPr deep-copied and the diff overlay applied.
-
-    color mode: 'del' = strike + DELETE_RGB, 'ins' = INSERT_RGB. track_changes mode: the run keeps its formatting and is
-    wrapped in <w:del> (text as w:delText) or <w:ins>; the wrapper is what gets returned."""
+def marked_rpr(kind, rpr, styles):
+    """A copy of run properties for a run of this kind. Colour mode: 'del' = strike + DELETE_RGB, 'ins' =
+    INSERT_RGB; track_changes mode leaves the formatting alone. A deleted run loses a character style the clean
+    document does not have."""
     tc = MODE == 'track_changes'
-    r = etree.Element(q('r'))
     new = copy.deepcopy(rpr) if rpr is not None else etree.Element(q('rPr'))
     if kind == 'del':
         st = new.find(q('rStyle'))
@@ -477,10 +677,96 @@ def make_run(kind, text, rpr, styles):
             rpr_set(new, 'color', val=DELETE_RGB)
     elif kind == 'ins' and not tc:
         rpr_set(new, 'color', val=INSERT_RGB)
+    return new
+
+
+def atom_block(kind, atom):
+    """Why an atom cannot be written as inserted or deleted, or None."""
+    if kind == 'eq':
+        return None
+    if atom.el is not None:
+        return 'stands outside a run and cannot be shown as %s' % ('inserted' if kind == 'ins' else 'deleted')
+    if kind == 'del':
+        for e in (e for ch in atom.children() for e in ch.iter() if isinstance(e.tag, str)):
+            if ln(e) in NOTE_REFS:
+                body = NOTE_BODY.get((ln(e), e.get(q('id'))))
+                if body is None:
+                    return 'refers to a note that the baseline file does not have'
+                if any(k.startswith('{%s}' % R_NS) for x in body.iter() if isinstance(x.tag, str) for k in x.attrib):
+                    return 'refers to a note of the baseline that points to parts of its own (a link, a picture)'
+                continue
+            for k, v in e.attrib.items():
+                if k.startswith('{%s}' % R_NS) and not BASE_RELS.get(v, {}).get('movable'):
+                    return ('points to a part of the baseline file that cannot be taken over (%s)'
+                            % (BASE_RELS.get(v, {}).get('target') or v))
+    return None
+
+
+def refuse_atoms(pairs, where):
+    """pairs: (kind, atom) of what is about to be written. Refuses with the place and the kind of the element."""
+    for kind, atom in pairs:
+        why = atom_block(kind, atom)
+        assert not why, '%s holds an element (%s) that %s' % (where, atom.kind, why)
+
+
+def emit_atom(kind, atom, styles):
+    """The elements of an atom, copied: as they are ('eq'), or as inserted or deleted content.
+
+    track_changes mode: the runs stand in one w:ins or w:del, and deleted text and field code become w:delText
+    and w:delInstrText, as Word writes a deleted field. Colour mode: every run gets the formatting of the kind.
+    Deleted runs come from the baseline: the parts they point to are taken over (MOVED, see write_docx), a
+    drawing gets an id of its own, and a note reference gets a new id under which the baseline's note is added to
+    the notes of the output (NOTE_MOVE)."""
+    if atom.el is not None:
+        assert kind == 'eq', 'an element outside a run reached the writer as %s' % kind   # refuse_atoms comes first
+        return [copy.deepcopy(atom.el)]
+    tc = MODE == 'track_changes'
+    runs = []
+    for _, rpr, children in atom.frags:
+        r = etree.Element(q('r'))
+        new = marked_rpr(kind, rpr, styles)
+        if len(new):
+            r.append(new)
+        for ch in children:
+            c = copy.deepcopy(ch)
+            if tc and kind == 'del' and ln(c) in ('t', 'instrText'):
+                c.tag = q('delText' if ln(c) == 't' else 'delInstrText')
+            r.append(c)
+        if kind == 'del':
+            for e in r.iter():
+                if not isinstance(e.tag, str):
+                    continue
+                MOVED.update(v for k, v in e.attrib.items() if k.startswith('{%s}' % R_NS))
+                if ln(e) == 'docPr':
+                    e.set('id', str(next(_DOCPR_ID)))
+                elif ln(e) in NOTE_REFS:              # the note is taken over under an id the clean file does not use
+                    old, new = (ln(e), e.get(q('id'))), (ln(e), str(NOTE_NEXT[0]))
+                    NOTE_NEXT[0] += 1
+                    NOTE_MOVE[new], NOTE_DIGEST[new] = old, NOTE_DIGEST.get(old)
+                    e.set(q('id'), new[1])
+        runs.append(r)
+    if tc and kind in ('ins', 'del'):
+        w = rev_mark(kind)
+        w.extend(runs)
+        return [w]
+    return runs
+
+
+def make_run(kind, text, rpr, styles):
+    """Build a w:r with the clean/baseline rPr deep-copied and the diff overlay applied (marked_rpr); for the
+    character of an atom, the atom's elements (emit_atom, a list).
+
+    track_changes mode: the run keeps its formatting and is wrapped in <w:del> (text as w:delText) or <w:ins>; the
+    wrapper is what gets returned."""
+    if isinstance(rpr, Atom):
+        return emit_atom(kind, rpr, styles)
+    tc = MODE == 'track_changes'
+    r = etree.Element(q('r'))
+    new = marked_rpr(kind, rpr, styles)
     if len(new):
         r.append(new)
     ttag = 'delText' if (tc and kind == 'del') else 't'
-    for part in re.split('([\t%s%s%s])' % (''.join(BREAK_CHARS), SEP_CHAR, INLINE_CHAR), text):
+    for part in re.split('([\t%s%s])' % (''.join(BREAK_CHARS), SEP_CHAR), text):
         if part == '':
             continue
         if part == '\t':
@@ -491,9 +777,8 @@ def make_run(kind, text, rpr, styles):
                 br.set(q(k), v)
         elif part == SEP_CHAR:
             raise AssertionError('a paragraph separator reached the run writer')   # rebuild_para splits there
-        elif INLINE_CHAR in part:
-            raise AssertionError('an element that is not text reached the run writer')   # refused before, see refuse_inline
         else:
+            assert not any(is_atom(ch) for ch in part), 'the character of an element reached the run writer as text'
             t = etree.SubElement(r, q(ttag))
             t.text = part
             t.set(XML_SPACE, 'preserve')
@@ -508,8 +793,9 @@ def build_children(segs, styles):
     """Run/hyperlink elements for segments; consecutive segments sharing a clean hyperlink are re-wrapped."""
     out, cur, cur_link = [], None, None
     for kind, text, key, rpr, link in segs:
-        # a bookmark marker from place_marks is the element itself, and stays in its hyperlink like a run
+        # a marker from place_marks is the element itself, and stays in its hyperlink like a run
         r = text if kind == 'mark' else make_run(kind, text, rpr, styles)
+        made = r if isinstance(r, list) else [r]
         if link is not None:
             if cur is None or cur_link is not link:
                 cur = copy.deepcopy(link)
@@ -517,18 +803,23 @@ def build_children(segs, styles):
                     cur.remove(ch)
                 out.append(cur)
                 cur_link = link
-            cur.append(r)
+            cur.extend(made)
         else:
             cur, cur_link = None, None
-            out.append(r)
+            out.extend(made)
     return out
 
 
 def colorize_in_place(p, rgb=None):
     """Mark the whole content of a clean-only paragraph as inserted (structure kept): every run, also one that
     holds a picture, a field mark or a footnote reference instead of text. Colour mode applies the insert colour
-    to the run, track_changes mode wraps the run in <w:ins>. What stands outside a run (Para.loose) cannot be
-    marked this way; the caller refuses such a paragraph."""
+    to the run, track_changes mode wraps the run in <w:ins>. A w:fldSimple is written with field marks first, so
+    that nothing of it is left when the paragraph goes. What else stands outside a run cannot be marked this way;
+    the caller refuses such a paragraph."""
+    for fld in list(p.iter(q('fldSimple'))):
+        for r in unfold_simple_field(fld):
+            fld.addprevious(r)
+        fld.getparent().remove(fld)
     n = 0
     for r in list(p.iter(q('r'))):
         if any(a.tag == q('r') for a in r.iterancestors()):
@@ -739,6 +1030,7 @@ def plan_marks(seq, cps, B, C, stats, new_tables=()):
 def place_marks(segs, marks):
     """Segments with the clean paragraph's bookmark markers put back where they were in the clean text.
 
+    A marker is a bookmark start or end, a comment range start or end, or the run with a comment's reference.
     A marker sits at an offset of the clean text; unchanged and inserted segments are cut there. Deleted text has no
     place in the clean text: it is shown at an offset too, and at that offset a bookmark end goes before it and a
     bookmark start after it, so deleted text next to a bookmark stays outside it. A bookmark that is empty in the
@@ -750,13 +1042,15 @@ def place_marks(segs, marks):
     for off in sorted({o for _, o, _ in marks}):
         here = [(e, link) for e, o, link in marks if o == off]
         seen, empty = set(), set()
+        name = lambda e: (ln(e)[:7], e.get(q('id')))   # 'bookmar' | 'comment', id: the two kinds number on their own
         for e, _ in here:
-            if ln(e) == 'bookmarkStart':
-                seen.add(e.get(q('id')))
-            elif e.get(q('id')) in seen:
-                empty.add(e.get(q('id')))
+            if ln(e) in ('bookmarkStart', 'commentRangeStart'):
+                seen.add(name(e))
+            elif ln(e) in ('bookmarkEnd', 'commentRangeEnd') and name(e) in seen:
+                empty.add(name(e))
         for e, link in here:
-            first = ln(e) == 'bookmarkEnd' or e.get(q('id')) in empty
+            # an end, and the run that holds the reference of a comment, go before deleted text; a start after it
+            first = ln(e) in ('bookmarkEnd', 'commentRangeEnd', 'r') or name(e) in empty
             (pre if first else post)[off].append(['mark', e, None, None, link])
     out, pos = [], 0
 
@@ -809,8 +1103,7 @@ def rebuild_para(p, b, c, styles, stats, segs=None, ppr_of=None):
     Where the segments say that a baseline paragraph ends inside this paragraph (SEP_CHAR), the text before that
     point becomes a paragraph of its own in front of p, with the properties ppr_of gives for that baseline
     paragraph. Returns those new paragraphs; plan_marks gives them their deleted paragraph marks."""
-    bad = {k: v for k, v in c.special.items() if k not in SAFE_CLEAN_TAGS and k != 'lastRenderedPageBreak'}
-    assert not bad, 'unsupported element in changed clean paragraph %r: %s' % (c.text[:60], bad)
+    assert not c.fixed, 'a paragraph that must stay whole reached the rewriter (%r): %s' % (show(c.text), dict(c.fixed))   # keep_whole comes first
     if segs is None:
         segs = segments(diff_ops(b.text, c.text), b, c)
     pieces, cur = [], []
@@ -864,20 +1157,10 @@ def deleted_ppr(bp, styles, numids, stats):
     return ppr
 
 
-def kinds_of(para):
-    return ', '.join('%s x%d' % kv for kv in sorted(para.inline.items())) or 'none'
-
-
-def refuse_inline(b, what):
-    """Deleted text is written from the baseline's characters; a picture, a field or a footnote reference among
-    them cannot be written (and would need parts of the baseline file). Such a paragraph is refused."""
-    assert not b.inline, ('a %s baseline paragraph has elements that deleted text cannot carry (%s): %r'
-                          % (what, kinds_of(b), b.text.replace(INLINE_CHAR, '')[:60]))
-
-
-def make_deleted_para(bp, b, styles, numids, stats):
-    """New paragraph holding baseline text as deletions; its mark is set by the caller."""
-    refuse_inline(b, 'deleted')
+def make_deleted_para(bp, b, styles, numids, stats, where):
+    """New paragraph holding baseline text as deletions; its mark is set by the caller. where: the paragraph, for
+    the message when it holds something that cannot be written as deleted."""
+    refuse_atoms((('del', a) for a in b.atoms), where)
     for k in sorted(COMMENT_TAGS & set(b.special)):
         stats['dropped_baseline_special'][k] += b.special[k]
     p = etree.Element(q('p'))
@@ -890,6 +1173,24 @@ def make_deleted_para(bp, b, styles, numids, stats):
     stats['exp_del'].append(''.join(t for k, t, *_ in segs))
     stats['marked'].append((b.text, '', marked_string(segs)))
     return p
+
+
+def keep_whole(ali, B, C, stats, part):
+    """A clean paragraph whose runs stand inside something the writer does not rebuild (a content control, a smart
+    tag, a field that crosses a link) is not rewritten word by word, which would take that apart. When it changed
+    it is shown as a deleted paragraph and a new paragraph, which keeps it as it is; a note says so."""
+    out = []
+    for tag, bi, ci in ali:
+        if ci is None or not C[ci].fixed or tag in ('eq', 'mins') or (bi is not None and B[bi].text == C[ci].text):
+            out.append((tag, bi, ci))
+            continue
+        if bi is not None:
+            out.append(('mdel', bi, None))
+            stats['notes'].append('clean paragraph %d of %s (%r) holds %s and is not rewritten word by word: it is shown '
+                                  'as a deleted paragraph and a new paragraph'
+                                  % (ci + 1, part, show(C[ci].text), ', '.join(sorted(C[ci].fixed))))
+        out.append(('mins', None, ci))
+    return out
 
 
 def align_paras(bt_all, ct_all):
@@ -1287,7 +1588,7 @@ def sentence_realign(ali, B, C, min_ratio):
     return out
 
 
-def apply_container(bps, cps, styles, numids, stats, tables=None):
+def apply_container(bps, cps, styles, numids, stats, tables=None, part='a table cell'):
     """Diff one list of baseline paragraphs against one list of clean paragraphs, editing the clean tree in place.
 
     tables (the document body only): {'before': tables that stand before each baseline paragraph, 'match': {id of a
@@ -1297,7 +1598,9 @@ def apply_container(bps, cps, styles, numids, stats, tables=None):
     B = [read_para(p) for p in bps]
     C = [read_para(p, skip_rpr=lambda r: False) for p in cps]
     ali = align_paras([x.text for x in B], [x.text for x in C])
+    ali = keep_whole(ali, B, C, stats, part)
     ali = sentence_realign(ali, B, C, SENT_MATCH_MIN_RATIO)
+    clean_at = lambda ci: 'clean paragraph %d of %s (%r)' % (ci + 1, part, show(C[ci].text))
     seq = list(cps)                                   # the output paragraphs of this container, in document order
     head = {}                                         # id of a clean paragraph -> the first piece split off in front of it
 
@@ -1306,17 +1609,10 @@ def apply_container(bps, cps, styles, numids, stats, tables=None):
 
     for tag, bi, ci, extra in ali:
         if tag == 'eq':
-            # the clean paragraph is kept as it is, so reject-all shows its elements: they must be the baseline's
-            assert B[bi].inline == C[ci].inline, (
-                'a paragraph with the same text holds other elements that are not text in the baseline (%s) than in '
-                'the clean document (%s), which cannot be shown: %r'
-                % (kinds_of(B[bi]), kinds_of(C[ci]), C[ci].text.replace(INLINE_CHAR, '')[:60]))
             stats['n_eq'] += 1
         elif tag == 'seg':
-            assert not C[ci].special.get('drawing'), 'text differs in clean paragraph with drawing: %r' % C[ci].text[:60]
             segs, used = extra
-            for u in used:
-                refuse_inline(B[u], 'changed')
+            refuse_atoms(((seg[0], seg[3]) for seg in segs if isinstance(seg[3], Atom)), clean_at(ci))
             new = rebuild_para(cps[ci], ' \u00b6 '.join(B[u].text for u in used), C[ci], styles, stats, segs,
                                lambda b: deleted_ppr(bps[b], styles, numids, stats))
             seq[at(cps[ci]):at(cps[ci])] = new
@@ -1325,9 +1621,7 @@ def apply_container(bps, cps, styles, numids, stats, tables=None):
             stats['n_mod'] += 1
         elif tag == 'ins':
             stats['n_ins'] += 1
-            assert not C[ci].loose, (
-                'a new paragraph has elements outside a run that cannot be marked as inserted (%s): %r'
-                % (', '.join('%s x%d' % kv for kv in sorted(C[ci].loose.items())), C[ci].text.replace(INLINE_CHAR, '')[:60]))
+            refuse_atoms((('ins', a) for a in C[ci].atoms), clean_at(ci))
             if C[ci].text:
                 colorize_in_place(cps[ci])
                 stats['exp_ins'].append(C[ci].text)
@@ -1354,7 +1648,8 @@ def apply_container(bps, cps, styles, numids, stats, tables=None):
             last = cps[ci] if ci is not None else last
             continue
         stats['n_del'] += 1
-        newp = make_deleted_para(bps[bi], B[bi], styles, numids, stats)
+        newp = make_deleted_para(bps[bi], B[bi], styles, numids, stats,
+                                 'baseline paragraph %d of %s (%r)' % (bi + 1, part, show(B[bi].text)))
         nxt = next((cps[a[2]] for a in ali[idx + 1:] if a[0] != 'del'), None)
         if nxt is not None:
             first = head.get(id(nxt), nxt)
@@ -1462,7 +1757,7 @@ def deleted_table(bt, styles, numids, stats):
     for tc in t.iter(q('tc')):
         for p in tc.findall(q('p')):
             b = read_para(p)
-            newp = make_deleted_para(p, b, styles, numids, stats)
+            newp = make_deleted_para(p, b, styles, numids, stats, 'a paragraph of a deleted table (%r)' % show(b.text))
             p.addprevious(newp)
             tc.remove(p)
         if tc.find(q('p')) is None:
@@ -1503,7 +1798,7 @@ def build_document(base_xml, clean_xml, styles, numids):
     broot, croot = etree.fromstring(base_xml), etree.fromstring(clean_xml)
     stats = {'n_eq': 0, 'n_mod': 0, 'n_ins': 0, 'n_del': 0, 'n_del_empty': 0, 'marked': [], 'exp_ins': [],
              'exp_del': [], 'deleted_paras': [], 'dropped_pstyle': 0, 'dropped_numpr': 0,
-             'dropped_baseline_special': collections.Counter(), 'tables': [],
+             'dropped_baseline_special': collections.Counter(), 'tables': [], 'notes': [],
              'para_marks': collections.Counter()}
     bts, cts = top_tables(broot), top_tables(croot)
     pairs = match_tables(bts, cts)
@@ -1513,7 +1808,8 @@ def build_document(base_xml, clean_xml, styles, numids):
     assert bps and cps, 'a document without a paragraph outside its tables'
     same_dims = lambda bk, ck: table_layout(bts[bk]) == table_layout(cts[ck])   # cells, spans and merges alike
     new = {id(cts[ck]) for bk, ck in pairs if ck is not None and bk is None}   # no deleted table will stand next to these
-    owners = apply_container(bps, cps, styles, numids, stats, {'before': tables_before, 'match': at_base, 'new': new})
+    owners = apply_container(bps, cps, styles, numids, stats, {'before': tables_before, 'match': at_base, 'new': new},
+                             part='the body')
     assert len(owners) == len(bps), 'not every baseline paragraph has its place in the marked text'
     out_paras = body_paras(croot)
     first = out_paras[0]
@@ -1569,9 +1865,9 @@ def build_document(base_xml, clean_xml, styles, numids):
             stats['tables'].append('baseline table %d: deleted' % (bk + 1))
         held.append(old)
         at_base[id(old)] = bk
-    stats['warnings'] = []
+    stats['warnings'] = stats['notes']
     if MODE == 'color':
-        stats['warnings'] = ['bookmark "%s" now also holds %d character(s) of deleted text (struck); a cross-reference '
+        stats['warnings'] = stats['notes'] + ['bookmark "%s" now also holds %d character(s) of deleted text (struck); a cross-reference '
                              'to it shows that text too' % (name, n) for name, n in bookmarks_holding_deletions(croot).items()]
     return etree.tostring(croot, xml_declaration=True, encoding='UTF-8', standalone=True), stats
 
@@ -1622,14 +1918,139 @@ def place(tmp, out, overwrite=False):
     os.unlink(tmp)
 
 
+def load_rels(z, prefix):
+    """{relationship id: where it points} of word/document.xml in a docx zip, every id with the prefix. Fills
+    REL_DIGEST for these ids and, from the footnotes and endnotes parts, NOTE_DIGEST.
+
+    Where it points: {'type', 'target', 'external', 'data' (the bytes of the part), 'ctype' (its content type),
+    'movable' (the part can be copied into another file: it is there, has a content type and no parts of its own)}."""
+    names = set(z.namelist())
+    rels = {}
+    if 'word/_rels/document.xml.rels' not in names:
+        return rels
+    types = etree.fromstring(z.read('[Content_Types].xml'))
+    by_name = {e.get('PartName'): e.get('ContentType') for e in types.iter('{%s}Override' % PKG_TYPES)}
+    by_ext = {(e.get('Extension') or '').lower(): e.get('ContentType') for e in types.iter('{%s}Default' % PKG_TYPES)}
+    for rel in etree.fromstring(z.read('word/_rels/document.xml.rels')):
+        if not isinstance(rel.tag, str):
+            continue
+        rid, target = prefix + (rel.get('Id') or ''), rel.get('Target') or ''
+        info = {'type': rel.get('Type') or '', 'target': target, 'external': rel.get('TargetMode') == 'External',
+                'data': None, 'ctype': None, 'movable': True}
+        rels[rid] = info
+        if info['external']:
+            REL_DIGEST[rid] = 'outside:' + target
+            continue
+        part = target[1:] if target.startswith('/') else posixpath.normpath(posixpath.join('word', target))
+        if part not in names:
+            info['movable'] = False
+            REL_DIGEST[rid] = 'missing:' + target
+            continue
+        folder, name = posixpath.split(part)
+        info['data'] = z.read(part)
+        info['ctype'] = by_name.get('/' + part) or by_ext.get(posixpath.splitext(part)[1][1:].lower())
+        info['movable'] = info['ctype'] is not None and posixpath.join(folder, '_rels', name + '.rels') not in names
+        REL_DIGEST[rid] = hashlib.sha256(info['data']).hexdigest()
+        kind = info['type'].rsplit('/', 1)[-1]
+        if kind in ('footnotes', 'endnotes'):
+            if not prefix:
+                NOTE_PART[kind] = part
+            for note in etree.fromstring(info['data']):
+                if isinstance(note.tag, str):
+                    key = (kind[:-1] + 'Reference', prefix + (note.get(q('id')) or ''))
+                    NOTE_DIGEST[key], NOTE_BODY[key] = repr(canon_seq(note)), note
+    return rels
+
+
+def from_baseline(xml):
+    """document.xml of the baseline with BASE_PREFIX before every relationship id and every note id, so that an id
+    read anywhere (in the baseline, the clean document or the output) says which file it belongs to."""
+    root = etree.fromstring(xml)
+    for e in root.iter():
+        if not isinstance(e.tag, str):
+            continue
+        for k in [k for k in e.attrib if k.startswith('{%s}' % R_NS)]:
+            e.set(k, BASE_PREFIX + e.get(k))
+        if e.tag in (q('footnoteReference'), q('endnoteReference')) and e.get(q('id')) is not None:
+            e.set(q('id'), BASE_PREFIX + e.get(q('id')))
+    return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+
+
 def write_docx(clean_path, out_path, doc_xml):
-    """Copy the clean zip with only word/document.xml replaced (ZipInfo, order and comment preserved)."""
+    """Copy the clean zip with word/document.xml replaced (ZipInfo, order and comment preserved).
+
+    When deleted content of the output points to parts of the baseline (MOVED: a deleted picture), those parts are
+    added at the end as word/media/bmd_<n>.<ext>, with a relationship of the same id in
+    word/_rels/document.xml.rels and their content type in [Content_Types].xml. When a deleted note reference of
+    the baseline is shown (NOTE_MOVE), its note is added to the footnotes or endnotes part of the clean file under
+    the new id; a clean file without such a part gets one (word/bmd_footnotes.xml: the separators of the
+    baseline's part and the notes taken over). In colour mode the text of such a note is formatted as deleted.
+    Returns the names of the parts that were added or changed besides the document (empty for most pairs)."""
+    parts, rel_rows, type_rows = {}, [], []
+    for n, rid in enumerate(sorted(MOVED), 1):
+        info = BASE_RELS[rid]
+        if info['external']:
+            rel_rows.append((rid, info['type'], info['target'], True))
+            continue
+        name = 'word/media/%s%d%s' % (BASE_PREFIX, n, posixpath.splitext(info['target'])[1])
+        parts[name] = info['data']
+        rel_rows.append((rid, info['type'], name[len('word/'):], False))
+        type_rows.append(('/' + name, info['ctype']))
+    notes = collections.defaultdict(list)             # 'footnotes' | 'endnotes' -> the notes to add
+    for (tag, new), old in sorted(NOTE_MOVE.items()):
+        note = copy.deepcopy(NOTE_BODY[old])
+        note.set(q('id'), new)
+        if MODE != 'track_changes':
+            for r in note.iter(q('r')):
+                rpr = marked_rpr('del', r.find(q('rPr')), None)
+                if r.find(q('rPr')) is not None:
+                    r.remove(r.find(q('rPr')))
+                r.insert(0, rpr)
+        notes[tag[:-len('Reference')] + 's'].append(note)
+    edited = {}                                       # part of the clean file -> its new bytes
+    xml_of = lambda root: etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+    with zipfile.ZipFile(clean_path) as zin:
+        for kind, added in sorted(notes.items()):
+            if kind in NOTE_PART:
+                root = etree.fromstring(zin.read(NOTE_PART[kind]))
+                root.extend(added)
+                edited[NOTE_PART[kind]] = xml_of(root)
+                continue
+            src = next(i for i in BASE_RELS.values() if i['type'].rsplit('/', 1)[-1] == kind and i['data'] is not None)
+            root = etree.fromstring(src['data'])
+            for note in list(root):
+                if not isinstance(note.tag, str) or note.get(q('type')) in (None, 'normal'):
+                    root.remove(note)
+            root.extend(added)
+            name = 'word/%s%s.xml' % (BASE_PREFIX, kind)
+            parts[name] = xml_of(root)
+            rel_rows.append((BASE_PREFIX + kind, src['type'], name[len('word/'):], False))
+            type_rows.append(('/' + name, src['ctype']))
+    changed = set(parts) | set(edited)
     with zipfile.ZipFile(clean_path) as zin, zipfile.ZipFile(out_path, 'w') as zout:
         zout.comment = zin.comment
+        assert not rel_rows or 'word/_rels/document.xml.rels' in zin.namelist(), 'the clean file has no relationships part'
         for info in zin.infolist():
-            data = doc_xml if info.filename == 'word/document.xml' else zin.read(info.filename)
+            data = doc_xml if info.filename == 'word/document.xml' else edited.get(info.filename) or zin.read(info.filename)
+            if rel_rows and info.filename == 'word/_rels/document.xml.rels':
+                root = etree.fromstring(data)
+                for rid, kind, target, external in rel_rows:
+                    rel = etree.SubElement(root, '{%s}Relationship' % PKG_RELS, Id=rid, Type=kind, Target=target)
+                    if external:
+                        rel.set('TargetMode', 'External')
+                data = xml_of(root)
+                changed.add(info.filename)
+            elif type_rows and info.filename == '[Content_Types].xml':
+                root = etree.fromstring(data)
+                for name, ctype in type_rows:
+                    etree.SubElement(root, '{%s}Override' % PKG_TYPES, PartName=name, ContentType=ctype)
+                data = xml_of(root)
+                changed.add(info.filename)
             ni = copy.copy(info)
             zout.writestr(ni, data, compress_type=info.compress_type)
+        for name, data in parts.items():              # a fixed date: the same inputs give the same file
+            zout.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), data, compress_type=zipfile.ZIP_DEFLATED)
+    return changed
 
 
 def colour_conflicts(clean_xml):
@@ -1639,8 +2060,8 @@ def colour_conflicts(clean_xml):
     root = etree.fromstring(clean_xml)
     marks = sum(1 for p in root.iter(q('p')) if para_mark(p))
     for r in root.iter(q('r')):
-        if not any(ln(ch) in ('t', 'tab', 'br') for ch in r if isinstance(ch.tag, str)):
-            continue
+        if not any(ln(ch) != 'rPr' and ln(ch) not in SKIPPED for ch in r if isinstance(ch.tag, str)):
+            continue                                  # a run that holds nothing
         rpr = r.find(q('rPr'))
         if is_struck(rpr):
             struck += 1
@@ -1727,8 +2148,9 @@ def view_root(marked_xml, side):
 def structure(root, baseline=False):
     """What the round-trip check compares of a document without marks:
     'flow'      the order of body paragraphs ('p') and top-level tables ('t'),
-    'body'      every body paragraph, empty ones included, as [text with tabs, typed breaks (BREAK_CHARS) and one
-                INLINE_CHAR per element that is not text, those elements counted by kind],
+    'body'      every body paragraph, empty ones included, as [text with tabs, typed breaks (BREAK_CHARS) and
+                the character of every atom (the same character for the same content: field code and result,
+                picture bytes, note text), the atoms counted by kind],
     'tables'    for every top-level table [grid columns, rows of cells as [columns spanned, vertical merge,
                 old-style horizontal merge, the paragraphs of the cell], each row closed by its row_skips],
     'bookmarks' the text between the start and the end of every bookmark,
@@ -1980,14 +2402,15 @@ def tamper_clear_mark(xml):
     return None
 
 
-def zip_checks(clean_path, out_path):
+def zip_checks(clean_path, out_path, changed=()):
     """testzip, part-by-part byte identity against the clean zip, lxml parse."""
     res = []
     with zipfile.ZipFile(clean_path) as a, zipfile.ZipFile(out_path) as b:
         res.append(('testzip', b.testzip() is None))
-        res.append(('namelist identical incl. order', a.namelist() == b.namelist()))
+        names, added = a.namelist(), [n for n in b.namelist() if n not in set(a.namelist())]
+        res.append(('namelist identical incl. order', names == b.namelist()[:len(names)] and set(added) <= set(changed)))
         res.append(('comment identical', a.comment == b.comment))
-        same = all(a.read(n) == b.read(n) for n in a.namelist() if n != 'word/document.xml')
+        same = all(a.read(n) == b.read(n) for n in a.namelist() if n != 'word/document.xml' and n not in changed)
         res.append(('all other parts byte-identical', same))
         meta = all((x.date_time, x.compress_type, x.external_attr) == (y.date_time, y.compress_type, y.external_attr)
                    for x, y in zip(a.infolist(), b.infolist()))
@@ -2062,10 +2485,20 @@ def run(a):
     if INSERT_RGB == DELETE_RGB:
         raise Refused('--insert-rgb and --delete-rgb must differ')
 
+    for table in (ATOMS, ATOM_KIND, REL_DIGEST, NOTE_DIGEST, BASE_RELS, MOVED, NOTE_BODY, NOTE_PART, NOTE_MOVE):
+        table.clear()
     with zipfile.ZipFile(a.baseline) as zb, zipfile.ZipFile(a.clean) as zc:
         base_xml, clean_xml = zb.read('word/document.xml'), zc.read('word/document.xml')
         styles, numids = style_ids(zc)
+        BASE_RELS.update(load_rels(zb, BASE_PREFIX))
+        load_rels(zc, '')
+    NOTE_NEXT[0] = max([int(i) for _, i in NOTE_BODY if i.isdigit()] + [1]) + 1
+    for name, xml in (('baseline', base_xml), ('clean document', clean_xml)):
+        if re.search('[\U000F0000-\U0010FFFF]', xml.decode('utf-8')):
+            raise Refused('the %s holds characters of a private plane (U+F0000 and above), which this tool uses '
+                          'itself for what is not text' % name)
     (base_xml, n_base), (clean_xml, n_clean) = accept_revisions(base_xml), accept_revisions(clean_xml)
+    base_xml = from_baseline(base_xml)
     if MODE == 'color':
         struck, coloured, marks = colour_conflicts(clean_xml)
         if marks:
@@ -2083,7 +2516,7 @@ def run(a):
     fd, tmp = tempfile.mkstemp(prefix='.marked-', suffix='.tmp', dir=out_dir)
     os.close(fd)
     try:
-        write_docx(a.clean, tmp, doc_xml)
+        st['changed_parts'] = write_docx(a.clean, tmp, doc_xml)
         failed, summary = report(a, tmp, base_xml, clean_xml, st)
         if not failed:
             if same_file(a.clean, a.out) or same_file(a.baseline, a.out):
@@ -2109,7 +2542,7 @@ def report(a, out_path, base_xml, clean_xml, st):
         failed += 0 if ok else 1
         lines.append('%s %s %s' % ('PASS' if ok else 'FAIL', name, detail))
 
-    for name, ok in zip_checks(a.clean, out_path):
+    for name, ok in zip_checks(a.clean, out_path, st.get('changed_parts', ())):
         rec(name, ok)
     with zipfile.ZipFile(out_path) as zo:
         out_xml = zo.read('word/document.xml')

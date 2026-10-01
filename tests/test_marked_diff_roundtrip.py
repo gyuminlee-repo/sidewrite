@@ -24,6 +24,7 @@ import marked_diff_corpus as corpus  # noqa: E402
 TOOL = Path(__file__).resolve().parent.parent / "tools" / "build_marked_diff.py"
 MODES = ("color", "track_changes")
 MIXED = 60
+RICH = 40
 
 
 def load_tool():
@@ -36,6 +37,7 @@ def load_tool():
 def all_cases():
     cases = dict(corpus.CASES)
     cases.update(corpus.mixed_cases(MIXED))
+    cases.update(corpus.rich_cases(RICH))
     return cases
 
 

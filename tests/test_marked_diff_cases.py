@@ -3,8 +3,10 @@
 Run: python3 -m unittest tests/test_marked_diff_cases.py
 """
 
+import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -773,17 +775,29 @@ class MergedCells(Case):
 
 
 class ElementsThatAreNotText(Case):
-    """A picture, a field or a note reference is content: it comes and goes with its paragraph, or the pair is refused."""
+    """A picture, a field, a note reference or a sign that is no character is content. What is the same in both
+    documents stays as the clean document has it; what is new or gone is marked with its own elements."""
+
+    def pair(self, name):
+        """The two files of a named pair of the corpus."""
+        self.n += 1
+        base, clean, _ = corpus.models(corpus.CASES[name])
+        return (corpus.write(base, self.dir / ("b%d.docx" % self.n)), corpus.write(clean, self.dir / ("c%d.docx" % self.n)))
+
+    def contents(self, out, mode):
+        """(accept-all, reject-all): what every paragraph holds besides text, by the corpus reader."""
+        return tuple([x[1] for x in corpus.structure_read(corpus.view(out, mode, side))[0] if x[0] == "x"]
+                     for side in ("accept", "reject"))
 
     def test_a_new_paragraph_with_a_picture_is_inserted_with_its_picture(self):
         base, clean = self.doc([P1, P2]), self.doc([P1, P2], picture("A caption."))
         tool = tool_module()
+        shown = ("drawing", hashlib.sha256(corpus._png()).hexdigest())
         for mode in ("color", "track_changes"):
             with self.subTest(mode=mode):
                 code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
                 self.assertEqual(code, 0, log)
-                kinds = lambda side: [x[1] for x in corpus.structure_read(corpus.view(out, mode, side))[0] if x[0] == "x"]
-                self.assertEqual((kinds("accept"), kinds("reject")), ([(("drawing", 1),)], []))
+                self.assertEqual(self.contents(out, mode), ([(shown,)], []))
         xml = doc_xml(out).encode("utf-8")  # track changes: the run of the picture stands inside w:ins
         self.assertEqual(xml.count(b"<w:drawing>"), 1)
         self.assertNotIn(b"<w:drawing>", tool.resolve_revisions(xml, "reject")[0])
@@ -803,13 +817,132 @@ class ElementsThatAreNotText(Case):
         self.assertEqual(accept, [])
         self.assertTrue(reject)
 
-    def test_what_cannot_be_written_is_refused_with_its_kind(self):
-        plain, pic = self.doc([P1, P2, "A caption."]), self.doc([P1, P2], picture("A caption."))
-        gone = self.doc([P1, P2])
+    def test_a_deleted_picture_is_shown_with_the_baseline_s_picture(self):
+        """The picture of the baseline is not in the clean file: the part comes along, under a name of its own."""
+        base, clean = self.pair("a picture swapped for another")
+        old, new = hashlib.sha256(corpus._png()).hexdigest(), hashlib.sha256(corpus._png(200)).hexdigest()
+        for mode in ("color", "track_changes"):
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertEqual(self.contents(out, mode), ([(("drawing", new),)], [(("drawing", old),)]))
+                with zipfile.ZipFile(out) as z, zipfile.ZipFile(clean) as c:
+                    self.assertEqual(z.namelist(), c.namelist() + ["word/media/bmd_1.png"])
+                    self.assertEqual(z.read("word/media/bmd_1.png"), corpus._png())
+                    self.assertIn(b'Target="media/bmd_1.png"', z.read("word/_rels/document.xml.rels"))
+                    self.assertIn(b'PartName="/word/media/bmd_1.png" ContentType="image/png"', z.read("[Content_Types].xml"))
+        code, out2, summary, log = self.run_tool(base, clean, "--mode", mode)
+        self.assertEqual(Path(out).read_bytes(), Path(out2).read_bytes(), "the same inputs give the same file")
+
+    def test_a_pair_without_deleted_parts_leaves_the_package_alone(self):
+        base, clean = self.pair("a picture added to a paragraph")
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertEqual(code, 0, log)
+        with zipfile.ZipFile(out) as z, zipfile.ZipFile(clean) as c:
+            self.assertEqual(z.namelist(), c.namelist())
+            self.assertEqual(z.read("word/_rels/document.xml.rels"), c.read("word/_rels/document.xml.rels"))
+
+    def test_a_citation_between_two_changed_words_stays_unmarked(self):
+        base, clean = self.pair("words changed on both sides of a citation")
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertEqual(code, 0, log)
+        xml = doc_xml(out)
+        marked = re.findall(r"<w:(?:ins|del) [^>]*>.*?</w:(?:ins|del)>", xml)
+        self.assertTrue(marked)
+        self.assertFalse([m for m in marked if "fldChar" in m or "nstrText" in m])
+        self.assertEqual(xml.count("<w:fldChar "), 6)
+        self.assertEqual(doc_xml(out).count("ZOTERO_ITEM"), doc_xml(clean).count("ZOTERO_ITEM"))
+
+    def test_a_citation_whose_shown_text_changed_is_the_old_field_deleted_and_the_new_one_inserted(self):
+        base, clean = self.pair("the shown text of a citation changed")
+        tool = tool_module()
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertEqual(code, 0, log)
+        xml = doc_xml(out)
+        gone = re.search(r"<w:del [^>]*>(?:(?!</w:del>).)*delInstrText.*?</w:del>", xml).group()
+        self.assertEqual(gone.count("<w:fldChar "), 3)
+        self.assertIn(">[2]</w:delText>", gone)
+        self.assertNotIn("<w:instrText", gone)
+        new = re.search(r"<w:ins [^>]*>(?:(?!</w:ins>).)*<w:instrText.*?</w:ins>", xml).group()
+        self.assertIn(">[2, 3]</w:t>", new)
+        # rejecting gives the code back as code
+        back = tool.resolve_revisions(xml.encode("utf-8"), "reject")[0].decode("utf-8")
+        self.assertNotIn("delInstrText", back)
+        self.assertEqual(back.count("ZOTERO_ITEM"), doc_xml(base).count("ZOTERO_ITEM"))
+        model = corpus.models(corpus.CASES["the shown text of a citation changed"])[0]
+        self.assertEqual(self.contents(out, "track_changes")[1], [x[1] for x in corpus.structure_of(model)[0] if x[0] == "x"])
+
+    def test_the_tool_s_own_check_sees_a_field_whose_result_differs(self):
+        base, clean = self.pair("the result of a cross-reference changed")
+        tool = tool_module()
+        accept, reject = tool.structure_failures(doc_xml(clean).encode(), doc_xml(base).encode(), doc_xml(clean).encode())
+        self.assertEqual(accept, [])
+        self.assertRegex(" ".join(reject), r"reject-all, body paragraphs")
+
+    def test_a_field_code_cut_differently_is_the_same_field(self):
+        tool = tool_module()
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        mark = '<w:r><w:fldChar w:fldCharType="%s"/></w:r>'
+        code = lambda *parts: "".join('<w:r><w:instrText xml:space="preserve">%s</w:instrText></w:r>' % x for x in parts)
+        para = lambda inner: tool.etree.fromstring(
+            "<w:p %s>%s%s%s<w:r><w:t>7</w:t></w:r>%s</w:p>" % (w, mark % "begin", inner, mark % "separate", mark % "end"))
+        one, cut, other = (tool.read_para(para(code(*x))) for x in ((" PAGE \\* MERGEFORMAT ",), (" PA", "GE \\* MERGEFORMAT "), (" NUMPAGES ",)))
+        self.assertEqual(one.text, cut.text)
+        self.assertNotEqual(one.text, other.text)
+        self.assertEqual((len(one.text), one.inline), (1, {"field": 1}))
+        simple = tool.read_para(tool.etree.fromstring(
+            '<w:p %s><w:fldSimple w:instr=" PAGE \\* MERGEFORMAT "><w:r><w:t>7</w:t></w:r></w:fldSimple></w:p>' % w))
+        self.assertEqual(simple.text, one.text)
+
+    def test_a_field_over_several_paragraphs_is_read_by_its_ends(self):
+        base, clean = self.pair("the first entry of a bibliography reworded")
+        for mode in ("color", "track_changes"):
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                xml = doc_xml(out)
+                self.assertEqual(xml.count("ZOTERO_BIBL"), 1)       # the begin of the field is kept, not deleted and inserted
+                self.assertEqual(xml.count("<w:fldChar "), 3)
+
+    def test_a_paragraph_in_a_content_control_is_shown_whole_with_a_note(self):
+        base, clean = self.pair("a word changed in a paragraph with a content control")
+        for mode in ("color", "track_changes"):
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertRegex(" ".join(summary["warnings"]), r"clean paragraph 5 of the body .* holds sdt and is not rewritten")
+                self.assertEqual(doc_xml(out).count("<w:sdt>"), 1)
+
+    def test_a_deleted_note_reference_brings_its_note(self):
+        tool = tool_module()
+        for name, part in (("a footnote in a deleted paragraph", "word/bmd_footnotes.xml"),
+                           ("a footnote swapped for another", "word/footnotes.xml")):
+            base, clean = self.pair(name)
+            for mode in ("color", "track_changes"):
+                with self.subTest(case=name, mode=mode):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    with zipfile.ZipFile(out) as z:
+                        notes = tool.etree.fromstring(z.read(part))
+                        refs = set(re.findall(r'<w:footnoteReference w:id="(\d+)"', z.read("word/document.xml").decode()))
+                    ids = [n.get(tool.q("id")) for n in notes]
+                    self.assertEqual(len(ids), len(set(ids)))
+                    self.assertLessEqual(refs, set(ids))
+                    self.assertIn(corpus.NOTE_TEXT["fn"], "".join(notes.itertext()))
+
+    def test_an_equation_that_changes_is_refused_with_its_place(self):
+        from lxml import etree
+
+        m = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
+        math = lambda text: (lambda d: d.paragraphs[-1]._p.append(etree.fromstring("<m:oMath %s><m:r><m:t>%s</m:t></m:r></m:oMath>" % (m, text))))
+        plain = self.doc([P1, P2])
+        with_x = self.doc([P1, P2, "A new paragraph. "], math("x"))
+        with_y = self.doc([P1, P2, "A new paragraph. "], math("y"))
+        reworded = self.doc([P1, P2, "A changed paragraph. "], math("x"))
         for name, base, clean, message in (
-            ("a paragraph with a picture deleted", pic, gone, r"deleted baseline paragraph .*cannot carry \(drawing x1\)"),
-            ("a picture taken out", pic, plain, r"changed baseline paragraph .*cannot carry \(drawing x1\)"),
-            ("a picture put in", plain, pic, r"text differs in clean paragraph with drawing"),
+            ("a new paragraph", plain, with_x, r"clean paragraph 3 of the body \('A new paragraph. <oMath>'\) holds an element \(oMath\) that stands outside a run and cannot be shown as inserted"),
+            ("a deleted paragraph", with_x, plain, r"baseline paragraph 3 of the body .* \(oMath\) that stands outside a run and cannot be shown as deleted"),
+            ("another equation", with_x, with_y, r"clean paragraph 3 of the body .* \(oMath\) that stands outside a run"),
         ):
             for mode in ("color", "track_changes"):
                 with self.subTest(case=name, mode=mode):
@@ -817,25 +950,15 @@ class ElementsThatAreNotText(Case):
                     self.assertEqual(code, 2, log)
                     self.assertRegex(log, message)
                     self.assertFalse(out.exists())
+        code, out, summary, log = self.run_tool(with_x, reworded, "--mode", "track_changes")   # the equation stays: written
+        self.assertEqual(code, 0, log)
+        self.assertEqual(doc_xml(out).count("<m:oMath"), 1)
 
-    def test_a_new_paragraph_with_an_element_outside_a_run_is_refused_with_its_kind(self):
-        from lxml import etree
-
-        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
-        m = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
-        kinds = {
-            "fldSimple": '<w:fldSimple %s w:instr=" PAGE "><w:r><w:t>3</w:t></w:r></w:fldSimple>' % w,
-            "oMath": "<m:oMath %s><m:r><m:t>x</m:t></m:r></m:oMath>" % m,
-        }
-        base = self.doc([P1, P2])
-        for kind, xml in kinds.items():
-            clean = self.doc([P1, P2, "A new paragraph. "], lambda d: d.paragraphs[-1]._p.append(etree.fromstring(xml)))
-            for mode in ("color", "track_changes"):
-                with self.subTest(kind=kind, mode=mode):
-                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
-                    self.assertEqual(code, 2, log)
-                    self.assertRegex(log, r"cannot be marked as inserted \(%s x1\)" % kind)
-                    self.assertFalse(out.exists())
+    def test_a_file_with_characters_of_the_private_plane_is_refused(self):
+        base, clean = self.doc([P1, P2]), self.doc([P1, P2 + " \U000F0001"])
+        code, out, summary, log = self.run_tool(base, clean)
+        self.assertEqual(code, 2, log)
+        self.assertRegex(log, r"private plane")
 
     def test_a_comment_is_no_change(self):
         """The two invented manuscripts differ in a comment on a paragraph with the same text: both ways are written."""
@@ -847,6 +970,18 @@ class ElementsThatAreNotText(Case):
                     code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
                     self.assertEqual(code, 0, log)
                     self.assertEqual(doc_xml(out).count("<w:commentReference"), doc_xml(clean).count("<w:commentReference"))
+
+    def test_a_comment_keeps_its_place_in_a_changed_paragraph(self):
+        base, clean = self.pair("a word changed under a comment")
+        for mode in ("color", "track_changes"):
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                xml = doc_xml(out)
+                start, end, ref = (xml.index(x) for x in ("<w:commentRangeStart", "<w:commentRangeEnd", "<w:commentReference"))
+                self.assertLess(start, xml.index("reworded"))
+                self.assertLess(xml.index("phrase"), end)
+                self.assertLess(end, ref)
 
 
 if __name__ == "__main__":

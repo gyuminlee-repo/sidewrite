@@ -3,13 +3,18 @@
 Nothing here uses the tool's code. A document is a model (a list of blocks); the same model gives the docx file
 and the structure the tool's output must show: after every mark is accepted the structure of the clean model,
 after every mark is rejected the structure of the baseline model. Structure means every paragraph (empty ones
-too) with its text, tabs and typed breaks, every table with its rows, cells and cell paragraphs, and the text
-inside every bookmark.
+too) with its text, tabs and typed breaks and with what it holds besides text (a field with its code and its
+result, a picture with the bytes it shows, an equation with its text, a symbol, a note reference), every table
+with its rows, cells and cell paragraphs, and the text inside every bookmark.
 
 A paragraph is {"k": "p", "id": ..., "pieces": [...]}. A piece is a string or a tuple:
 ("tab",), ("br", "line" | "page" | "column" | "all" | "none"), ("link", text), ("bm", name, text), ("b", text),
-("fn",), ("pic",) (an inline picture), ("field", code, result), ("ins", text) and ("del", text) (a change that
-is still pending in the input file).
+("fn",) and ("fn2",) (references to two notes), ("pic",) and ("pic2",) (two inline pictures that differ), ("field", code, result), ("cite", number,
+shown text) (a field as a reference manager writes it: a long code cut into several runs), ("simple", code,
+result) (a w:fldSimple), ("fopen", code) and ("fend",) (the two ends of a field that runs over several
+paragraphs, as a bibliography does), ("sym",), ("nbh",) (a hyphen that does not break), ("shy",) (a soft
+hyphen), ("cr",), ("math", text), ("cm", text) (text with a comment on it), ("sdt", text) (text in a content
+control), ("ins", text) and ("del", text) (a change that is still pending in the input file).
 A table is {"k": "t", "id": ..., "rows": [[cell, ...], ...]}; a cell is a list of piece lists (its paragraphs).
 A table may have "merge": [("h", row, first column, last column) | ("v", column, first row, last row)]; the
 cells a merge takes in must be empty in the model.
@@ -18,29 +23,48 @@ between paragraphs, as Word writes them when a bookmark covers whole paragraphs.
 """
 
 import copy
+import hashlib
 import io
+import json
 import random
 import struct
 import zipfile
 import zlib
 
 from docx import Document
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
 INSERT_RGB = "FF0000"
-# What a paragraph can hold besides text, tabs and breaks: counted per paragraph, by kind.
-INLINE = ("drawing", "pict", "object", "fldChar", "instrText", "delInstrText", "fldSimple", "footnoteReference",
-          "endnoteReference", "commentRangeStart", "commentRangeEnd", "commentReference", "sym")
-MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath"
+M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+A_BLIP = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+BIBLIOGRAPHY = 'ADDIN ZOTERO_BIBL {"uncited":[],"omitted":[],"custom":[]} CSL_BIBLIOGRAPHY'
 
 
-def _png():
-    """A one-pixel picture."""
+def _png(shade=0):
+    """A one-pixel picture; another shade is another picture."""
     chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)  # noqa: E731
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(b"\x00\x00")) + chunk(b"IEND", b""))
+            + chunk(b"IDAT", zlib.compress(bytes([0, shade]))) + chunk(b"IEND", b""))
+
+
+def cite_code(number, shown):
+    """The code of a citation field as a reference manager writes it: its name and one long JSON value (invented)."""
+    item = {"id": number, "uris": ["http://example.invalid/items/INV%04d" % number],
+            "itemData": {"id": number, "type": "article-journal",
+                         "title": "An invented title about the %s, number %d" % (sentence(number)[4:-1], number),
+                         "container-title": "Journal of Invented Results", "volume": str(10 + number),
+                         "page": "%d-%d" % (100 * number, 100 * number + 9),
+                         "author": [{"family": "Invented", "given": "A."}, {"family": "Madeup", "given": "B."}],
+                         "issued": {"date-parts": [[2031]]}}}
+    value = {"citationID": "inv%d" % number, "properties": {"formattedCitation": shown, "plainCitation": shown,
+                                                            "noteIndex": 0},
+             "citationItems": [item], "schema": "https://example.invalid/schema/csl-citation.json"}
+    return " ADDIN ZOTERO_ITEM CSL_CITATION %s " % json.dumps(value, separators=(",", ":"))
+
+
 PAGE, COLUMN, LINE_ALL = "<page>", "<column>", "<line:all>"
 
 _A = ["quiet", "narrow", "distant", "early", "plain", "heavy", "bright", "silent"]
@@ -136,25 +160,53 @@ def _fill(par, pieces):
             rpr.append(_el("w:b"))
             r.insert(0, rpr)
             p.append(r)
-        elif kind == "fn":
+        elif kind in ("fn", "fn2"):
             r = _el("w:r")
-            r.append(_el("w:footnoteReference", id="2"))
+            r.append(_el("w:footnoteReference", id="2" if kind == "fn" else "3"))
             p.append(r)
-        elif kind == "pic":
-            par.add_run().add_picture(io.BytesIO(_png()), width=Pt(24), height=Pt(24))
-        elif kind == "field":
-            for part in ("begin", piece[1], "separate", piece[2], "end"):
+        elif kind in ("pic", "pic2"):
+            par.add_run().add_picture(io.BytesIO(_png(0 if kind == "pic" else 200)), width=Pt(24), height=Pt(24))
+        elif kind in ("field", "cite", "fopen", "fend"):
+            code = cite_code(piece[1], piece[2]) if kind == "cite" else " %s " % piece[1] if kind != "fend" else ""
+            # a long code is cut into several runs, as Word does
+            chunks = [code[i:i + 90] for i in range(0, len(code), 90)]
+            parts = {"fend": ["end"], "fopen": ["begin"] + chunks + ["separate"]}.get(
+                kind, ["begin"] + chunks + ["separate", None, "end"])
+            for part in parts:
                 r = _el("w:r")
                 if part in ("begin", "separate", "end"):
                     r.append(_el("w:fldChar", fldCharType=part))
-                elif part is piece[1]:
-                    code = _el("w:instrText")
-                    code.text = " %s " % part
-                    code.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                    r.append(code)
+                elif part is None:
+                    r = _run(piece[2])
                 else:
-                    r = _run(part)
+                    text_ = _el("w:instrText")
+                    text_.text = part
+                    text_.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                    r.append(text_)
                 p.append(r)
+        elif kind == "simple":
+            fld = _el("w:fldSimple", instr=" %s " % piece[1])
+            fld.append(_run(piece[2]))
+            p.append(fld)
+        elif kind in ("sym", "nbh", "shy", "cr"):
+            r = _el("w:r")
+            r.append(_el("w:sym", font="Symbol", char="F061") if kind == "sym" else
+                     _el({"nbh": "w:noBreakHyphen", "shy": "w:softHyphen", "cr": "w:cr"}[kind]))
+            p.append(r)
+        elif kind == "math":
+            p.append(parse_xml('<m:oMath xmlns:m="%s"><m:r><m:t>%s</m:t></m:r></m:oMath>' % (M_NS, piece[1])))
+        elif kind == "cm":
+            run = par.add_run(piece[1])
+            par.part.document.add_comment(run, text="An invented remark.", author="Somebody", initials="S")
+        elif kind == "sdt":
+            sdt = _el("w:sdt")
+            pr = _el("w:sdtPr")
+            pr.append(_el("w:alias", val="Invented"))
+            body = _el("w:sdtContent")
+            body.append(_run(piece[1]))
+            sdt.append(pr)
+            sdt.append(body)
+            p.append(sdt)
         elif kind in ("ins", "del"):
             w = _el("w:" + kind, id=str(next(_IDS)), author="Somebody", date="2031-01-02T03:04:05Z")
             r = _run(piece[1])
@@ -169,9 +221,13 @@ def _fill(par, pieces):
 FOOTNOTES = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-    '<w:footnote w:id="2"><w:p><w:r><w:t>An invented note at the foot of the page.</w:t></w:r></w:p></w:footnote>'
+    '<w:footnote w:type="separator" w:id="0"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+    '<w:footnote w:type="continuationSeparator" w:id="1"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+    '<w:footnote w:id="2"><w:p><w:r><w:t>%s</w:t></w:r></w:p></w:footnote>'
+    '<w:footnote w:id="3"><w:p><w:r><w:t>%s</w:t></w:r></w:p></w:footnote>'
     "</w:footnotes>"
 )
+NOTE_TEXT = {"fn": "An invented note at the foot of the page.", "fn2": "Another invented note."}
 
 
 def write(model, path, header=None):
@@ -200,12 +256,18 @@ def write(model, path, header=None):
     if header:
         d.sections[0].header.paragraphs[0].text = header
     d.save(path)
-    if any(piece == ("fn",) for b in model if b["k"] == "p" for piece in b["pieces"]):
-        _add_footnotes(path)
+    used = {piece[0] for b in model if b["k"] == "p" for piece in b["pieces"] if piece in (("fn",), ("fn2",))}
+    if used:
+        _add_footnotes(path, used)
     return path
 
 
-def _add_footnotes(path):
+def _add_footnotes(path, used):
+    """Add the footnotes part, with the notes the model refers to."""
+    notes = FOOTNOTES % (NOTE_TEXT["fn"], NOTE_TEXT["fn2"])
+    for kind, n in (("fn", 2), ("fn2", 3)):
+        if kind not in used:
+            notes = notes.replace('<w:footnote w:id="%d"><w:p><w:r><w:t>%s</w:t></w:r></w:p></w:footnote>' % (n, NOTE_TEXT[kind]), "")
     with zipfile.ZipFile(path) as z:
         parts = [(i, z.read(i.filename)) for i in z.infolist()]
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -221,7 +283,7 @@ def _add_footnotes(path):
                     b'<Relationship Id="rIdNotes" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
                     b'relationships/footnotes" Target="footnotes.xml"/></Relationships>')
             z.writestr(info.filename, data)
-        z.writestr("word/footnotes.xml", FOOTNOTES)
+        z.writestr("word/footnotes.xml", notes)
 
 
 # ---------------------------------------------------------------- the structure a model stands for
@@ -234,22 +296,42 @@ def _text(pieces):
             out += "\t"
         elif piece[0] == "br":
             out += {"line": "\n", "none": "\n", "page": PAGE, "column": COLUMN, "all": LINE_ALL}[piece[1]]
-        elif piece[0] in ("link", "b", "ins"):
+        elif piece[0] in ("link", "b", "ins", "cm", "sdt"):
             out += piece[1]
-        elif piece[0] in ("bm", "field"):
+        elif piece[0] in ("bm", "field", "cite", "simple"):
             out += piece[2]
     return out
 
 
 def _inline(pieces):
-    """What the pieces hold besides text: ((kind, count), ...), sorted."""
-    counts = {}
+    """What the pieces hold besides text, in order: ("field", code, result), ("drawing", digest of the picture),
+    ("oMath", text), ("sym", font, character), (kind,) for the rest."""
+    out = []
     for piece in pieces:
-        kinds = {"fn": ["footnoteReference"], "pic": ["drawing"],
-                 "field": ["fldChar"] * 3 + ["instrText"]}.get(piece[0] if not isinstance(piece, str) else "", [])
-        for k in kinds:
-            counts[k] = counts.get(k, 0) + 1
-    return tuple(sorted(counts.items()))
+        kind = "" if isinstance(piece, str) else piece[0]
+        if kind in ("pic", "pic2"):
+            out.append(("drawing", hashlib.sha256(_png(0 if kind == "pic" else 200)).hexdigest()))
+        elif kind in ("field", "simple"):
+            out.append(("field", " %s " % piece[1], piece[2]))
+        elif kind == "cite":
+            out.append(("field", cite_code(piece[1], piece[2]), piece[2]))
+        elif kind == "fopen":
+            out.append(("field-open", " %s " % piece[1]))
+        elif kind == "fend":
+            out.append(("fldChar", "end"))
+        elif kind == "math":
+            out.append(("oMath", piece[1]))
+        elif kind == "sym":
+            out.append(("sym", "Symbol", "F061"))
+        elif kind in ("fn", "fn2"):
+            out.append(("footnoteReference", NOTE_TEXT[kind]))
+        elif kind in ("nbh", "shy", "cr"):
+            out.append(({"nbh": "noBreakHyphen", "shy": "softHyphen", "cr": "cr"}[kind],))
+    return tuple(out)
+
+
+def _comments(pieces):
+    return sum(1 for piece in pieces if not isinstance(piece, str) and piece[0] == "cm")
 
 
 def _layout(block):
@@ -266,15 +348,18 @@ def _layout(block):
 
 
 def structure_of(model):
-    """(items in order, {bookmark name: text}). An item is ("p", text), followed by ("x", kinds and counts) when the
-    paragraph holds something that is not text; or ("t", rows of cells of paragraph texts), followed by
-    ("g", (grid columns, rows of cells as (span, vertical merge)))."""
+    """(items in order, {bookmark name: text}). An item is ("p", text), followed by ("x", what it holds besides text,
+    see _inline) when there is something, and by ("c", (comment range starts, ends, references)) when it has
+    comments; or ("t", rows of cells of paragraph texts), followed by ("g", (grid columns, rows of cells as
+    (span, vertical merge)))."""
     items, marks, opened = [], {}, {}
     for block in model:
         if block["k"] == "p":
             items.append(("p", _text(block["pieces"])))
             if _inline(block["pieces"]):
                 items.append(("x", _inline(block["pieces"])))
+            if _comments(block["pieces"]):
+                items.append(("c", (_comments(block["pieces"]),) * 3))
             marks.update({piece[1]: piece[2] for piece in block["pieces"] if not isinstance(piece, str) and piece[0] == "bm"})
             for name in opened.values():
                 marks[name] += _text(block["pieces"])
@@ -318,7 +403,18 @@ def view(path, mode, side):
     Colour: struck runs are deletions and runs in the insert colour insertions; a paragraph mark formatted that
     way is a deleted or inserted paragraph mark; a row whose paragraph marks are all deleted (or all inserted)
     is a deleted (inserted) row. Dropping a paragraph mark joins the paragraph with the one after it."""
-    body = Document(path).element.body
+    doc = Document(path)
+    body = doc.element.body
+    for blip in body.iter(A_BLIP):                    # a picture is the bytes it shows, not the id that points to them
+        if blip.get(R_EMBED) in doc.part.related_parts:
+            blip.set(R_EMBED, hashlib.sha256(doc.part.related_parts[blip.get(R_EMBED)].blob).hexdigest())
+    notes = {}                                        # a note reference is the text of its note, not its id
+    for rel in doc.part.rels.values():
+        if rel.reltype.endswith("/footnotes"):
+            root = parse_xml(rel.target_part.blob)
+            notes = {n.get(qn("w:id")): "".join(t.text or "" for t in n.iter(qn("w:t"))) for n in root}
+    for ref in body.iter(qn("w:footnoteReference")):
+        ref.set("note", notes.get(ref.get(qn("w:id")), "no such note"))
     drop = "del" if side == "accept" else "ins"
     track = mode == "track_changes"
 
@@ -396,19 +492,62 @@ def _cell_layout(tc):
             None if vm is None else vm.get(qn("w:val")) or "continue")
 
 
+def _contents(p):
+    """What a paragraph holds besides text, read from its XML in the terms of _inline. A field that does not end
+    in the paragraph is ("field-open", code); a field mark without its begin is ("fldChar", kind)."""
+    out, field = [], None
+    for e in p.iter():
+        if not isinstance(e.tag, str):
+            continue
+        if e.tag == qn("w:fldChar"):
+            kind = e.get(qn("w:fldCharType"))
+            if kind == "begin" and field is None:
+                field = {"depth": 1, "code": "", "result": "", "sep": False}
+            elif field is None:
+                out.append(("fldChar", kind))
+            elif kind == "begin":
+                field["depth"] += 1
+            elif kind == "separate" and field["depth"] == 1:
+                field["sep"] = True
+            elif kind == "end":
+                field["depth"] -= 1
+                if field["depth"] == 0:
+                    out.append(("field", field["code"], field["result"]))
+                    field = None
+        elif e.tag in (qn("w:instrText"), qn("w:delInstrText")):
+            if field is not None:
+                field["code"] += e.text or ""
+        elif e.tag in (qn("w:t"), qn("w:delText")):
+            if field is not None and field["sep"]:
+                field["result"] += e.text or ""
+        elif e.tag == qn("w:fldSimple"):
+            out.append(("field", e.get(qn("w:instr")), "".join(t.text or "" for t in e.iter(qn("w:t")))))
+        elif e.tag == qn("w:drawing"):
+            out.append(("drawing", next((b.get(R_EMBED) for b in e.iter(A_BLIP)), None)))
+        elif e.tag == "{%s}oMath" % M_NS:
+            out.append(("oMath", "".join(t.text or "" for t in e.iter("{%s}t" % M_NS))))
+        elif e.tag == qn("w:sym"):
+            out.append(("sym", e.get(qn("w:font")), e.get(qn("w:char"))))
+        elif e.tag == qn("w:footnoteReference"):
+            out.append(("footnoteReference", e.get("note")))
+        elif e.tag in [qn("w:" + k) for k in ("endnoteReference", "noBreakHyphen", "softHyphen", "cr", "pict", "object")]:
+            out.append((e.tag.split("}")[-1],))
+    if field is not None:
+        out.append(("field-open", field["code"]))
+    return tuple(out)
+
+
 def structure_read(body):
     """The same two values as structure_of, read from a body element."""
     items, marks, opened = [], {}, {}
     for child in body:
         if child.tag == qn("w:p"):
             items.append(("p", _para_text(child)))
-            counts = {}
-            for e in child.iter():
-                kind = "oMath" if e.tag == MATH else e.tag.split("}")[-1] if isinstance(e.tag, str) else ""
-                if kind == "oMath" or (kind in INLINE and e.tag == qn("w:" + kind)):
-                    counts[kind] = counts.get(kind, 0) + 1
-            if counts:
-                items.append(("x", tuple(sorted(counts.items()))))
+            if _contents(child):
+                items.append(("x", _contents(child)))
+            notes = tuple(len(list(child.iter(qn("w:" + k)))) for k in ("commentRangeStart", "commentRangeEnd", "commentReference"))
+            if any(notes):
+                items.append(("c", notes))
         elif child.tag == qn("w:tbl"):
             items.append(("t", tuple(
                 tuple(tuple(_para_text(p) for p in tc.findall(qn("w:p"))) for tc in tr.findall(qn("w:tc")))
@@ -438,7 +577,8 @@ def without_page_breaks(items):
 
 
 def split_reject(items):
-    """(body paragraphs, tables): where a table stands among the paragraphs is not compared on the reject side."""
+    """(body paragraphs, tables): where a table stands among the paragraphs is not compared on the reject side, and
+    neither are comments (a comment is no tracked change: the output has the clean document's)."""
     return [x for x in items if x[0] in ("p", "x")], [x for x in items if x[0] in ("t", "g")]
 
 
@@ -660,6 +800,17 @@ WITH_FIELD = set_pieces("c", text(5) + " ", ("field", "PAGE", "3"), " " + text(6
 PICTURE_PARA = lambda m: m.insert(_at(m, "b"), P("pic", text(20) + " ", ("pic",)))  # noqa: E731
 PICTURE_ONLY = lambda m: m.insert(_at(m, "b"), P("pic", ("pic",)))  # noqa: E731
 FIELD_PARA = lambda m: m.insert(_at(m, "b"), P("fld", text(20) + " ", ("field", "PAGE", "3"), "."))  # noqa: E731
+CITE1, CITE2, CITE3 = ("cite", 1, "[1]"), ("cite", 2, "[2]"), ("cite", 3, "[3]")
+WITH_CITES = set_pieces("c", text(5) + " ", CITE1, " " + text(6) + " ", CITE2, " " + text(7))
+CAPTION = lambda m: m.insert(_at(m, "d"), P("cap", "Figure ", ("field", "SEQ Figure \\* ARABIC", "1"), ". " + text(40) + " See ", ("field", "REF _Ref4242 \\h", "Table 1"), "."))  # noqa: E731
+CAPTION2 = lambda m: m.insert(_at(m, "d"), P("cap", "Figure ", ("field", "SEQ Figure \\* ARABIC", "1"), ". " + text(40) + " See ", ("field", "REF _Ref4242 \\h", "Table 2"), "."))  # noqa: E731
+WITH_SIGNS = set_pieces("c", text(5) + " well", ("nbh",), "known ", ("sym",), " " + text(6), ("cr",), text(7), ("shy",))
+WITH_MATH = set_pieces("c", text(5) + " ", ("math", "x+y"), " " + text(6, 7))
+WITH_COMMENT = set_pieces("c", text(5) + " ", ("cm", "a remarked phrase"), " " + text(6, 7))
+WITH_SIMPLE = set_pieces("c", text(5) + " ", ("simple", "PAGE", "3"), " " + text(6, 7))
+WITH_CONTROL = set_pieces("c", text(5) + " ", ("sdt", "a controlled phrase"), " " + text(6, 7))
+BIB = lambda m: m.extend([P("bib1", ("fopen", BIBLIOGRAPHY), "1. " + text(41)), P("bib2", "2. " + text(42)), P("bib3", "3. " + text(43), ("fend",))])  # noqa: E731
+CITED_PARA = lambda m: m.insert(_at(m, "b"), P("cited", text(20) + " ", CITE3, " " + text(21)))  # noqa: E731
 SPLIT_AT_MARK = set_pieces("c", text(5))
 PENDING_INS = set_pieces("b", text(3), ("ins", " " + text(4)))
 PENDING_DEL = set_pieces("b", text(3, 4), ("del", " " + text(20)))
@@ -726,8 +877,12 @@ CASES = {
     "a pending deletion in the clean file": (variant(), both(PENDING_DEL, reword("a")), None),
     "a pending insertion in the baseline": (variant(PENDING_INS), reword("b"), None),
     "a footnote and a header, change elsewhere": (variant(WITH_NOTE), both(WITH_NOTE, reword("a")), None),
-    "a footnote in the changed paragraph": (variant(WITH_NOTE), both(WITH_NOTE, reword("d")), r"footnoteReference"),
-    "a footnote in a deleted paragraph": (variant(WITH_NOTE), del_para("d"), r"cannot carry"),
+    "a footnote in the changed paragraph": (variant(WITH_NOTE), both(WITH_NOTE, reword("d")), None),
+    "a footnote in a deleted paragraph": (variant(WITH_NOTE), del_para("d"), None),
+    "a footnote taken out, another stays": (
+        variant(WITH_NOTE, set_pieces("f", text(10), ("fn2",), " " + text(11, 12))), set_pieces("d", text(8) + " " + text(9)), None),
+    "a footnote swapped for another": (variant(WITH_NOTE), set_pieces("d", text(8), ("fn2",), " " + text(9)), None),
+    "a footnote added": (variant(), WITH_NOTE, None),
     "a cell merged across two columns": (variant(), MERGED_ACROSS, None),
     "a cell merged down a column": (variant(), MERGED_DOWN, None),
     "a merged cell split again": (variant(MERGED_DOWN), both(unmerge("t1"), table("t1", lambda rows: rows[1].__setitem__(0, [[text(49)]]))), None),
@@ -738,14 +893,67 @@ CASES = {
     "a paragraph with a field added": (variant(), FIELD_PARA, None),
     "a picture in an unchanged paragraph, change elsewhere": (variant(WITH_PICTURE), reword("a"), None),
     "a field in an unchanged paragraph, change elsewhere": (variant(WITH_FIELD), reword("a"), None),
-    "a picture added to a paragraph": (variant(), WITH_PICTURE, r"drawing"),
-    "a word changed in a paragraph with a picture": (variant(WITH_PICTURE), reword("c"), r"drawing"),
-    "a word changed in a paragraph with a field": (variant(WITH_FIELD), reword("c"), r"cannot carry|unsupported element"),
+    "a picture added to a paragraph": (variant(), WITH_PICTURE, None),
+    "a word changed in a paragraph with a picture": (variant(WITH_PICTURE), reword("c"), None),
+    "a word changed in a paragraph with a field": (variant(WITH_FIELD), reword("c"), None),
     "a picture put where a footnote stood": (
-        variant(set_pieces("c", text(5) + " ", ("fn",), " " + text(6, 7))), WITH_PICTURE, r"other elements"),
-    "a paragraph with a picture deleted": (variant(PICTURE_PARA), del_para("pic"), r"cannot carry"),
-    "a paragraph that is only a picture deleted": (variant(PICTURE_ONLY), del_para("pic"), r"cannot carry"),
-    "a picture taken out of a paragraph": (variant(WITH_PICTURE), set_pieces("c", text(5) + "  " + text(6, 7)), r"cannot carry"),
+        variant(set_pieces("c", text(5) + " ", ("fn",), " " + text(6, 7))), WITH_PICTURE, None),
+    "a paragraph with a picture deleted": (variant(PICTURE_PARA), del_para("pic"), None),
+    "a paragraph that is only a picture deleted": (variant(PICTURE_ONLY), del_para("pic"), None),
+    "a picture taken out of a paragraph": (variant(WITH_PICTURE), set_pieces("c", text(5) + "  " + text(6, 7)), None),
+    "a picture swapped for another": (variant(WITH_PICTURE), set_pieces("c", text(5) + " ", ("pic2",), " " + text(6, 7)), None),
+    "a table with a picture that lost a row": (
+        variant(table("t1", lambda rows: rows[0].__setitem__(0, [[text(30) + " ", ("pic",)]]))), table("t1", del_row), None),
+    # fields as a reference manager writes them
+    "a word changed next to a citation": (variant(WITH_CITES), reword("c"), None),
+    "words changed on both sides of a citation": (
+        variant(WITH_CITES), set_pieces("c", text(5)[:-1] + " indeed ", CITE1, " Then " + text(6) + " ", CITE2, " " + text(7)), None),
+    "a citation added": (
+        variant(WITH_CITES), set_pieces("c", text(5) + " ", CITE1, " " + text(6) + " ", CITE2, " " + text(7) + " ", CITE3), None),
+    "a citation deleted": (variant(WITH_CITES), set_pieces("c", text(5) + " ", CITE1, " " + text(6) + " " + text(7)), None),
+    "the shown text of a citation changed": (
+        variant(WITH_CITES), set_pieces("c", text(5) + " ", CITE1, " " + text(6) + " ", ("cite", 2, "[2, 3]"), " " + text(7)), None),
+    "a paragraph with citations deleted": (variant(WITH_CITES), del_para("c"), None),
+    "a paragraph with a citation added": (variant(), CITED_PARA, None),
+    "a paragraph with citations rewritten": (
+        variant(WITH_CITES), set_pieces("c", text(22) + " ", CITE1, " " + text(23) + " ", CITE3), None),
+    "a word changed in a caption with a number and a cross-reference": (variant(CAPTION), reword("cap"), None),
+    "the result of a cross-reference changed": (variant(CAPTION), both(del_para("cap"), CAPTION2), None),
+    "a word changed in a paragraph with a simple field": (variant(WITH_SIMPLE), reword("c"), None),
+    "a simple field added to a paragraph": (variant(), WITH_SIMPLE, None),
+    "a simple field taken out of a paragraph": (variant(WITH_SIMPLE), set_pieces("c", text(5) + "  " + text(6, 7)), None),
+    "a paragraph with a simple field added": (
+        variant(), lambda m: m.insert(_at(m, "b"), P("fld", text(20) + " ", ("simple", "PAGE", "3"), ".")), None),
+    "a paragraph with a simple field deleted": (
+        variant(lambda m: m.insert(_at(m, "b"), P("fld", text(20) + " ", ("simple", "PAGE", "3"), "."))), del_para("fld"), None),
+    # a field that runs over several paragraphs
+    "an entry added to a bibliography": (variant(BIB), lambda m: m.insert(_at(m, "bib3"), P("bib9", "9. " + text(44))), None),
+    "the first entry of a bibliography reworded": (variant(BIB), reword("bib1"), None),
+    "the first entry of a bibliography replaced": (variant(BIB), set_pieces("bib1", ("fopen", BIBLIOGRAPHY), "1. " + text(45)), None),
+    "the last entry of a bibliography deleted": (
+        variant(BIB), both(del_para("bib3"), set_pieces("bib2", "2. " + text(42), ("fend",))), None),
+    "a bibliography added": (variant(), BIB, None),
+    # signs that are no characters
+    "a word changed in a paragraph with a hard hyphen, a symbol and a return": (variant(WITH_SIGNS), reword("c"), None),
+    "a symbol taken out": (
+        variant(WITH_SIGNS), set_pieces("c", text(5) + " well", ("nbh",), "known " + text(6), ("cr",), text(7), ("shy",)), None),
+    "a paragraph with a hard hyphen and a symbol deleted": (variant(WITH_SIGNS), del_para("c"), None),
+    # equations: kept where they are the same, refused where they change
+    "a word changed in a paragraph with an equation": (variant(WITH_MATH), reword("c"), None),
+    "an equation changed": (
+        variant(WITH_MATH), set_pieces("c", text(5) + " ", ("math", "x+z"), " " + text(6, 7)), r"\(oMath\) that stands outside a run"),
+    "a paragraph with an equation added": (
+        variant(), lambda m: m.insert(_at(m, "b"), P("eq", text(20) + " ", ("math", "x+y"))), r"clean paragraph 3 of the body .*\(oMath\)"),
+    "a paragraph with an equation deleted": (variant(WITH_MATH), del_para("c"), r"baseline paragraph 5 of the body .*\(oMath\)"),
+    # comments
+    "a word changed in a paragraph with a comment": (variant(WITH_COMMENT), reword("c"), None),
+    "a word changed under a comment": (
+        variant(WITH_COMMENT), set_pieces("c", text(5) + " ", ("cm", "a reworded phrase"), " " + text(6, 7)), None),
+    "a comment added in a changed paragraph": (variant(), WITH_COMMENT, None),
+    "a comment only in the baseline, the paragraph changed": (variant(WITH_COMMENT), set_pieces("c", text(5, 6, 7)), None),
+    "a paragraph with a comment deleted": (variant(WITH_COMMENT), del_para("c"), None),
+    # a wrapper the writer does not rebuild: the paragraph is shown as deleted and new
+    "a word changed in a paragraph with a content control": (variant(WITH_CONTROL), reword("c"), None),
     "a sentence moved to the next paragraph": (variant(), move_sentence("a", "b"), None),
     "a sentence moved across an empty paragraph": (variant(), move_sentence("b", "c"), None),
     "a paragraph rewritten around one sentence": (variant(), rewrite_keeping("a", 1, (20, 21, 22)), None),
@@ -811,6 +1019,30 @@ def mixed_cases(count, seed=20311):
         # A merge takes the next block, so it runs before the changes that add or remove blocks.
         order = sorted(picks, key=lambda k: (k != 7, k))
         out["mix " + "+".join(map(str, picks))] = (variant(), both(*[MIXABLE[k] for k in order]), None)
+    return out
+
+
+# A baseline with what a manuscript holds besides text, and changes of it that can be combined.
+RICH = (WITH_CITES, WITH_NOTE, PICTURE_PARA, CAPTION, BIB)
+RICH_MIX = [
+    reword("c"), del_para("pic"), reword("cap"), reword("bib1"),
+    lambda m: m.insert(_at(m, "bib3"), P("bib9", "9. " + text(44))), del_para("d"), merge_paras("a"),
+    set_pieces("c", text(5) + " ", CITE1, " " + text(6) + " ", ("cite", 2, "[2, 3]"), " " + text(7) + " ", CITE3),
+    replace_para("c", (26, 27)), table("t1", add_row), add_para("h1", (28,), "lead"), del_para("cap"),
+    set_pieces("d", text(8), ("fn2",), " " + text(9) + " ", ("pic2",)),
+    lambda m: m.insert(_at(m, "h2"), P("cited", text(20) + " ", CITE3, " " + text(21))), del_para("bib2"),
+]
+
+
+def rich_cases(count, seed=20312):
+    """`count` combinations of two to four changes of the rich baseline, the same ones for the same seed."""
+    rng = random.Random(seed)
+    out = {}
+    while len(out) < count:
+        picks = sorted(rng.sample(range(len(RICH_MIX)), rng.randint(2, 4)))
+        if {2, 11} <= set(picks) or {5, 12} <= set(picks):   # two changes of one block, the first of them a deletion
+            continue
+        out["rich " + "+".join(map(str, picks))] = (variant(*RICH), both(*[RICH_MIX[k] for k in picks]), None)
     return out
 
 
