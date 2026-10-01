@@ -20,8 +20,13 @@ class FakeEl {
   addEventListener(ev, fn) {
     (this.listeners[ev] ??= []).push(fn);
   }
+  // As in a browser: anything that is not a node becomes a text node, so an
+  // appended null shows as the text "null".
   append(...kids) {
-    this.children.push(...kids.filter((k) => k && typeof k === "object"));
+    for (const k of kids) {
+      if (k instanceof FakeEl) this.children.push(k);
+      else this.children.push(Object.assign(new FakeEl("#text"), { textContent: String(k) }));
+    }
   }
   replaceChildren(...kids) {
     this.children = [];
@@ -174,6 +179,11 @@ test("the menus list what passed; a provider that cannot be chosen is disabled a
   );
   assert.equal(boxes.length, 1);
   assert.equal(findAll(rowOf(t, "ollama"), (n) => n.tagName === "INPUT").length, 0);
+  // A row part that is left out (no key note, no key box) leaves no text.
+  assert.deepEqual(
+    findAll(t.$("providers-list"), (n) => n.tagName === "#TEXT").map((n) => n.textContent),
+    [],
+  );
   // Nothing was sent but the list request: the defaults are the daemon's own.
   assert.deepEqual(
     t.requests.map((r) => r.type),

@@ -25,7 +25,7 @@ function el(tag, { text, cls, ...props } = {}, kids = []) {
   if (text != null) e.textContent = text;
   if (cls) e.className = cls;
   Object.assign(e, props);
-  e.append(...kids);
+  e.append(...kids.filter(Boolean)); // a part left out is null, not the text "null"
   return e;
 }
 
