@@ -8,8 +8,8 @@ Every category of tools/anonymize_docx.py is counted in --after and gets one of 
   not cleared      something is left that should be gone, or that no tool here can clear
 
 Categories (default): names, org, custom_props, comment_authors, people, change_authors, dates,
-core_dates, core_text, rsids, doc_vars, attached_template, doc_ids, custom_xml, thumbnail, image_meta
-(cleared by default); title, para_ids (kept by default); hidden_text, protection, image_uninspected,
+core_dates, core_text, rsids, doc_vars, attached_template, doc_ids, custom_xml, thumbnail, image_meta,
+zip_meta (cleared by default); title, para_ids (kept by default); hidden_text, protection, image_uninspected,
 embedded (reported only: the anonymizer never changes them, so they are "not cleared" whenever present).
 Pass the same --keep / --also that the anonymizer was given.
 
@@ -70,6 +70,7 @@ CATEGORIES = collections.OrderedDict([
     ("custom_xml", ("clear", True, "custom XML items other than bibliography sources")),
     ("thumbnail", ("clear", True, "thumbnail picture of page one")),
     ("image_meta", ("clear", True, "EXIF, XMP, IPTC, comments and text chunks in JPEG and PNG pictures")),
+    ("zip_meta", ("clear", True, "zip comments, member extra fields (user ids, times) and member times")),
     ("title", ("keep", False, "document title in core.xml")),
     ("para_ids", ("keep", False, "paragraph ids outside comments.xml")),
     ("hidden_text", ("report", True, "hidden text runs (never removed: the text must stay)")),
@@ -100,6 +101,8 @@ class Package:
     def __init__(self, path):
         with zipfile.ZipFile(path) as z:
             self.names = z.namelist()
+            self.comment = z.comment
+            self.members = [(i.comment, i.extra, tuple(i.date_time)) for i in z.infolist()]
             self.raw = {}
             self.xml = {}
             for name in self.names:
@@ -161,6 +164,17 @@ def png_has_meta(data):
             return False
         pos += 12 + length
     return None
+
+
+def extra_has_metadata(extra):
+    """True when a member's extra field holds more than the zip64 sizes (header id 1), or is not well-formed."""
+    pos = 0
+    while pos + 4 <= len(extra):
+        kind, size = struct.unpack("<HH", extra[pos : pos + 4])
+        if kind != 1:
+            return True
+        pos += 4 + size
+    return pos != len(extra)
 
 
 # ---------------------------------------------------------------- counting
@@ -243,6 +257,10 @@ def count_marks(pkg, author, initials):
             tiff += 1
     add("image_meta", "word/media:with_metadata", meta)
     add("image_uninspected", "word/media:tiff", tiff)
+    add("zip_meta", "zip:archive_comment", 1 if pkg.comment else 0)
+    add("zip_meta", "zip:entry_comment", sum(1 for comment, _, _ in pkg.members if comment))
+    add("zip_meta", "zip:extra_field", sum(1 for _, extra, _ in pkg.members if extra_has_metadata(extra)))
+    add("zip_meta", "zip:timestamp", sum(1 for _, _, when in pkg.members if when != (1980, 1, 1, 0, 0, 0)))
     add("embedded", "word/embeddings:object", sum(1 for n in pkg.names if n.startswith("word/embeddings/") and not n.endswith("/")))
     return out
 

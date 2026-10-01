@@ -62,7 +62,16 @@ EXPECTED_DIRTY = dict(
     protection=1,
     image_uninspected=1,  # a TIFF
     embedded=1,
+    # archive comment, comment and extra field (uid/gid, time) on document.xml, real times on two members
+    zip_meta=5,
 )
+
+ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+ZIP_COMMENT = b"Created by test.author@example.org"
+ENTRY_COMMENT = b"Author: test.author@example.org"
+# Info-ZIP "ux" (uid 1000, gid 1000) and "UT" (modification time) extra fields.
+ZIP_EXTRA = struct.pack("<HHBBIBI", 0x7875, 11, 1, 4, 1000, 4, 1000) + struct.pack("<HHBI", 0x5455, 5, 1, 1767323046)
+TIMED = ("word/document.xml", "docProps/core.xml")  # members of a dirty file that carry a real time
 
 BODY = "The culture grew on methane and reached a plateau."
 # Text that looks like attributes: an edit of attributes must never touch it.
@@ -92,6 +101,23 @@ def _ns(prefix="w"):
         'xmlns:%s="%s" xmlns:w14="%s" xmlns:w15="%s" xmlns:mc="%s" xmlns:r="%s" mc:Ignorable="w14 w15"'
         % (prefix, W, W14, W15, MC, R)
     )
+
+
+def rezip(src, dst, member="word/document.xml", comment=None, entry_comment=None, extra=None, date_time=None):
+    """Copy a docx member by member, setting the given zip metadata (on `member` for the entry ones)."""
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        zout.comment = zin.comment if comment is None else comment
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == member:
+                if entry_comment is not None:
+                    info.comment = entry_comment
+                if extra is not None:
+                    info.extra = extra
+                if date_time is not None:
+                    info.date_time = date_time
+            zout.writestr(info, data, compress_type=info.compress_type)
+    return dst
 
 
 # ---------------------------------------------------------------- pictures
@@ -336,7 +362,16 @@ def build(path, body=BODY, extra_ins=False, prefix="w", quote='"', parts=None, e
         _wide_parts(files, m)
     files.update(extra or {})
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        if wide:
+            z.comment = ZIP_COMMENT
         for name, data in files.items():
-            if name not in skip:
-                z.writestr(name, data)
+            if name in skip:
+                continue
+            # A clean file has what Word writes: the zip epoch, no comment, no extra field.
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 2, 3, 4, 6) if wide and name in TIMED else ZIP_EPOCH)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            if wide and name == "word/document.xml":
+                info.comment = ENTRY_COMMENT
+                info.extra = ZIP_EXTRA
+            z.writestr(info, data)
     return path

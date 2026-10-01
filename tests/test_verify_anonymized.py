@@ -7,6 +7,7 @@ python3 -m unittest tests/test_verify_anonymized.py
 
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -71,7 +72,7 @@ class VerifyAnonymized(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(set(rep["categories"]), set(fx.EXPECTED_DIRTY))
         self.assertEqual({c: v["count"] for c, v in rep["categories"].items()}, fx.EXPECTED_DIRTY)
-        self.assertGreaterEqual(len(rep["categories"]), 22)
+        self.assertEqual(len(rep["categories"]), 23)
         for cid, c in rep["categories"].items():
             self.assertEqual(c["status"], "kept by option" if c["default"] == "keep" else "not cleared", cid)
         clear = [c for c, v in rep["categories"].items() if v["default"] == "clear"]
@@ -92,6 +93,34 @@ class VerifyAnonymized(unittest.TestCase):
             r = subprocess.run([sys.executable, str(SCRIPT), "--before", str(self.before), "--after", str(self.before), "--keep", bad],
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 2, bad)
+
+    def test_zip_comments_extra_fields_and_member_times_are_leaks_of_their_own(self):
+        clean = fx.build(self.dir / "clean.docx", **fx.clean_marks())
+        code, rep, err = self.verify(clean)
+        self.assertEqual([code, rep["categories"]["zip_meta"]["count"]], [0, 0], err)
+        leaks = {
+            "zip:archive_comment": dict(comment=fx.ZIP_COMMENT),
+            "zip:entry_comment": dict(entry_comment=fx.ENTRY_COMMENT),
+            "zip:extra_field": dict(extra=fx.ZIP_EXTRA),
+            "zip:timestamp": dict(date_time=(2026, 1, 2, 3, 4, 6)),
+        }
+        for key, how in leaks.items():
+            with self.subTest(key=key):
+                after = fx.rezip(clean, self.dir / "leak.docx", **how)
+                code, rep, err = self.verify(after)
+                self.assertEqual(code, 1, err)
+                self.assertEqual(rep["remaining"][key], 1)
+                self.assertEqual([rep["total"], rep["body_equal"], rep["markup_equal"]], [1, True, True])
+                self.assertEqual(rep["categories"]["zip_meta"]["status"], "not cleared")
+                self.assertIn("zip_meta", rep["not_cleared"])
+                kept = self.verify(after, "--keep", "zip_meta")
+                self.assertEqual([kept[0], kept[1]["categories"]["zip_meta"]["status"]], [0, "kept by option"])
+        # Both comments at once, as in a file an archiver wrote: two leaks.
+        both = fx.rezip(clean, self.dir / "both.docx", comment=fx.ZIP_COMMENT, entry_comment=fx.ENTRY_COMMENT)
+        self.assertEqual(self.verify(both)[1]["categories"]["zip_meta"]["count"], 2)
+        # The zip64 size field is not metadata about a person.
+        zip64 = struct.pack("<HHQQ", 0x0001, 16, 10, 10)
+        self.assertEqual(self.verify(fx.rezip(clean, self.dir / "z64.docx", extra=zip64))[1]["categories"]["zip_meta"]["count"], 0)
 
     def test_a_picture_that_cannot_be_read_counts_as_not_cleared(self):
         marks = fx.clean_marks()

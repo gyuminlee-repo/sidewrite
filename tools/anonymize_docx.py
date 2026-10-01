@@ -24,6 +24,9 @@ category can be switched (--keep a,b / --also c,d). Defaults:
     image_meta         EXIF, XMP, IPTC and comments in word/media JPEG files; text, EXIF and time chunks in PNG
                        files -> removed. A picture whose EXIF says it is rotated is left as it is (removing
                        the tag could turn the picture) and the verifier reports it.
+    zip_meta           the zip container itself: the archive comment and every member comment -> empty;
+                       member extra fields (user and group ids, time stamps) -> removed; member times ->
+                       the zip epoch 1980-01-01, which is what Word writes. --dates does not apply here.
 
   kept by default (clear with --also)
     title              core.xml title -> empty
@@ -85,7 +88,7 @@ CATEGORIES = {
     "names": True, "org": True, "custom_props": True, "comment_authors": True, "people": True,
     "change_authors": True, "dates": True, "core_dates": True, "core_text": True, "rsids": True,
     "doc_vars": True, "attached_template": True, "doc_ids": True, "custom_xml": True, "thumbnail": True,
-    "image_meta": True, "title": False, "para_ids": False,
+    "image_meta": True, "zip_meta": True, "title": False, "para_ids": False,
 }  # fmt: skip
 
 
@@ -452,6 +455,35 @@ def strip_picture(name, data):
     return data, 0, "none"
 
 
+# ---------------------------------------------------------------- the zip container
+ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+
+
+def has_extra_metadata(extra):
+    """True when a member's extra field holds anything but the zip64 sizes (id 1), or cannot be read."""
+    pos = 0
+    while pos + 4 <= len(extra):
+        kind, size = struct.unpack("<HH", extra[pos : pos + 4])
+        if kind != 0x0001:
+            return True
+        pos += 4 + size
+    return pos != len(extra)
+
+
+def clear_zip_meta(info, counts):
+    """Empty the comment and extra field of one member and set its time to the zip epoch; count what was there."""
+    for key, found in (
+        ("entry_comment", bool(info.comment)),
+        ("extra_field", has_extra_metadata(info.extra)),
+        ("timestamp", tuple(info.date_time) != ZIP_EPOCH),
+    ):
+        if found:
+            counts[key] = counts.get(key, 0) + 1
+    info.comment = b""
+    info.extra = b""  # the zip writer adds the zip64 sizes again when a member needs them
+    info.date_time = ZIP_EPOCH
+
+
 # ---------------------------------------------------------------- the copy
 def anonymize_member(name, data, author, initials, on, dates, dropped):
     """Return (new bytes, counts) for one zip member; the same bytes for anything that is not a target."""
@@ -507,21 +539,28 @@ def anonymize(src, out, author="Anonymous", initials="A", on=None, dates="fixed"
         raise Refused("the output folder does not exist: %s" % out_dir)
     if not zipfile.is_zipfile(src):
         raise Refused("not a docx (not a zip file): %s" % src)
-    changed = {}
+    changed, zip_counts = {}, {}
     fd, tmp = tempfile.mkstemp(prefix=".anonymize-", suffix=".tmp", dir=out_dir)
     try:
         with os.fdopen(fd, "wb") as fh, zipfile.ZipFile(src) as zin, zipfile.ZipFile(fh, "w") as zout:
             if "word/document.xml" not in zin.namelist():
                 raise Refused("not a docx (no word/document.xml): %s" % src)
             dropped = members_to_drop(zin, on)
-            zout.comment = zin.comment
+            if "zip_meta" in on:
+                if zin.comment:
+                    zip_counts["archive_comment"] = 1
+            else:
+                zout.comment = zin.comment
             for info in zin.infolist():
                 if info.filename in dropped:
                     continue
                 data, counts = anonymize_member(info.filename, zin.read(info.filename), author, initials, on, dates, dropped)
                 if counts:
                     changed[info.filename] = counts
-                zout.writestr(copy.copy(info), data, compress_type=info.compress_type)
+                member = copy.copy(info)
+                if "zip_meta" in on:
+                    clear_zip_meta(member, zip_counts)
+                zout.writestr(member, data, compress_type=info.compress_type)
         if same_file(src, out):  # the output became a link to the source while the copy was written
             raise Refused("the output is the same file as the source: %s" % out)
         os.replace(tmp, out)
@@ -536,6 +575,7 @@ def anonymize(src, out, author="Anonymous", initials="A", on=None, dates="fixed"
         "kept": sorted(set(CATEGORIES) - on),
         "dates": dates,
         "changed": changed,
+        "zip": zip_counts,
         "removed": sorted(dropped),
     }
 

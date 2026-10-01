@@ -211,6 +211,49 @@ class AnonymizeDocx(unittest.TestCase):
         self.assertIn("<w:documentProtection", settings)
         self.assertIn("compatibilityMode", settings)
 
+    # ---- the zip container
+    def test_zip_comments_extra_fields_and_member_times_are_cleared(self):
+        before = sha(self.src)
+        with zipfile.ZipFile(self.src) as z:  # the fixture really carries them
+            self.assertEqual(z.comment, fx.ZIP_COMMENT)
+            self.assertEqual(z.getinfo("word/document.xml").comment, fx.ENTRY_COMMENT)
+            self.assertEqual(z.getinfo("word/document.xml").extra, fx.ZIP_EXTRA)
+        code, out, err = self.anonymize()
+        self.assertEqual(code, 0, err)
+        with zipfile.ZipFile(self.out) as z:
+            self.assertEqual(z.comment, b"")
+            for info in z.infolist():
+                self.assertEqual((info.comment, info.extra, info.date_time), (b"", b"", fx.ZIP_EPOCH), info.filename)
+        blob = Path(self.out).read_bytes()
+        for leak in (b"test.author", b"example.org", fx.ZIP_COMMENT, fx.ENTRY_COMMENT, fx.ZIP_EXTRA):
+            self.assertNotIn(leak, blob)
+        self.assertEqual(json.loads(out)["zip"], {"archive_comment": 1, "entry_comment": 1, "extra_field": 1, "timestamp": 2})
+        rep = self.verifier.verify(self.src, self.out)
+        self.assertEqual([rep["categories"]["zip_meta"]["count"], rep["body_equal"]], [0, True])
+        self.assertTrue(self.verifier.passed(rep))
+        self.assertEqual(sha(self.src), before)
+        # Asked to keep them, the tool copies them as they are.
+        self.anonymize(None, None, "--keep", "zip_meta")
+        with zipfile.ZipFile(self.out) as z:
+            d = z.getinfo("word/document.xml")
+            self.assertEqual((z.comment, d.comment, d.extra, d.date_time), (fx.ZIP_COMMENT, fx.ENTRY_COMMENT, fx.ZIP_EXTRA, (2026, 1, 2, 3, 4, 6)))
+
+    def test_only_the_comments_as_an_archiver_would_leave_them(self):
+        # A docx without any other mark, with an archive comment and a member comment.
+        clean = fx.build(self.dir / "clean.docx", **fx.clean_marks())
+        src = fx.rezip(clean, self.dir / "commented.docx", comment=b"Created by someone@example.org",
+                       entry_comment=b"Author: someone@example.org")
+        self.assertEqual(self.verifier.verify(src, src)["categories"]["zip_meta"]["count"], 2)
+        code, out, err = self.anonymize(src)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(b"someone@example.org", Path(self.out).read_bytes())
+        self.assertEqual(json.loads(out)["zip"], {"archive_comment": 1, "entry_comment": 1})
+        self.assertTrue(self.verifier.passed(self.verifier.verify(src, self.out)))
+        # A docx without comments is judged as before: nothing to clear, nothing reported.
+        code, out, err = self.anonymize(clean)
+        self.assertEqual([code, json.loads(out)["zip"]], [0, {}], err)
+        self.assertTrue(self.verifier.passed(self.verifier.verify(clean, self.out)))
+
     # ---- pictures
     def test_picture_metadata_is_dropped_and_the_picture_data_is_not_touched(self):
         self.anonymize()
