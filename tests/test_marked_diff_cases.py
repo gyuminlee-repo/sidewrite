@@ -705,5 +705,149 @@ class TableRows(Case):
         self.assertEqual(tables("reject"), [((("Row one.",),), (("Row two.",),))])
 
 
+GRID = [["One.", "Two."], ["Three.", "Four."]]
+
+
+def merged(first, last, drop):
+    """edit(document): the 2x2 table with two cells merged; the text of the cell that is swallowed is dropped."""
+
+    def edit(d):
+        table(GRID)(d)
+        t = d.tables[-1]
+        t.cell(*drop).paragraphs[0].runs[0].text = ""
+        t.cell(*first).merge(t.cell(*last))
+        d.add_paragraph().add_run("End.")
+
+    return edit
+
+
+def picture(text=""):
+    """edit(document): one more paragraph, with a picture of one dot after its text."""
+
+    def edit(d):
+        import io
+
+        p = d.add_paragraph()
+        if text:
+            p.add_run(text)
+        p.add_run().add_picture(io.BytesIO(corpus._png()))
+
+    return edit
+
+
+class MergedCells(Case):
+    """Cells merged in the clean document only: rejecting gives the four cells of the baseline back."""
+
+    PLAIN = staticmethod(both(table(GRID), lambda d: d.add_paragraph().add_run("End.")))
+
+    def layouts(self, out, mode):
+        return tuple([x[1] for x in corpus.structure_read(corpus.view(out, mode, side))[0] if x[0] == "g"]
+                     for side in ("accept", "reject"))
+
+    def check(self, first, last, drop, merged_layout):
+        four = (2, (((1, None), (1, None)), ((1, None), (1, None))))
+        for mode in ("color", "track_changes"):
+            with self.subTest(mode=mode):
+                base, clean = self.doc([P1, P2], self.PLAIN), self.doc([P1, P2], merged(first, last, drop))
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertEqual(self.layouts(out, mode), ([merged_layout], [four]))
+                # ... and the other way round: the merge is in the baseline.
+                code, out, summary, log = self.run_tool(clean, base, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertEqual(self.layouts(out, mode), ([four], [merged_layout]))
+
+    def test_a_merge_down_a_column(self):
+        self.check((0, 0), (1, 0), (1, 0), (2, (((1, "restart"), (1, None)), ((1, "continue"), (1, None)))))
+
+    def test_a_merge_across_a_row(self):
+        self.check((0, 0), (0, 1), (0, 1), (2, (((2, None),), ((1, None), (1, None)))))
+
+    def test_the_tool_s_own_check_sees_a_merge_that_is_left_behind(self):
+        """What the check is for: an output that keeps the clean table unmarked fails on the reject side."""
+        base, clean = self.doc([P1, P2], self.PLAIN), self.doc([P1, P2], merged((0, 0), (1, 0), (1, 0)))
+        tool = tool_module()
+        accept, reject = tool.structure_failures(doc_xml(clean).encode(), doc_xml(base).encode(), doc_xml(clean).encode())
+        self.assertEqual(accept, [])
+        self.assertRegex(" ".join(reject), r"reject-all, tables: #1 .*restart")
+
+
+class ElementsThatAreNotText(Case):
+    """A picture, a field or a note reference is content: it comes and goes with its paragraph, or the pair is refused."""
+
+    def test_a_new_paragraph_with_a_picture_is_inserted_with_its_picture(self):
+        base, clean = self.doc([P1, P2]), self.doc([P1, P2], picture("A caption."))
+        tool = tool_module()
+        for mode in ("color", "track_changes"):
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                kinds = lambda side: [x[1] for x in corpus.structure_read(corpus.view(out, mode, side))[0] if x[0] == "x"]
+                self.assertEqual((kinds("accept"), kinds("reject")), ([(("drawing", 1),)], []))
+        xml = doc_xml(out).encode("utf-8")  # track changes: the run of the picture stands inside w:ins
+        self.assertEqual(xml.count(b"<w:drawing>"), 1)
+        self.assertNotIn(b"<w:drawing>", tool.resolve_revisions(xml, "reject")[0])
+        self.assertIn(b"<w:drawing>", tool.resolve_revisions(xml, "accept")[0])
+
+    def test_a_new_paragraph_that_is_only_a_picture(self):
+        base, clean = self.doc([P1, P2]), self.doc([P1, P2], picture())
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertEqual(code, 0, log)
+        tool = tool_module()
+        self.assertNotIn(b"<w:drawing>", tool.resolve_revisions(doc_xml(out).encode("utf-8"), "reject")[0])
+
+    def test_the_tool_s_own_check_sees_a_picture_that_is_left_behind(self):
+        base, clean = self.doc([P1, P2]), self.doc([P1, P2], picture("A caption."))
+        tool = tool_module()
+        accept, reject = tool.structure_failures(doc_xml(clean).encode(), doc_xml(base).encode(), doc_xml(clean).encode())
+        self.assertEqual(accept, [])
+        self.assertTrue(reject)
+
+    def test_what_cannot_be_written_is_refused_with_its_kind(self):
+        plain, pic = self.doc([P1, P2, "A caption."]), self.doc([P1, P2], picture("A caption."))
+        gone = self.doc([P1, P2])
+        for name, base, clean, message in (
+            ("a paragraph with a picture deleted", pic, gone, r"deleted baseline paragraph .*cannot carry \(drawing x1\)"),
+            ("a picture taken out", pic, plain, r"changed baseline paragraph .*cannot carry \(drawing x1\)"),
+            ("a picture put in", plain, pic, r"text differs in clean paragraph with drawing"),
+        ):
+            for mode in ("color", "track_changes"):
+                with self.subTest(case=name, mode=mode):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 2, log)
+                    self.assertRegex(log, message)
+                    self.assertFalse(out.exists())
+
+    def test_a_new_paragraph_with_an_element_outside_a_run_is_refused_with_its_kind(self):
+        from lxml import etree
+
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        m = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
+        kinds = {
+            "fldSimple": '<w:fldSimple %s w:instr=" PAGE "><w:r><w:t>3</w:t></w:r></w:fldSimple>' % w,
+            "oMath": "<m:oMath %s><m:r><m:t>x</m:t></m:r></m:oMath>" % m,
+        }
+        base = self.doc([P1, P2])
+        for kind, xml in kinds.items():
+            clean = self.doc([P1, P2, "A new paragraph. "], lambda d: d.paragraphs[-1]._p.append(etree.fromstring(xml)))
+            for mode in ("color", "track_changes"):
+                with self.subTest(kind=kind, mode=mode):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 2, log)
+                    self.assertRegex(log, r"cannot be marked as inserted \(%s x1\)" % kind)
+                    self.assertFalse(out.exists())
+
+    def test_a_comment_is_no_change(self):
+        """The two invented manuscripts differ in a comment on a paragraph with the same text: both ways are written."""
+        fx = ROOT / "tests" / "fixtures"
+        a, b = fx / "spike_manuscript.docx", fx / "review_manuscript.docx"
+        for base, clean in ((a, b), (b, a)):
+            for mode in ("color", "track_changes"):
+                with self.subTest(clean=clean.name, mode=mode):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    self.assertEqual(doc_xml(out).count("<w:commentReference"), doc_xml(clean).count("<w:commentReference"))
+
+
 if __name__ == "__main__":
     unittest.main()

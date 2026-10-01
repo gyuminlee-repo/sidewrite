@@ -14,6 +14,7 @@ colour on the mark in colour mode. Where a baseline paragraph ended inside what 
 paragraph is split there and the first part ends in a deleted paragraph mark. A table whose rows or columns
 changed, that is new, gone or stands at another place is shown as a deleted table and an inserted table: its rows
 carry w:trPr/w:del or w:ins in track-changes mode, every paragraph mark in it the mark formatting in colour mode.
+The same holds for a table whose cells are merged differently (w:gridSpan, w:vMerge, the grid).
 
 How the diff is made: paragraphs are aligned first (exact matches anchor the alignment), changed paragraphs are
 diffed word by word, and runs of paragraphs without a counterpart are re-paired sentence by sentence, so a rewritten
@@ -28,14 +29,20 @@ apart) and is refused.
 
 The result is checked before it is written: accepting every mark must give the clean document and rejecting every
 mark the baseline, in text and in structure: every paragraph (empty ones too) with its text, tabs and breaks by kind
-(line, page, column, clear), every table with its rows, cells and cell paragraphs, and on the accept side the text
-inside every bookmark and the order of paragraphs and tables. Not compared on the reject side: where a table stands
+(line, page, column, clear) and with what it holds besides text, by kind and number (pictures, objects, fields,
+footnote and endnote references, equations, symbols); every table with its grid, its rows, its
+cells with their spans and merges, and the cell paragraphs; and on the accept side the text inside every bookmark,
+the number of comment marks of every paragraph and the order of paragraphs and tables. Comments are no tracked
+change: the output keeps the clean document's, and a comment of the baseline is not carried over. Not compared on the reject side: where a table stands
 among the paragraphs, and in colour mode page and column breaks (a deleted one is left out there, because a struck
 break would still break the page). The check itself is tested by damaging a copy. When a check fails nothing is
 written and the exit code is 1.
 
 What is refused (exit 2) instead of written wrong: nested tables; a changed paragraph with a field, a footnote
-reference, a drawing or another element the writer cannot rebuild; a paragraph of one document before a table or at
+reference, a picture or another element that is not text, in the clean document or in the baseline, and a deleted
+baseline paragraph with one (the writer cannot rebuild such an element; a paragraph that differs only in such an
+element counts as changed, and one with the same text but other kinds of them is refused as well); a new paragraph
+with an equation or a simple field (w:fldSimple), which stand outside a run and cannot be marked as inserted; a paragraph of one document before a table or at
 the end of a cell or of the document where the other document has no paragraph at all (a paragraph mark cannot
 show that); pending cell insertions, deletions and merges. The output is never one of the inputs, and an output or report file
 that already exists is refused unless --overwrite is given (the write creates the name exclusively).
@@ -97,8 +104,18 @@ RPR_ORDER = ['rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps', 's
 TOKEN_RE = re.compile(r'\w*[^\W\d_]\w*|\d+(?:\.\d+)*|\w+|[^\w\s]')
 SAFE_CLEAN_TAGS = {'pPr', 'rPr', 'r', 't', 'tab', 'br', 'hyperlink', 'bookmarkStart', 'bookmarkEnd',
                    'proofErr', 'lastRenderedPageBreak'}
-DROP_IN_BASELINE = {'fldChar', 'instrText', 'drawing', 'pict', 'footnoteReference', 'endnoteReference',
-                    'lastRenderedPageBreak', 'commentReference', 'object', 'sym'}
+# Whatever a paragraph holds besides text, tabs and breaks (a picture, an object, a field mark or its code, a footnote
+# or endnote reference, an equation, a symbol, ...) is one INLINE_CHAR in the paragraph text, so
+# the diff sees that it is there, and it is counted by kind (Para.inline) for the structure check. The writer
+# cannot make such an element, so it never writes this character: a paragraph that would need it is refused.
+INLINE_CHAR = '\x02'
+# Where a comment is anchored. A comment is no tracked change (Word keeps it when every change is rejected), so
+# these are not content: the output has the clean document's comments, checked on the accept side, and a baseline
+# comment is not carried over (the output has no comments part of the baseline); in a deleted paragraph it is
+# counted as dropped.
+COMMENT_TAGS = {'commentRangeStart', 'commentRangeEnd', 'commentReference'}
+NOT_INLINE = {'proofErr', 'lastRenderedPageBreak', 'bookmarkStart', 'bookmarkEnd', 'hyperlink', 'smartTag', 'sdt',
+              'sdtPr', 'sdtEndPr'} | COMMENT_TAGS   # wrappers and markers that are not content of their own
 
 
 def q(tag):
@@ -257,6 +274,8 @@ class Para:
         self.text = ''
         self.fmt = []
         self.special = collections.Counter()
+        self.inline = collections.Counter()   # the elements that stand as INLINE_CHAR in the text, by kind
+        self.loose = collections.Counter()    # those of them that stand outside a run (a simple field, an equation)
         self.marks = []     # bookmark markers: (element, text offset it sits at, enclosing hyperlink or None)
 
 
@@ -289,9 +308,19 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
                 s = break_char(ch)
             else:
                 para.special[t] += 1
-                continue
+                if t in NOT_INLINE:
+                    continue
+                para.inline[t] += 1
+                s = INLINE_CHAR
             parts.append(s)
             para.fmt.extend([f] * len(s))
+
+    def inline(t, link):
+        """A paragraph-level element that is not text: one INLINE_CHAR."""
+        para.inline[t] += 1
+        para.loose[t] += 1
+        parts.append(INLINE_CHAR)
+        para.fmt.append(('', None, link))
 
     def walk(node, link, mark=None):
         for ch in node:
@@ -313,6 +342,8 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
             elif t in ('smartTag', 'fldSimple', 'sdt', 'sdtContent'):
                 if t != 'sdtContent':
                     para.special[t] += 1
+                if t == 'fldSimple':
+                    inline(t, link)
                 walk(ch, link, mark)
             elif t in ('moveFrom', 'pPr'):
                 continue
@@ -320,6 +351,8 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
                 para.special[t] += 1
                 if t in ('bookmarkStart', 'bookmarkEnd'):
                     para.marks.append((ch, len(para.fmt), link))
+                elif t not in NOT_INLINE:
+                    inline(t, link)
 
     walk(p, None)
     para.text = ''.join(parts)
@@ -447,7 +480,7 @@ def make_run(kind, text, rpr, styles):
     if len(new):
         r.append(new)
     ttag = 'delText' if (tc and kind == 'del') else 't'
-    for part in re.split('([\t%s%s])' % (''.join(BREAK_CHARS), SEP_CHAR), text):
+    for part in re.split('([\t%s%s%s])' % (''.join(BREAK_CHARS), SEP_CHAR, INLINE_CHAR), text):
         if part == '':
             continue
         if part == '\t':
@@ -458,6 +491,8 @@ def make_run(kind, text, rpr, styles):
                 br.set(q(k), v)
         elif part == SEP_CHAR:
             raise AssertionError('a paragraph separator reached the run writer')   # rebuild_para splits there
+        elif INLINE_CHAR in part:
+            raise AssertionError('an element that is not text reached the run writer')   # refused before, see refuse_inline
         else:
             t = etree.SubElement(r, q(ttag))
             t.text = part
@@ -490,22 +525,25 @@ def build_children(segs, styles):
 
 
 def colorize_in_place(p, rgb=None):
-    """Mark every text-bearing run of a clean-only paragraph as inserted (structure kept):
-    colour mode applies the insert colour, track_changes mode wraps the run in <w:ins>."""
+    """Mark the whole content of a clean-only paragraph as inserted (structure kept): every run, also one that
+    holds a picture, a field mark or a footnote reference instead of text. Colour mode applies the insert colour
+    to the run, track_changes mode wraps the run in <w:ins>. What stands outside a run (Para.loose) cannot be
+    marked this way; the caller refuses such a paragraph."""
     n = 0
     for r in list(p.iter(q('r'))):
-        if any(ln(ch) in ('t', 'tab', 'br') for ch in r):
-            if MODE == 'track_changes':
-                w = rev_mark('ins')
-                r.addprevious(w)
-                w.append(r)
-            else:
-                rpr = r.find(q('rPr'))
-                if rpr is None:
-                    rpr = etree.Element(q('rPr'))
-                    r.insert(0, rpr)
-                rpr_set(rpr, 'color', val=rgb or INSERT_RGB)
-            n += 1
+        if any(a.tag == q('r') for a in r.iterancestors()):
+            continue                               # inside a text box of a picture: its outer run is marked
+        if MODE == 'track_changes':
+            w = rev_mark('ins')
+            r.addprevious(w)
+            w.append(r)
+        else:
+            rpr = r.find(q('rPr'))
+            if rpr is None:
+                rpr = etree.Element(q('rPr'))
+                r.insert(0, rpr)
+            rpr_set(rpr, 'color', val=rgb or INSERT_RGB)
+        n += 1
     return n
 
 
@@ -826,15 +864,26 @@ def deleted_ppr(bp, styles, numids, stats):
     return ppr
 
 
+def kinds_of(para):
+    return ', '.join('%s x%d' % kv for kv in sorted(para.inline.items())) or 'none'
+
+
+def refuse_inline(b, what):
+    """Deleted text is written from the baseline's characters; a picture, a field or a footnote reference among
+    them cannot be written (and would need parts of the baseline file). Such a paragraph is refused."""
+    assert not b.inline, ('a %s baseline paragraph has elements that deleted text cannot carry (%s): %r'
+                          % (what, kinds_of(b), b.text.replace(INLINE_CHAR, '')[:60]))
+
+
 def make_deleted_para(bp, b, styles, numids, stats):
     """New paragraph holding baseline text as deletions; its mark is set by the caller."""
+    refuse_inline(b, 'deleted')
+    for k in sorted(COMMENT_TAGS & set(b.special)):
+        stats['dropped_baseline_special'][k] += b.special[k]
     p = etree.Element(q('p'))
     ppr = deleted_ppr(bp, styles, numids, stats)
     if ppr is not None and len(ppr):
         p.append(ppr)
-    for k, v in b.special.items():
-        if k in DROP_IN_BASELINE:
-            stats['dropped_baseline_special'][k] += v
     segs = segments([('del', 0, len(b.text))], b, b)
     for e in build_children(segs, styles):
         p.append(e)
@@ -1257,10 +1306,17 @@ def apply_container(bps, cps, styles, numids, stats, tables=None):
 
     for tag, bi, ci, extra in ali:
         if tag == 'eq':
+            # the clean paragraph is kept as it is, so reject-all shows its elements: they must be the baseline's
+            assert B[bi].inline == C[ci].inline, (
+                'a paragraph with the same text holds other elements that are not text in the baseline (%s) than in '
+                'the clean document (%s), which cannot be shown: %r'
+                % (kinds_of(B[bi]), kinds_of(C[ci]), C[ci].text.replace(INLINE_CHAR, '')[:60]))
             stats['n_eq'] += 1
         elif tag == 'seg':
             assert not C[ci].special.get('drawing'), 'text differs in clean paragraph with drawing: %r' % C[ci].text[:60]
             segs, used = extra
+            for u in used:
+                refuse_inline(B[u], 'changed')
             new = rebuild_para(cps[ci], ' \u00b6 '.join(B[u].text for u in used), C[ci], styles, stats, segs,
                                lambda b: deleted_ppr(bps[b], styles, numids, stats))
             seq[at(cps[ci]):at(cps[ci])] = new
@@ -1269,6 +1325,9 @@ def apply_container(bps, cps, styles, numids, stats, tables=None):
             stats['n_mod'] += 1
         elif tag == 'ins':
             stats['n_ins'] += 1
+            assert not C[ci].loose, (
+                'a new paragraph has elements outside a run that cannot be marked as inserted (%s): %r'
+                % (', '.join('%s x%d' % kv for kv in sorted(C[ci].loose.items())), C[ci].text.replace(INLINE_CHAR, '')[:60]))
             if C[ci].text:
                 colorize_in_place(cps[ci])
                 stats['exp_ins'].append(C[ci].text)
@@ -1344,6 +1403,32 @@ def top_tables(root):
 def body_paras(root):
     """Paragraphs outside tables and drawings, document order (sdt content included)."""
     return [p for p in root.iter(q('p')) if not in_box(p) and not any(a.tag == q('tbl') for a in p.iterancestors())]
+
+
+def cell_layout(tc):
+    """[columns a cell spans, its vertical merge (None | 'restart' | 'continue'), its old-style horizontal merge]."""
+    pr = tc.find(q('tcPr'))
+    span = pr.find(q('gridSpan')) if pr is not None else None
+    vm = pr.find(q('vMerge')) if pr is not None else None
+    hm = pr.find(q('hMerge')) if pr is not None else None
+    return [int(span.get(q('val')) or 1) if span is not None else 1,
+            None if vm is None else vm.get(q('val')) or 'continue',
+            None if hm is None else hm.get(q('val')) or 'continue']
+
+
+def row_skips(tr):
+    """[grid columns a row leaves out before its cells, and after them]."""
+    def n(tag):
+        e = tr.find(q('trPr') + '/' + q(tag))
+        return int(e.get(q('val')) or 0) if e is not None else 0
+    return [n('gridBefore'), n('gridAfter')]
+
+
+def table_layout(t):
+    """[grid columns, rows of [row_skips, cell_layout of every cell]]: two tables with the same layout can be
+    compared cell by cell."""
+    return [len(t.findall(q('tblGrid') + '/' + q('gridCol'))),
+            [[row_skips(tr)] + [cell_layout(tc) for tc in tr.findall(q('tc'))] for tr in t.findall(q('tr'))]]
 
 
 def table_dims(t):
@@ -1426,7 +1511,7 @@ def build_document(base_xml, clean_xml, styles, numids):
     at_base = {id(cts[ck]): bk for bk, ck in pairs if ck is not None}   # output table -> its baseline table (or None)
     bps, cps = body_paras(broot), body_paras(croot)
     assert bps and cps, 'a document without a paragraph outside its tables'
-    same_dims = lambda bk, ck: table_dims(bts[bk]) == table_dims(cts[ck])
+    same_dims = lambda bk, ck: table_layout(bts[bk]) == table_layout(cts[ck])   # cells, spans and merges alike
     new = {id(cts[ck]) for bk, ck in pairs if ck is not None and bk is None}   # no deleted table will stand next to these
     owners = apply_container(bps, cps, styles, numids, stats, {'before': tables_before, 'match': at_base, 'new': new})
     assert len(owners) == len(bps), 'not every baseline paragraph has its place in the marked text'
@@ -1642,11 +1727,16 @@ def view_root(marked_xml, side):
 def structure(root, baseline=False):
     """What the round-trip check compares of a document without marks:
     'flow'      the order of body paragraphs ('p') and top-level tables ('t'),
-    'body'      the text of every body paragraph, empty ones included, with tabs and typed breaks (BREAK_CHARS),
-    'tables'    for every top-level table its rows, their cells and the text of every paragraph of each cell,
-    'bookmarks' the text between the start and the end of every bookmark.
+    'body'      every body paragraph, empty ones included, as [text with tabs, typed breaks (BREAK_CHARS) and one
+                INLINE_CHAR per element that is not text, those elements counted by kind],
+    'tables'    for every top-level table [grid columns, rows of cells as [columns spanned, vertical merge,
+                old-style horizontal merge, the paragraphs of the cell], each row closed by its row_skips],
+    'bookmarks' the text between the start and the end of every bookmark,
+    'comments'  for every paragraph, also in tables, how many comment marks it holds (COMMENT_TAGS).
     baseline=True reads struck text as already deleted, as the diff does."""
-    read = (lambda x: read_para(x).text) if baseline else (lambda x: read_para(x, lambda r: False).text)
+    def read(x):
+        para = read_para(x) if baseline else read_para(x, lambda r: False)
+        return [para.text, sorted(para.inline.items())]
     held = top_tables(root)                           # held: an id is only stable while its element object lives
     tops = {id(t) for t in held}
     flow, body = [], []
@@ -1657,8 +1747,9 @@ def structure(root, baseline=False):
         elif not in_box(e) and not any(a.tag == q('tbl') for a in e.iterancestors()):
             flow.append('p')
             body.append(read(e))
-    tables = [[[[read(x) for x in tc.iter(q('p')) if not in_box(x)] for tc in tr.findall(q('tc'))]
-               for tr in t.findall(q('tr'))] for t in held]
+    tables = [[len(t.findall(q('tblGrid') + '/' + q('gridCol'))),
+               [[cell_layout(tc) + [[read(x) for x in tc.iter(q('p')) if not in_box(x)]] for tc in tr.findall(q('tc'))]
+                + [row_skips(tr)] for tr in t.findall(q('tr'))]] for t in held]
     opened, marks = {}, {}
     for e in root.iter(q('bookmarkStart'), q('bookmarkEnd'), q('r')):
         if ln(e) == 'bookmarkStart':
@@ -1670,7 +1761,9 @@ def structure(root, baseline=False):
             text = ''.join(t.text or '' for t in e.iter(q('t'), q('delText')))
             for name in opened.values():
                 marks[name] += text
-    return {'flow': flow, 'body': body, 'tables': tables, 'bookmarks': marks}
+    comments = [sum(1 for e in x.iter() if isinstance(e.tag, str) and ln(e) in COMMENT_TAGS)
+                for x in root.iter(q('p')) if not in_box(x)]
+    return {'flow': flow, 'body': body, 'tables': tables, 'bookmarks': marks, 'comments': comments}
 
 
 def first_difference(name, got, want):
@@ -1690,17 +1783,17 @@ def structure_failures(marked_xml, base_xml, clean_xml):
     """The round trip on structure: accepting every mark must give the structure of the clean document, rejecting
     every mark the structure of the baseline (see structure). Returns (accept failures, reject failures).
 
-    Not compared on the reject side: where a table stands among the paragraphs, bookmarks (the output carries the
-    clean document's), and, in colour mode only, page and column breaks (a deleted one is not written)."""
+    Not compared on the reject side: where a table stands among the paragraphs, bookmarks and comment marks (the
+    output carries the clean document's; a comment is no tracked change), and, in colour mode only, page and column breaks (a deleted one is not written)."""
     want_c = structure(etree.fromstring(clean_xml))
     want_b = structure(etree.fromstring(base_xml), baseline=True)
     acc, rej = structure(view_root(marked_xml, 'accept')), structure(view_root(marked_xml, 'reject'))
     a = []
     for key, label in (('flow', 'order of paragraphs and tables'), ('body', 'body paragraphs'),
-                       ('tables', 'tables'), ('bookmarks', 'bookmarks')):
+                       ('tables', 'tables'), ('bookmarks', 'bookmarks'), ('comments', 'comment marks')):
         a += first_difference('accept-all, %s' % label, acc[key], want_c[key])
     if MODE == 'color':
-        strip = lambda v: no_page_breaks(v) if isinstance(v, str) else [strip(x) for x in v]
+        strip = lambda v: no_page_breaks(v) if isinstance(v, str) else [strip(x) for x in v] if isinstance(v, (list, tuple)) else v
         rej, want_b = {k: strip(rej[k]) for k in ('body', 'tables')}, {k: strip(want_b[k]) for k in ('body', 'tables')}
     r = first_difference('reject-all, body paragraphs', rej['body'], want_b['body'])
     r += first_difference('reject-all, tables', rej['tables'], want_b['tables'])
@@ -2023,9 +2116,9 @@ def report(a, out_path, base_xml, clean_xml, st):
     v = verify(out_xml, base_xml, clean_xml)
     rec('two-way restoration, paragraph by paragraph (%d paragraphs)' % v['paragraphs_compared'],
         not v['failures'], '; '.join(v['failures'][:5]))
-    rec('accept-all has the structure of the clean document (paragraphs with empty ones, breaks, tables, bookmarks)',
+    rec('accept-all has the structure of the clean document (paragraphs with empty ones, breaks, elements that are not text, tables with merged cells, bookmarks)',
         not v['structure_accept'], '; '.join(v['structure_accept'][:3]))
-    rec('reject-all has the structure of the baseline (paragraphs with empty ones, breaks, tables)',
+    rec('reject-all has the structure of the baseline (paragraphs with empty ones, breaks, elements that are not text, tables with merged cells)',
         not v['structure_reject'], '; '.join(v['structure_reject'][:3]))
     rec('every w:tc contains a w:p', v['tc_no_p'] == 0, 'w:tc without w:p: %d' % v['tc_no_p'])
     exp_i, exp_d = words_of(st['exp_ins']), words_of(st['exp_del'])

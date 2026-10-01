@@ -8,21 +8,39 @@ inside every bookmark.
 
 A paragraph is {"k": "p", "id": ..., "pieces": [...]}. A piece is a string or a tuple:
 ("tab",), ("br", "line" | "page" | "column" | "all" | "none"), ("link", text), ("bm", name, text), ("b", text),
-("fn",), ("ins", text) and ("del", text) (a change that is still pending in the input file).
+("fn",), ("pic",) (an inline picture), ("field", code, result), ("ins", text) and ("del", text) (a change that
+is still pending in the input file).
 A table is {"k": "t", "id": ..., "rows": [[cell, ...], ...]}; a cell is a list of piece lists (its paragraphs).
+A table may have "merge": [("h", row, first column, last column) | ("v", column, first row, last row)]; the
+cells a merge takes in must be empty in the model.
 {"k": "bs", "name": ..., "n": ...} and {"k": "be", "n": ...} are the start and the end of a bookmark that stand
 between paragraphs, as Word writes them when a bookmark covers whole paragraphs.
 """
 
 import copy
+import io
 import random
+import struct
 import zipfile
+import zlib
 
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Pt
 
 INSERT_RGB = "FF0000"
+# What a paragraph can hold besides text, tabs and breaks: counted per paragraph, by kind.
+INLINE = ("drawing", "pict", "object", "fldChar", "instrText", "delInstrText", "fldSimple", "footnoteReference",
+          "endnoteReference", "commentRangeStart", "commentRangeEnd", "commentReference", "sym")
+MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath"
+
+
+def _png():
+    """A one-pixel picture."""
+    chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)  # noqa: E731
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00\x00")) + chunk(b"IEND", b""))
 PAGE, COLUMN, LINE_ALL = "<page>", "<column>", "<line:all>"
 
 _A = ["quiet", "narrow", "distant", "early", "plain", "heavy", "bright", "silent"]
@@ -85,7 +103,9 @@ def _run(text_):
 _IDS = iter(range(500, 100000))
 
 
-def _fill(p, pieces):
+def _fill(par, pieces):
+    """Fill a python-docx paragraph with the pieces of the model."""
+    p = par._p
     for piece in pieces:
         if isinstance(piece, str):
             p.append(_run(piece))
@@ -120,6 +140,21 @@ def _fill(p, pieces):
             r = _el("w:r")
             r.append(_el("w:footnoteReference", id="2"))
             p.append(r)
+        elif kind == "pic":
+            par.add_run().add_picture(io.BytesIO(_png()), width=Pt(24), height=Pt(24))
+        elif kind == "field":
+            for part in ("begin", piece[1], "separate", piece[2], "end"):
+                r = _el("w:r")
+                if part in ("begin", "separate", "end"):
+                    r.append(_el("w:fldChar", fldCharType=part))
+                elif part is piece[1]:
+                    code = _el("w:instrText")
+                    code.text = " %s " % part
+                    code.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                    r.append(code)
+                else:
+                    r = _run(part)
+                p.append(r)
         elif kind in ("ins", "del"):
             w = _el("w:" + kind, id=str(next(_IDS)), author="Somebody", date="2031-01-02T03:04:05Z")
             r = _run(piece[1])
@@ -144,7 +179,7 @@ def write(model, path, header=None):
     d = Document()
     for block in model:
         if block["k"] == "p":
-            _fill(d.add_paragraph()._p, block["pieces"])
+            _fill(d.add_paragraph(), block["pieces"])
         elif block["k"] in ("bs", "be"):
             attrs = {"id": str(block["n"]), "name": block["name"]} if block["k"] == "bs" else {"id": str(block["n"])}
             d.element.body.find(qn("w:sectPr")).addprevious(_el("w:bookmarkStart" if block["k"] == "bs" else "w:bookmarkEnd", **attrs))
@@ -154,9 +189,14 @@ def write(model, path, header=None):
             for i, row in enumerate(rows):
                 for j, cell in enumerate(row):
                     tc = table.cell(i, j)
-                    _fill(tc.paragraphs[0]._p, cell[0])
+                    _fill(tc.paragraphs[0], cell[0])
                     for pieces in cell[1:]:
-                        _fill(tc.add_paragraph()._p, pieces)
+                        _fill(tc.add_paragraph(), pieces)
+            for kind, a, b, c in block.get("merge", []):
+                if kind == "h":
+                    table.cell(a, b).merge(table.cell(a, c))
+                else:
+                    table.cell(b, a).merge(table.cell(c, a))
     if header:
         d.sections[0].header.paragraphs[0].text = header
     d.save(path)
@@ -196,17 +236,45 @@ def _text(pieces):
             out += {"line": "\n", "none": "\n", "page": PAGE, "column": COLUMN, "all": LINE_ALL}[piece[1]]
         elif piece[0] in ("link", "b", "ins"):
             out += piece[1]
-        elif piece[0] == "bm":
+        elif piece[0] in ("bm", "field"):
             out += piece[2]
     return out
 
 
+def _inline(pieces):
+    """What the pieces hold besides text: ((kind, count), ...), sorted."""
+    counts = {}
+    for piece in pieces:
+        kinds = {"fn": ["footnoteReference"], "pic": ["drawing"],
+                 "field": ["fldChar"] * 3 + ["instrText"]}.get(piece[0] if not isinstance(piece, str) else "", [])
+        for k in kinds:
+            counts[k] = counts.get(k, 0) + 1
+    return tuple(sorted(counts.items()))
+
+
+def _layout(block):
+    """(grid columns, rows of cells as (model column, span, vertical merge)) of a table of the model."""
+    rows = [[{"col": j, "span": 1, "vm": None} for j in range(len(row))] for row in block["rows"]]
+    for kind, a, b, c in block.get("merge", []):
+        if kind == "h":
+            rows[a] = [x for x in rows[a] if not b < x["col"] <= c]
+            next(x for x in rows[a] if x["col"] == b)["span"] = c - b + 1
+        else:
+            for i in range(b, c + 1):
+                next(x for x in rows[i] if x["col"] == a)["vm"] = "restart" if i == b else "continue"
+    return len(block["rows"][0]), rows
+
+
 def structure_of(model):
-    """(items in order, {bookmark name: text}); an item is ("p", text) or ("t", rows of cells of paragraph texts)."""
+    """(items in order, {bookmark name: text}). An item is ("p", text), followed by ("x", kinds and counts) when the
+    paragraph holds something that is not text; or ("t", rows of cells of paragraph texts), followed by
+    ("g", (grid columns, rows of cells as (span, vertical merge)))."""
     items, marks, opened = [], {}, {}
     for block in model:
         if block["k"] == "p":
             items.append(("p", _text(block["pieces"])))
+            if _inline(block["pieces"]):
+                items.append(("x", _inline(block["pieces"])))
             marks.update({piece[1]: piece[2] for piece in block["pieces"] if not isinstance(piece, str) and piece[0] == "bm"})
             for name in opened.values():
                 marks[name] += _text(block["pieces"])
@@ -216,7 +284,10 @@ def structure_of(model):
         elif block["k"] == "be":
             opened.pop(block["n"])
         else:
-            items.append(("t", tuple(tuple(tuple(_text(p) for p in cell) for cell in row) for row in block["rows"])))
+            grid, layout = _layout(block)
+            items.append(("t", tuple(tuple(tuple(_text(p) for p in block["rows"][i][x["col"]]) for x in row)
+                                     for i, row in enumerate(layout))))
+            items.append(("g", (grid, tuple(tuple((x["span"], x["vm"]) for x in row) for row in layout))))
     return items, marks
 
 
@@ -317,16 +388,33 @@ def _run_text(r):
     return out
 
 
+def _cell_layout(tc):
+    """(columns the cell spans, None | "restart" | "continue") of a w:tc."""
+    span = tc.find(qn("w:tcPr") + "/" + qn("w:gridSpan"))
+    vm = tc.find(qn("w:tcPr") + "/" + qn("w:vMerge"))
+    return (int(span.get(qn("w:val"))) if span is not None else 1,
+            None if vm is None else vm.get(qn("w:val")) or "continue")
+
+
 def structure_read(body):
     """The same two values as structure_of, read from a body element."""
     items, marks, opened = [], {}, {}
     for child in body:
         if child.tag == qn("w:p"):
             items.append(("p", _para_text(child)))
+            counts = {}
+            for e in child.iter():
+                kind = "oMath" if e.tag == MATH else e.tag.split("}")[-1] if isinstance(e.tag, str) else ""
+                if kind == "oMath" or (kind in INLINE and e.tag == qn("w:" + kind)):
+                    counts[kind] = counts.get(kind, 0) + 1
+            if counts:
+                items.append(("x", tuple(sorted(counts.items()))))
         elif child.tag == qn("w:tbl"):
             items.append(("t", tuple(
                 tuple(tuple(_para_text(p) for p in tc.findall(qn("w:p"))) for tc in tr.findall(qn("w:tc")))
                 for tr in child.findall(qn("w:tr")))))
+            items.append(("g", (len(child.findall(qn("w:tblGrid") + "/" + qn("w:gridCol"))), tuple(
+                tuple(_cell_layout(tc) for tc in tr.findall(qn("w:tc"))) for tr in child.findall(qn("w:tr"))))))
     for e in body.iter(qn("w:bookmarkStart"), qn("w:bookmarkEnd"), qn("w:r")):
         if e.tag == qn("w:bookmarkStart"):
             opened[e.get(qn("w:id"))] = e.get(qn("w:name"))
@@ -345,12 +433,13 @@ def without_page_breaks(items):
     """Colour mode shows a deleted page or column break as nothing (a struck break would still break the page)."""
     strip = lambda s: s.replace(PAGE, "").replace(COLUMN, "")
     return [("p", strip(x[1])) if x[0] == "p" else
-            ("t", tuple(tuple(tuple(strip(p) for p in cell) for cell in row) for row in x[1])) for x in items]
+            ("t", tuple(tuple(tuple(strip(p) for p in cell) for cell in row) for row in x[1])) if x[0] == "t" else x
+            for x in items]
 
 
 def split_reject(items):
     """(body paragraphs, tables): where a table stands among the paragraphs is not compared on the reject side."""
-    return [x for x in items if x[0] == "p"], [x for x in items if x[0] == "t"]
+    return [x for x in items if x[0] in ("p", "x")], [x for x in items if x[0] in ("t", "g")]
 
 
 # ---------------------------------------------------------------- changes
@@ -522,6 +611,20 @@ def span(first, last, name="whole"):
     return op
 
 
+def merge(ident, *merges, empty=()):
+    """Merge cells of a table; `empty` are the (row, column) cells the merges take in, which lose their text."""
+    def op(m):
+        block = m[_at(m, ident)]
+        for i, j in empty:
+            block["rows"][i][j] = [[]]
+        block["merge"] = list(merges)
+    return op
+
+
+def unmerge(ident):
+    return lambda m: m[_at(m, ident)].pop("merge")
+
+
 def both(*ops):
     def op(m):
         for o in ops:
@@ -550,6 +653,13 @@ WITH_MARK = set_pieces("c", text(5) + " ", ("bm", "mark1", "Figure 3"), " " + te
 WITH_BOLD = set_pieces("c", text(5) + " ", ("b", "a bold phrase"), " " + text(6, 7))
 WITH_NOTE = set_pieces("d", text(8), ("fn",), " " + text(9))
 TWO_TABLES = add_table("h2")
+MERGED_ACROSS = merge("t1", ("h", 0, 0, 1), empty=[(0, 1)])
+MERGED_DOWN = merge("t1", ("v", 0, 0, 1), empty=[(1, 0)])
+WITH_PICTURE = set_pieces("c", text(5) + " ", ("pic",), " " + text(6, 7))
+WITH_FIELD = set_pieces("c", text(5) + " ", ("field", "PAGE", "3"), " " + text(6, 7))
+PICTURE_PARA = lambda m: m.insert(_at(m, "b"), P("pic", text(20) + " ", ("pic",)))  # noqa: E731
+PICTURE_ONLY = lambda m: m.insert(_at(m, "b"), P("pic", ("pic",)))  # noqa: E731
+FIELD_PARA = lambda m: m.insert(_at(m, "b"), P("fld", text(20) + " ", ("field", "PAGE", "3"), "."))  # noqa: E731
 SPLIT_AT_MARK = set_pieces("c", text(5))
 PENDING_INS = set_pieces("b", text(3), ("ins", " " + text(4)))
 PENDING_DEL = set_pieces("b", text(3, 4), ("del", " " + text(20)))
@@ -617,7 +727,25 @@ CASES = {
     "a pending insertion in the baseline": (variant(PENDING_INS), reword("b"), None),
     "a footnote and a header, change elsewhere": (variant(WITH_NOTE), both(WITH_NOTE, reword("a")), None),
     "a footnote in the changed paragraph": (variant(WITH_NOTE), both(WITH_NOTE, reword("d")), r"footnoteReference"),
-    "a footnote in a deleted paragraph": (variant(WITH_NOTE), del_para("d"), None),
+    "a footnote in a deleted paragraph": (variant(WITH_NOTE), del_para("d"), r"cannot carry"),
+    "a cell merged across two columns": (variant(), MERGED_ACROSS, None),
+    "a cell merged down a column": (variant(), MERGED_DOWN, None),
+    "a merged cell split again": (variant(MERGED_DOWN), both(unmerge("t1"), table("t1", lambda rows: rows[1].__setitem__(0, [[text(49)]]))), None),
+    "a word changed in a table with a merged cell": (variant(MERGED_DOWN), table("t1", lambda rows: _reword(rows[0][1][0])), None),
+    "a merge across turned into a merge down": (variant(MERGED_ACROSS), both(unmerge("t1"), MERGED_DOWN, table("t1", lambda rows: rows[0].__setitem__(1, [[text(31)]]))), None),
+    "a paragraph with a picture added": (variant(), PICTURE_PARA, None),
+    "a paragraph that is only a picture added": (variant(), PICTURE_ONLY, None),
+    "a paragraph with a field added": (variant(), FIELD_PARA, None),
+    "a picture in an unchanged paragraph, change elsewhere": (variant(WITH_PICTURE), reword("a"), None),
+    "a field in an unchanged paragraph, change elsewhere": (variant(WITH_FIELD), reword("a"), None),
+    "a picture added to a paragraph": (variant(), WITH_PICTURE, r"drawing"),
+    "a word changed in a paragraph with a picture": (variant(WITH_PICTURE), reword("c"), r"drawing"),
+    "a word changed in a paragraph with a field": (variant(WITH_FIELD), reword("c"), r"cannot carry|unsupported element"),
+    "a picture put where a footnote stood": (
+        variant(set_pieces("c", text(5) + " ", ("fn",), " " + text(6, 7))), WITH_PICTURE, r"other elements"),
+    "a paragraph with a picture deleted": (variant(PICTURE_PARA), del_para("pic"), r"cannot carry"),
+    "a paragraph that is only a picture deleted": (variant(PICTURE_ONLY), del_para("pic"), r"cannot carry"),
+    "a picture taken out of a paragraph": (variant(WITH_PICTURE), set_pieces("c", text(5) + "  " + text(6, 7)), r"cannot carry"),
     "a sentence moved to the next paragraph": (variant(), move_sentence("a", "b"), None),
     "a sentence moved across an empty paragraph": (variant(), move_sentence("b", "c"), None),
     "a paragraph rewritten around one sentence": (variant(), rewrite_keeping("a", 1, (20, 21, 22)), None),
