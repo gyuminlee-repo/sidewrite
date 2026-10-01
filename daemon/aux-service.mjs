@@ -208,8 +208,9 @@ export function createAuxService({
       const job = await modelFor(key, "reading the guideline");
       const r = await extractGuidelineRules(text, { oneshot: job.run, splitSentences });
       const kinds = r.candidates.map((c) => (c.profile ? "format" : c.check.type));
+      // Codes and counts only: no word of the guideline or of the reply.
       log(
-        `[tools] guideline rules candidates=${r.candidates.length} warnings=${r.warnings.length} model=${job.model}`,
+        `[tools] guideline rules candidates=${r.candidates.length} warnings=${r.warnings.length} reason=${r.reason ?? "-"} problem=${r.problem ? JSON.stringify(r.problem) : "-"} asks=${r.asks} model=${job.model}`,
       );
       try {
         await appendDecisions(receipts, [
@@ -217,13 +218,24 @@ export function createAuxService({
             kind: "guideline_rules",
             input: text,
             model: job.model,
-            output: { candidates: r.candidates.length, kinds, warnings: r.warnings.length },
+            output: {
+              candidates: r.candidates.length,
+              kinds,
+              warnings: r.warnings.length,
+              reason: r.reason,
+            },
           }),
         ]);
       } catch (e) {
         log(`[tools] decision log failed: ${e?.message ?? e}`);
       }
-      return { candidates: r.candidates, warnings: r.warnings, model: job.model };
+      return {
+        candidates: r.candidates,
+        warnings: r.warnings,
+        reason: r.reason,
+        problem: r.problem,
+        model: job.model,
+      };
     },
 
     // The candidates the author picked: rules into the ledger, format

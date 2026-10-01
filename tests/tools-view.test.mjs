@@ -7,6 +7,7 @@ import {
   candidateKind,
   candidateCite,
   rulesAdded,
+  extractMessage,
   fileTooLarge,
   markedLines,
   checkRows,
@@ -232,4 +233,38 @@ test("the anonymized copy: the verifier's totals, what is kept, what is left", (
     { text: "Still present: names (2): creator", bad: true },
     { text: 'The text still has the name "A. Writer" (3 times).', bad: true },
   ]);
+});
+
+test("after Extract rules the tab says why there is no candidate", () => {
+  const none = { candidates: [], warnings: [] };
+  assert.deepEqual(extractMessage({ candidates: [1, 2], warnings: [] }), {
+    text: "2 rule candidates. Untick the ones you do not want, then press Add selected.",
+    bad: false,
+  });
+  assert.deepEqual(extractMessage({ ...none, reason: null }), {
+    text: "No rule was found in the guideline text.",
+    bad: false,
+  });
+  assert.deepEqual(
+    extractMessage({
+      ...none,
+      reason: "reply_unreadable",
+      problem: "sentence 4 is labelled twice",
+    }),
+    {
+      text: "The model's reply could not be read (sentence 4 is labelled twice), also when asked again. No rule was taken; run it again or add the rules by hand.",
+      bad: true,
+    },
+  );
+  assert.deepEqual(
+    extractMessage({
+      candidates: [],
+      warnings: ["guideline labelling failed: usage limit; add the rules by hand"],
+      reason: "request_failed",
+    }),
+    {
+      text: "The model could not be asked: guideline labelling failed: usage limit; add the rules by hand",
+      bad: true,
+    },
+  );
 });

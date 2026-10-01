@@ -11,6 +11,7 @@ import {
   candidateKind,
   candidateCite,
   rulesAdded,
+  extractMessage,
   fileTooLarge,
   markedLines,
   checkRows,
@@ -196,11 +197,8 @@ export function initToolsPane({
     if (!r.ok) throw new Error(r.error || "The guideline could not be read.");
     state.rules = { text, candidates: r.candidates, warnings: r.warnings, boxes: [] };
     renderRules();
-    say(
-      r.candidates.length
-        ? `${r.candidates.length} rule candidates. Untick the ones you do not want, then press Add selected.`
-        : "No rule was found in the guideline text.",
-    );
+    const m = extractMessage(r);
+    say(m.text, m.bad);
   }
   async function addRules() {
     const r = state.rules;

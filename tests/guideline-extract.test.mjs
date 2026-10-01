@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import {
   extractGuidelineRules,
   candidatesFromLabels,
+  labelProblem,
   guidelinePrompt,
   numbersIn,
   htmlToText,
@@ -249,10 +250,15 @@ test("a long guideline is asked in batches; one bad batch leaves no rule at all"
   assert.deepEqual(sizes, [100, 60]);
   assert.equal(r.candidates.length, 160);
   assert.equal(r.candidates[159].text, many[159]);
+  // The second batch is unusable, also when it is asked again.
   let call = 0;
-  const second = async (req) => (++call === 2 ? { ok: true, json: { sentences: [] } } : good(req));
+  const second = async (req) => (++call >= 2 ? { ok: true, json: { sentences: [] } } : good(req));
   const bad = await extractGuidelineRules(many.join(" "), { oneshot: second, splitSentences });
   assert.deepEqual([bad.candidates, bad.warnings], [[], [GUIDELINE_WARNING]]);
+  assert.deepEqual(
+    [call, bad.asks, bad.reason, bad.problem],
+    [3, 3, "reply_unreadable", "60 sentences were sent and 0 labels came back"],
+  );
 });
 
 test("the invented guideline: twelve sentences, five counted rules, each one a sentence of the file", async () => {
@@ -331,4 +337,110 @@ test("a guideline URL is fetched once with the injected fetch; html becomes text
     throw new Error("getaddrinfo ENOTFOUND");
   });
   assert.deepEqual([down.ok, /ENOTFOUND/.test(down.error)], [false, true]);
+});
+
+// ---- found with the real model (haiku, 2026-10-01): the labels were right
+// and one section name was written with a capital, which threw the whole
+// reply away.
+
+test("section names in another case are the names of the list", async () => {
+  const labelled = {
+    sentences: [
+      { s: 1, type: "count", rule: { target: "section_words", section: "Abstract", max: 250 } },
+      ...tail,
+    ],
+  };
+  const r = await extractGuidelineRules(text, { oneshot: answering(labelled), splitSentences });
+  assert.equal(r.candidates[0].check.max, 250);
+  assert.equal(r.candidates[0].check.section, "^(?:[\\d.]+\\s+)?(?:abstract|summary)\\b");
+  const order =
+    "The manuscript should be arranged as Introduction, Methods, Results and Discussion.";
+  const ordered = candidatesFromLabels([order], {
+    sentences: [
+      {
+        s: 1,
+        type: "count",
+        rule: {
+          target: "section_order",
+          order: ["Introduction", " Methods", "Results", "Discussion"],
+        },
+      },
+    ],
+  });
+  assert.deepEqual(ordered.candidates[0].check, {
+    type: "count",
+    target: "section_order",
+    order: ["introduction", "methods", "results", "discussion"],
+  });
+  // A name that is not in the list is still refused.
+  assert.equal(
+    labelProblem([order], {
+      sentences: [
+        { s: 1, type: "count", rule: { target: "section_order", order: ["Intro", "Methods"] } },
+      ],
+    }),
+    "the label of sentence 1 is not in the form asked for",
+  );
+});
+
+test("a reply in the wrong form is asked for once more, with what was wrong and no guideline text in it", async () => {
+  const prompts = [];
+  const replies = [
+    { ok: true, json: { sentences: reply.sentences.slice(0, 3) } },
+    { ok: true, json: reply },
+  ];
+  const r = await extractGuidelineRules(text, {
+    oneshot: async (req) => (prompts.push(req.prompt), replies.shift()),
+    splitSentences,
+  });
+  assert.deepEqual([r.candidates.length, r.reason, r.problem, r.asks], [3, null, null, 2]);
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1].startsWith(prompts[0]));
+  assert.equal(
+    prompts[1].slice(prompts[0].length),
+    "\n\nYour last reply could not be used: 4 sentences were sent and 3 labels came back. Reply again in the JSON form above, with one entry for each of the 4 sentence(s).",
+  );
+});
+
+test("a reply that is no JSON is asked for once more; a failed request is not", async () => {
+  let calls = 0;
+  const notJson = await extractGuidelineRules(text, {
+    oneshot: async () =>
+      ++calls === 1 ? { ok: false, error: "reply was not JSON" } : { ok: true, json: reply },
+    splitSentences,
+  });
+  assert.deepEqual([calls, notJson.candidates.length, notJson.reason], [2, 3, null]);
+  calls = 0;
+  const twice = await extractGuidelineRules(text, {
+    oneshot: async () => (calls++, { ok: false, error: "reply was not JSON" }),
+    splitSentences,
+  });
+  assert.deepEqual(
+    [calls, twice.candidates, twice.warnings, twice.reason, twice.problem],
+    [2, [], [GUIDELINE_WARNING], "reply_unreadable", "reply was not JSON"],
+  );
+  calls = 0;
+  const failed = await extractGuidelineRules(text, {
+    oneshot: async () => (calls++, { ok: false, error: "Claude usage limit reached." }),
+    splitSentences,
+  });
+  assert.deepEqual([calls, failed.reason, failed.problem], [1, "request_failed", null]);
+});
+
+test("what is wrong with a reply is said in numbers and keys only", () => {
+  const cases = [
+    [null, '"sentences" is not a list'],
+    [{ sentences: reply.sentences.slice(1) }, "4 sentences were sent and 3 labels came back"],
+    [
+      { sentences: [...head3, { s: 9, type: "other" }] },
+      "entry 4 has no sentence number from 1 to 4",
+    ],
+    [{ sentences: [...head3, { s: 1, type: "other" }] }, "sentence 1 is labelled twice"],
+    [
+      { sentences: [...head3, { s: 4, type: "style", text: "Use italics." }] },
+      "the label of sentence 4 is not in the form asked for",
+    ],
+    [reply, null],
+  ];
+  for (const [json, problem] of cases) assert.equal(labelProblem(sentences, json), problem);
 });

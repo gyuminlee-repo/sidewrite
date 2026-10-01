@@ -36,11 +36,12 @@ async function setup({ reply = { ok: true, json: LABELS } } = {}) {
   await writeFile(doc, "docx");
   const asked = [];
   const events = [];
+  const lines = [];
   const service = createAuxService({
     getContext: () => ({ activeDoc: doc }),
     oneshotFor: async () => ({ model: "haiku", run: async (req) => (asked.push(req), reply) }),
     sendEvent: (key, event) => events.push(event),
-    log: () => {},
+    log: (line) => lines.push(line),
     env: ENV,
   });
   async function call(type, msg = {}) {
@@ -52,7 +53,16 @@ async function setup({ reply = { ok: true, json: LABELS } } = {}) {
     return mine().result;
   }
   const revision = () => loadRevision(revisionPathFor(doc), doc);
-  return { dir, doc, asked, events, call, revision, done: () => rm(dir, { recursive: true }) };
+  return {
+    dir,
+    doc,
+    asked,
+    events,
+    lines,
+    call,
+    revision,
+    done: () => rm(dir, { recursive: true }),
+  };
 }
 
 test("extract is a job; every candidate cites a sentence of the guideline and nothing is stored", async () => {
@@ -83,6 +93,7 @@ test("extract is a job; every candidate cites a sentence of the guideline and no
       candidates: 3,
       kinds: ["count", "count", "format"],
       warnings: 0,
+      reason: null,
     });
     assert.ok(!receipt.includes("abstract must not"));
   } finally {
@@ -169,6 +180,26 @@ test("no text, a model failure: an error or a warning, never a rule without a se
     assert.equal(r.ok, true);
     assert.deepEqual(r.candidates, []);
     assert.match(r.warnings[0], /guideline labelling failed: usage limit/);
+    assert.equal(r.reason, "request_failed");
+  } finally {
+    await t.done();
+  }
+  // A reply the code cannot read, twice: the reason and what was wrong come
+  // back, and the log line holds them without a word of the guideline.
+  t = await setup({ reply: { ok: true, json: { sentences: LABELS.sentences.slice(1) } } });
+  try {
+    const r = await t.call("profile_rules_extract", { text: GUIDELINE });
+    assert.deepEqual(
+      [r.ok, r.candidates, r.reason, r.problem],
+      [true, [], "reply_unreadable", "4 sentences were sent and 3 labels came back"],
+    );
+    assert.equal(t.asked.length, 2);
+    assert.deepEqual(
+      t.lines.filter((l) => l.startsWith("[tools] guideline rules")),
+      [
+        '[tools] guideline rules candidates=0 warnings=1 reason=reply_unreadable problem="4 sentences were sent and 3 labels came back" asks=2 model=haiku',
+      ],
+    );
   } finally {
     await t.done();
   }

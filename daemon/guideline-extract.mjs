@@ -67,10 +67,10 @@ const BOUNDED = COUNT_TARGETS.filter((t) => t !== "section_order");
 export function guidelinePrompt(sentences) {
   return [
     "Each line below is one sentence of a journal's author guidelines, numbered [s1], [s2], ...",
-    'Return {"sentences":[{"s":<number>,"type":"count"|"style"|"other","rule":{...}}]} with one entry for every sentence.',
+    'Return {"sentences":[{"s":<number>,"type":"count"|"format"|"style"|"other","rule":{...}}]} with one entry for every sentence.',
     '"count": the sentence sets a countable limit on the manuscript. Give "rule" with',
     `  "target": one of ${BOUNDED.map((t) => `"${t}"`).join(", ")} (with "min" and/or "max", whole numbers that stand in the sentence as digits), or "section_order" (with "order", a list of section names);`,
-    `  "section" (only for "section_words", and required there): one of ${SECTIONS.map((t) => `"${t}"`).join(", ")}.`,
+    `  "section" (only for "section_words", and required there): one of ${SECTIONS.map((t) => `"${t}"`).join(", ")}. Section names are written exactly like these, in "order" too.`,
     `"format": the sentence sets one of these format rules. Give "rule" with "setting": one of ${Object.entries(
       FORMAT_SETTINGS,
     )
@@ -87,6 +87,9 @@ export function guidelinePrompt(sentences) {
 const isPlain = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const onlyKeys = (x, keys) => Object.keys(x).every((k) => keys.includes(k));
 const isCount = (n) => Number.isInteger(n) && n >= 0;
+// A section name as the model wrote it ("Introduction") -> the name of the
+// list ("introduction"); anything else stays what it is and is refused.
+const sectionName = (x) => (typeof x === "string" ? x.trim().toLowerCase() : x);
 
 // The label of one sentence as [type, rule | null], or null when it is not
 // one of the allowed shapes.
@@ -105,14 +108,16 @@ function sentenceLabel(x) {
   if (r.target === "section_order") {
     if (!onlyKeys(r, ["target", "order"])) return null;
     if (!Array.isArray(r.order) || r.order.length < 2) return null;
-    if (!r.order.every((name) => SECTIONS.includes(name))) return null;
-    return ["count", { target: r.target, order: [...r.order] }];
+    const order = r.order.map(sectionName);
+    if (!order.every((name) => SECTIONS.includes(name))) return null;
+    return ["count", { target: r.target, order }];
   }
   const words = r.target === "section_words";
   if (!onlyKeys(r, words ? ["target", "section", "min", "max"] : ["target", "min", "max"])) {
     return null;
   }
-  if (words && !SECTIONS.includes(r.section)) return null;
+  const section = sectionName(r.section);
+  if (words && !SECTIONS.includes(section)) return null;
   if (r.min === undefined && r.max === undefined) return null;
   for (const n of [r.min, r.max]) if (n !== undefined && !isCount(n)) return null;
   if (r.min !== undefined && r.max !== undefined && r.min > r.max) return null;
@@ -120,7 +125,7 @@ function sentenceLabel(x) {
     "count",
     {
       target: r.target,
-      ...(words && { section: r.section }),
+      ...(words && { section }),
       ...(r.min !== undefined && { min: r.min }),
       ...(r.max !== undefined && { max: r.max }),
     },
@@ -494,19 +499,33 @@ function unsupported(rule, sentence) {
 
 const none = () => ({ candidates: [], warnings: [GUIDELINE_WARNING] });
 
+// The labels of a reply, one per sentence, or what is wrong with the reply.
+// The problem names numbers and keys only, never a word of the guidelines or
+// of the reply, so it can go into a log and back to the model.
+function readLabels(count, json) {
+  const list = isPlain(json) ? json.sentences : null;
+  if (!Array.isArray(list)) return { problem: '"sentences" is not a list' };
+  if (list.length !== count)
+    return { problem: `${count} sentences were sent and ${list.length} labels came back` };
+  const labels = new Array(count);
+  for (const [i, x] of list.entries()) {
+    const s = x?.s;
+    if (!Number.isInteger(s) || s < 1 || s > count)
+      return { problem: `entry ${i + 1} has no sentence number from 1 to ${count}` };
+    if (labels[s - 1]) return { problem: `sentence ${s} is labelled twice` };
+    const label = sentenceLabel(x);
+    if (!label) return { problem: `the label of sentence ${s} is not in the form asked for` };
+    labels[s - 1] = label;
+  }
+  return { labels };
+}
+export const labelProblem = (sentences, json) => readLabels(sentences.length, json).problem ?? null;
+
 // sentences: the guideline sentences that were numbered in the prompt.
 // json: the model's reply. `offset` only shifts the numbers named in warnings.
 export function candidatesFromLabels(sentences, json, { offset = 0 } = {}) {
-  const list = isPlain(json) ? json.sentences : null;
-  if (!Array.isArray(list) || list.length !== sentences.length) return none();
-  const labels = new Array(sentences.length);
-  for (const x of list) {
-    const s = x?.s;
-    if (!Number.isInteger(s) || s < 1 || s > labels.length || labels[s - 1]) return none();
-    const label = sentenceLabel(x);
-    if (!label) return none();
-    labels[s - 1] = label;
-  }
+  const { labels } = readLabels(sentences.length, json);
+  if (!labels) return none();
   const candidates = [];
   const warnings = [];
   labels.forEach(([type, rule], i) => {
@@ -553,6 +572,13 @@ export function candidatesFromLabels(sentences, json, { offset = 0 } = {}) {
   return { candidates, warnings };
 }
 
+// What a one-shot runner answers when the model wrote something that is no
+// JSON (oneshot.mjs and every provider under providers/).
+const NOT_JSON = "reply was not JSON";
+
+// Returns { candidates, warnings, reason, problem, asks }. reason: null, or
+// why there is no candidate at all: "reply_unreadable" (problem says what was
+// wrong with the last reply) or "request_failed". asks: model requests made.
 export async function extractGuidelineRules(
   text,
   { oneshot, splitSentences, batchSize = 100 } = {},
@@ -563,21 +589,45 @@ export async function extractGuidelineRules(
   const sentences = splitSentences(text);
   const candidates = [];
   const warnings = [];
+  let asks = 0;
   for (let at = 0; at < sentences.length; at += batchSize) {
     const batch = sentences.slice(at, at + batchSize);
-    const r = await oneshot({ system: GUIDELINE_SYSTEM, prompt: guidelinePrompt(batch) });
-    if (!r?.ok) {
-      return {
-        candidates: [],
-        warnings: [`guideline labelling failed: ${r?.error}; add the rules by hand`],
-      };
+    const prompt = guidelinePrompt(batch);
+    // A reply in the wrong form (also one that is no JSON) is asked for once
+    // more, with what was wrong (as ledger-check.mjs askBatch does); a model
+    // call that failed (limit, refusal, timeout) is not.
+    let json;
+    let problem = null;
+    for (const again of [false, true]) {
+      asks += 1;
+      const r = await oneshot({
+        system: GUIDELINE_SYSTEM,
+        prompt: again
+          ? `${prompt}\n\nYour last reply could not be used: ${problem}. Reply again in the JSON form above, with one entry for each of the ${batch.length} sentence(s).`
+          : prompt,
+      });
+      if (r?.ok) problem = labelProblem(batch, r.json);
+      else if (r?.error === NOT_JSON) problem = NOT_JSON;
+      else {
+        return {
+          candidates: [],
+          warnings: [`guideline labelling failed: ${r?.error}; add the rules by hand`],
+          reason: "request_failed",
+          problem: null,
+          asks,
+        };
+      }
+      if (!problem) {
+        json = r.json;
+        break;
+      }
     }
-    const part = candidatesFromLabels(batch, r.json, { offset: at });
-    if (part.warnings[0] === GUIDELINE_WARNING) return none();
+    if (problem) return { ...none(), reason: "reply_unreadable", problem, asks };
+    const part = candidatesFromLabels(batch, json, { offset: at });
     candidates.push(...part.candidates);
     warnings.push(...part.warnings);
   }
-  return { candidates, warnings };
+  return { candidates, warnings, reason: null, problem: null, asks };
 }
 
 const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };

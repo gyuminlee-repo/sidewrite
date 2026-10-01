@@ -30,6 +30,25 @@ export function candidateKind(c) {
 }
 export const candidateCite = (c) => `Guideline: "${c.source.sentence}"`;
 
+// The message after "Extract rules": { text, bad }. No candidate has three
+// different reasons, and the tab says which one it is.
+export function extractMessage(r) {
+  const n = r.candidates.length;
+  if (n)
+    return {
+      text: `${n} rule candidates. Untick the ones you do not want, then press Add selected.`,
+      bad: false,
+    };
+  if (r.reason === "reply_unreadable")
+    return {
+      text: `The model's reply could not be read (${r.problem}), also when asked again. No rule was taken; run it again or add the rules by hand.`,
+      bad: true,
+    };
+  if (r.reason === "request_failed")
+    return { text: `The model could not be asked: ${r.warnings[0]}`, bad: true };
+  return { text: "No rule was found in the guideline text.", bad: false };
+}
+
 // What came of adding the picked rules.
 export function rulesAdded(r) {
   const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
