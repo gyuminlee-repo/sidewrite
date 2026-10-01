@@ -1189,6 +1189,8 @@ async function proposeAllSetup() {
   const proposals = [];
   // fail[type] = "message": the next request of that type is refused, once.
   const fail = {};
+  // doc.comments: the comments Word reports in the next snapshot.
+  const doc = { comments: [] };
   const sendRequest = async (type, payload) => {
     if (fail[type]) {
       const error = fail[type];
@@ -1205,7 +1207,7 @@ async function proposeAllSetup() {
   pane = initReviewPane({
     sendRequest,
     word: {
-      collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }),
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: doc.comments }),
       selectionParagraphs: async () => [{ index: 1, text: "selected" }],
     },
     onTurnStarted() {
@@ -1228,7 +1230,7 @@ async function proposeAllSetup() {
       ...(error ? { error } : {}),
     });
   };
-  return { pane, turn, proposals, fail, $, wait, endTurn };
+  return { pane, turn, proposals, fail, doc, $, wait, endTurn };
 }
 
 test("Propose all sends the next review_propose only after turn_done; an error stops the queue", async () => {
@@ -1463,6 +1465,59 @@ test("one Propose changes: a failed status check after the turn says what to do"
     assert.equal(t.$("review-message").textContent, unchecked("R1.1", "Word is busy"));
   } finally {
     delete t.fail.review_refresh;
+    await t.pane.reload();
+  }
+});
+
+// The status check worked and found that the changes on record and the tool
+// comments in Word do not match (an edit that was not recorded, or a
+// rationale comment that is gone). The next turn would start on that state:
+// the queue stops, as for a check that failed.
+const mismatched = (ref, missing, unrecorded) =>
+  `The turn for ${ref} ran and its record is saved, but the changes on record and the tool comments in Word do not match (missing ${missing}, unrecorded ${unrecorded}); check those in Word, then press Refresh status.`;
+
+test("Propose all: a mismatch found by the status check after a turn starts no other turn", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    // A tool comment in Word that no recorded change has.
+    t.doc.comments = [comment("70", "[R1.1] a / b / c")];
+    t.endTurn("R1.1");
+    // Not `await all`: a queue that went on would wait for the turn of R1.3.
+    await t.wait();
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1"],
+      "R1.3 is not started",
+    );
+    assert.equal(
+      t.$("review-message").textContent,
+      `Propose all stopped at R1.1: ${mismatched("R1.1", "-", "70")} R1.1 is not counted: 0 of 3 proposed.`,
+    );
+    assert.equal(t.turn.inFlight, false);
+    await all;
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+test("one Propose changes: a mismatch after the turn says what to do; Refresh status keeps its counts", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    t.doc.comments = [comment("70", "[R1.1] a / b / c")];
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.equal(t.$("review-message").textContent, mismatched("R1.1", "-", "70"));
+    await t.$("review-refresh").click();
+    assert.match(
+      t.$("review-message").textContent,
+      /^Accepted 0, .* found 1 \(MISMATCH: missing -, unrecorded 70\)$/,
+    );
+  } finally {
     await t.pane.reload();
   }
 });
