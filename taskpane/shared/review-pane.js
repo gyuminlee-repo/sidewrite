@@ -646,7 +646,8 @@ export function initReviewPane({
   // A turn of the queue ends at its turn_done (after the reload and refresh
   // that event starts), at a new connection (reload), or after TURN_WAIT_MS
   // without either. turn_done says how the turn ended ({ ok, error }): a
-  // usage limit, a refusal, a stop or a crash ends the run. The error event
+  // usage limit, a refusal, a stop or a crash ends the run, and so does a
+  // reload or refresh that fails after a turn that ran. The error event
   // of the chat is not used: the daemon may send it after turn_done.
   function waitTurn(ref) {
     return new Promise((resolve) => {
@@ -703,7 +704,8 @@ export function initReviewPane({
     state.queueNote = null;
     const ok = r.done.filter((d) => d.ok).length;
     const tail = `${ok} of ${refs.length} proposed.`;
-    if (r.failed) say(`Propose all stopped at ${r.failed}: ${r.error} ${tail}`, true);
+    const notCounted = r.done.at(-1)?.unchecked ? `${r.failed} is not counted: ` : "";
+    if (r.failed) say(`Propose all stopped at ${r.failed}: ${r.error} ${notCounted}${tail}`, true);
     else if (r.stopped) say(`Propose all stopped before ${r.next}. ${tail}`);
     else say(`Propose all: ${tail}`);
     render();
@@ -1047,18 +1049,31 @@ export function initReviewPane({
         state.turnsDone += 1;
         state.reviewTurnOpen = false;
         stopProgress();
+        // Propose all: the next comment may start only when this turn ran
+        // AND the reload and refresh after it worked. A turn that ran but
+        // could not be checked is not counted (unchecked) and ends the run;
+        // what it recorded is saved by the daemon.
+        const failed =
+          msg.ok === false
+            ? { ok: false, error: msg.error || "The turn ended with an error." }
+            : null;
         load()
           .then(refresh)
-          .catch((e) => say(e.message, true))
-          .finally(() => {
+          .then(
+            () => failed ?? { ok: true },
+            (e) => {
+              if (failed) {
+                say(e.message, true);
+                return failed;
+              }
+              const error = `The turn for ${msg.ref} ran and its record is saved, but the status check after it failed (${e.message}); press Refresh status to check again.`;
+              say(error, true);
+              return { ok: false, unchecked: true, error };
+            },
+          )
+          .then((result) => {
             render();
-            // Propose all: the next comment may start, unless this turn failed.
-            endWait(
-              msg.ref,
-              msg.ok === false
-                ? { ok: false, error: msg.error || "The turn ended with an error." }
-                : { ok: true },
-            );
+            endWait(msg.ref, result);
           });
       } else if (msg.event === "late_result_recorded") {
         // A tracked edit that timed out was applied after all and is now recorded.
