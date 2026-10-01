@@ -31,6 +31,17 @@ test("ranOther: only a difference that can be told is one", () => {
   assert.equal(ranOther("opus", "claude-opus-5-5", null), false);
   assert.equal(ranOther("opus", "claude-sonnet-5-5", null), true);
   assert.equal(ranOther("qwen3.5:9b", "qwen3.5:9b-q4", null), false);
+  // A date at the end of an id is the same model (the list may name it with
+  // or without); a longer version is another one.
+  assert.equal(ranOther("haiku", "claude-haiku-4-5-20251001", MODELS), false);
+  assert.equal(ranOther("claude-haiku-4-5-20251001", "claude-haiku-4-5", null), false);
+  assert.equal(ranOther("claude-opus-5", "claude-opus-5-5", null), true);
+  assert.equal(
+    ranOther("claude-opus-5", "claude-opus-5-5", [
+      { value: "claude-opus-5", displayName: "Opus 5", resolvedModel: "claude-opus-5" },
+    ]),
+    true,
+  );
   // The provider did not say, or nothing was asked for by name.
   assert.equal(ranOther("opus", null, MODELS), false);
   assert.equal(ranOther(null, "gpt-6", MODELS), false);
