@@ -205,3 +205,32 @@ test("the turn after a refusal fallback goes back to the chosen model, and its m
     /onUserMessage: \(key, host\) => \{\s*const idle = !turnBusy\.has\(key\);\s*turnBusy\.add\(key\);\s*return ensureLoopForMessage\(key, host, \{ idle \}\);/,
   );
 });
+
+// What a session was given of the manuscript is remembered per pane, and
+// forgotten when the session is one that did not get it: a start this turn
+// did not cause, or a compaction of its history.
+test("the manuscript a session has: kept for the session a turn starts, forgotten on any other start and on compaction", () => {
+  assert.match(code, /const manuscriptByKey = new Map\(\);/);
+  // A turn that starts or restarts the session takes nothing as seen.
+  assert.match(
+    code,
+    /const startsSession = \(key\) => \{\s*const s = sessionFor\(key\);\s*return !s \|\| s\.settled \|\| !!s\.fellBackTo;\s*\};/,
+  );
+  assert.match(
+    code,
+    /manuscriptSeen: \(key\) => \(startsSession\(key\) \? null : \(manuscriptByKey\.get\(key\)\?\.hashes \?\? null\)\),/,
+  );
+  assert.match(
+    code,
+    /manuscriptGiven: \(key, hashes\) =>\s*manuscriptByKey\.set\(key, \{ hashes, fresh: startsSession\(key\) \}\),/,
+  );
+  const start = code.slice(code.indexOf("async function startSessionForFolder"));
+  assert.match(
+    start.slice(0, 600),
+    /const given = manuscriptByKey\.get\(key\);\s*if \(given\?\.fresh\) given\.fresh = false;\s*else manuscriptByKey\.delete\(key\);/,
+  );
+  assert.match(
+    code,
+    /msg\.subtype === "compact_boundary"[\s\S]{0,200}manuscriptByKey\.delete\(session\.key\)/,
+  );
+});
