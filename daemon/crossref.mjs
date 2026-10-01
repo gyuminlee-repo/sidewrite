@@ -18,6 +18,7 @@
 // settings and passes referenceEntries(snapshot.paragraphs, profile).
 
 import { referenceSection, paraText } from "./ref-section.mjs";
+import { FETCH_TIMEOUT_MS, deadline } from "./fetch-timeout.mjs";
 
 export const CROSSREF_URL = "https://api.crossref.org";
 export const CROSSREF_NOTICE =
@@ -109,6 +110,7 @@ export async function checkReferences({
   now = Date.now,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   base = CROSSREF_URL,
+  timeoutMs = FETCH_TIMEOUT_MS,
   log = () => {},
 } = {}) {
   if (enabled !== true) return { ok: false, error: CROSSREF_OFF };
@@ -125,7 +127,7 @@ export async function checkReferences({
       last = now();
       let res;
       try {
-        res = await fetchFn(url);
+        res = await fetchFn(url, { signal: deadline(timeoutMs) });
       } catch (e) {
         log(`[crossref] ${kind} status=failed`);
         return {

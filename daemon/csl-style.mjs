@@ -17,6 +17,7 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { FETCH_TIMEOUT_MS, deadline } from "./fetch-timeout.mjs";
 
 export const CSL_RAW = "https://raw.githubusercontent.com/citation-style-language/styles/master";
 
@@ -96,6 +97,7 @@ export async function fetchStyle({
   enabled = false,
   fetchFn,
   cacheDir,
+  timeoutMs = FETCH_TIMEOUT_MS,
   log = () => {},
 } = {}) {
   const fail = (error) => ({ ok: false, error, notice: CSL_NOTICE });
@@ -117,7 +119,9 @@ export async function fetchStyle({
     for (const folder of folders) {
       let res;
       try {
-        res = await fetchFn(styleUrl({ name, dependent: folder === "dependent" }));
+        res = await fetchFn(styleUrl({ name, dependent: folder === "dependent" }), {
+          signal: deadline(timeoutMs),
+        });
       } catch (e) {
         log(`[csl] style=${name} status=failed`);
         return { error: `The styles repository could not be reached: ${String(e?.message ?? e)}` };
@@ -125,7 +129,14 @@ export async function fetchStyle({
       log(`[csl] style=${name} status=${res.status}`);
       if (res.status === 404) continue;
       if (!res.ok) return { error: `The styles repository answered ${res.status}` };
-      const bytes = Buffer.from(await res.arrayBuffer());
+      // The connection can still break, or the time run out, while the body is read.
+      let bytes;
+      try {
+        bytes = Buffer.from(await res.arrayBuffer());
+      } catch (e) {
+        log(`[csl] style=${name} status=failed`);
+        return { error: `The style could not be read to its end: ${String(e?.message ?? e)}` };
+      }
       const info = parseStyleInfo(bytes.toString("utf8"));
       if (!info) return { error: `${name} is not a CSL style` };
       return { bytes, info, path, cached: false };

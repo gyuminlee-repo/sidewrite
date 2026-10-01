@@ -13,6 +13,8 @@
 // the paragraphs to check, shows the matches with LT_LINK above them and
 // turns a picked match into a tracked edit with matchToEdit().
 
+import { FETCH_TIMEOUT_MS, deadline } from "./fetch-timeout.mjs";
+
 export const LT_LINK = "https://languagetool.org";
 export const LT_URL = "https://api.languagetool.org";
 export const LT_LIMITS = { requestsPerMinute: 20, bytesPerMinute: 75_000, bytesPerRequest: 20_000 };
@@ -95,6 +97,7 @@ export async function ltCheck({
   limiter,
   url = LT_URL,
   language = "auto",
+  timeoutMs = FETCH_TIMEOUT_MS,
   log = () => {},
 } = {}) {
   if (enabled !== true) return { ok: false, error: LT_OFF };
@@ -117,6 +120,7 @@ export async function ltCheck({
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ text: chunk.text, language }).toString(),
+        signal: deadline(timeoutMs),
       });
       data = res.ok ? await res.json() : null;
     } catch (e) {

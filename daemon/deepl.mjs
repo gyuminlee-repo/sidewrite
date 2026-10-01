@@ -15,6 +15,8 @@
 // from the key store, and asks translationRoute() before it translates. A
 // DeepL failure is shown to the user and is not retried on another route.
 
+import { FETCH_TIMEOUT_MS, deadline } from "./fetch-timeout.mjs";
+
 export const DEEPL_NOTICE =
   "This feature sends the selected text from this PC to DeepL (deepl.com). Check DeepL's free-plan terms yourself before you turn it on.";
 
@@ -45,6 +47,7 @@ export async function deeplTranslate({
   enabled = false,
   fetchFn,
   base,
+  timeoutMs = FETCH_TIMEOUT_MS,
   log = () => {},
 } = {}) {
   const fail = (error) => ({ ok: false, error, route: "deepl" });
@@ -64,6 +67,7 @@ export async function deeplTranslate({
       method: "POST",
       headers: { Authorization: `DeepL-Auth-Key ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({ text: [body], target_lang }),
+      signal: deadline(timeoutMs),
     });
     data = await res.json().catch(() => null);
   } catch (e) {

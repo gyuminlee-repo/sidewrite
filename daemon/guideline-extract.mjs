@@ -13,13 +13,14 @@
 //
 // Pure apart from the injected functions: oneshot({ system, prompt }) ->
 // { ok, json?, error? } (daemon/oneshot.mjs), splitSentences(text) ->
-// string[], fetchFn(url) -> Response.
+// string[], fetchFn(url, { signal }) -> Response.
 //
 // Not wired yet. The caller passes splitSentences from review-split.mjs and
 // the one-shot function of the chosen provider, and shows candidates to the
 // author before any of them enters the ledger.
 
 import { COUNT_TARGETS } from "./count-check.mjs";
+import { FETCH_TIMEOUT_MS, deadline } from "./fetch-timeout.mjs";
 
 export const GUIDELINE_SYSTEM =
   "You sort the sentences of a journal's author guidelines. Label every sentence exactly once. Do not return any text of the guidelines. Reply with JSON only.";
@@ -601,7 +602,10 @@ export function htmlToText(html) {
 }
 
 // Only called when the author typed a URL. One request, http(s) only.
-export async function fetchGuidelineText(url, { fetchFn, maxBytes = 2_000_000 } = {}) {
+export async function fetchGuidelineText(
+  url,
+  { fetchFn, maxBytes = 2_000_000, timeoutMs = FETCH_TIMEOUT_MS } = {},
+) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -612,7 +616,7 @@ export async function fetchGuidelineText(url, { fetchFn, maxBytes = 2_000_000 } 
     return { ok: false, error: "only http and https addresses are read" };
   }
   try {
-    const res = await fetchFn(url);
+    const res = await fetchFn(url, { signal: deadline(timeoutMs) });
     if (!res.ok) return { ok: false, error: `the page answered ${res.status}` };
     const body = await res.text();
     if (Buffer.byteLength(body) > maxBytes) {
