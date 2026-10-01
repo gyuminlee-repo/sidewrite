@@ -107,3 +107,23 @@ test("cache: one fetch for concurrent callers, refetch after ttl or refresh", as
   assert.equal(n, 3);
   assert.equal(cache.current().models[0].value, "m3");
 });
+
+// A slow CLI start (seen here: 18 s under load) times the probe out once; the
+// alias list must not then stay for the whole ttl.
+test("cache: a fallback result is kept only for the short fallback ttl", async () => {
+  let n = 0;
+  let t = 0;
+  const cache = createModelCache({
+    fetch: async () =>
+      ++n === 1 ? { source: "fallback", models: FALLBACK_MODELS, error: "x" } : { source: "sdk" },
+    ttlMs: 1000,
+    fallbackTtlMs: 100,
+    now: () => t,
+  });
+  assert.equal((await cache.get()).source, "fallback");
+  t = 50;
+  assert.equal((await cache.get()).source, "fallback");
+  t = 150;
+  assert.equal((await cache.get()).source, "sdk");
+  assert.equal(n, 2);
+});

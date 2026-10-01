@@ -26,6 +26,7 @@ import {
 } from "./limit-detect.mjs";
 import { createReviewService } from "./review-service.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
+import { createModelCache, resolveModelChoice } from "./model-list.mjs";
 import {
   buildQueryOptions,
   formatUsageLine,
@@ -295,14 +296,17 @@ const reviewTurnByKey = new Map();
 // model is fixed per agent loop, so a change while a loop is live triggers
 // a resuming restart (see the set_model handler).
 const modelByKey = new Map();
-const ALLOWED_MODELS = new Set(["haiku", "sonnet", "opus"]);
+// The models the signed-in account can use (model-list.mjs), fetched once at
+// start and kept for ten minutes. Until it is known, and when the fetch
+// fails, the three aliases and well-formed claude-* ids are accepted.
+const modelCache = createModelCache();
 
-// The model alias to pass to query(). Draftspect always pins an explicit
-// model (cost-control UI) — never silently inherits the CLI default, which
+// The model to pass to query(). Draftspect always pins an explicit
+// model (cost-control UI), never silently inherits the CLI default, which
 // can be Opus. Falls back to "sonnet" if the taskpane hasn't said yet.
 function modelArgFor(key) {
   const m = modelByKey.get(key);
-  return ALLOWED_MODELS.has(m) ? m : "sonnet";
+  return m ? resolveModelChoice(m, modelCache.current()) : "sonnet";
 }
 
 function sessionFor(key) {
@@ -683,10 +687,20 @@ const bridge = createBridge({
         });
       }
     },
+    models_list: async (msg, reply) => {
+      const r = await modelCache.get({ refresh: !!msg.refresh });
+      console.log(
+        `[models] source=${r.source} count=${r.models.length}${r.error ? ` error=${r.error}` : ""}`,
+      );
+      reply({ type: "models_list_result", ok: true, request_id: msg.request_id, ...r });
+    },
     set_model: async (msg, reply, key, host) => {
       const requested = String(msg.model || "").trim();
-      const model = ALLOWED_MODELS.has(requested) ? requested : "sonnet";
       const prev = modelByKey.get(key);
+      // Recorded before the list is awaited, so a first message sent
+      // meanwhile does not start on "sonnet"; modelArgFor checks it again.
+      if (prev === undefined) modelByKey.set(key, requested);
+      const model = resolveModelChoice(requested, await modelCache.get());
       modelByKey.set(key, model);
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
       // Only relaunch if the model actually changed for an already-known
@@ -1383,6 +1397,8 @@ function handleAgentMessage(msg, session) {
 // idempotent with, the daemon_ready that startSessionForFolder also
 // emits on the first real session.
 // ---------------------------------------------------------------------------
+// Fetched ahead of the first pane; fetchClaudeModels never rejects.
+modelCache.get();
 console.log(`[daemon] Ready; waiting for a taskpane. Default workspace: ${matterFolder}`);
 if (process.send) {
   try {

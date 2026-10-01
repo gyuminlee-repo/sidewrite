@@ -105,6 +105,9 @@ export function resolveModelChoice(requested, state) {
 export function createModelCache({
   fetch = fetchClaudeModels,
   ttlMs = 10 * 60_000,
+  // A failed fetch (a slow CLI start can time the probe out) is tried again
+  // soon instead of leaving the aliases for the whole ttl.
+  fallbackTtlMs = 60_000,
   now = Date.now,
 } = {}) {
   let value = null;
@@ -113,7 +116,8 @@ export function createModelCache({
   return {
     current: () => value ?? { source: "fallback", models: FALLBACK_MODELS },
     async get({ refresh = false } = {}) {
-      if (!refresh && value && now() - at < ttlMs) return value;
+      const ttl = value?.source === "sdk" ? ttlMs : fallbackTtlMs;
+      if (!refresh && value && now() - at < ttl) return value;
       inflight ??= fetch().then((v) => {
         value = v;
         at = now();
