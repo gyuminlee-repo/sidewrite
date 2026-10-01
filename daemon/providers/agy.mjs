@@ -21,8 +21,9 @@
 //   other than SUCCESS is taken as a failure.
 //
 // No run carries --dangerously-skip-permissions or --mode accept-edits. agy
-// denies the office tools without one of them, so it is a provider for
-// judgments only and the task pane says why (probe.mjs TURN_BLOCKED).
+// denies the office tools without one of them, so it never was a provider
+// for review turns; since the measurements below it is not offered for
+// judgments either, and the task pane says why (probe.mjs AGY_NOT_OFFERED).
 //
 // agy has no setting for a run that leaves no trace: every judgment is kept
 // as a conversation in the user's Antigravity history.
@@ -50,7 +51,7 @@
 // anyway; that watch is an alarm after the fact, not a wall.
 
 import { parseJsonReply } from "../oneshot.mjs";
-import { runCli as defaultRunCli, emptyWorkDir, resolveCliBin } from "./cli-exec.mjs";
+import { runCli as defaultRunCli, childEnv, resolveCliBin, withRunDir } from "./cli-exec.mjs";
 
 const LIMIT_RE = /(usage limit|rate limit|quota|too many requests|out of credits|\b429\b)/i;
 // One argument of a process is at most 128 KiB on Linux; the prompt is one.
@@ -70,8 +71,10 @@ function printArgs({ prompt, model, timeoutS, format }) {
   ];
 }
 
+// stream-json for a judgment too: one object at the end would hide the
+// steps of the run.
 export const agyOneshotArgs = ({ prompt, model, timeoutS }) =>
-  printArgs({ prompt, model, timeoutS, format: "json" });
+  printArgs({ prompt, model, timeoutS, format: "stream-json" });
 
 export const agyTurnArgs = ({ prompt, model, timeoutS }) =>
   printArgs({ prompt, model, timeoutS, format: "stream-json" });
@@ -170,15 +173,68 @@ export function parseAgyLine(line) {
   return [];
 }
 
+// What a stdout line of a judgment shows that it must not: { tool: name }
+// for a step that is not the user's input or the answer (also a step type
+// this code does not know) and for a denied action; { error } for a
+// permission mode other than request-review. null otherwise. Names only: no
+// argument and no text of the run.
+const ALLOWED_STEPS = new Set(["user_input", "agent_response"]);
+const plainName = (v, fallback) =>
+  /^[\w .:-]{1,80}$/.test(String(v ?? "")) ? String(v) : fallback;
+export function agyViolationOf(line) {
+  let o;
+  try {
+    o = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!o || typeof o !== "object") return null;
+  if (o.event === "init") {
+    const mode = o.init?.permission_mode;
+    return mode === "request-review"
+      ? null
+      : {
+          error: `agy started in permission mode "${plainName(mode, "unknown")}", not "request-review". The run was ended and its reply discarded.`,
+        };
+  }
+  if (o.event === "step_update") {
+    const s = o.step_update ?? {};
+    if (ALLOWED_STEPS.has(s.step_type)) return null;
+    if (s.step_type !== "tool") return { tool: plainName(s.step_type, "unknown step") };
+    const p = s.tool_info?.parameters ?? {};
+    return {
+      tool:
+        s.tool_name === "call_mcp_tool"
+          ? plainName(`mcp__${p.ServerName}__${p.ToolName}`, "mcp tool")
+          : plainName(`agy_${s.tool_name ?? s.tool_info?.name ?? "tool"}`, "agy tool"),
+    };
+  }
+  if (o.event === "result") {
+    const denied = Array.isArray(o.result?.denied_actions) ? o.result.denied_actions : [];
+    return denied.length
+      ? { tool: plainName(denied[0]?.display_name ?? denied[0]?.action, "denied action") }
+      : null;
+  }
+  return null;
+}
+
 // The contract of oneshot.mjs runOneshot: { ok, text, json?, error?,
 // limited? }; never throws. System and prompt go as one argument (agy has no
 // separate system prompt and print mode takes the prompt as an argument).
+//
+// The run has a directory of its own and an environment without keys, and
+// it is read as a stream: the first line agyViolationOf objects to ends it
+// and the reply is discarded ({ ok: false, tool_event } for a tool). A run
+// that never said its permission mode is not taken either. signal ends it
+// from outside ({ ok: false, aborted: true }).
 export async function agyOneshot(
-  { system, prompt, model, expectJson = true, timeoutMs = 120_000 },
+  { system, prompt, model, expectJson = true, timeoutMs = 120_000, signal = null },
   {
     runCli = defaultRunCli,
     bin = resolveCliBin("agy", { envVar: "CC_OFFICE_AGY_BIN" }),
-    emptyDir = emptyWorkDir,
+    runDir = withRunDir,
+    env = process.env,
+    log = console.log,
   } = {},
 ) {
   const full = `${system}\n\n${prompt}`;
@@ -191,15 +247,44 @@ export async function agyOneshot(
   }
   const timeoutS = Math.ceil(timeoutMs / 1000);
   let r;
+  let bad = null;
   try {
-    r = await runCli(bin, agyOneshotArgs({ prompt: full, model, timeoutS }), {
-      cwd: await emptyDir(),
-      // agy stops itself at --print-timeout; the kill is a backstop.
-      timeoutMs: timeoutMs + 10_000,
-    });
+    r = await runDir((cwd) =>
+      runCli(bin, agyOneshotArgs({ prompt: full, model, timeoutS }), {
+        cwd,
+        env: childEnv(env),
+        signal,
+        // agy stops itself at --print-timeout; the kill is a backstop.
+        timeoutMs: timeoutMs + 10_000,
+        onLine(line, kill) {
+          bad ??= agyViolationOf(line);
+          if (bad) kill();
+        },
+      }),
+    );
   } catch (e) {
     return { ok: false, error: `agy could not be run: ${String(e?.message ?? e)}` };
   }
+  let sawInit = false;
+  let res = null;
+  for (const line of String(r.stdout ?? "").split("\n")) {
+    bad ??= agyViolationOf(line); // a runner that did not hand the lines over
+    for (const ev of parseAgyLine(line)) {
+      if (ev.kind === "session") sawInit = true;
+      if (ev.kind === "done") res = { ok: true, text: ev.text };
+      if (ev.kind === "error") res = { ok: false, error: ev.message };
+    }
+  }
+  if (bad?.tool) {
+    log(`[providers] tool event provider=antigravity name=${bad.tool}`);
+    return {
+      ok: false,
+      tool_event: bad.tool,
+      error: `Antigravity CLI (agy) used a tool (${bad.tool}) in a run that must not use any. Its reply was discarded.`,
+    };
+  }
+  if (bad) return { ok: false, error: bad.error };
+  if (r.aborted) return { ok: false, aborted: true, error: "stopped" };
   if (r.timedOut) return { ok: false, error: `timed out after ${timeoutMs} ms` };
   if (r.code !== 0) {
     const detail = String(r.stderr ?? "").slice(0, 300);
@@ -207,7 +292,7 @@ export async function agyOneshot(
       ? { ok: false, error: "Antigravity CLI (agy) is not installed" }
       : { ok: false, error: `agy exited ${r.code}: ${detail}` };
   }
-  const res = parseAgyResult(r.stdout);
+  if (!res) return { ok: false, error: "agy gave no answer" };
   if (!res.ok) {
     return {
       ok: false,
@@ -215,6 +300,12 @@ export async function agyOneshot(
       limited: LIMIT_RE.test(res.error)
         ? { limited: true, kind: "rate_limit", text: res.error }
         : null,
+    };
+  }
+  if (!sawInit) {
+    return {
+      ok: false,
+      error: "agy did not say which permission mode it ran in. Its reply was discarded.",
     };
   }
   if (!expectJson) return { ok: true, text: res.text };

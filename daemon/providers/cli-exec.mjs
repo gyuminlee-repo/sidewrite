@@ -18,20 +18,12 @@
 
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath, win32 } from "node:path";
 
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
-
-// An empty directory to run a judgment in: the CLI finds nothing to read
-// there and no project instructions.
-export async function emptyWorkDir() {
-  const dir = join(tmpdir(), "cc-office-oneshot-cwd");
-  await mkdir(dir, { recursive: true });
-  return dir;
-}
 
 // A directory of its own for one run: the CLI finds nothing to read there,
 // and nothing another process put into a shared place. It is removed when
