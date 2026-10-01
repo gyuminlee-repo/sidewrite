@@ -88,11 +88,14 @@ export const ChangeSchema = z.object({
   checked_at: z.string().nullable().default(null),
 });
 
-// An approved exception whose tracked edit got no answer from the task pane
+// A tracked edit on its way to Word, or one the task pane did not answer
 // (OutcomeUnknown): the change it would record and the document form it
-// expects, so a late answer or a status refresh can record it once.
+// expects, so a late answer or a status refresh can record it once. It is
+// written before Word is called (addAttempt, setBlockedAttempt).
 const Attempt = z.object({
+  // The bridge call id, once a call got no answer; null before.
   tool_call_id: z.string().nullable(),
+  // When the edit was sent to Word; rewritten when its answer was given up.
   unknown_at: z.string(),
   comment_text: z.string(),
   change: z.record(z.string(), z.unknown()),
@@ -102,14 +105,17 @@ const Blocked = z.object({
   id: z.string(),
   args: z.record(z.string(), z.unknown()),
   // Ledger ids of the forbid rules that refused the edit. Empty: a normal
-  // edit (nothing refused it) that Word did not answer, kept here as
-  // outcome_unknown with its attempt until a refresh or a late answer
-  // settles it (addUnknownEdit).
+  // edit (nothing refused it), kept here with its attempt from before Word
+  // is called until its answer, a late answer or a refresh settles it
+  // (addAttempt). Its id is the id of the attempt.
   blocked_by: z.array(z.string()),
   created_at: z.string(),
-  // outcome_unknown: an override was sent and not answered; it may be in the
+  // outcome_unknown: the edit was sent and not answered; it may be in the
   // document, so a plain second override is refused (review-service.mjs).
-  // applying: an override is running now; any second override is refused.
+  // applying: the edit is with Word now; any second override is refused.
+  // An applying item no running call owns (the daemon stopped, or the
+  // record of an applied edit could not be saved) turns outcome_unknown
+  // (markStaleApplying).
   state: z.enum(["blocked", "applying", "outcome_unknown"]).default("blocked"),
   attempt: Attempt.nullable().default(null),
 });
@@ -553,10 +559,11 @@ export function addBlocked(rev, ref, { args, blocked_by }, now = new Date()) {
   return { revision: next, blocked: row };
 }
 
-// A tracked edit no forbid rule refused and Word did not answer: it may be
-// in the document. Kept like an unanswered exception (state outcome_unknown,
-// attempt), with no rule in blocked_by.
-export function addUnknownEdit(rev, ref, { args, attempt }, now = new Date()) {
+// A tracked edit no forbid rule refused, written BEFORE Word is called: from
+// then on it may be in the document. Kept like a claimed exception (state
+// applying, with the attempt), with no rule in blocked_by. Its id comes from
+// the blocked-edit counter of the comment, so no two attempts share one.
+export function addAttempt(rev, ref, { args, attempt }, now = new Date()) {
   const next = clone(rev);
   const c = requireComment(next, ref);
   c.blocked_seq = blockedSeq(c) + 1;
@@ -565,11 +572,20 @@ export function addUnknownEdit(rev, ref, { args, attempt }, now = new Date()) {
     args: clone(args),
     blocked_by: [],
     created_at: now.toISOString(),
-    state: "outcome_unknown",
+    state: "applying",
     attempt: Attempt.parse(clone(attempt)),
   };
   c.blocked.push(row);
   return { revision: next, blocked: row };
+}
+
+// The same for a claimed exception (claimBlocked), before Word is called.
+export function setBlockedAttempt(rev, ref, blockedId, attempt) {
+  const next = clone(rev);
+  const b = requireComment(next, ref).blocked.find((x) => x.id === blockedId);
+  if (!b) throw new Error(`No blocked edit ${blockedId} under ${ref}`);
+  b.attempt = Attempt.parse(clone(attempt));
+  return next;
 }
 
 export function markBlockedUnknown(rev, ref, blockedId, attempt) {
@@ -601,13 +617,22 @@ export function claimBlocked(rev, ref, blockedId, { force = false } = {}) {
   return { revision: next, blocked: before };
 }
 
-// End an override that did not apply: back to the state it had before.
-export function releaseBlocked(rev, ref, blockedId, state) {
+// End an override that did not apply: back to the state it had before, and
+// to the attempt it had then when one is given (`attempt`, null for none).
+export function releaseBlocked(rev, ref, blockedId, state, attempt) {
   const next = clone(rev);
   const b = findComment(next, ref)?.blocked.find((x) => x.id === blockedId);
   if (!b || b.state !== "applying") return null;
   b.state = state;
+  if (attempt !== undefined) b.attempt = clone(attempt);
   return next;
+}
+
+// The revision without that blocked edit, or null when it is not there.
+export function dropBlocked(rev, ref, blockedId) {
+  return findComment(rev, ref)?.blocked.some((b) => b.id === blockedId)
+    ? takeBlocked(rev, ref, blockedId).revision
+    : null;
 }
 
 // applying items no running override owns (the daemon stopped mid-call) may

@@ -143,9 +143,16 @@ function fail(message, extra = {}) {
   return { ok: false, message, ...extra };
 }
 
-// deps: { begin(), call(name, args), getLedger(), getReviewContext(ref), onEdit({ref, change}),
-//         onBlocked({ref, args, blocked_by}), onOutcomeUnknown({id, ref, record}),
+// deps: { begin(), call(name, args), getLedger(), getReviewContext(ref),
+//         onAttempt({ref, args, attempt}) -> {id, end()}, onEdit({ref, change, attempt_id}),
+//         onNotApplied({ref, attempt_id}), onBlocked({ref, args, blocked_by}),
+//         onOutcomeUnknown({id, ref, record, attempt, attempt_id}),
 //         holdRef(ref) -> release, log }
+// onAttempt: called before Word, with the edit and the form it would have in
+// the document; it writes them to the review file and returns the id of
+// that attempt (end(): the call is over). When it throws, Word is not
+// called. onEdit settles the attempt in the save that records the change;
+// onNotApplied removes it; onOutcomeUnknown keeps it with the call id.
 // begin (optional): called once, before anything else. What it returns
 // (review-service.mjs: the document of the pane, as it is now) is handed to
 // every other function of this call as its last argument or as `at`, also
@@ -252,8 +259,49 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     kind === "delete" ? [] : unsourcedTerms(newText, [...texts, ctx.comment_text ?? "", args.find]);
   const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
 
+  const commentText = formatRationaleComment(turn.ref, rationale, { lost });
+  // The edit as it would read in the document (unknownAttempt). It goes into
+  // the review file BEFORE Word is called (onAttempt), so the stretch between
+  // "Word applied it" and "the file says so" is never empty: a daemon that
+  // stops there, or a record that cannot be saved, leaves the attempt for
+  // the next refresh. id: the bridge call id once a call got no answer.
+  const attemptOf = (id) => ({
+    tool_call_id: id,
+    unknown_at: new Date().toISOString(),
+    comment_text: commentText,
+    change: unknownAttempt(current, target, ctx.paragraph_ids, {
+      kind,
+      find: args.find,
+      text: newText,
+      rationale,
+      override_of: excepted,
+      lost_facts: lost,
+      unsourced_terms: unsourced,
+    }),
+  });
+  let pre;
+  try {
+    pre =
+      (await deps.onAttempt?.({ ref: turn.ref, args: edit, attempt: attemptOf(null), at })) ?? null;
+  } catch (e) {
+    deps.log?.(`[review] attempt not recorded ${turn.ref}: ${e?.message ?? e}`);
+    return fail(
+      `Not applied: the edit could not be written to the review file first (${e?.message ?? e}), so nothing was sent to Word. Tell the author; retry only after that is fixed.`,
+      { code: "AttemptNotRecorded" },
+    );
+  }
+  const attemptId = pre?.id ?? null;
+  // Word answered that the edit is not in the document: its attempt goes. A
+  // failed removal only leaves it for the refresh, which drops it.
+  const notApplied = () =>
+    Promise.resolve(deps.onNotApplied?.({ ref: turn.ref, attempt_id: attemptId, at })).catch((e) =>
+      deps.log?.(`[review] attempt ${attemptId} not removed: ${e?.message ?? e}`),
+    );
+
   // The answer of the task pane, now or late: record it (or return its error).
   const record = async (r) => {
+    // No result at all says nothing about the document: the attempt stays
+    // and reads as unanswered once this call is over.
     if (!r) return fail("empty result from the task pane");
     // applied:true with ok:false: the task pane changed the document but could
     // not add the rationale comment (CommentAnchorMissing: no range to anchor
@@ -261,9 +309,13 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     // still recorded, with no comment id, so the change list and the
     // "changes == rationale comments" check show it instead of losing it.
     const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
-    if (r.ok === false && !commentMissing) return r;
+    if (r.ok === false && !commentMissing) {
+      await notApplied();
+      return r;
+    }
     return recordApplied(deps, turn.ref, r, {
       at,
+      attemptId,
       texts: current,
       kind,
       newText,
@@ -277,7 +329,6 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     });
   };
 
-  const commentText = formatRationaleComment(turn.ref, rationale, { lost });
   // The comment stays in the list until the answer is recorded (or handed
   // to onOutcomeUnknown, which holds it on its own).
   const release = deps.holdRef?.(turn.ref, at);
@@ -292,26 +343,31 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         comment_text: commentText,
       });
     } catch (e) {
+      // An error the task pane sent back: its edit batch failed, nothing was
+      // applied (tools-word.js toolTrackedEdit reports every failure after
+      // the edit as a result with applied:true, never as an error).
+      if (!NO_ANSWER_CODES.has(e?.code)) {
+        await notApplied();
+        throw e;
+      }
       // No answer (bridge.mjs timeout or pane disconnect): the edit may be in
       // the document with nothing recorded. A retry could apply it twice.
-      if (!NO_ANSWER_CODES.has(e?.code)) throw e;
       const id = e.toolCallId ?? null;
       deps.log?.(`[review] outcome unknown ${turn.ref} code=${e.code} id=${id}`);
-      const attempt = {
-        tool_call_id: id,
-        unknown_at: new Date().toISOString(),
-        comment_text: commentText,
-        change: unknownAttempt(current, target, ctx.paragraph_ids, {
-          kind,
-          find: args.find,
-          text: newText,
-          rationale,
-          override_of: excepted,
-          lost_facts: lost,
-          unsourced_terms: unsourced,
-        }),
-      };
-      await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt, args: edit, at });
+      try {
+        await deps.onOutcomeUnknown?.({
+          id,
+          ref: turn.ref,
+          record,
+          attempt: attemptOf(id),
+          attempt_id: attemptId,
+          args: edit,
+          at,
+        });
+      } catch (err) {
+        // The attempt written before the call is still on file.
+        deps.log?.(`[review] outcome unknown ${turn.ref} not saved: ${err?.message ?? err}`);
+      }
       return fail(
         `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
         { code: "OutcomeUnknown", tool_call_id: id },
@@ -319,6 +375,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     }
     return await record(r);
   } finally {
+    pre?.end?.();
     release?.();
   }
 }
@@ -427,7 +484,20 @@ async function recordApplied(
   deps,
   ref,
   r,
-  { at, texts, kind, newText, narrow, rationale, excepted, lost, unsourced, find, commentMissing },
+  {
+    at,
+    attemptId,
+    texts,
+    kind,
+    newText,
+    narrow,
+    rationale,
+    excepted,
+    lost,
+    unsourced,
+    find,
+    commentMissing,
+  },
 ) {
   // The task pane reports whether it could apply the narrowed range (the cut
   // find must occur once inside the located hit); otherwise the full range.
@@ -455,7 +525,28 @@ async function recordApplied(
       narrowFind: narrowed ? narrow.find : null,
     }),
   };
-  const saved = await deps.onEdit?.({ ref: ref, change, at });
+  let saved;
+  try {
+    // One save: the change, and its attempt out of the blocked list.
+    saved = await deps.onEdit?.({ ref: ref, change, at, attempt_id: attemptId });
+  } catch (e) {
+    // The edit is in the document and the file does not say so. Not thrown:
+    // an error would read as "not applied" and invite a second apply. The
+    // attempt written before the call stays; a refresh records the change.
+    deps.log?.(`[review] applied, record failed ${attemptId ?? ref}: ${e?.message ?? e}`);
+    return {
+      ok: false,
+      applied: true,
+      code: "AppliedNotRecorded",
+      attempt_id: attemptId,
+      kind: appliedKind,
+      word_comment_id: change.word_comment_id,
+      paragraph_index: change.paragraph_index,
+      before: r.before,
+      after: r.after,
+      message: `The edit was applied in Word but could not be written to the review file (${e?.message ?? e}). Do not repeat it: it is in the document. Tell the author to press Refresh status in the Review tab, which records it${attemptId ? ` from attempt ${attemptId}` : ""}.`,
+    };
+  }
   const id = saved?.id ?? "?";
   deps.log?.(
     `[review] change recorded ${id} kind=${appliedKind} comment=${change.word_comment_id} paragraph=${change.paragraph_index}` +

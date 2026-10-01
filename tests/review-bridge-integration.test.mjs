@@ -156,10 +156,17 @@ test("real bridge: the socket drops with an edit in flight, the pane reconnects 
 
     p2 = await pane(w.d.port(), w.doc);
     p2.send({ type: "tool_result", id: call.id, ok: true, result: APPLIED });
-    await until(async () => (await revisionOf(w.doc)).comments[0].changes.length === 1, "change");
+    // One save records the change and removes the unanswered edit: the
+    // first read that shows the change shows no blocked edit (two saves used
+    // to leave [1, 1] in between, and a read after a fixed wait hit it).
+    const first = await until(async () => {
+      const x = (await revisionOf(w.doc)).comments[0];
+      return x.changes.length === 1 && x;
+    }, "change");
+    assert.deepEqual([first.changes.length, first.blocked.length], [1, 0]);
     p2.send({ type: "tool_result", id: call.id, ok: true, result: APPLIED }); // a second copy
-    await sleep(50);
-    const c = (await revisionOf(w.doc)).comments[0];
+    // Answered after the second copy: same socket, and the same file chain.
+    const c = (await p2.ask("review_load")).revision.comments[0];
     assert.deepEqual([c.changes.length, c.blocked.length], [1, 0]);
     assert.equal(c.changes[0].word_comment_id, "12");
     assert.ok(w.d.lines.includes(`[review] late result recorded ${call.id}`));

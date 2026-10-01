@@ -482,11 +482,18 @@ export function ledgerCheckFromText(text) {
 }
 
 // L7. Everything that waits for the author, in one list.
+// A normal edit that is with Word right now: the daemon writes it to the
+// file before the call (review-service.mjs onAttempt) and takes it out with
+// the answer. Nothing for the author to decide, so it is not shown. One
+// that got no answer is outcome_unknown and is shown.
+export const inFlightEdit = (b) => b.state === "applying" && (b.blocked_by ?? []).length === 0;
+
 export function pendingDecisions(revision) {
   const blocked = [];
   const requirements = [];
   for (const c of revision?.comments ?? []) {
     for (const b of c.blocked ?? []) {
+      if (inFlightEdit(b)) continue;
       blocked.push({
         ref: c.ref,
         id: b.id,

@@ -30,7 +30,9 @@ import {
   addChange,
   applyStates,
   addBlocked,
-  addUnknownEdit,
+  addAttempt,
+  setBlockedAttempt,
+  dropBlocked,
   takeBlocked,
   markBlockedUnknown,
   claimBlocked,
@@ -323,7 +325,40 @@ export function createReviewService({
             : [],
         };
       },
-      onEdit: async ({ ref, change, at: d = at(key) }) => {
+      // A normal edit is written to the file before Word is called, as a
+      // blocked item no rule blocks (state applying, with the form it would
+      // have in the document). The stretch between "Word applied it" and
+      // "the change is saved" then always has it on file: a daemon that
+      // stops there leaves an item the next one takes as unanswered
+      // (clearStale) and a refresh settles. It joins `active` in the same
+      // step, like an override, so a load in between does not take it for a
+      // stale one. One more save per edit, in the chain of the file
+      // (withRevision): it is done before Word is called, and the save of
+      // the change is queued after it.
+      onAttempt: async ({ ref, args, attempt, at: d = at(key) }) => {
+        const active = activeFor(d);
+        let saved = null;
+        try {
+          await update(d, (rev) => {
+            const r = addAttempt(withComment(d, rev, ref), ref, { args, attempt });
+            saved = r.blocked;
+            active.add(applyingKey(ref, saved.id));
+            return r.revision;
+          });
+        } catch (e) {
+          if (saved) active.delete(applyingKey(ref, saved.id)); // added, then the save failed
+          throw e;
+        }
+        return { id: saved.id, end: () => active.delete(applyingKey(ref, saved.id)) };
+      },
+      // Word answered that the edit is not in the document.
+      onNotApplied: async ({ ref, attempt_id, at: d = at(key) }) => {
+        if (attempt_id) await update(d, (rev) => dropBlocked(rev, ref, attempt_id));
+      },
+      // attempt_id: the attempt (or the approved exception) this change
+      // settles. It leaves the blocked list in the save that adds the
+      // change: no reader of the file sees both, or neither.
+      onEdit: async ({ ref, change, attempt_id = null, at: d = at(key) }) => {
         let saved = null;
         let comment = null;
         await update(d, (rev) => {
@@ -331,7 +366,7 @@ export function createReviewService({
           const r = addChange(base, ref, change);
           saved = r.change;
           comment = findComment(base, ref);
-          return r.revision;
+          return (attempt_id && dropBlocked(r.revision, ref, attempt_id)) || r.revision;
         });
         await receipt(d, [
           decisionRecord({
@@ -355,44 +390,43 @@ export function createReviewService({
         return saved;
       },
       // blocked_id: the approved exception the edit came from (its item is
-      // marked by review_override). A normal edit gets an item of its own
-      // in the file here, so a refresh or a restarted daemon can still find
+      // marked by review_override). attempt_id: the item a normal edit wrote
+      // before Word was called (onAttempt); it turns outcome_unknown here
+      // with the call id, so a refresh or a restarted daemon can still find
       // out whether Word applied it (Codex review 14).
       onOutcomeUnknown: async ({
         id,
         ref,
         record,
         attempt,
-        args,
+        attempt_id = null,
         blocked_id = null,
         at: d = at(key),
       }) => {
-        let own = false;
-        if (!blocked_id && attempt && args) {
-          let saved = null;
-          await update(d, (rev) => {
-            const r = addUnknownEdit(withComment(d, rev, ref), ref, { args, attempt });
-            saved = r.blocked;
-            return r.revision;
+        const own = !blocked_id && !!attempt_id;
+        if (own) blocked_id = attempt_id;
+        // Before the save below: a late answer is recorded even if it fails.
+        if (id) {
+          const timer = setTimeout(() => forgetLate(id), lateResultTtlMs);
+          timer.unref?.();
+          pendingLate.set(id, {
+            key,
+            at: d,
+            ref,
+            record,
+            blocked_id,
+            own,
+            timer,
+            release: hold(d, ref),
           });
-          blocked_id = saved.id;
-          own = true;
-          log(`[review] outcome unknown ${saved.id} kept for refresh id=${id}`);
-          sendEvent(key, { type: "review_event", event: "edit_blocked", ref, blocked: saved });
         }
-        if (!id) return;
-        const timer = setTimeout(() => forgetLate(id), lateResultTtlMs);
-        timer.unref?.();
-        pendingLate.set(id, {
-          key,
-          at: d,
-          ref,
-          record,
-          blocked_id,
-          own,
-          timer,
-          release: hold(d, ref),
-        });
+        if (!own) return;
+        const revision = await update(d, (rev) =>
+          markBlockedUnknown(rev, ref, attempt_id, attempt),
+        );
+        const saved = findComment(revision, ref).blocked.find((b) => b.id === attempt_id);
+        log(`[review] outcome unknown ${attempt_id} kept for refresh id=${id}`);
+        sendEvent(key, { type: "review_event", event: "edit_blocked", ref, blocked: saved });
       },
       holdRef: (ref, d = at(key)) => hold(d, ref),
       onBlocked: async ({ ref, args, blocked_by, at: d = at(key) }) => {
@@ -427,27 +461,24 @@ export function createReviewService({
       log(`[review] late result dropped ${entry.id}: no pending tracked edit`);
       return null;
     }
+    // p.record saves the change and takes its item (p.blocked_id) out of
+    // the blocked list in one save (onEdit).
     const out = entry.ok ? await p.record(entry.result) : null;
     if (!out?.ok) {
+      // Applied, and the save of the change failed: the item stays
+      // outcome_unknown in the file for the next refresh.
+      if (out?.applied) {
+        log(`[review] late result applied, not recorded ${entry.id}: ${p.blocked_id} kept`);
+        return null;
+      }
       const why = entry.ok ? (out?.code ?? out?.message ?? "not applied") : entry.error;
       log(`[review] late result not applied ${entry.id}: ${why}`);
       // Word answered that the normal edit is not in the document.
-      if (p.own) {
-        await update(p.at, (rev) =>
-          findComment(rev, p.ref)?.blocked.some((b) => b.id === p.blocked_id)
-            ? takeBlocked(rev, p.ref, p.blocked_id).revision
-            : null,
-        );
-      }
+      if (p.own) await update(p.at, (rev) => dropBlocked(rev, p.ref, p.blocked_id));
       return null;
     }
     log(`[review] late result recorded ${entry.id}`);
     if (p.blocked_id) {
-      await update(p.at, (rev) =>
-        findComment(rev, p.ref)?.blocked.some((b) => b.id === p.blocked_id)
-          ? takeBlocked(rev, p.ref, p.blocked_id).revision
-          : null,
-      );
       log(
         `[review] ${p.own ? "edit" : "override"} ${p.blocked_id} applied late as ${out.change_id}`,
       );
@@ -687,13 +718,23 @@ export function createReviewService({
         if (blocked) active.delete(held); // claimed, then the save failed
         throw e;
       }
-      const restore = () => update(d, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state));
+      // Back to the state and the attempt it had before this try.
+      const restore = () =>
+        update(d, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state, blocked.attempt));
       try {
         const base = trackedEditDeps(key, d);
         let attempt = null;
         const deps = {
           ...base,
           call: (name, args) => callTool(name, args, key),
+          // The claimed item is the attempt: the form the edit would have in
+          // the document goes on it before Word is called, so a daemon that
+          // stops mid-call leaves an item a refresh can settle.
+          onAttempt: async (x) => {
+            await update(d, (rev) => setBlockedAttempt(rev, msg.ref, blocked.id, x.attempt));
+            return { id: blocked.id };
+          },
+          onNotApplied: async () => {}, // restore() below puts the item back
           onOutcomeUnknown: (x) => {
             attempt = x.attempt;
             return base.onOutcomeUnknown({ ...x, blocked_id: blocked.id });
@@ -723,7 +764,8 @@ export function createReviewService({
           return { applied: false, result: r, revision };
         }
         log(`[review] override ${msg.blocked_id} approved for ${blocked.blocked_by.join(",")}`);
-        const revision = await update(d, (x) => takeBlocked(x, msg.ref, msg.blocked_id).revision);
+        // The save of the change took the item out of the blocked list (onEdit).
+        const revision = await update(d, (x) => dropBlocked(x, msg.ref, msg.blocked_id));
         return { applied: true, result: r, revision };
       } finally {
         active.delete(held);

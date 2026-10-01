@@ -181,7 +181,12 @@ test("applied, then the record fails: told apart from a plain error, and the att
 });
 
 test("not applied: the attempt is taken back (an answer of Word, or an error it sent); no answer keeps it with the call id", async () => {
-  let d = fakeDeps({ call: async () => ({ ok: false, code: "NotFound", message: "not found" }) });
+  let d = fakeDeps({
+    call: async () => {
+      d.order.push(["call"]);
+      return { ok: false, code: "NotFound", message: "not found" };
+    },
+  });
   let r = await applyTrackedEdit(d, EDIT, { ref: "R1.1" });
   assert.deepEqual([r.ok, r.code], [false, "NotFound"]);
   assert.deepEqual(steps(d), ["attempt", "call", "not_applied", "end"]);

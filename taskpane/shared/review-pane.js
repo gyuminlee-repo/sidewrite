@@ -23,6 +23,7 @@ import {
   ledgerCheckFromText,
   ledgerStatusText,
   pendingDecisions,
+  inFlightEdit,
   reviewerOfRef,
   progressText,
 } from "./review-view.js";
@@ -439,7 +440,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         reqLine ? el("div", { class: "review-reqs-line", text: reqLine }) : null,
       );
       for (const ch of c.changes) card.append(changeRow(ch));
-      for (const b of c.blocked) card.append(blockedRow(c.ref, b));
+      for (const b of c.blocked) if (!inFlightEdit(b)) card.append(blockedRow(c.ref, b));
       box.append(card);
     }
   }

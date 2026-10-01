@@ -480,6 +480,25 @@ test("L7 pendingDecisions gathers blocked edits, unchecked ledger items and open
     unanswered.blocked.map((x) => x.text),
     ['R1.3 edit with no answer from Word: "the medium"'],
   );
+  // The same edit while Word still works on it (on file from before the
+  // call, state applying): nothing to decide yet. An exception being
+  // applied (a rule in blocked_by) stays listed.
+  const row = (id, state, blocked_by) => ({ id, args: { replace: "x" }, blocked_by, state });
+  const running = [
+    row("R1.3-b3", "applying", []),
+    row("R1.3-b4", "applying", ["L1"]),
+    row("R1.3-b5", "outcome_unknown", []),
+  ];
+  assert.deepEqual(running.map(view.inFlightEdit), [true, false, false]);
+  assert.deepEqual(
+    view
+      .pendingDecisions({
+        comments: [{ ref: "R1.3", requirements: [], changes: [], blocked: running }],
+        ledger: [],
+      })
+      .blocked.map((x) => x.id),
+    ["R1.3-b4", "R1.3-b5"],
+  );
 });
 
 test("ledgerStatusText names the stage that checks a non-manuscript item", () => {
