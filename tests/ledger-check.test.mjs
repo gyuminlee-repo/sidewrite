@@ -8,7 +8,19 @@ import {
   forbidHits,
   ledgerPrompt,
   checkLedgerIncremental,
+  inScope,
+  inManuscriptScope,
 } from "../daemon/ledger-check.mjs";
+
+test("inScope keeps the manuscript default", () => {
+  assert.equal(inScope({}, "manuscript"), true);
+  assert.equal(inScope({ scope: "response" }, "response"), true);
+  assert.equal(inScope({ scope: "response" }, "manuscript"), false);
+  assert.equal(inScope({}, "response"), false);
+  assert.equal(inScope(null, "manuscript"), true);
+  for (const item of [{}, { scope: "manuscript" }, { scope: "response" }, { scope: "supplement" }])
+    assert.equal(inManuscriptScope(item), inScope(item, "manuscript"));
+});
 
 const IN_VITRO = {
   id: "L1",

@@ -274,12 +274,15 @@ export async function checkLedger(items, paragraphs, deps = {}) {
   return outcomes;
 }
 
-// Ledger items that apply to manuscript edits. An item without a scope is a
-// manuscript item (the schema default). The review prompt (review-prompt.mjs)
-// and the pre-check below use this one rule, so what the model is told and
-// what is refused cannot drift apart.
+// Does this ledger item apply to `scope` (manuscript | response | supplement)?
+// An item without a scope is a manuscript item (the schema default).
+export const inScope = (item, scope) => (item?.scope ?? "manuscript") === scope;
+
+// Ledger items that apply to manuscript edits. The review prompt
+// (review-prompt.mjs) and the pre-check below use this one rule, so what the
+// model is told and what is refused cannot drift apart.
 export function inManuscriptScope(item) {
-  return (item?.scope ?? "manuscript") === "manuscript";
+  return inScope(item, "manuscript");
 }
 
 // The rules a tracked edit is pre-checked against: manuscript-scope
