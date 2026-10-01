@@ -23,7 +23,34 @@ import { COUNT_TARGETS } from "./count-check.mjs";
 export const GUIDELINE_SYSTEM =
   "You sort the sentences of a journal's author guidelines. Label every sentence exactly once. Do not return any text of the guidelines. Reply with JSON only.";
 
-export const GUIDELINE_TYPES = ["count", "style", "other"];
+export const GUIDELINE_TYPES = ["count", "style", "format", "other"];
+
+// Format rules of the journal profile that a guideline sentence can turn on
+// without a list of names: setting -> the profile keys it sets and what the
+// sentence must say.
+export const FORMAT_SETTINGS = {
+  "italics.statistics": {
+    profile: { italics: { statistics: true } },
+    says: "statistics symbols are set in italics",
+    needs: ["statistics", "italic"],
+  },
+};
+
+// The words the code looks for in such a sentence (whole words, any case). A
+// negation anywhere in the sentence keeps the setting from being proposed.
+export const FORMAT_WORDS = {
+  italic: ["italic", "italics", "italicize", "italicized", "italicise", "italicised"],
+  statistics: [
+    "statistic",
+    "statistics",
+    "statistical",
+    "p value",
+    "p values",
+    "p-value",
+    "p-values",
+  ],
+  negation: ["not", "never", "no", "nor", "without", "roman", "upright", "non-italic"],
+};
 
 export const GUIDELINE_WARNING =
   "model could not label the guideline sentences; add the rules by hand";
@@ -49,6 +76,11 @@ export function guidelinePrompt(sentences) {
     '"count": the sentence sets a countable limit on the manuscript. Give "rule" with',
     `  "target": one of ${BOUNDED.map((t) => `"${t}"`).join(", ")} (with "min" and/or "max", whole numbers that stand in the sentence as digits), or "section_order" (with "order", a list of section names);`,
     `  "section" (only for "section_words", and required there): one of ${SECTIONS.map((t) => `"${t}"`).join(", ")}.`,
+    `"format": the sentence sets one of these format rules. Give "rule" with "setting": one of ${Object.entries(
+      FORMAT_SETTINGS,
+    )
+      .map(([k, v]) => `"${k}" (${v.says})`)
+      .join(", ")}.`,
     '"style": the sentence is another rule an author must follow in the manuscript text. No "rule".',
     '"other": anything else (scope of the journal, submission steps, fees, contacts). No "rule".',
     "Do not add any other key and do not repeat or rewrite the sentences.",
@@ -66,6 +98,12 @@ const isCount = (n) => Number.isInteger(n) && n >= 0;
 function sentenceLabel(x) {
   if (!isPlain(x) || !onlyKeys(x, ["s", "type", "rule"])) return null;
   if (!GUIDELINE_TYPES.includes(x.type)) return null;
+  if (x.type === "format") {
+    const ok = isPlain(x.rule) && onlyKeys(x.rule, ["setting"]);
+    return ok && Object.hasOwn(FORMAT_SETTINGS, x.rule.setting)
+      ? ["format", { setting: x.rule.setting }]
+      : null;
+  }
   if (x.type !== "count") return x.rule === undefined ? [x.type, null] : null;
   const r = x.rule;
   if (!isPlain(r) || !COUNT_TARGETS.includes(r.target)) return null;
@@ -314,12 +352,27 @@ export function candidatesFromLabels(sentences, json, { offset = 0 } = {}) {
         };
       }
     }
+    let profile = null;
+    if (type === "format") {
+      const setting = FORMAT_SETTINGS[rule.setting];
+      const lower = sentence.toLowerCase();
+      const said =
+        setting.needs.every((words) => wholeWord(FORMAT_WORDS[words]).test(lower)) &&
+        !wholeWord(FORMAT_WORDS.negation).test(lower);
+      if (said) profile = structuredClone(setting.profile);
+      else {
+        warnings.push(
+          `s${offset + i + 1}: the sentence does not say that ${setting.says}; kept as a rule the model checks, without a profile setting`,
+        );
+      }
+    }
     candidates.push({
       kind: "instruction",
       text: sentence,
       scope: "manuscript",
       check,
       source: { kind: "guideline", sentence },
+      ...(profile && { profile }),
     });
   });
   return { candidates, warnings };

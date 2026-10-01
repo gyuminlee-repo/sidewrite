@@ -13,10 +13,19 @@
 //   table?: { rows, cols, empty? | cells?: string[] }   on the paragraph
 //                                            that stands for a table
 // }
-// Profile keys read here: italics { genera, epithets, genes }, subscripts,
-// first_line_indent ("indented" | "none" | null | { expect, min_pt,
-// skip_after_heading }), ref_section_head, ref_section_end_heads,
-// legend_heads.
+// The journal profile is the only source of style. No style rule runs unless
+// the profile turns it on; with an empty profile the only finding left is an
+// empty table, which is a defect of content, not a matter of style.
+//   italics.statistics: true           statistics symbols in italics
+//   italics.genera, italics.epithets   species and genus names in italics
+//   italics.genes                      gene names in italics
+//   subscripts                         digits of these formulas in subscript
+//   first_line_indent                  "indented" | "none" | "consistent"
+//                                      (outliers of the document's own clear
+//                                      majority), or { expect, min_pt,
+//                                      skip_after_heading }
+// Also read: ref_section_head, ref_section_end_heads, legend_heads (where
+// the reference list and the captions are; they turn nothing on).
 //
 // Finding: { paragraph_index, rule, find?, start?, spans?, want, found?,
 // context?, locate? }. spans are the characters to change (paragraph
@@ -173,7 +182,8 @@ function indentFindings(paragraphs, profile, { headings = [], styleIndentsKnown 
     (p) => side(p.indent.first_line) !== null && (styleIndentsKnown || p.indent.source !== "style"),
   );
   let expect = opt.expect ?? null;
-  if (expect === null) {
+  if (expect === "consistent") {
+    expect = null;
     const indented = judged.filter((p) => side(p.indent.first_line) === 1).length;
     if (judged.length && indented / judged.length >= 0.8) expect = "indented";
     else if (judged.length && (judged.length - indented) / judged.length >= 0.8) expect = "none";
@@ -227,7 +237,12 @@ export function findFormatIssues(paragraphs, profile = {}, extra = {}) {
   const genes = list(italics.genes);
   const formulas = list(profile.subscripts);
   const rules = [
-    { rule: "stat", re: STAT, flag: "italic", want: { italic: true } },
+    italics.statistics === true && {
+      rule: "stat",
+      re: STAT,
+      flag: "italic",
+      want: { italic: true },
+    },
     species && { rule: "species", re: species, flag: "italic", want: { italic: true } },
     genes.length && { rule: "gene", re: whole(alt(genes)), flag: "italic", want: { italic: true } },
     formulas.length && {

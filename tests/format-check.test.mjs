@@ -9,9 +9,11 @@ const profile = {
     genera: ["Escherichia", "Bacillus"],
     epithets: ["coli", "subtilis"],
     genes: ["lacZ", "recA", "mmoX"],
+    statistics: true,
   },
   subscripts: ["CO2", "OD600", "H2O"],
 };
+const STYLE_RULES = ["stat", "species", "gene", "subscript", "indent"];
 const kinds = (ps, pr = profile, extra = {}) =>
   findFormatIssues(ps, pr, extra).map((f) => `${f.rule}:${f.find ?? f.paragraph_index}`);
 const finds = (rule, text, pr = profile) =>
@@ -197,14 +199,56 @@ test("findings come in document order and say where and what to change", () => {
   assert.notEqual(f[4].start, f[5].start);
 });
 
-test("the name and formula rules run only with a profile list; statistics symbols always run", () => {
-  const ps = [para(0, ["Escherichia coli lacZ on CO2, P < 0.05"])];
-  assert.deepEqual(kinds(ps, {}), ["stat:P"]);
+test("no style rule runs unless the profile turns it on: an empty profile gives no style finding", () => {
+  const LONG_TEXT =
+    "This sentence is long enough to count as body text for the indent rule and it ends with a period.";
+  const indented = (index, first_line) => ({
+    index,
+    runs: [run(LONG_TEXT)],
+    indent: { first_line, left: 0, source: "direct" },
+  });
+  // Everything a style rule could report: symbols, names, a formula, one odd indent.
+  const ps = [
+    para(0, ["Escherichia coli lacZ on CO2, P < 0.05, p = 0.01, n = 3, t(2) = 8.9, q values"]),
+    indented(1, 36),
+    indented(2, 36),
+    indented(3, 36),
+    indented(4, 36),
+    indented(5, 0),
+  ];
+  for (const empty of [
+    undefined,
+    {},
+    { italics: {} },
+    { italics: { genera: [], epithets: [], genes: [] }, subscripts: [] },
+    { italics: { statistics: false }, first_line_indent: null },
+    { italics: { statistics: "yes" } },
+    { italics: { statistics: 1 } },
+    { italics: null, subscripts: null },
+  ]) {
+    assert.deepEqual(findFormatIssues(ps, empty), [], JSON.stringify(empty));
+  }
+  // The same document with every rule turned on reports every kind.
+  const all = { ...profile, first_line_indent: "consistent" };
   assert.deepEqual(
-    kinds(ps, { italics: { genera: [], epithets: [], genes: [] }, subscripts: [] }),
-    ["stat:P"],
+    [...new Set(findFormatIssues(ps, all).map((f) => f.rule))].sort(),
+    [...STYLE_RULES].sort(),
   );
-  assert.deepEqual(kinds(ps, { italics: { genes: ["lacZ"] } }), ["gene:lacZ", "stat:P"]);
+});
+
+test("each style rule is turned on by its own profile key and by nothing else", () => {
+  const ps = [para(0, ["Escherichia coli lacZ on CO2, P < 0.05"])];
+  assert.deepEqual(kinds(ps, { italics: { statistics: true } }), ["stat:P"]);
+  assert.deepEqual(kinds(ps, { italics: { statistics: false, genes: ["lacZ"] } }), ["gene:lacZ"]);
+  assert.deepEqual(kinds(ps, { italics: { genes: ["lacZ"] } }), ["gene:lacZ"]);
+  assert.deepEqual(kinds(ps, { italics: { genes: ["lacZ"], statistics: true } }), [
+    "gene:lacZ",
+    "stat:P",
+  ]);
+  assert.deepEqual(kinds(ps, { italics: { genera: ["Escherichia"], epithets: ["coli"] } }), [
+    "species:Escherichia coli",
+  ]);
+  assert.deepEqual(kinds(ps, { subscripts: ["CO2"] }), ["subscript:CO2"]);
 });
 
 test("names with regex characters in the profile are read as plain text", () => {
@@ -236,10 +280,8 @@ test("the references section is skipped for text rules, up to its end heading", 
   const prose = [
     para(0, ["The references below were checked by hand and n = 3 of them were wrong."]),
   ];
-  assert.deepEqual(kinds([...prose, para(1, ["q = 0.01"])], { ref_section_head: "references" }), [
-    "stat:n",
-    "stat:q",
-  ]);
+  const pr = { italics: { statistics: true }, ref_section_head: "references" };
+  assert.deepEqual(kinds([...prose, para(1, ["q = 0.01"])], pr), ["stat:n", "stat:q"]);
 });
 
 // ---------------------------------------------------------------- empty table
@@ -376,17 +418,33 @@ test("expect none: indented body paragraphs are findings and the wanted value is
   );
 });
 
-test("no expectation: only outliers of a clear majority (80%) are findings, and a mixed document gives none", () => {
+test("expect consistent: only outliers of a clear majority (80%) are findings, and a mixed document gives none", () => {
+  const same = { first_line_indent: "consistent" };
   const mostly = [para(0, ["H"]), body(1, 36), body(2, 36), body(3, 36), body(4, 36), body(5, 0)];
-  assert.deepEqual(kinds(mostly, {}, { headings }), ["indent:5"]);
-  assert.equal(findFormatIssues(mostly, {}, { headings })[0].want.first_line_indent, 36);
+  assert.deepEqual(kinds(mostly, same, { headings }), ["indent:5"]);
+  assert.equal(findFormatIssues(mostly, same, { headings })[0].want.first_line_indent, 36);
+  assert.deepEqual(kinds(mostly, { first_line_indent: { expect: "consistent" } }, { headings }), [
+    "indent:5",
+  ]);
   const flush = [para(0, ["H"]), body(1, 0), body(2, 0), body(3, 0), body(4, 0), body(5, 24)];
-  assert.deepEqual(kinds(flush, {}, { headings }), ["indent:5"]);
-  assert.equal(findFormatIssues(flush, {}, { headings })[0].want.first_line_indent, 0);
-  assert.deepEqual(kinds(doc, {}, { headings }), []);
-  assert.deepEqual(kinds(doc, { first_line_indent: null }, { headings }), []);
+  assert.deepEqual(kinds(flush, same, { headings }), ["indent:5"]);
+  assert.equal(findFormatIssues(flush, same, { headings })[0].want.first_line_indent, 0);
+  assert.deepEqual(kinds(doc, same, { headings }), []);
   // All alike: nothing to report.
-  assert.deepEqual(kinds([para(0, ["H"]), body(1, 36), body(2, 36)], {}, { headings }), []);
+  assert.deepEqual(kinds([para(0, ["H"]), body(1, 36), body(2, 36)], same, { headings }), []);
+});
+
+test("without an indent setting in the profile the indent rule does not run, whatever the document looks like", () => {
+  const mostly = [para(0, ["H"]), body(1, 36), body(2, 36), body(3, 36), body(4, 36), body(5, 0)];
+  for (const pr of [
+    {},
+    { first_line_indent: null },
+    { first_line_indent: "majority" },
+    { first_line_indent: { min_pt: 18 } },
+    { first_line_indent: { expect: null, skip_after_heading: true } },
+  ]) {
+    assert.deepEqual(kinds(mostly, pr, { headings }), [], JSON.stringify(pr));
+  }
 });
 
 test("a hanging indent is not an indent; an unknown indent is not judged; a chars-based indent counts as indented", () => {
