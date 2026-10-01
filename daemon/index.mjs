@@ -44,7 +44,9 @@ import {
   userMcpEnabled,
 } from "./query-options.mjs";
 import { stat } from "node:fs/promises";
+import { healthBody } from "./health.mjs";
 
+const STARTED_AT = Date.now();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..");
 
@@ -170,6 +172,17 @@ const http = createServer(async (req, res) => {
 
   try {
     const urlPath = (req.url || "/").split("?")[0];
+
+    // Up or not, for scripts (install, doctor). No token asked, none given.
+    if (urlPath === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(
+        JSON.stringify(
+          healthBody({ startedAt: STARTED_AT, now: Date.now(), ws: WS_PORT, http: HTTP_PORT }),
+        ),
+      );
+      return;
+    }
 
     // Token endpoint: serves the per-daemon bridge token to the taskpane.
     // Only same-origin (i.e. cross-origin requests get blocked by CORS).
