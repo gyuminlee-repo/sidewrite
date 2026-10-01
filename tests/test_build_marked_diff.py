@@ -199,8 +199,10 @@ class BuildMarkedDiff(unittest.TestCase):
 
     def test_the_tool_carries_no_manuscript_specific_value(self):
         src = TOOL.read_text(encoding="utf-8")
-        for word in ("/mnt/", "/home/", "BITE", "jrp_config", "submission.json", "extorquens", "4EA72E", "JRP_"):
+        for word in ("/mnt/", "/home/", "jrp_config", "submission.json", "JRP_"):
             self.assertNotIn(word, src, word)
+        # The two default colours are the only colour values in the source.
+        self.assertEqual(set(re.findall(r"'([0-9A-F]{6})'", src)), {"FF0000", "808080"})
         # A whole word: the WordprocessingML namespace ends in "...ingml".
         self.assertNotRegex(src, r"\bgml\b")
         self.assertNotRegex(src, r"\bR[12]\b")
