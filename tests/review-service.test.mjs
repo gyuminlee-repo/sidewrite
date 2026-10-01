@@ -7,6 +7,7 @@ import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 import { loadRevision, saveRevision } from "../daemon/revision-store.mjs";
 import { REQUIREMENT_SYSTEM } from "../daemon/review-split.mjs";
+import { ledgerReply } from "./fixtures/ledger-reply.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 
@@ -1002,10 +1003,10 @@ test("overlapping comments_backup requests write two files, neither overwritten"
 
 test("ledger_check stores an unsure LLM verdict on the item", async () => {
   const t = await setup({
-    oneshot: async () => ({
-      ok: true,
-      json: { violations: [], unsure: [{ paragraph_index: 3, reason: "cannot tell" }] },
-    }),
+    oneshot: async (req) =>
+      ledgerReply(req, [{ index: 3, text: "a" }], {
+        unsure: [{ paragraph_index: 3, reason: "cannot tell" }],
+      }),
   });
   try {
     await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
@@ -1033,13 +1034,17 @@ test("receipts: an LLM split, LLM ledger verdicts and requirement links land in 
         assert.equal(req.system, REQUIREMENT_SYSTEM);
         return { ok: true, json: { sentences: [{ ref: "R1.1", s: 1, type: "request" }] } };
       }
-      return {
-        ok: true,
-        json: {
+      return ledgerReply(
+        req,
+        [
+          { index: 3, text: "some hidden words" },
+          { index: 4, text: "maybe" },
+        ],
+        {
           violations: [{ paragraph_index: 3, quote: "hidden words", reason: "r" }],
           unsure: [{ paragraph_index: 4, reason: "?" }],
         },
-      };
+      );
     },
   });
   try {
@@ -1156,9 +1161,9 @@ test("ledger_check drops the result of a rule edited during the check; the next 
   let release;
   const gate = new Promise((r) => (release = r));
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       await gate;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1188,9 +1193,9 @@ test("ledger_check skips an item removed during the check and still saves the ot
   let release;
   const gate = new Promise((r) => (release = r));
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       await gate;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1218,15 +1223,14 @@ test("ledger_check: a stale check that ends after a newer one leaves the newer r
   const gate = new Promise((r) => (release = r));
   let n = 0;
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       if (++n === 1) {
         await gate;
-        return { ok: true, json: { violations: [], unsure: [] } };
+        return ledgerReply(req, []);
       }
-      return {
-        ok: true,
-        json: { violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }], unsure: [] },
-      };
+      return ledgerReply(req, [para(0, "a novel substrate")], {
+        violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }],
+      });
     },
   });
   try {
@@ -1260,13 +1264,12 @@ async function overlappingChecks(order) {
     oneshot: async (req) => {
       if (req.prompt.includes("novel")) {
         await opened.old;
-        return {
-          ok: true,
-          json: { violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }], unsure: [] },
-        };
+        return ledgerReply(req, [para(0, "a novel substrate")], {
+          violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }],
+        });
       }
       await opened.fresh;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1311,9 +1314,9 @@ test("ledger_check and review_split answer with a job id at once and send the re
   let release;
   const gate = new Promise((r) => (release = r));
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       await gate;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1865,9 +1868,9 @@ test("no handler reads the pane's document again after its first await", async (
     await t.ask("ledger_add", { item: NOVEL });
 
     // ledger_check job: the pane goes away while the model answers.
-    hooks.oneshot = async () => {
+    hooks.oneshot = async (req) => {
       ctx.activeDoc = null;
-      return { ok: true, json: { violations: [] } };
+      return ledgerReply(req, []);
     };
     const checked = await t.ask("ledger_check", {
       ids: ["L1"],

@@ -507,6 +507,12 @@ test("ledgerStatusText names the stage that checks a non-manuscript item", () =>
     "2 violation(s)",
   );
   assert.equal(view.ledgerStatusText({ status: "ok" }), "ok");
+  // A check that failed (a model reply that could not be used, a regex that
+  // does not compile) passed nothing.
+  assert.equal(
+    view.ledgerStatusText({ status: "error" }),
+    "check failed: nothing counts as passed",
+  );
   assert.equal(
     view.ledgerStatusText({ status: "skipped", scope: "response" }),
     "Checked at the response stage",
