@@ -76,6 +76,7 @@ export function initReviewPane({
     backupShown: null,
     editingLedger: null, // L6: id of the ledger item loaded into the form
     confirmDone: null, // L5: ref whose "Done" was asked once with something left open
+    answerDrafts: new Map(), // ref/question id -> answer typed and not saved yet
     reqDrafts: new Map(), // ref -> requirement text typed and not saved yet (Codex review 9)
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
@@ -528,6 +529,46 @@ export function initReviewPane({
         saveReqs,
         reqLine ? el("div", { class: "review-reqs-line", text: reqLine }) : null,
       );
+      // What the model asked instead of guessing (office_ask_author). An
+      // answer goes into the prompt of the next turn.
+      if ((c.questions ?? []).length) {
+        card.append(
+          el("div", { class: "review-questions-head", text: "Questions for the author" }),
+        );
+        for (const q of c.questions) {
+          const draftKey = `${c.ref}/${q.id}`;
+          const answer = el("textarea", {
+            rows: "2",
+            class: "review-answer",
+            placeholder: "Your answer (it goes into the next turn)",
+          });
+          answer.value = state.answerDrafts.has(draftKey)
+            ? state.answerDrafts.get(draftKey)
+            : (q.answer ?? "");
+          answer.addEventListener("input", () => state.answerDrafts.set(draftKey, answer.value));
+          const saveAnswer = el("button", {
+            type: "button",
+            class: "btn-secondary btn-small",
+            text: "Save answer",
+          });
+          saveAnswer.addEventListener(
+            "click",
+            guard(async () => {
+              await ask("review_question_answer", { ref: c.ref, id: q.id, answer: answer.value });
+              state.answerDrafts.delete(draftKey);
+            }),
+          );
+          card.append(
+            el("div", {
+              class: "review-question",
+              text: `${q.id}${q.requirement_id ? ` (${q.requirement_id})` : ""}: ${q.question}`,
+            }),
+            el("div", { class: "review-reqs-line", text: `Why it is asked: ${q.why}` }),
+            answer,
+            saveAnswer,
+          );
+        }
+      }
       for (const ch of c.changes) card.append(changeRow(ch));
       for (const b of c.blocked) if (!inFlightEdit(b)) card.append(blockedRow(c.ref, b));
       box.append(card);
@@ -1274,7 +1315,11 @@ export function initReviewPane({
           .then(refresh)
           .catch((e) => say(e.message, true))
           .finally(render);
-      } else if (msg.event === "change_recorded" || msg.event === "edit_blocked") {
+      } else if (
+        msg.event === "change_recorded" ||
+        msg.event === "edit_blocked" ||
+        msg.event === "comment_noted"
+      ) {
         load()
           .catch((e) => say(e.message, true))
           .finally(render);

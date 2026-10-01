@@ -57,8 +57,12 @@ export const REVIEW_BLOCKED_TOOLS = new Set([
   "office_header_footer",
 ]);
 
+// Tools of a review turn that write the review file and nothing in Word:
+// a question for the author.
+export const REVIEW_NOTE_TOOLS = new Set(["office_ask_author"]);
+
 export function reviewTurnToolAllowed(name) {
-  return REVIEW_READ_TOOLS.has(name) || name === REVIEW_WRITE_TOOL;
+  return REVIEW_READ_TOOLS.has(name) || REVIEW_NOTE_TOOLS.has(name) || name === REVIEW_WRITE_TOOL;
 }
 
 // Wrap the bridge call used by every office/excel tool handler.
@@ -127,6 +131,80 @@ export const trackedEditShape = {
       "In the language the prompt asks for. Facts from the manuscript or the review only; say so when inferring.",
     ),
 };
+
+const commentRef = (what) =>
+  z
+    .string()
+    .regex(/^(?:R\d+|E)\.\d+$/)
+    .describe(`${what} Must be the comment of this turn.`);
+
+export const ASK_AUTHOR_DESCRIPTION =
+  "Review turns only. Ask the author ONE question instead of changing the manuscript, when what the comment needs cannot be told from the manuscript or the review: " +
+  "which of two numbers that differ is right, how something was measured, a statistic that would have to be computed again, a count or a direction that is only in the author's records. " +
+  "The question is kept on the card of the comment; the author's answer comes with the next turn. Do not edit the text the question is about in this turn.";
+
+export const askAuthorShape = {
+  comment_ref: commentRef('Reviewer comment the question belongs to, e.g. "R1.3".'),
+  requirement_id: z
+    .string()
+    .optional()
+    .describe("Id of the listed request the question holds up (q2), when there is one."),
+  question: z
+    .string()
+    .min(1)
+    .describe(
+      "The question, in the language of the rationale. Name the places and the values it is about, so the author can answer without searching.",
+    ),
+  why: z.string().min(1).describe("Why the manuscript and the review cannot answer it."),
+};
+
+// The turn and the request id of a note tool, checked as office_tracked_edit
+// checks them. Returns { error } or { at, ctx }.
+async function noteTurn(deps, tool, args, turn) {
+  if (!turn)
+    return { error: fail(`${tool} works only in a review turn started from the Review tab.`) };
+  if (args.comment_ref !== turn.ref) {
+    return {
+      error: fail(
+        `comment_ref ${args.comment_ref} does not match the comment of this turn ${turn.ref}.`,
+      ),
+    };
+  }
+  const at = deps.begin?.();
+  const ctx = (await deps.getReviewContext?.(turn.ref, at)) ?? {};
+  const known = (ctx.requirements ?? []).map((r) => r.id);
+  if (args.requirement_id != null && !known.includes(args.requirement_id)) {
+    return {
+      error: fail(
+        `Unknown requirement id ${args.requirement_id} for ${turn.ref}. Valid ids: ${known.join(", ") || "(none listed)"}.`,
+      ),
+    };
+  }
+  return { at, ctx };
+}
+
+// office_ask_author. deps: { begin(), getReviewContext(ref),
+// onQuestion({ref, question: {requirement_id, question, why}, at}) -> {id}, log }.
+// The log names the question by id; its text stays in the review file.
+export async function askAuthor(deps, args, turn) {
+  const t = await noteTurn(deps, "office_ask_author", args, turn);
+  if (t.error) return t.error;
+  const saved = await deps.onQuestion({
+    ref: turn.ref,
+    question: {
+      requirement_id: args.requirement_id ?? null,
+      question: args.question,
+      why: args.why,
+    },
+    at: t.at,
+  });
+  deps.log?.(`[review] question ${turn.ref} ${saved.id} requirement=${args.requirement_id ?? "-"}`);
+  return {
+    ok: true,
+    question_id: saved.id,
+    message: `Recorded as ${saved.id} on the card of ${turn.ref}. Leave the text it is about as it is in this turn; the author's answer comes with the next turn.`,
+  };
+}
 
 export const TOOL_COMMENT_PREFIX = /^\s*\[(?:R\d+|E)\.\d+\]/;
 

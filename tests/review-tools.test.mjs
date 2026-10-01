@@ -6,6 +6,7 @@ import {
   REVIEW_READ_TOOLS,
   REVIEW_BLOCKED_TOOLS,
   REVIEW_WRITE_TOOL,
+  REVIEW_NOTE_TOOLS,
   reviewTurnToolAllowed,
   guardedCall,
   trackedEditShape,
@@ -27,10 +28,14 @@ async function registeredWordTools() {
 test("every registered Word tool is classified for review turns", async () => {
   const names = await registeredWordTools();
   const unclassified = names.filter(
-    (n) => !REVIEW_READ_TOOLS.has(n) && !REVIEW_BLOCKED_TOOLS.has(n) && n !== REVIEW_WRITE_TOOL,
+    (n) =>
+      !REVIEW_READ_TOOLS.has(n) &&
+      !REVIEW_BLOCKED_TOOLS.has(n) &&
+      !REVIEW_NOTE_TOOLS.has(n) &&
+      n !== REVIEW_WRITE_TOOL,
   );
   assert.deepEqual(unclassified, []);
-  for (const n of [...REVIEW_READ_TOOLS, ...REVIEW_BLOCKED_TOOLS])
+  for (const n of [...REVIEW_READ_TOOLS, ...REVIEW_BLOCKED_TOOLS, ...REVIEW_NOTE_TOOLS])
     assert.ok(names.includes(n), `${n} is not registered`);
   console.log(
     `classified ${names.length} Word tools: read ${REVIEW_READ_TOOLS.size}, blocked ${REVIEW_BLOCKED_TOOLS.size}`,

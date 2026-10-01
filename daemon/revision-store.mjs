@@ -187,6 +187,21 @@ const Response = z.object({
     .default([]),
 });
 
+// A question the model put to the author instead of settling it with an
+// edit (review-tools.mjs askAuthor): what only the author's records can say.
+// answer: what the author wrote on the card ("" until then). An answer goes
+// into the prompt of every later turn and counts as a source of numbers.
+const Question = z.object({
+  id: z.string().regex(/^a\d+$/),
+  // The listed request the question holds up, when there is one.
+  requirement_id: z.string().nullable().default(null),
+  question: z.string().min(1),
+  why: z.string().default(""),
+  asked_at: z.string(),
+  answer: z.string().default(""),
+  answered_at: z.string().nullable().default(null),
+});
+
 const Comment = z.object({
   // R<reviewer>.<n>; E.<n> is the editor letter with reviewer 0.
   ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
@@ -203,6 +218,7 @@ const Comment = z.object({
   // comment (see "id counters" below). null: a file from before the counters.
   requirement_seq: z.number().int().nonnegative().nullable().default(null),
   blocked_seq: z.number().int().nonnegative().nullable().default(null),
+  questions: z.array(Question).default([]),
   // The answer in the response letter, and the author's decision not to
   // change anything for this comment.
   response: Response.nullable().default(null),
@@ -463,6 +479,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       blocked_seq: old ? blockedSeq(old) : 0,
       response: old ? clone(old.response ?? null) : null,
       declined: old ? clone(old.declined ?? null) : null,
+      questions: old ? clone(old.questions ?? []) : [],
     });
     const row = list[list.length - 1];
     row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });
@@ -591,6 +608,50 @@ export function setRequirements(rev, ref, texts) {
   c.requirement_seq = requirementSeq({ ...c, requirement_seq: seq });
   return next;
 }
+
+// A question for the author under a comment: ids a1, a2, ... in the order
+// asked (questions are never removed, so the next id is the count plus one
+// and no counter is kept). The same question asked again while it has no
+// answer gives the row that is there.
+export function addQuestion(
+  rev,
+  ref,
+  { requirement_id = null, question, why = "" },
+  now = new Date(),
+) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  c.questions ??= [];
+  const text = String(question ?? "").trim();
+  const same = c.questions.find((q) => !q.answer && q.question === text);
+  if (same) return { revision: next, question: same };
+  const row = Question.parse({
+    id: `a${nextNumber(
+      c.questions.map((q) => q.id),
+      "a",
+    )}`,
+    requirement_id: requirement_id ?? null,
+    question: text,
+    why: String(why ?? "").trim(),
+    asked_at: now.toISOString(),
+  });
+  c.questions.push(row);
+  return { revision: next, question: row };
+}
+
+// The author's answer to a question; an empty one takes the answer back.
+export function answerQuestion(rev, ref, id, answer, now = new Date()) {
+  const next = clone(rev);
+  const q = (requireComment(next, ref).questions ?? []).find((x) => x.id === id);
+  if (!q) throw new Error(`No question ${id} under ${ref}`);
+  q.answer = String(answer ?? "").trim();
+  q.answered_at = q.answer ? now.toISOString() : null;
+  return next;
+}
+
+// What the author answered, anywhere in the review.
+export const authorAnswers = (rev) =>
+  (rev?.comments ?? []).flatMap((c) => (c.questions ?? []).map((q) => q.answer).filter(Boolean));
 
 export function setCommentStatus(rev, ref, status) {
   const next = clone(rev);

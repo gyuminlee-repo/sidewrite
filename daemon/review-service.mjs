@@ -4,7 +4,7 @@
 // Messages (task pane -> daemon, reply type is `<type>_result` with the same
 // request_id, the existing sendRequest pattern in taskpane.js):
 //   review_load, review_split, review_save_comments, review_set_status,
-//   review_set_requirements, review_preview, review_propose, review_refresh,
+//   review_set_requirements, review_question_answer, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
 //   review_comment_text, review_comment_set,
 //   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
@@ -57,6 +57,9 @@ import {
   dismissExternal,
   markCommentsCleaned,
   setChangeComment,
+  addQuestion,
+  answerQuestion,
+  authorAnswers,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -452,6 +455,9 @@ export function createReviewService({
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
           comment_ids: recordedCommentIds(rev),
+          // What the author answered to questions of this review: a source
+          // of numbers for an edit, like the comment.
+          author_texts: authorAnswers(rev),
           recent_changes: since
             ? rev.comments
                 .flatMap((x) => x.changes)
@@ -505,6 +511,18 @@ export function createReviewService({
         });
         await linkReceipt(d, key, ref, comment, saved);
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
+        return saved;
+      },
+      // office_ask_author: the question goes under the comment and the pane
+      // loads the file again.
+      onQuestion: async ({ ref, question, at: d = at(key) }) => {
+        let saved = null;
+        await update(d, (rev) => {
+          const r = addQuestion(withComment(d, rev, ref), ref, question);
+          saved = r.question;
+          return r.revision;
+        });
+        sendEvent(key, { type: "review_event", event: "comment_noted", ref });
         return saved;
       },
       // blocked_id: the approved exception the edit came from (its item is
@@ -795,6 +813,13 @@ export function createReviewService({
       const d = at(key);
       const texts = Array.isArray(msg.requirements) ? msg.requirements : [];
       return { revision: await update(d, (rev) => setRequirements(rev, msg.ref, texts)) };
+    },
+    // The author's answer to a question of the model (the card of the comment).
+    async review_question_answer(msg, key) {
+      const d = at(key);
+      return {
+        revision: await update(d, (rev) => answerQuestion(rev, msg.ref, msg.id, msg.answer)),
+      };
     },
     async review_preview(msg, key) {
       const d = at(key);

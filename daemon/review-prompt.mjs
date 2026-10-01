@@ -28,6 +28,8 @@ export const REVIEW_RULES = [
   "Write the rationale in {lang}: what = what you changed, why = why, addresses = which part of the comment it answers.",
   "If office_tracked_edit returns blocked_by, do not retry the same wording. Rephrase without the forbidden expression, or stop and explain.",
   "Follow every author instruction below. They are decisions the author already made.",
+  // Appended, never inserted: POLICY_PACKS names rules by index.
+  "What only the author can know is asked, not guessed: a number that differs between two places, how something was measured, a statistic that would have to be computed again, a count or a direction that is in the author's records and not in the manuscript. Do not settle it with an edit. Call office_ask_author with the question and why the manuscript cannot answer it, and leave that text as it is. An edit that puts a number into the manuscript that nothing gives is refused.",
 ];
 
 // The fence of one prompt: a string that is not in the comment, so no line
@@ -269,6 +271,32 @@ export function buildReviewPrompt({
   lines.push("", "Author instructions:");
   if (instructions.length) for (const i of instructions) lines.push(`- [${i.id}] ${i.text}`);
   else lines.push("- (none)");
+  // What the author answered when asked (office_ask_author), anywhere in the
+  // review, and what was asked for this comment and has no answer yet.
+  const byRef = new Map([...others, comment].map((c) => [c.ref, c]));
+  const answers = [...byRef.values()].flatMap((c) =>
+    (c.questions ?? []).filter((q) => q.answer).map((q) => ({ ref: c.ref, ...q })),
+  );
+  const one = (t) =>
+    String(t ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+  if (answers.length) {
+    lines.push(
+      "",
+      "Author answers (what the author said when asked; they hold like author instructions, and a number in them may be written):",
+    );
+    for (const q of answers)
+      lines.push(`- [${q.ref} ${q.id}] ${one(q.question)} Answer: ${one(q.answer)}`);
+  }
+  const waiting = (comment.questions ?? []).filter((q) => !q.answer);
+  if (waiting.length) {
+    lines.push(
+      "",
+      "Asked for this comment and not answered yet (do not ask again; leave the text they are about as it is):",
+    );
+    for (const q of waiting) lines.push(`- [${q.id}] ${one(q.question)}`);
+  }
   lines.push("", "Forbidden (an edit containing these is refused before it is applied):");
   if (forbids.length) for (const i of forbids) lines.push(`- [${i.id}] ${i.text}`);
   else lines.push("- (none listed)");

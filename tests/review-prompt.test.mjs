@@ -159,10 +159,11 @@ test("formatPromptLog names the section when the comment has one", () => {
 
 // ---- policy packs: rules 2 to 4 are a pack a journal profile can switch off
 
-test("without a profile every rule is in the prompt, numbered 1 to 7", () => {
+test("without a profile every rule is in the prompt, numbered from 1", () => {
   const { text } = buildReviewPrompt({ comment, ledger });
   assert.equal(rulesFor({}).length, REVIEW_RULES.length);
   assert.match(text, /\n7\. Follow every author instruction below/);
+  assert.equal(text.match(/^\d+\. /gm).length, REVIEW_RULES.length);
 });
 
 test("a profile that switches the review_scope pack off drops rules 2 to 4 and renumbers", () => {
@@ -174,9 +175,13 @@ test("a profile that switches the review_scope pack off drops rules 2 to 4 and r
   assert.doesNotMatch(text, /Base every change/);
   assert.match(text, /\n1\. Change the manuscript only with office_tracked_edit/);
   assert.match(text, /\n4\. Follow every author instruction below/);
-  assert.doesNotMatch(text, /\n5\. /);
+  // The rules after the pack (how the tool works) all stay.
+  assert.equal(text.match(/^\d+\. /gm).length, REVIEW_RULES.length - 3);
   // Any other value keeps the pack; an unknown pack name changes nothing.
-  assert.equal(rulesFor({ policy_packs: { review_scope: true, other: false } }).length, 7);
+  assert.equal(
+    rulesFor({ policy_packs: { review_scope: true, other: false } }).length,
+    REVIEW_RULES.length,
+  );
 });
 
 test("the rationale language is the one given; the default names no particular reader", () => {
