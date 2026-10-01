@@ -404,7 +404,7 @@ export function pendingDecisions(revision) {
       requirements.push({
         ref: c.ref,
         id: r.id,
-        text: `${c.ref} ${r.id} has no change: ${r.text}`,
+        text: `${c.ref}${c.section ? ` (${c.section})` : ""} ${r.id} has no change: ${r.text}`,
       });
     }
   }

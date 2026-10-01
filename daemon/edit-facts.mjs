@@ -1,5 +1,5 @@
 // What an office_tracked_edit removes, adds, and how small it can be.
-// Pure: no Office.js, no I/O. Lessons L1-L3 of earlier revision sessions:
+// Pure: no Office.js, no I/O. Checks L1-L3 against common failure modes of LLM-assisted revisions:
 //   L1 lostFacts: numbers (with units), versions, text in parentheses and
 //      capitalized name candidates that are in the deleted text and not in
 //      the replacement.

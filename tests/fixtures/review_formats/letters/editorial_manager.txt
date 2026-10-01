@@ -1,0 +1,32 @@
+Ms. Ref. No.: EX-D-26-00001
+Title: An invented manuscript
+Journal of Examples
+
+Dear Dr. Author,
+
+The reviewers have commented on your paper. Please revise it within 60 days.
+
+Comments from the editors and reviewers:
+
+Reviewer #1: The paper reports a growth assay in shaken flasks.
+
+Major comments
+1. The carbon source is called novel without support. Please remove the claim or cite earlier work.
+2. Please add:
+1. the optical density at inoculation
+2. the wavelength
+3. The growth rate of 2.5 per day is not credible.
+2.5 mM substrate cannot support it.
+
+Minor comments
+1. Line 45: "cell-free extract" should be "clarified lysate".
+2. Fig. 3 has no scale bar.
+
+Reviewer #2: Comments to the Author
+- The flask supplier does not need to be named.
+- Please state the antifoam concentration.
+
+Kind regards,
+The Editorial Office
+
+In compliance with data protection regulations, you may request that we remove your personal registration details at any time.

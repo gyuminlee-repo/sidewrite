@@ -1,0 +1,102 @@
+{
+  "note": "Whole decision letters in letters/*.txt. The head lines follow the layouts of ScholarOne, Editorial Manager, MDPI, Nature-style review files and a questionnaire letter; every sentence is invented.",
+  "letters": [
+    {
+      "file": "scholarone.txt",
+      "refs": ["E.1", "E.2", "R1.0", "R1.1", "R1.2", "R1.3", "R2.1"],
+      "texts": {
+        "E.2": "Please shorten the abstract to 200 words.",
+        "R1.0": "The manuscript describes a growth assay. The work is clear but the methods need detail.",
+        "R1.2": "Report the number of replicates in Table\n2. The legend does not give it.",
+        "R1.3": "Please add the following to the Methods:\n   a) the strain\n   b) the medium",
+        "R2.1": "The study is sound. I recommend adding error bars to Fig. 2 and naming the antifoam agent."
+      },
+      "sections": {},
+      "strong": true
+    },
+    {
+      "file": "editorial_manager.txt",
+      "refs": ["E.1", "R1.0", "R1.1", "R1.2", "R1.3", "R1.4", "R1.5", "R2.1", "R2.2", "E.2"],
+      "texts": {
+        "R1.0": "The paper reports a growth assay in shaken flasks.",
+        "R1.2": "Please add:\n1. the optical density at inoculation\n2. the wavelength",
+        "R1.3": "The growth rate of 2.5 per day is not credible.\n2.5 mM substrate cannot support it.",
+        "R1.4": "Line 45: \"cell-free extract\" should be \"clarified lysate\".",
+        "R2.2": "Please state the antifoam concentration.",
+        "E.2": "Kind regards,\nThe Editorial Office\n\nIn compliance with data protection regulations, you may request that we remove your personal registration details at any time."
+      },
+      "sections": {
+        "R1.1": "Major comments",
+        "R1.2": "Major comments",
+        "R1.3": "Major comments",
+        "R1.4": "Minor comments",
+        "R1.5": "Minor comments"
+      },
+      "strong": true
+    },
+    {
+      "file": "mdpi.txt",
+      "refs": ["E.1", "R1.0", "R1.1", "R1.2", "R2.1", "R2.2", "R2.3", "E.2", "E.3"],
+      "texts": {
+        "E.1": "Round 1",
+        "R1.0": "The manuscript is within the scope of the journal.",
+        "R1.2": "The term \"cell-free extract\" is misleading.\nCentrifugation alone does not remove every cell.",
+        "R2.3": "Page 4, line 88: add the antifoam concentration.",
+        "E.2": "Please add a data availability statement.",
+        "E.3": "Please check the reference format."
+      },
+      "sections": {},
+      "strong": true
+    },
+    {
+      "file": "nature_style.txt",
+      "refs": ["R1.1", "R1.2", "R1.3", "R2.1", "R2.2", "R2.3", "R3.1"],
+      "texts": {
+        "R1.1": "The authors follow growth on a synthetic carbon source. The data are of interest.",
+        "R2.1": "Add error bars to Fig. 2.",
+        "R3.1": "I have no further requests. The revision can be accepted once the units are added."
+      },
+      "sections": {
+        "R2.1": "Specific comments",
+        "R2.2": "Specific comments",
+        "R2.3": "Specific comments"
+      },
+      "strong": true
+    },
+    {
+      "file": "korean.txt",
+      "refs": ["E.1", "E.2", "R1.0", "R1.1", "R1.2", "R1.3", "R2.1", "R2.2"],
+      "texts": {
+        "E.2": "초록을 200단어 이내로 줄여 주십시오.",
+        "R1.0": "본 논문은 플라스크 배양에서의 생장 측정을 다루고 있습니다.",
+        "R1.3": "Figure 2에 오차 막대를 추가해 주십시오.",
+        "R2.2": "플라스크 구입처 문장은 삭제해 주십시오."
+      },
+      "sections": {
+        "R1.1": "주요 의견",
+        "R1.2": "주요 의견",
+        "R1.3": "세부 의견"
+      },
+      "strong": true
+    },
+    {
+      "file": "questionnaire.txt",
+      "refs": ["E.1", "E.2", "E.3", "E.4", "E.5", "R1.0", "R1.1", "R1.2", "R1.3", "R2.1", "E.6"],
+      "texts": {
+        "E.2": "Reviewer's Responses to Questions\n\nComments to the Author\n\n1. Is the work technically sound, and do the data support the conclusions?\n\nReviewer #1: Partly\n\nReviewer #2: Yes",
+        "E.3": "2. Has the statistical analysis been done appropriately?\n\nReviewer #1: No\n\nReviewer #2: Yes",
+        "E.5": "4. Review Comments to the Author\n\nPlease use the space below to explain your answers to the questions above.",
+        "R1.0": "The manuscript reports a growth assay in shaken flasks.",
+        "R1.3": "The unit of the incubation temperature is missing.",
+        "R2.1": "The study is sound. I have only one request: please add error bars to Fig. 2.",
+        "E.6": "5. Do you want your name to be public for this review?\n\nReviewer #1: No\n\nReviewer #2: Yes: A. Reviewer\n\n[NOTE: If a reviewer sent comments as a file, the file is attached to this email.]"
+      },
+      "sections": {
+        "R1.1": "Major",
+        "R1.2": "Major",
+        "R1.3": "Minor"
+      },
+      "strong": true
+    }
+  ]
+}
