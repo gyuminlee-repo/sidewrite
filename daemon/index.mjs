@@ -36,6 +36,7 @@ import { chatOneshot } from "./providers/openai-compat.mjs";
 import { codexOneshot } from "./providers/codex.mjs";
 import { agyOneshot } from "./providers/agy.mjs";
 import { proposalTurnsFor } from "./proposal-turns.mjs";
+import { createTurnState, CLAUDE, PROPOSAL } from "./turn-state.mjs";
 import { presetById } from "./providers/registry.mjs";
 import {
   buildQueryOptions,
@@ -295,13 +296,16 @@ const workspaceByKey = new Map();
 // Panes whose workspace the user set explicitly (Change workspace). Their
 // workspace must NOT be re-derived from the document folder on reconnect.
 const explicitWorkspaceKeys = new Set();
-// Panes with a turn in flight (a user_message or a review turn was queued
-// and no result/stop/stream end has come back yet). A review turn is only
-// started on an idle pane, so the SDK cannot fold it into a running turn.
-const turnBusy = new Set();
-// paneKey -> { ref } while a Review-tab turn runs. office-tools.mjs reads it
-// to refuse every document writer except office_tracked_edit.
-const reviewTurnByKey = new Map();
+// The turn of each pane and its owner (turn-state.mjs): a user_message or
+// a review turn was queued and no result/stop/stream end has come back yet.
+// A review turn is only started on an idle pane, so the SDK cannot fold it
+// into a running turn. A Review-tab turn carries { ref }; office-tools.mjs
+// reads it to refuse every document writer except office_tracked_edit. The
+// Claude session ends its own turns only: a restart of it leaves a proposal
+// turn, which the runner ends.
+const turnState = createTurnState({
+  onReviewTurnEnded: (key, turn, outcome) => review.turnEnded(key, turn, outcome),
+});
 // Per-pane sticky model choice (set by the taskpane composer). The SDK
 // model is fixed per agent loop, so a change while a loop is live triggers
 // a resuming restart (see the set_model handler).
@@ -560,13 +564,12 @@ const review = createReviewService({
   getContext: (key) => bridge.getContext(key),
   callTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key),
   pushTurn: (key, host, text, turn) => {
-    if (turnBusy.has(key)) {
+    if (turnState.busy(key)) {
       throw new Error(
         "The agent is still working on the previous message. Wait until it is Ready.",
       );
     }
-    turnBusy.add(key);
-    reviewTurnByKey.set(key, turn);
+    turnState.begin(key, turn.choice ? PROPOSAL : CLAUDE, turn);
     // turn.choice: the provider of a proposal turn, as the review service
     // read it for this request (proposalPreview below). Without one the
     // turn is Claude's: the pane's Agent SDK session.
@@ -590,7 +593,7 @@ const review = createReviewService({
         const error = e?.message ?? String(e);
         bridge.sendAssistantEvent({ event: "error", error }, key);
         bridge.sendAssistantEvent({ event: "turn_complete", subtype: "error" }, key);
-        endTurnState(key, { ok: false, error });
+        turnState.end(key, PROPOSAL, { ok: false, error });
       });
   },
   // How the pane's provider runs a review turn (registry.mjs turnMode).
@@ -619,16 +622,12 @@ const review = createReviewService({
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
 });
 
-// Clear per-turn state when a turn ends for any reason. outcome: how it
-// ended ({ ok: true } or { ok: false, error }); a review turn's turn_done
-// carries it to the task pane.
+// A turn of the pane's Claude session ended, for any reason. outcome: how
+// it ended ({ ok: true } or { ok: false, error }); a review turn's turn_done
+// carries it to the task pane. A proposal turn running in the pane is not
+// the session's and is left alone.
 function endTurnState(key, outcome = { ok: true }) {
-  turnBusy.delete(key);
-  const turn = reviewTurnByKey.get(key);
-  if (turn) {
-    reviewTurnByKey.delete(key);
-    review.turnEnded(key, turn, outcome);
-  }
+  turnState.end(key, CLAUDE, outcome);
 }
 
 // ---------------------------------------------------------------------------
@@ -640,7 +639,7 @@ const bridge = createBridge({
   allowedOrigins: [HTTP_ORIGIN],
   onHello: (key, host, doc) => onPaneConnect(key, host, doc),
   onUserMessage: (key, host) => {
-    turnBusy.add(key);
+    turnState.begin(key, CLAUDE);
     return ensureLoopForMessage(key, host);
   },
   onClose: (key) => onPaneClose(key),
@@ -919,7 +918,7 @@ const proposalTurns = proposalTurnsFor({
   bridge,
   review,
   router: oneshotRouter,
-  endTurn: (key, outcome) => endTurnState(key, outcome),
+  endTurn: (key, outcome) => turnState.end(key, PROPOSAL, outcome),
 });
 
 // ---------------------------------------------------------------------------
@@ -1260,7 +1259,7 @@ async function startSessionForFolder(
   // is created lazily on the first user message (onUserMessage →
   // ensureLoopForMessage), so `host` is normally "word" or "excel".
   const officeMcp = createOfficeBridgeMcp(bridge, host, key, {
-    getReviewTurn: () => reviewTurnByKey.get(key) ?? null,
+    getReviewTurn: () => turnState.reviewTurn(key, CLAUDE),
     trackedEdit: review.trackedEditDeps(key),
   });
 

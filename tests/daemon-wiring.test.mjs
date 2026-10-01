@@ -110,7 +110,7 @@ test("a restart that keeps waiting input does not drop it or end its turn", () =
 test("a review turn of a proposing provider goes to the proposal runner; Stop and shutdown reach it", () => {
   assert.match(
     code,
-    /const proposalTurns = proposalTurnsFor\(\{\s*bridge,\s*review,\s*router: oneshotRouter,\s*endTurn: \(key, outcome\) => endTurnState\(key, outcome\),?\s*\}\);/,
+    /const proposalTurns = proposalTurnsFor\(\{\s*bridge,\s*review,\s*router: oneshotRouter,\s*endTurn: \(key, outcome\) => turnState\.end\(key, PROPOSAL, outcome\),?\s*\}\);/,
   );
   // The mode is read from the registry, for the choice of the pane.
   const dep = code.slice(code.indexOf("proposalPreview: async (key, ref, source) =>"));
