@@ -88,6 +88,9 @@ const SEPARATOR = /^\s*[*_=\-]{5,}\s*$/;
 
 // A short label line of the reviewer's own ("Abstract:", "Methods:").
 const SHORT_LABEL = /^\s*([^\s:.!?,;][^:.!?,;]{0,38}):\s*$/;
+// The name of a manuscript part: a label also with no blank line before it.
+const PART_NAME =
+  /^(?:Title|Abstract|Summary|Keywords|Introduction|Background|(?:Materials\s+and\s+)?Methods|Experimental(?:\s+section)?|Results(?:\s+and\s+Discussion)?|Discussion|Conclusions?|References|Figures?|Tables?|Supplementary(?:\s+(?:materials?|information))?|\uC81C\uBAA9|\uCD08\uB85D|\uC11C\uB860|\uBC29\uBC95|\uACB0\uACFC|\uACE0\uCC30|\uACB0\uB860|\uCC38\uACE0\uBB38\uD5CC)$/i;
 
 const QUOTE = /^\s*(?:>\s?)+/;
 
@@ -324,12 +327,15 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   }, []);
 
   // A short label line: after a blank line or the block head, before a head.
+  // The name of a manuscript part needs no blank line, unless the line
+  // before it ends inside a sentence ("... are missing in the").
   const isHead = (i) => ["comment", "list", "line", "bullet"].some((k) => re[k].test(txt(i)));
   const shortLabel = (b, k) => {
     const i = b.idx[k];
     const m = i === b.head ? null : SHORT_LABEL.exec(txt(i));
     if (!m || m[1].trim().split(/\s+/).length > 3 || isHead(i)) return null;
-    if (k > 0 && over[b.idx[k - 1]].trim()) return null;
+    const before = k > 0 ? txt(b.idx[k - 1]) : "";
+    if (before.trim() && !(PART_NAME.test(m[1].trim()) && !WRAP_END.test(before))) return null;
     const next = b.idx.slice(k + 1).find((j) => over[j].trim());
     return next !== undefined && isHead(next) ? m[1].trim() : null;
   };
