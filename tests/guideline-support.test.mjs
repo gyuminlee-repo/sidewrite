@@ -12,6 +12,8 @@ import {
   candidatesFromLabels,
   CLAUSE_BREAKS,
   DIRECTION,
+  ORDER_DOUBT,
+  ORDER_KEEPS,
   SECTION_TERMS,
   SECTION_PATTERNS,
   UNIT_WORDS,
@@ -352,5 +354,128 @@ test("the clause breaks are a list the code reads; each one separates two sectio
     );
     assert.equal(kind(both(` ${word} `), words("methods", { max: 250 })), "llm", word);
     assert.equal(kind(both(` x${word}x `), words("abstract", { max: 250 })), "llm", word);
+  }
+});
+
+// ---- the order of sections
+//
+// The order the model gives must be the order in which the sentence names the
+// sections, and the sentence must have no word after which that order may not
+// be the required one.
+
+const order = (...names) => ({ target: "section_order", order: names });
+const PLAIN = "Arrange the text as Methods, then Results.";
+const FULL =
+  "The manuscript should be organised in the following order: Introduction, Materials and Methods, Results, Discussion.";
+
+const IN_ORDER = [
+  [PLAIN, order("methods", "results")],
+  [FULL, order("introduction", "methods", "results", "discussion")],
+  [FULL, order("introduction", "discussion")],
+  [
+    "The Introduction is followed by the Methods and the Results.",
+    order("introduction", "methods", "results"),
+  ],
+  [
+    "Structure the paper as follows: Background, Methods, Results.",
+    order("introduction", "methods", "results"),
+  ],
+  // A section named twice counts where it is named first.
+  [
+    "Arrange the text as Methods, then Results; the Methods are short.",
+    order("methods", "results"),
+  ],
+  // "hereafter" and "Notes" hold "after" and "not", but not as words.
+  ["Arrange the text hereafter as Methods, then Results.", order("methods", "results")],
+  ["Notes: Methods, then Results.", order("methods", "results")],
+];
+
+const NOT_IN_ORDER = {
+  "the reverse of the order in the sentence": [PLAIN, order("results", "methods"), /order/],
+  "two of four sections swapped": [FULL, order("introduction", "results", "methods"), /order/],
+  "follow, in the order the sentence means": [
+    "Results should follow Methods.",
+    order("methods", "results"),
+    /"follow"/,
+  ],
+  "follow, in the order of appearance": [
+    "Results should follow Methods.",
+    order("results", "methods"),
+    /"follow"/,
+  ],
+  "after, as it reads": [
+    "The Methods come after the Results.",
+    order("methods", "results"),
+    /"after"/,
+  ],
+  "after, as it means": [
+    "The Methods come after the Results.",
+    order("results", "methods"),
+    /"after"/,
+  ],
+  "preceded by": [
+    "The Results are preceded by the Methods.",
+    order("results", "methods"),
+    /"preceded"/,
+  ],
+  "before at the start": [
+    "Before the Results, describe the Methods.",
+    order("results", "methods"),
+    /"before"/,
+  ],
+  "a negation": [
+    "The Methods must not come ahead of the Results.",
+    order("methods", "results"),
+    /"not"/,
+  ],
+  "first and last": [
+    "Place the Results last and the Methods first.",
+    order("results", "methods"),
+    /"(?:first|last)"/,
+  ],
+  "section names inside other words": [
+    "Arrange the methodsless text as resultsets.",
+    order("methods", "results"),
+    /not in the sentence/,
+  ],
+};
+
+test("section order: at least five cases the code must accept and five it must not", () => {
+  assert.ok(IN_ORDER.length >= 5 && Object.keys(NOT_IN_ORDER).length >= 5);
+});
+
+for (const [sentence, rule] of IN_ORDER) {
+  test(`a section order stands: ${rule.order.join(" < ")} in ${JSON.stringify(sentence)}`, () => {
+    const r = one(sentence, rule);
+    assert.deepEqual(r.warnings, []);
+    assert.deepEqual(r.candidates[0].check, { type: "count", ...rule });
+  });
+}
+
+for (const [name, [sentence, rule, why]] of Object.entries(NOT_IN_ORDER)) {
+  test(`no section order from ${name}`, () => {
+    const r = one(sentence, rule);
+    assert.deepEqual(r.candidates[0].check, { type: "llm" });
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0], /^s1: /);
+    assert.match(r.warnings[0], why);
+  });
+}
+
+test("the words that put the order in doubt are a list the code reads; each one works, and only as a whole word", () => {
+  assert.ok(ORDER_DOUBT.length >= 5 && ORDER_KEEPS.length >= 2);
+  const rule = order("methods", "results");
+  for (const word of ORDER_DOUBT) {
+    assert.equal(kind(`Methods, then Results (${word}).`, rule), "llm", word);
+    assert.equal(kind(`Methods, then Results (${word.toUpperCase()}).`, rule), "llm", word);
+    assert.equal(kind(`Methods, then Results (x${word}x).`, rule), "count", word);
+  }
+  // A phrase that keeps the order holds a doubt word and is still accepted.
+  for (const phrase of ORDER_KEEPS) {
+    assert.ok(
+      ORDER_DOUBT.some((word) => phrase.split(" ").includes(word)),
+      phrase,
+    );
+    assert.equal(kind(`Methods, then Results (${phrase}).`, rule), "count", phrase);
   }
 });

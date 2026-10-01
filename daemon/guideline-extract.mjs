@@ -168,6 +168,43 @@ export const CLAUSE_BREAKS = {
   words: ["and", "but", "while", "whereas", "or"],
 };
 
+// When is a section order confirmed? The sentence names every section of the
+// order, the order given is the order in which the sentence first names them,
+// and the sentence has none of the words below. After such a word the order of
+// naming may not be the order asked for ("Results should follow Methods",
+// "Before the Results, describe the Methods", "Methods last"), or the sentence
+// forbids or offers a choice instead of asking. Telling these apart needs the
+// grammar of the sentence, so the sentence stays a model-checked rule. The
+// phrases in ORDER_KEEPS hold such a word and keep the order of naming; they
+// are taken out before the words are looked for.
+export const ORDER_DOUBT = [
+  "after",
+  "before",
+  "behind",
+  "follow",
+  "follows",
+  "followed",
+  "following",
+  "precede",
+  "precedes",
+  "preceded",
+  "preceding",
+  "first",
+  "last",
+  "beginning",
+  "end",
+  "not",
+  "never",
+  "no",
+  "nor",
+  "or",
+  "either",
+  "except",
+  "unless",
+  "without",
+];
+export const ORDER_KEEPS = ["followed by", "the following", "as follows"];
+
 // The words that name what each target counts. A number other than 1 needs
 // the plural ("6 figure panels" does not count figures).
 export const UNIT_WORDS = {
@@ -347,7 +384,19 @@ function unsupported(rule, sentence) {
   const lower = sentence.toLowerCase();
   if (rule.target === "section_order") {
     const absent = rule.order.filter((name) => !sectionNamed(name, lower));
-    return absent.length ? `section ${absent.join(", ")} is not in the sentence` : null;
+    if (absent.length) return `section ${absent.join(", ")} is not in the sentence`;
+    const plain = lower.replace(new RegExp(`(?<![a-z])(?:${alt(ORDER_KEEPS)})(?![a-z])`, "g"), " ");
+    const doubt = wholeWord(ORDER_DOUBT).exec(plain);
+    if (doubt) {
+      return `the sentence has "${doubt[0]}", so the order in which it names the sections may not be the order it asks for`;
+    }
+    const first = (name) => sectionMentions(lower).find((x) => x.section === name).start;
+    const inOrder = rule.order.every(
+      (name, i) => i === 0 || first(rule.order[i - 1]) < first(name),
+    );
+    return inOrder
+      ? null
+      : `the sentence does not name the sections in the order ${rule.order.join(", ")}`;
   }
   const spans = numberSpans(sentence);
   for (const n of [rule.min, rule.max]) {
