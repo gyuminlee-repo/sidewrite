@@ -4,6 +4,8 @@
 import { randomBytes } from "node:crypto";
 import { inManuscriptScope } from "./ledger-check.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
+// One implementation for the prompt and for the card of the task pane.
+import { termBlock } from "../taskpane/shared/named-terms.js";
 
 // Rules 2 to 4 are a policy pack ("review_scope": keep to what the reviewer
 // asked, no revision history in the manuscript, facts only). A journal
@@ -21,7 +23,7 @@ export function rulesFor(profile = {}) {
 }
 
 export const REVIEW_RULES = [
-  "Change the manuscript only with office_tracked_edit, one call per change. Every other document-writing tool is disabled in this turn.",
+  "Change the manuscript only with office_tracked_edit, one call per change (or office_tracked_rewrite for a whole paragraph). Every other document-writing tool is disabled in this turn.",
   "Make only the changes this comment asks for. Do not delete or add anything the reviewer did not request.",
   'Do not write the revision history into the manuscript (no "as suggested by the reviewer", no "in this revised version"). That belongs in the response letter only.',
   "Base every change and every rationale on facts in the manuscript or the review. If a rationale is an inference, say so.",
@@ -31,6 +33,9 @@ export const REVIEW_RULES = [
   // Appended, never inserted: POLICY_PACKS names rules by index.
   "What only the author can know is asked, not guessed: a number that differs between two places, how something was measured, a statistic that would have to be computed again, a count or a direction that is in the author's records and not in the manuscript. Do not settle it with an edit. Call office_ask_author with the question and why the manuscript cannot answer it, and leave that text as it is. An edit that puts a number into the manuscript that nothing gives is refused.",
   "Do not pass over a request in silence. Each one ends the turn as a change that names its id, as a question to the author (office_ask_author with its id), or as a note that it belongs to another file (office_requirement_outside with its id). What is left with none of these stays open on the card of the author.",
+  "When three or more places of one paragraph have to change, or the argument of the paragraph changes, do not patch it sentence by sentence: write the paragraph anew and send it with office_tracked_rewrite (its paragraph id and the whole new text; only the words that differ become tracked changes). Start from the paragraph as it reads now, with the pending changes of other comments in it, and keep what you do not mean to change word for word. One or two words in a paragraph stay with office_tracked_edit.",
+  'The reviewer\'s own words come first. For each term listed under "Terms this comment names", go to every place given, headings, figure and table legends and the methods included, and change it there, or name the place and the reason it stays in your end report.',
+  'Tell apart what is not in this file from what only the author knows. What the comment asks of a figure file, the supplementary material, the title page, the response letter or any other file is declared with office_requirement_outside: it is not a question. Use office_ask_author only for what the author\'s records or judgement must settle. A request the reviewer made conditional ("unless it was verified", "if this was controlled for") is not decided by you: ask whether the condition holds; that the manuscript does not mention it settles nothing.',
   "A claim you change for this comment is changed everywhere the manuscript makes it: abstract, introduction, results, discussion, conclusion, headings, figure and table legends. That is part of what the comment asks for. Before the turn ends, look through the manuscript for the same claim and the same term, and change those places too (each with its own office_tracked_edit) or name them in your answer.",
   'When the reviewer says a claim does not hold, is not supported, or should be removed or not made, take the claim out or rewrite it as what was observed. Do not keep the claim and put a caveat next to it ("although this was not measured"): no sentence and no paragraph may state a claim and its denial together. Write a limitation, or an experiment that was not done, into the manuscript only when the reviewer asks for that.',
   'Before you end the turn, check: every request has a change, a question or a note; no changed paragraph states a claim and its denial together; the term you changed is not left elsewhere without being named. End your answer with the line "Same term still at: " followed by the ids of the paragraphs where it is left, or "none".',
@@ -268,6 +273,9 @@ export function buildReviewPrompt({
       "",
     );
   }
+  // The terms the comment names, with every paragraph that holds them now.
+  const terms = termBlock(comment, manuscript?.paragraphs ?? [], manuscript?.ids ?? null);
+  if (terms.length) lines.push(...terms, "");
   const overview = reviewOverview(others, comment.ref);
   if (overview.lines.length) lines.push(...overview.lines, "");
   if (paragraphs.length) {
@@ -333,6 +341,21 @@ export function buildReviewPrompt({
       hashes: paper.hashes,
     },
   };
+}
+
+// The paragraphs a turn named in the last line the rules ask for ("Same
+// term still at: p4, p7" or "none"): the ids of that line that the
+// manuscript of the last status refresh has, each once. snapshot:
+// { paragraphs, ids }. No such line, or none named: [].
+export function sameTermReport(text, snapshot) {
+  const lines = [...String(text ?? "").matchAll(/^[*_\s]*Same term still at:[*_\s]*(.*)$/gim)];
+  if (!lines.length) return [];
+  const n = snapshot?.paragraphs?.length ?? 0;
+  const known = new Set(
+    Array.from({ length: n }, (_, i) => snapshot?.ids?.[i] ?? `p${i}`).filter(Boolean),
+  );
+  const tokens = lines.at(-1)[1].match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  return [...new Set(tokens.filter((t) => known.has(t)))];
 }
 
 export function formatPromptLog(ref, built, { paragraphs = 0, preview = false } = {}) {

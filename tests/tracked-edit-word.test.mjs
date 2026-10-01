@@ -19,6 +19,12 @@ function fakeWord({
   error = () => new Error("GeneralException: sync"),
   // Comments already in the paragraph, on other words than this edit.
   comments = [],
+  // What the paragraph holds besides text: counts of fields, inline
+  // pictures, footnotes. noPlainApi: this Word cannot list them.
+  fields = 0,
+  pictures = 0,
+  footnotes = 0,
+  noPlainApi = false,
 } = {}) {
   const state = {
     applied: false,
@@ -71,6 +77,19 @@ function fakeWord({
     getReviewedText: () => ({ value: text }),
   });
   para = { ...range(PARA), uniqueLocalId: "P1", style: "Normal" };
+  const things = (n) => ({
+    items: Array.from({ length: n }, () => ({})),
+    load() {
+      if (noPlainApi) throw new Error("ApiNotFound");
+    },
+  });
+  Object.assign(para, {
+    fields: things(fields),
+    inlinePictures: things(pictures),
+    footnotes: things(footnotes),
+    endnotes: things(0),
+    contentControls: things(0),
+  });
   const document = {
     load() {},
     getSelection: () => ({ select() {} }),
@@ -276,4 +295,47 @@ test("the second try does not take the comment of another change for its own", a
   s = fakeWord({ failAfter: ({ kinds }) => kinds.includes("comment") && ++n === 1 });
   r = await toolTrackedEdit({ ...REPLACE, known_comment_ids: ["C1"] });
   assert.deepEqual([r.ok, r.word_comment_id, s.comments.length], [true, "C2", 2]);
+});
+
+// ---- the parts of a rewritten paragraph (daemon/review-tools.mjs applyTrackedRewrite)
+
+test("the task pane names the capability a rewrite needs", async () => {
+  const { PANE_CAPS } = await import("../taskpane/shared/tools-word.js");
+  assert.deepEqual(PANE_CAPS, ["target_hash", "tracked_rewrite"]);
+});
+
+test("no_comment: the edit is applied and no comment is added", async () => {
+  const s = fakeWord();
+  const { comment_text, ...bare } = REPLACE;
+  const r = await toolTrackedEdit({ ...bare, no_comment: true });
+  assert.deepEqual(
+    [r.ok, r.word_comment_id, r.no_comment, r.target_checked],
+    [true, null, true, true],
+  );
+  assert.deepEqual([s.applied, s.comments.length, s.mode], [true, 0, "Off"]);
+  assert.equal(r.after, "Cells were held at 30 °C for 2 h.");
+  // Without the flag a comment text is still required.
+  await assert.rejects(() => toolTrackedEdit(bare), /comment_text must start with/);
+});
+
+test("plain_only: a paragraph with a field, a picture or a footnote is not touched", async () => {
+  for (const what of [{ fields: 1 }, { pictures: 2 }, { footnotes: 1 }]) {
+    const s = fakeWord(what);
+    const r = await toolTrackedEdit({ ...REPLACE, plain_only: true });
+    assert.deepEqual(
+      [r.ok, r.code, s.applied, s.comments.length],
+      [false, "ParagraphNotPlain", false, 0],
+    );
+    assert.match(r.message, /Nothing was changed/);
+  }
+  // Plain text: applied as usual. Without the flag nothing is looked at.
+  let s = fakeWord();
+  assert.equal((await toolTrackedEdit({ ...REPLACE, plain_only: true })).ok, true);
+  assert.equal(s.applied, true);
+  s = fakeWord({ fields: 1 });
+  assert.equal((await toolTrackedEdit(REPLACE)).ok, true);
+  // A Word that cannot list them: not rewritten as a whole.
+  s = fakeWord({ noPlainApi: true });
+  const r = await toolTrackedEdit({ ...REPLACE, plain_only: true });
+  assert.deepEqual([r.ok, r.code, s.applied], [false, "ParagraphNotPlain", false]);
 });

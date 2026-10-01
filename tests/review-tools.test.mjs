@@ -6,6 +6,7 @@ import {
   REVIEW_READ_TOOLS,
   REVIEW_BLOCKED_TOOLS,
   REVIEW_WRITE_TOOL,
+  REVIEW_WRITE_TOOLS,
   REVIEW_NOTE_TOOLS,
   reviewTurnToolAllowed,
   guardedCall,
@@ -32,7 +33,7 @@ test("every registered Word tool is classified for review turns", async () => {
       !REVIEW_READ_TOOLS.has(n) &&
       !REVIEW_BLOCKED_TOOLS.has(n) &&
       !REVIEW_NOTE_TOOLS.has(n) &&
-      n !== REVIEW_WRITE_TOOL,
+      !REVIEW_WRITE_TOOLS.has(n),
   );
   assert.deepEqual(unclassified, []);
   for (const n of [...REVIEW_READ_TOOLS, ...REVIEW_BLOCKED_TOOLS, ...REVIEW_NOTE_TOOLS])

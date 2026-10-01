@@ -47,7 +47,7 @@ import { initReviewPane } from "./review-pane.js";
 import { initResponsePane } from "./response-pane.js";
 import { initToolsPane } from "./tools-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
-import { fallbackNotice, modelLabel, modelLineText } from "./model-line.js";
+import { declinedNote, fallbackNotice, modelLabel, modelLineText } from "./model-line.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
 import {
@@ -206,6 +206,12 @@ function renderModelLine() {
     ),
     accountModels,
   );
+  // Setup, under the Edits row: the chosen model declines this manuscript.
+  const $note = document.getElementById("provider-turn-note");
+  if ($note) {
+    $note.textContent = declinedNote(modelUsed.turn, accountModels);
+    $note.hidden = !$note.textContent;
+  }
 }
 // For the result line of a job: what its kind of work last ran on, or null.
 function usedLabel(role) {
@@ -331,6 +337,7 @@ const TOOL_STATUS_LABELS = {
   office_resolve_comment: "Resolving a comment…",
   office_header_footer: "Editing header/footer…",
   office_tracked_edit: "Applying a tracked change with its rationale…",
+  office_tracked_rewrite: "Rewriting a paragraph as tracked changes…",
   office_ask_author: "Noting a question for the author…",
   office_requirement_outside: "Noting a request that belongs to another file…",
   // Excel
@@ -862,11 +869,19 @@ async function handleServerMessage(msg) {
             provider: "claude",
             asked: modelUsed.turn?.asked ?? editsModel(),
             ran: msg.fallback ?? null,
+            // stay: the daemon leaves the document on the other model.
+            declined: {
+              original: msg.original,
+              fallback: msg.fallback,
+              category: msg.category ?? null,
+              stay: msg.stay === true,
+            },
           };
           renderConnection();
           renderModelLine();
         }
-        appendNotice(fallbackNotice(msg, accountModels));
+        // quiet: the state told again to a pane that connected again.
+        if (!msg.quiet) appendNotice(fallbackNotice(msg, accountModels));
       } else if (msg.event === "info") {
         appendNotice(msg.message);
       } else if (msg.event === "error") {

@@ -61,6 +61,8 @@ import {
   answerQuestion,
   authorAnswers,
   setRequirementOutside,
+  setSameTerm,
+  byCreated,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -69,10 +71,10 @@ import {
   normalizeParaText,
 } from "./revision-classify.mjs";
 import { extractRequirements, splitReview } from "./review-split.mjs";
-import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
+import { buildReviewPrompt, formatPromptLog, sameTermReport } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
-import { checkParagraphs } from "./paragraph-check.mjs";
+import { checkParagraphs, rewriteNote } from "./paragraph-check.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
@@ -131,7 +133,12 @@ export function resolveUnknownOverrides(rev, snapshot) {
       );
       const { narrow: _narrow, ...full } = b.attempt.change;
       const judged = [full, narrowedAttempt(b.attempt.change)].filter(Boolean).map((form) => {
-        const change = { ...form, word_comment_id: comment ? String(comment.id) : null };
+        // A part of a rewrite that adds no comment is under the comment of
+        // its paragraph (form.word_comment_id).
+        const change = {
+          ...form,
+          word_comment_id: comment ? String(comment.id) : (form.word_comment_id ?? null),
+        };
         const row = classifyChange(change, snapshot);
         const p = paras.find((x) => x.index === row.paragraph_index);
         // Plain containment: Word joins pending inserted and deleted text with
@@ -163,7 +170,7 @@ export function resolveUnknownOverrides(rev, snapshot) {
         ...change,
         paragraph_index: row.paragraph_index,
         paragraph_id: p?.id ?? null,
-        comment_missing: comment ? null : "CommentNotFound",
+        comment_missing: comment || change.word_comment_id != null ? null : "CommentNotFound",
       });
       next = takeBlocked(added.revision, c.ref, b.id).revision;
       if (comment) used.add(String(comment.id));
@@ -241,6 +248,9 @@ export function createReviewService({
   afterRefresh = null,
   clock = Date.now,
   getModel = () => null,
+  // The model the session of the pane runs on, for the receipt of a change
+  // a review turn made (after a refusal fallback it is not the one asked for).
+  getRunModel = getModel,
   // The manuscript and the session of a pane (review-prompt.mjs
   // manuscriptBlock): manuscriptSeen(key) gives the paragraph hashes the
   // session was last given, or null; manuscriptGiven(key, hashes) is called
@@ -434,7 +444,7 @@ export function createReviewService({
           find: saved.find,
           text: saved.text,
         },
-        model: getModel(key),
+        model: getRunModel(key),
         output: {
           change_id: saved.id,
           comment_ref: ref,
@@ -472,7 +482,7 @@ export function createReviewService({
             ? rev.comments
                 .flatMap((x) => x.changes)
                 .filter((ch) => ch.created_at > since)
-                .sort((a, b) => (a.created_at < b.created_at ? -1 : 1))
+                .sort(byCreated)
             : [],
         };
       },
@@ -583,6 +593,8 @@ export function createReviewService({
       // Does the task pane compare the paragraph before a tracked edit? One
       // that does not say so in its hello is sent no edit.
       paneChecksTarget: (d = at(key)) => d.caps.includes(TARGET_HASH_CAP),
+      // A capability the task pane named in its hello (review-tools.mjs REWRITE_CAP).
+      paneCan: (cap, d = at(key)) => d.caps.includes(cap),
       // Word applied the edit and its record could not be saved. change: as
       // it was applied; kept for the next load or refresh (recordUnsaved).
       onRecordFailed: async ({ ref, attempt_id, change, at: d = at(key) }) => {
@@ -671,14 +683,37 @@ export function createReviewService({
     const failed = outcome?.ok === false;
     const error = failed ? String(outcome.error ?? "The turn ended with an error.") : null;
     log(`[review] turn done ${turn.ref}${failed ? ` failed: ${error}` : ""}`);
-    sendEvent(key, {
-      type: "review_event",
-      event: "turn_done",
-      ref: turn.ref,
-      ok: !failed,
-      ...(failed ? { error } : {}),
-    });
+    const done = () =>
+      sendEvent(key, {
+        type: "review_event",
+        event: "turn_done",
+        ref: turn.ref,
+        ok: !failed,
+        ...(failed ? { error } : {}),
+      });
+    // outcome.text: the answer of the turn (index.mjs gives it for a turn
+    // that ended with a result). The paragraphs its last line names as
+    // still holding the term are saved first, so the pane that loads on
+    // turn_done has them; a save that fails only loses that list.
+    if (typeof outcome?.text !== "string") return done();
+    Promise.resolve()
+      .then(() => {
+        const d = at(key);
+        return update(d, (rev) =>
+          setSameTerm(rev, turn.ref, sameTermReport(outcome.text, rev.snapshot)),
+        );
+      })
+      .catch((e) => log(`[review] same-term list not saved ${turn.ref}: ${e?.message ?? e}`))
+      .finally(done);
   }
+
+  // The model of a receipt: the one the last request of the job ran on,
+  // when the router knows it (a Claude job; another provider's name stays
+  // as the job gives it, with the provider in it).
+  const ranOf = (job) =>
+    job.provider == null || job.provider === "claude"
+      ? (job.used?.()?.ran ?? job.model)
+      : job.model;
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";
 
@@ -718,7 +753,7 @@ export function createReviewService({
               rev.comments
                 .flatMap((c) => c.changes)
                 .filter((ch) => ch.created_at > rev.snapshot.taken_at)
-                .sort((a, b) => (a.created_at < b.created_at ? -1 : 1)),
+                .sort(byCreated),
             ),
             ids: rev.snapshot.ids,
             seen: manuscriptSeen(key),
@@ -754,7 +789,6 @@ export function createReviewService({
       // Provider and model of this job, for the split and the extraction after it.
       const job = await oneshotJob(key);
       const shot = job.run;
-      const shotModel = job.model;
       let asked = false;
       const ask =
         shot &&
@@ -779,7 +813,7 @@ export function createReviewService({
           decisionRecord({
             kind: "comment_split",
             input: text,
-            model: shotModel,
+            model: ranOf(job),
             output: {
               method: r.method,
               refs: r.comments.map((c) => c.ref),
@@ -791,13 +825,13 @@ export function createReviewService({
       }
       // L5: once the comments are known, whichever split made them. A save of
       // the edited list does not come here, so it never runs again on it.
-      const x = await extractRequirements(r.comments, { oneshot: shot });
+      const x = await extractRequirements(r.comments, { oneshot: shot, log });
       if (x.asked) {
         records.push(
           decisionRecord({
             kind: "requirement_extract",
             input: x.input,
-            model: shotModel,
+            model: ranOf(job),
             output: { requests: x.requests },
           }),
         );
@@ -852,7 +886,8 @@ export function createReviewService({
           return job.run({ ...req, timeoutMs: PARAGRAPH_CHECK_TIMEOUT_MS });
         },
       });
-      const model = job?.model ?? null;
+      // The model the last request ran on, when the router knows it.
+      const model = job?.used?.()?.ran ?? job?.model ?? null;
       log(
         `[review] paragraph check paragraphs=${r.paragraphs.length} findings=${r.findings.length}` +
           `${r.warnings.length ? ` warnings=${r.warnings.length}` : ""} model=${model ?? "-"}`,
@@ -929,7 +964,18 @@ export function createReviewService({
           `Forbidden rule(s) ${broken.map((b) => b.id).join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}), so no change would be applied. Fix or remove the rule in the Instruction ledger, then propose again.`,
         );
       }
-      pushTurn(key, host, built.text, { ref: msg.ref });
+      // "Rewrite this paragraph": the turn of this comment is told to write
+      // one paragraph anew (paragraph-check.mjs rewriteNote). A paragraph
+      // that does not hold two changes starts no turn.
+      const rewrite = Number.isInteger(msg.rewrite_paragraph)
+        ? rewriteNote(rev, msg.rewrite_paragraph, msg.ref)
+        : null;
+      if (rewrite) {
+        log(
+          `[review] rewrite turn ${msg.ref} paragraph=${msg.rewrite_paragraph} changes=${Number(/holds (\d+) changes/.exec(rewrite)?.[1] ?? 0)}`,
+        );
+      }
+      pushTurn(key, host, rewrite ? `${built.text}\n\n${rewrite}` : built.text, { ref: msg.ref });
       // The session of the pane has the manuscript as of this turn.
       if (built.manuscript.mode !== "none") manuscriptGiven(key, built.manuscript.hashes);
       turnHolds.get(key)?.();
@@ -1053,7 +1099,10 @@ export function createReviewService({
         change_id: ch.id,
         // As applyTrackedEdit composed it for the edit (the stored rationale
         // holds the note of an approved exception; lost facts on the last line).
-        comment_text: formatRationaleComment(msg.ref, ch.rationale, { lost: ch.lost_facts }),
+        comment_text: formatRationaleComment(msg.ref, ch.rationale, {
+          lost: ch.lost_facts,
+          fromReview: ch.from_review,
+        }),
         // The task pane reuses none of these for this change.
         known_comment_ids: recordedCommentIds(rev),
         change: {
@@ -1224,7 +1273,6 @@ export function createReviewService({
       if (!text.trim()) throw new Error("Paste or load the review text first.");
       const d = at(key); // before the model call: the receipt goes next to this document
       const job = await oneshotJob(key);
-      const shotModel = job.model;
       const r = await suggestLedger(text, { oneshot: job.run });
       log(
         `[review] ledger suggest method=${r.method} candidates=${r.candidates.length} warnings=${r.warnings.length}`,
@@ -1235,7 +1283,7 @@ export function createReviewService({
           decisionRecord({
             kind: "ledger_suggest",
             input: r.input,
-            model: shotModel,
+            model: ranOf(job),
             output: {
               method: r.method,
               candidates: r.candidates.length,
@@ -1271,7 +1319,6 @@ export function createReviewService({
       const decisions = [];
       // Every batch of this check runs on the provider and model of its start.
       const job = await oneshotJob(key);
-      const shotModel = job.model;
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
         oneshot: job.run,
         full: msg.full === true,
@@ -1280,7 +1327,7 @@ export function createReviewService({
             decisionRecord({
               kind: "ledger_check",
               input: { instruction: x.instruction, paragraph: x.paragraph },
-              model: shotModel,
+              model: ranOf(job),
               output: {
                 item_id: x.item_id,
                 paragraph_index: x.paragraph_index,

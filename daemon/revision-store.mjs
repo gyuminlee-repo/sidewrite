@@ -76,8 +76,14 @@ export const ChangeSchema = z.object({
   lost_facts: z.array(z.string()).default([]),
   // L2: new facts and words found neither in the manuscript nor in the comment.
   unsourced_terms: z.array(z.string()).default([]),
+  // New words and quantities that the review has and the manuscript does not.
+  from_review: z.array(z.string()).default([]),
   // L3: the find/replace the model asked for, when the applied range is smaller.
   narrowed_from: z.object({ find: z.string(), text: z.string() }).nullable().default(null),
+  // A part of a paragraph rewritten as a whole (review-tools.mjs
+  // applyTrackedRewrite): the id its parts share. They also share one
+  // rationale comment (word_comment_id).
+  rewrite_id: z.string().nullable().default(null),
   // Up to 3 words before and after the changed range at edit time, so one
   // change can be judged apart from others in the same paragraph. null for
   // changes recorded before this field (whole-paragraph rule).
@@ -219,6 +225,12 @@ const Comment = z.object({
   requirement_seq: z.number().int().nonnegative().nullable().default(null),
   blocked_seq: z.number().int().nonnegative().nullable().default(null),
   questions: z.array(Question).default([]),
+  // Words the comment names, from the requirement labelling
+  // (taskpane/shared/named-terms.js adds what the text itself quotes).
+  named_terms: z.array(z.string()).default([]),
+  // Paragraph ids the last turn of this comment named as still holding the
+  // term it changed (review-prompt.mjs sameTermReport).
+  same_term_at: z.array(z.string()).default([]),
   // Requests the model said cannot be handled in this file (review-tools.mjs
   // requirementOutside): one note per request id.
   requirements_outside: z
@@ -344,7 +356,13 @@ export const RevisionSchema = z.object({
           z.object({
             paragraph_index: z.number().int(),
             paragraph_id: z.string().nullable().default(null),
-            kind: z.enum(["contradiction", "conflict", "review_as_source"]),
+            kind: z.enum([
+              "contradiction",
+              "conflict",
+              "review_as_source",
+              "claim_left",
+              "open_question",
+            ]),
             detail: z.string(),
             change_ids: z.array(z.string()).default([]),
           }),
@@ -478,6 +496,15 @@ export function withRevision(path, manuscript, fn) {
 
 const clone = (x) => structuredClone(x);
 
+// Order of changes for replaying them on the snapshot (currentTexts): by
+// the time they were recorded, and within one instant by the number of their
+// id (the parts of a rewrite can be recorded in the same millisecond).
+export function byCreated(a, b) {
+  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+  const n = (x) => Number(String(x.id ?? "").match(/(\d+)$/)?.[1] ?? 0);
+  return n(a) - n(b);
+}
+
 export function findComment(rev, ref) {
   return rev.comments.find((c) => c.ref === ref) ?? null;
 }
@@ -518,6 +545,10 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       declined: old ? clone(old.declined ?? null) : null,
       questions: old ? clone(old.questions ?? []) : [],
       requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
+      same_term_at: old ? clone(old.same_term_at ?? []) : [],
+      named_terms: Array.isArray(c.named_terms)
+        ? c.named_terms.filter((t) => typeof t === "string")
+        : clone(old?.named_terms ?? []),
     });
     const row = list[list.length - 1];
     row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });
@@ -697,6 +728,16 @@ export function setRequirementOutside(rev, ref, { id, why = "" }, now = new Date
     ...(c.requirements_outside ?? []).filter((n) => n.id !== id),
     { id, why: String(why ?? "").trim(), at: now.toISOString() },
   ];
+  return next;
+}
+
+// The paragraphs the last turn of a comment named as still holding its term.
+// null when the comment is gone or the list is the one on file.
+export function setSameTerm(rev, ref, ids) {
+  const old = findComment(rev, ref);
+  if (!old || JSON.stringify(old.same_term_at ?? []) === JSON.stringify(ids)) return null;
+  const next = clone(rev);
+  findComment(next, ref).same_term_at = ids;
   return next;
 }
 

@@ -205,7 +205,7 @@ export function unsourcedTerms(inserted, sources = [], opts = {}) {
 
 // ---- L3 ---------------------------------------------------------------------
 
-const tokens = (s) => String(s ?? "").match(/\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? [];
+export const tokens = (s) => String(s ?? "").match(/\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]/gu) ?? [];
 
 function occurrences(hay, needle) {
   let n = 0;

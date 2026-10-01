@@ -2744,3 +2744,149 @@ test("the turn carries the manuscript of the last refresh; a later turn of the s
   );
   await t.cleanup();
 });
+
+// The answer of a review turn ends with "Same term still at: ...": the
+// paragraphs it names are saved under the comment before turn_done goes out,
+// so the pane that loads on turn_done has them.
+test("turnEnded saves the paragraphs the turn named as still holding the term, then sends turn_done", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const para = (text, index) => ({
+      index,
+      id: `p${index}`,
+      text,
+      reviewed_text: text,
+      w_ins: 0,
+      w_del: 0,
+    });
+    await t.ask("review_refresh", {
+      snapshot: { paragraphs: ["Title", "One.", "Two."].map(para), comments: [] },
+    });
+    const done = () => t.events.filter((e) => e.event === "turn_done").length;
+    const before = done();
+    t.svc.turnEnded(
+      "k",
+      { ref: "R1.1" },
+      { ok: true, text: "Changed it.\n\nSame term still at: p2, p9" },
+    );
+    assert.equal(done(), before, "not before the save");
+    for (let i = 0; i < 50 && done() === before; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(done(), before + 1);
+    let rev = await loadRevision(join(t.dir, "paper.revision.json"));
+    assert.deepEqual(rev.comments[0].same_term_at, ["p2"]);
+    // The next turn of the comment names none: the list is cleared.
+    t.svc.turnEnded("k", { ref: "R1.1" }, { ok: true, text: "Same term still at: none" });
+    for (let i = 0; i < 50 && done() === before + 1; i++)
+      await new Promise((r) => setTimeout(r, 5));
+    rev = await loadRevision(join(t.dir, "paper.revision.json"));
+    assert.deepEqual(rev.comments[0].same_term_at, []);
+    // A comment-list save keeps it; no text of the answer is in the log.
+    assert.equal(
+      t.lines.some((l) => l.includes("Changed it")),
+      false,
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// A receipt names the model that did the work: for the link of a change the
+// model the session runs on (after a refusal fallback, the other model), not
+// the alias that was asked for.
+test("the receipt of a recorded change names the model the session runs on", async () => {
+  const t = await setup({ getModel: () => "opus", getRunModel: () => "claude-opus-5" });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({
+        ok: true,
+        word_comment_id: 5,
+        paragraph_index: 2,
+        before: "b",
+        after: "a",
+      }),
+    };
+    const r = await applyTrackedEdit(
+      deps,
+      {
+        comment_ref: "R1.1",
+        find: "degrees",
+        replace: "°C",
+        rationale: { what: "w", why: "y", addresses: "a" },
+      },
+      { ref: "R1.1" },
+    );
+    assert.equal(r.ok, true, r.message);
+    const link = (await readDecisions(t.dir)).find((d) => d.kind === "requirement_link");
+    assert.equal(link.model, "claude-opus-5");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// A rewrite turn: review_propose with rewrite_paragraph adds the instruction
+// for that paragraph to the prompt of the turn.
+test("review_propose with rewrite_paragraph: the turn is told to write that paragraph anew", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const para = (text, index) => ({
+      index,
+      id: `p${index}`,
+      text,
+      reviewed_text: text,
+      w_ins: 0,
+      w_del: 0,
+    });
+    await t.ask("review_refresh", {
+      snapshot: {
+        paragraphs: ["Title", "The culture grew fast and was held warm at 30 degrees."].map(para),
+        comments: [],
+      },
+    });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({
+        ok: true,
+        word_comment_id: 5,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      }),
+    };
+    const R = { what: "w", why: "y", addresses: "a" };
+    for (const [find, replace] of [
+      ["grew fast", "grew slowly"],
+      ["held warm", "kept warm"],
+    ]) {
+      const r = await applyTrackedEdit(
+        deps,
+        { comment_ref: "R1.1", find, replace, rationale: R },
+        { ref: "R1.1" },
+      );
+      assert.equal(r.ok, true, r.message);
+    }
+    const r = await t.ask("review_propose", { ref: "R1.1", paragraphs: [], rewrite_paragraph: 1 });
+    assert.equal(r.ok, true, r.error);
+    const text = t.pushed.at(-1).text;
+    assert.match(
+      text,
+      /\n\n\[Rewrite of paragraph p1\]\nThis turn does one thing\. Paragraph p1 holds 2 changes \(R1\.1-1, R1\.1-2\), made for R1\.1\./,
+    );
+    assert.ok(text.includes("The culture grew slowly and was kept warm at 30 degrees."));
+    assert.ok(t.lines.includes("[review] rewrite turn R1.1 paragraph=1 changes=2"));
+    // A paragraph without two changes: no turn.
+    const bad = await t.ask("review_propose", {
+      ref: "R1.1",
+      paragraphs: [],
+      rewrite_paragraph: 0,
+    });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /Paragraph 0 does not hold two or more changes/);
+  } finally {
+    await t.cleanup();
+  }
+});

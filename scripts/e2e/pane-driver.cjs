@@ -486,6 +486,28 @@ const steps = {
     return view(page);
   },
 
+  // "Rewrite this paragraph" under "Check revised paragraphs": the n-th such
+  // button (a.nth, 0 by default) starts a review turn that writes the
+  // paragraph anew; waits as `propose` does until the turn is over.
+  async "rewrite-paragraph"(page, a = {}) {
+    if (await turnBusy(page)) throw new Error("a turn is already running");
+    const btn = page
+      .locator("#review-consistency button", { hasText: "Rewrite this paragraph" })
+      .nth(a.nth ?? 0);
+    await btn.click();
+    await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
+      timeout: 30_000,
+    });
+    const started = Date.now();
+    while (await turnBusy(page)) {
+      if (Date.now() - started > TURN_TIMEOUT)
+        throw new Error(`rewrite turn still running after ${TURN_TIMEOUT} ms`);
+      await sleep(1000);
+    }
+    await sleep(4000);
+    return { seconds: Math.round((Date.now() - started) / 1000), ...(await view(page)) };
+  },
+
   async "clean-tool"(page) {
     await clearMessage(page);
     await page.click("#review-clean-tool");

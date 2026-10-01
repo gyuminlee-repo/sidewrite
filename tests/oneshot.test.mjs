@@ -192,3 +192,24 @@ test("runOneshot reports the model the run was on, when the CLI names it", async
   );
   assert.equal("model_ran" in none, false);
 });
+
+// A labelling job asks for no thinking (review-split.mjs): the setting goes
+// to the SDK as given, and is absent when the request names none.
+test("a request's thinking setting goes into the SDK options; none by default", async () => {
+  const { buildOneshotOptions, runOneshot } = await import("../daemon/oneshot.mjs");
+  assert.equal("thinking" in buildOneshotOptions({ system: "s" }), false);
+  assert.deepEqual(buildOneshotOptions({ system: "s", thinking: { type: "disabled" } }).thinking, {
+    type: "disabled",
+  });
+  let seen = null;
+  const queryFn = ({ options }) => {
+    seen = options;
+    return (async function* () {
+      yield { type: "result", subtype: "success", result: "{}" };
+    })();
+  };
+  await runOneshot({ system: "s", prompt: "p", thinking: { type: "disabled" } }, { queryFn });
+  assert.deepEqual(seen.thinking, { type: "disabled" });
+  await runOneshot({ system: "s", prompt: "p" }, { queryFn });
+  assert.equal("thinking" in seen, false);
+});
