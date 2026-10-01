@@ -7,6 +7,7 @@ import {
   ollamaChatModels,
   createProbeCache,
   TURN_BLOCKED,
+  AGY_NOT_OFFERED,
 } from "../daemon/providers/probe.mjs";
 
 const AGY_OUT =
@@ -83,8 +84,15 @@ test("probeAll: available, turn_ready and reasons", async () => {
     by.codex.models.map((m) => m.value),
     ["gpt-6.1-sol"],
   );
-  assert.equal(by.antigravity.available, true);
-  assert.equal(by.antigravity.reason, null);
+  // agy is installed and signed in, and still offered for nothing: its
+  // tools cannot be switched off (measured 2026-10-01, agy.mjs).
+  assert.equal(by.antigravity.available, false);
+  assert.equal(by.antigravity.reason, AGY_NOT_OFFERED);
+  assert.equal(
+    AGY_NOT_OFFERED,
+    "Not offered: the built-in tools of Antigravity CLI (agy) cannot be switched off, so manuscript text would sit next to them.",
+  );
+  assert.ok(by.antigravity.models.length > 0, "its models are still listed");
   assert.equal(by.ollama.available, true);
   assert.equal(by.ollama.turn_ready, false, "no tool loop for a local model in this stage");
   assert.equal(by.openrouter.available, false);
@@ -209,7 +217,7 @@ test("probes are read-only and bounded: only status commands run; a hang or a th
       },
     }),
   );
-  assert.deepEqual(ran.sort(), ["agy models", "codex login status"]);
+  assert.deepEqual(ran.sort(), ["agy mcp list", "agy models", "codex login status"]);
 
   const t0 = Date.now();
   const rows = await probeAll(
@@ -279,8 +287,8 @@ test("Codex and Antigravity are judgments only: not turn ready, with the CLI's o
   const by = byId(await probeAll(deps()));
   assert.deepEqual([by.codex.available, by.codex.turn_ready], [true, false]);
   assert.match(by.codex.turn_note, /MCP tool call requires approval, but approval policy is never/);
-  assert.deepEqual([by.antigravity.available, by.antigravity.turn_ready], [true, false]);
-  assert.match(by.antigravity.turn_note, /denied_actions.*CallMcpTool/);
+  assert.deepEqual([by.antigravity.available, by.antigravity.turn_ready], [false, false]);
+  assert.equal(by.antigravity.turn_note, AGY_NOT_OFFERED);
   assert.equal(by.codex.turn_note, TURN_BLOCKED.codex);
   assert.equal(by.antigravity.turn_note, TURN_BLOCKED.antigravity);
   assert.deepEqual([by.claude.turn_ready, by.claude.turn_note], [true, null]);
@@ -352,3 +360,43 @@ async function stalledBody(scenario) {
   );
   return JSON.parse(stdout);
 }
+
+// agy is not offered whatever its state; the row still says what is known.
+test("Antigravity: not offered, also when listed in CC_OFFICE_CLI_TURNS; MCP servers are named", async () => {
+  const tried = byId(await probeAll(deps({ env: { CC_OFFICE_CLI_TURNS: "antigravity" } })));
+  assert.deepEqual([tried.antigravity.available, tried.antigravity.turn_ready], [false, false]);
+  const ran = [];
+  const withServers = byId(
+    await probeAll(
+      deps({
+        execFileFn: async (cmd, args) => {
+          ran.push(`${cmd} ${args.join(" ")}`);
+          if (cmd === "agy" && args[0] === "models") return { code: 0, stdout: AGY_OUT };
+          if (cmd === "agy" && args.join(" ") === "mcp list")
+            return { code: 0, stdout: "office  http://127.0.0.1:47834/mcp/x  enabled\n" };
+          return { code: 0, stdout: "Logged in using ChatGPT\n" };
+        },
+      }),
+    ),
+  );
+  assert.ok(ran.includes("agy mcp list"), "read-only: list, never add or remove");
+  assert.equal(
+    ran.some((c) => /mcp (add|remove|enable|disable)/.test(c)),
+    false,
+  );
+  assert.equal(
+    withServers.antigravity.reason,
+    `${AGY_NOT_OFFERED} agy also has MCP servers registered (office http://127.0.0.1:47834/mcp/x enabled).`,
+  );
+  // Not installed is still said as that.
+  const none = byId(
+    await probeAll(
+      deps({
+        execFileFn: async () => {
+          throw Object.assign(new Error("not found"), { code: "ENOENT" });
+        },
+      }),
+    ),
+  );
+  assert.match(none.antigravity.reason, /not installed/);
+});
