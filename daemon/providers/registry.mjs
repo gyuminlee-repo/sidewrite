@@ -19,6 +19,10 @@ export const PRESETS = Object.freeze([
     tier: "subscription",
     label: "Claude (Agent SDK)",
     roles: ["turn", "oneshot"],
+    // How a review turn runs. "agent": the model calls the office tools
+    // itself. "proposal": the model is given no tools and returns a list of
+    // changes the daemon checks and applies (proposal-turns.mjs).
+    turnMode: "agent",
     defaultEnabled: true,
     policy: "Your Claude subscription terms apply.",
   },
@@ -27,6 +31,7 @@ export const PRESETS = Object.freeze([
     tier: "subscription",
     label: "Codex CLI (ChatGPT sign-in)",
     roles: ["turn", "oneshot"],
+    turnMode: "proposal",
     defaultEnabled: true,
     policy: "Your ChatGPT plan terms apply.",
     // A proposal turn (proposal.mjs): the most characters, system and prompt

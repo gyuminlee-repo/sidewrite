@@ -67,6 +67,7 @@ import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
+import { presetById } from "./providers/registry.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
@@ -74,6 +75,7 @@ import {
   formatRationaleComment,
   TOOL_COMMENT_PREFIX,
   TARGET_HASH_CAP,
+  PROPOSAL_CAP,
 } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
 
@@ -208,6 +210,13 @@ export function createReviewService({
   // the pane's provider for review turns is confirmed and throws otherwise
   // (providers/selection.mjs ready). The request then fails with that text.
   turnGate = async () => {},
+  // A provider that is given no tools and proposes (proposal-turns.mjs):
+  // async (key, ref, { at, selected }) => null when the pane's provider for
+  // review turns calls the tools itself (Claude), else { choice, built }:
+  // the provider of this request and what would be sent to it
+  // (proposal.mjs buildProposalPrompt, or { ok: false, message }). It throws
+  // for a provider that runs no review turns.
+  proposalPreview = async () => null,
   clock = Date.now,
   getModel = () => null,
   sendEvent = () => {},
@@ -274,6 +283,16 @@ export function createReviewService({
     return restoreComment(rev, ref, remembered(d.path, ref));
   }
   const turnHolds = new Map(); // pane key -> release of its review turn hold
+  // A review_propose that has not become a turn yet, by pane key:
+  // { stopped }. A Stop in that stretch (cancelStarting) is kept: the request
+  // then starts nothing and fails as stopped.
+  const starting = new Map();
+  function cancelStarting(key) {
+    const s = starting.get(key);
+    if (!s) return false;
+    s.stopped = true;
+    return true;
+  }
   // Ledger check generation by revision file and item id: each check of an
   // item takes the next one and only the check started last saves its
   // result. Two checks of one rule on two snapshots share a fingerprint, so
@@ -620,6 +639,9 @@ export function createReviewService({
       ref: turn.ref,
       ok: !failed,
       ...(failed ? { error } : {}),
+      // What the author should see with a turn that worked (a request of
+      // the comment left without a change, proposal-turns.mjs).
+      ...(!failed && outcome?.notice ? { notice: String(outcome.notice) } : {}),
     });
   }
 
@@ -636,6 +658,79 @@ export function createReviewService({
       includeForbid: includeForbid(),
     });
     return { rev, comment, built };
+  }
+
+  async function propose(msg, key, host, mine) {
+    const asked = clock();
+    await turnGate(key);
+    // The pane waits wait_ms for this answer and then shows the request as
+    // failed. A turn started after that would run behind the author's
+    // back, so a request that was held longer starts nothing.
+    const waitMs = Number(msg.wait_ms);
+    if (waitMs > 0 && clock() - asked >= waitMs) {
+      throw new Error(
+        `The task pane stopped waiting for this request after ${Math.round(waitMs / 1000)} s, so no turn was started. Press Propose changes again.`,
+      );
+    }
+    const d = at(key);
+    const selected = Array.isArray(msg.paragraphs) ? msg.paragraphs : [];
+    const proposal = await proposalPreview(key, msg.ref, { at: d, selected });
+    const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs);
+    // A turn in which no edit can be applied is not started: every
+    // office_tracked_edit of it would be refused (review-tools.mjs
+    // applyTrackedEdit: TaskPaneOutdated, ForbidRuleBroken), the turn
+    // would be spent, and a "Propose all" run would spend one for every
+    // comment after it. As the answer of this request the refusal is
+    // shown by a task pane of any age and ends its run.
+    if (!d.caps.includes(TARGET_HASH_CAP)) {
+      throw new Error(
+        "This task pane is older than the daemon and does not check the paragraph before an edit, so no change would be applied. Reload the task pane (close and reopen it), then propose again.",
+      );
+    }
+    const broken = brokenForbidRules(rev.ledger);
+    if (broken.length) {
+      throw new Error(
+        `Forbidden rule(s) ${broken.map((b) => b.id).join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}), so no change would be applied. Fix or remove the rule in the Instruction ledger, then propose again.`,
+      );
+    }
+    if (proposal) {
+      // A task pane loaded before proposal turns existed has not told its
+      // author what goes to this provider (its first-use notice).
+      if (!d.caps.includes(PROPOSAL_CAP)) {
+        throw new Error(
+          `This task pane is older than the daemon and does not know the proposal turns of ${presetById(proposal.choice?.id)?.label ?? proposal.choice?.id}, so nothing was sent. Reload the task pane (close and reopen it), then propose again.`,
+        );
+      }
+      // A request that cannot be built (no snapshot, too long): the
+      // refusal is the answer of this request and no turn is spent.
+      if (!proposal.built.ok) throw new Error(proposal.built.message);
+    }
+    // Nothing is awaited between this check and the queued turn.
+    if (mine.stopped) throw new Error("The turn was stopped.");
+    starting.delete(key);
+    if (proposal) pushTurn(key, host, null, { ref: msg.ref, selected, choice: proposal.choice });
+    else pushTurn(key, host, built.text, { ref: msg.ref });
+    turnHolds.get(key)?.();
+    turnHolds.set(
+      key,
+      hold(d, msg.ref, {
+        reviewer: comment.reviewer,
+        text: comment.text,
+        section: comment.section,
+        requirements: comment.requirements,
+      }),
+    );
+    log(
+      formatPromptLog(msg.ref, proposal ? proposal.built : built, {
+        paragraphs: msg.paragraphs?.length ?? 0,
+      }),
+    );
+    const revision = await update(d, (rev) =>
+      findComment(rev, msg.ref).status === "pending"
+        ? setCommentStatus(rev, msg.ref, "in_progress")
+        : null,
+    );
+    return { started: true, ref: msg.ref, started_at: new Date().toISOString(), revision };
   }
 
   const impl = {
@@ -725,6 +820,15 @@ export function createReviewService({
     },
     async review_preview(msg, key) {
       const d = at(key);
+      const selected = Array.isArray(msg.paragraphs) ? msg.paragraphs : [];
+      const proposal = await proposalPreview(key, msg.ref, { at: d, selected });
+      if (proposal) {
+        // What goes to the provider: its system text, then the prompt.
+        const b = proposal.built;
+        if (!b.ok) throw new Error(b.message);
+        log(formatPromptLog(msg.ref, b, { paragraphs: selected.length, preview: true }));
+        return { prompt: `${b.system}\n\n${b.prompt}` };
+      }
       const { built } = await buildFor(d, msg.ref, msg.paragraphs);
       log(
         formatPromptLog(msg.ref, built, { paragraphs: msg.paragraphs?.length ?? 0, preview: true }),
@@ -732,54 +836,14 @@ export function createReviewService({
       return { prompt: built.text };
     },
     async review_propose(msg, key, host) {
-      const asked = clock();
-      await turnGate(key);
-      // The pane waits wait_ms for this answer and then shows the request as
-      // failed. A turn started after that would run behind the author's
-      // back, so a request that was held longer starts nothing.
-      const waitMs = Number(msg.wait_ms);
-      if (waitMs > 0 && clock() - asked >= waitMs) {
-        throw new Error(
-          `The task pane stopped waiting for this request after ${Math.round(waitMs / 1000)} s, so no turn was started. Press Propose changes again.`,
-        );
+      // From here until the turn is queued a Stop is remembered (cancelStarting).
+      const mine = { stopped: false };
+      starting.set(key, mine);
+      try {
+        return await propose(msg, key, host, mine);
+      } finally {
+        if (starting.get(key) === mine) starting.delete(key);
       }
-      const d = at(key);
-      const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs);
-      // A turn in which no edit can be applied is not started: every
-      // office_tracked_edit of it would be refused (review-tools.mjs
-      // applyTrackedEdit: TaskPaneOutdated, ForbidRuleBroken), the turn
-      // would be spent, and a "Propose all" run would spend one for every
-      // comment after it. As the answer of this request the refusal is
-      // shown by a task pane of any age and ends its run.
-      if (!d.caps.includes(TARGET_HASH_CAP)) {
-        throw new Error(
-          "This task pane is older than the daemon and does not check the paragraph before an edit, so no change would be applied. Reload the task pane (close and reopen it), then propose again.",
-        );
-      }
-      const broken = brokenForbidRules(rev.ledger);
-      if (broken.length) {
-        throw new Error(
-          `Forbidden rule(s) ${broken.map((b) => b.id).join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}), so no change would be applied. Fix or remove the rule in the Instruction ledger, then propose again.`,
-        );
-      }
-      pushTurn(key, host, built.text, { ref: msg.ref });
-      turnHolds.get(key)?.();
-      turnHolds.set(
-        key,
-        hold(d, msg.ref, {
-          reviewer: comment.reviewer,
-          text: comment.text,
-          section: comment.section,
-          requirements: comment.requirements,
-        }),
-      );
-      log(formatPromptLog(msg.ref, built, { paragraphs: msg.paragraphs?.length ?? 0 }));
-      const revision = await update(d, (rev) =>
-        findComment(rev, msg.ref).status === "pending"
-          ? setCommentStatus(rev, msg.ref, "in_progress")
-          : null,
-      );
-      return { started: true, ref: msg.ref, started_at: new Date().toISOString(), revision };
     },
     async review_refresh(msg, key) {
       const d = at(key);
@@ -1246,5 +1310,15 @@ export function createReviewService({
       }
     };
   }
-  return { handlers, trackedEditDeps, turnEnded, lateToolResult };
+  return {
+    handlers,
+    trackedEditDeps,
+    turnEnded,
+    lateToolResult,
+    // For the proposal runner (index.mjs): the document handle of a pane as
+    // it is now, the forbid switch of the prompt, and a Stop before a turn.
+    at,
+    includeForbid,
+    cancelStarting,
+  };
 }

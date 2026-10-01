@@ -37,6 +37,8 @@ import { codexOneshot } from "./providers/codex.mjs";
 import { agyOneshot } from "./providers/agy.mjs";
 import { createMcpHttp } from "./mcp-http.mjs";
 import { createCliTurns } from "./cli-turns.mjs";
+import { proposalTurnsFor } from "./proposal-turns.mjs";
+import { presetById } from "./providers/registry.mjs";
 import {
   buildQueryOptions,
   formatUsageLine,
@@ -585,12 +587,12 @@ const review = createReviewService({
         "The agent is still working on the previous message. Wait until it is Ready.",
       );
     }
-    // The provider the pane chose for review turns (set_provider checked it
-    // against the probe). Claude: the pane's Agent SDK session, as before.
-    const choice = selection.choiceFor(key, "turn");
     turnBusy.add(key);
     reviewTurnByKey.set(key, turn);
-    if (choice.id === "claude") {
+    // turn.choice: the provider of a proposal turn, as the review service
+    // read it for this request (proposalPreview below). Without one the
+    // turn is Claude's: the pane's Agent SDK session.
+    if (!turn.choice) {
       // Same order as the user_message path in the bridge: schedule the loop,
       // then queue the message it will consume.
       ensureLoopForMessage(key, host).catch((e) =>
@@ -599,15 +601,31 @@ const review = createReviewService({
       bridge.pushUserMessage(text, key);
       return;
     }
-    // A CLI has no separate system prompt: the host instructions go in front.
-    buildSystemPromptAppend(host)
-      .then((append) => cliTurns.start(key, host, `${append}\n\n${text}`, choice, turn))
+    // Registered before this call returns: a Stop from here on finds it.
+    proposalTurns
+      .start(key, host, turn, {
+        at: review.at(key),
+        selected: turn.selected,
+        choice: turn.choice,
+      })
       .catch((e) => {
         const error = e?.message ?? String(e);
         bridge.sendAssistantEvent({ event: "error", error }, key);
         bridge.sendAssistantEvent({ event: "turn_complete", subtype: "error" }, key);
         endTurnState(key, { ok: false, error });
       });
+  },
+  // How the pane's provider runs a review turn (registry.mjs turnMode).
+  proposalPreview: async (key, ref, source) => {
+    const choice = selection.choiceFor(key, "turn");
+    const preset = presetById(choice.id);
+    if (preset?.turnMode === "agent") return null;
+    if (preset?.turnMode !== "proposal") {
+      throw new Error(
+        `${preset?.label ?? choice.id} does not run review turns. Choose another provider in Setup, Providers.`,
+      );
+    }
+    return { choice, built: await proposalTurns.preview(key, { ref }, { ...source, choice }) };
   },
   oneshot: makeOneshot(),
   oneshotModel: ONESHOT_MODEL,
@@ -762,7 +780,13 @@ const bridge = createBridge({
       // flag the session interrupted) emits turn_complete interrupted so
       // the taskpane flips to Ready and auto-restarts a resuming loop.
       // Every other pane's loop is untouched.
-      // A CLI provider's review turn first: it is not an SDK session.
+      // A review turn that has not started yet, then a proposal turn:
+      // neither is an SDK session. After this answer no change of that
+      // turn goes to Word (proposal-turns.mjs stop).
+      if (review.cancelStarting(key) || proposalTurns.stop(key)) {
+        reply({ type: "stop_agent_result", ok: true, request_id: msg.request_id });
+        return;
+      }
       if (cliTurns.stop(key)) {
         reply({ type: "stop_agent_result", ok: true, request_id: msg.request_id });
         return;
@@ -928,6 +952,15 @@ const bridge = createBridge({
       }
     },
   },
+});
+
+// Review turns of a provider that proposes (Codex): one request without
+// tools, then every proposal checked and applied here (proposal-turns.mjs).
+const proposalTurns = proposalTurnsFor({
+  bridge,
+  review,
+  router: oneshotRouter,
+  endTurn: (key, outcome) => endTurnState(key, outcome),
 });
 
 // ---------------------------------------------------------------------------
@@ -1606,7 +1639,7 @@ function shutdown() {
   const bye = () => process.exit(0);
   const limit = setTimeout(bye, 8_000);
   limit.unref?.();
-  cliTurns.shutdown().then(bye, bye);
+  Promise.all([cliTurns.shutdown(), proposalTurns.shutdown()]).then(bye, bye);
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

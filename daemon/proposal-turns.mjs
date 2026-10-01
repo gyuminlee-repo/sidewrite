@@ -97,35 +97,48 @@ export function createProposalTurns({
   log = console.log,
 }) {
   const live = new Map(); // pane key -> turn
+  const labelOf = (choice) =>
+    presetById(choice?.id)?.label ?? String(choice?.id ?? "This provider");
 
-  // Everything before the end of the turn. Returns nothing: what happened is
-  // in t (failure, rows, stopped).
-  async function work(t) {
-    const { key, ref, d } = t;
-    const label = presetById(t.choice?.id)?.label ?? String(t.choice?.id ?? "This provider");
-    const limit = budgetOf(t.choice);
-    if (!limit) return void (t.failure = `${label} does not run proposal turns.`);
-    const handle = handleFor(t.choice);
-    t.model = handle.model;
+  // The request of a turn, the same for the turn and for its preview:
+  // { ok: true, built, comment, ctx, deps, snapshotAt } or { ok: false,
+  // message }. Nothing is sent and nothing is written.
+  async function prepare({ key, ref, d, selected, choice }) {
+    const label = labelOf(choice);
+    const limit = budgetOf(choice);
+    if (!limit) return { ok: false, message: `${label} does not run proposal turns.` };
     const deps = trackedEditDeps(key, d);
-
     const rev = await load(d);
     const comment = findComment(rev, ref);
-    if (!comment) return void (t.failure = `No reviewer comment ${ref}.`);
-    t.snapshotAt = rev.snapshot?.taken_at ?? null;
+    if (!comment) return { ok: false, message: `No reviewer comment ${ref}.` };
     const ctx = await deps.getReviewContext(ref, d);
     const built = buildProposalPrompt({
       comment,
       snapshot: rev.snapshot ? { paragraphs: ctx.paragraphs, ids: ctx.paragraph_ids } : null,
       recentChanges: ctx.recent_changes,
-      selected: t.selected,
+      selected,
       ledger: rev.ledger,
       lang,
       includeForbid: includeForbid(),
       limit,
       label,
     });
-    if (!built.ok) return void (t.failure = built.message);
+    if (!built.ok) return { ok: false, message: built.message };
+    return { ok: true, built, comment, ctx, deps, snapshotAt: rev.snapshot?.taken_at ?? null };
+  }
+
+  // Everything before the end of the turn. Returns nothing: what happened is
+  // in t (failure, rows, stopped).
+  async function work(t) {
+    const { key, ref, d } = t;
+    const label = labelOf(t.choice);
+    const p = await prepare(t);
+    if (!p.ok) return void (t.failure = p.message);
+    const { built, comment, ctx, deps } = p;
+    t.snapshotAt = p.snapshotAt;
+    t.requirements = comment.requirements ?? [];
+    const handle = handleFor(t.choice);
+    t.model = handle.model;
     t.input = { system: built.system, prompt: built.prompt };
     log(
       `[proposal] prompt ref=${ref} provider=${handle.model} scope=${built.scope} paragraphs=${built.shown.length} chars=${built.chars}`,
@@ -186,8 +199,8 @@ export function createProposalTurns({
       code,
       change_id: null,
     }));
+    t.note = read.note; // shown at the end of the turn
     sendText(`${plural(t.rows.length)} received.\n`, key);
-    if (read.note) sendText(`${read.note}\n`, key);
     for (const row of t.rows.filter((x) => x.code)) {
       sendText(`${row.id} rejected (${row.code}): paragraph ${row.proposal.paragraph_id}.\n`, key);
       log(`[proposal] rejected ref=${ref} id=${row.id} code=${row.code}`);
@@ -240,6 +253,17 @@ export function createProposalTurns({
     if (t.rows.length && !applied) t.failure = "No proposal could be placed.";
   }
 
+  // The requests of the comment (ids) that no change on record answers,
+  // whichever turn made the change.
+  async function uncovered(t) {
+    if (!t.requirements.length) return [];
+    const comment = findComment(await load(t.d), t.ref);
+    const used = new Set(
+      (comment?.changes ?? []).flatMap((ch) => ch.rationale?.requirement_ids ?? []),
+    );
+    return t.requirements.map((q) => q.id).filter((id) => !used.has(id));
+  }
+
   // The turn ends at this proposal.
   function stopAt(t, row, outcome, code, r) {
     row.outcome = outcome;
@@ -277,6 +301,21 @@ export function createProposalTurns({
       sendText(`${plural(t.rows.length)}: ${parts.join(", ")}.\n`, key);
     }
     const outcome = t.stopped ? "stopped" : t.failure ? "error" : "ok";
+    // A turn that worked and left a request of the comment without a change
+    // says so: in the chat, and with the end of the turn for the Review tab.
+    const open = await Promise.resolve()
+      .then(() => uncovered(t))
+      .then(undefined, () => []);
+    let notice = null;
+    if (outcome === "ok" && open.length) {
+      const n = t.requirements.length;
+      notice =
+        `${n - open.length} of ${n} request${n === 1 ? " has" : "s have"} a proposed change; ` +
+        `${open.join(", ")} ${open.length === 1 ? "has" : "have"} none${t.note ? `: ${t.note}` : "."}`;
+      sendText(`${notice}\n`, key);
+    } else if (t.note) {
+      sendText(`${t.note}\n`, key);
+    }
     log(
       `[proposal] done ref=${ref} proposals=${t.rows.length} applied=${count("applied")} rejected=${count("rejected")} skipped=${count("skipped")} stopped_at=${t.stoppedAt ?? "-"} outcome=${outcome}`,
     );
@@ -293,6 +332,7 @@ export function createProposalTurns({
               snapshot_taken_at: t.snapshotAt,
               retried: t.retried,
               stopped_at: t.stoppedAt,
+              uncovered: open,
               ...(t.toolEvent ? { tool_event: t.toolEvent } : {}),
               proposals: t.rows.map((x) => ({
                 id: x.id,
@@ -319,12 +359,19 @@ export function createProposalTurns({
       endTurn(key, { ok: false, error: t.failure });
     } else {
       sendEvent({ event: "turn_complete", subtype: "success" }, key);
-      endTurn(key, { ok: true });
+      endTurn(key, { ok: true, ...(notice ? { notice } : {}) });
     }
   }
 
   return {
     running: (key) => live.has(key),
+    // What a turn would send, for Preview prompt: { ok: true, system, prompt,
+    // chars, scope, shown, ... } (proposal.mjs buildProposalPrompt) or
+    // { ok: false, message }. Arguments as for start.
+    async preview(key, turn, { at, selected = [], choice = null } = {}) {
+      const p = await prepare({ key, ref: turn?.ref, d: at, selected, choice });
+      return p.ok ? p.built : p;
+    },
     // Starts the turn and resolves at once: the turn is registered before
     // anything is awaited, so a Stop right after this call finds it. Rejects
     // only when nothing was started. turn: { ref }. source: { at: the
@@ -350,6 +397,8 @@ export function createProposalTurns({
         retried: false,
         stoppedAt: null,
         toolEvent: null,
+        requirements: [],
+        note: "",
         done: null,
       };
       live.set(key, t);
@@ -375,4 +424,30 @@ export function createProposalTurns({
       await Promise.all(all.map((t) => t.done));
     },
   };
+}
+
+// The runner as index.mjs uses it: the one place where it meets the bridge
+// and the review service. The bridge takes (text, key) and (event, key);
+// the review service sends its own events itself, as (key, obj).
+// CC_OFFICE_PROPOSAL_TIMEOUT_MS: how long one request to the provider may take.
+export function proposalTurnsFor({
+  bridge,
+  review,
+  router,
+  endTurn,
+  env = process.env,
+  log = console.log,
+}) {
+  return createProposalTurns({
+    handleFor: (choice) => router.handleFor(choice),
+    trackedEditDeps: (key, d) => review.trackedEditDeps(key, d),
+    call: (name, args, key) => bridge.callTaskpaneTool(name, args, key),
+    // One switch for both kinds of review turn (review-service.mjs).
+    includeForbid: () => review.includeForbid(),
+    timeoutMs: Number(env.CC_OFFICE_PROPOSAL_TIMEOUT_MS) || 300_000,
+    sendText: (text, key) => bridge.sendAssistantText(text, key),
+    sendEvent: (event, key) => bridge.sendAssistantEvent(event, key),
+    endTurn,
+    log,
+  });
 }

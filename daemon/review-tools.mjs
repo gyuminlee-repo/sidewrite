@@ -18,6 +18,9 @@ export const REVIEW_WRITE_TOOL = "office_tracked_edit";
 // edit (taskpane/shared/tools-word.js PANE_CAPS): it compares the paragraph
 // with expected_before_hash before it edits.
 export const TARGET_HASH_CAP = "target_hash";
+// The capability of a task pane that knows proposal turns: it has shown its
+// author, once, what goes to the provider of such a turn (providers-pane.js).
+export const PROPOSAL_CAP = "proposal_turns";
 
 // Read-only Word tools stay available in a review turn.
 export const REVIEW_READ_TOOLS = new Set([
