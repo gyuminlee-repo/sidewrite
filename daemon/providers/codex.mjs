@@ -40,12 +40,13 @@
 //     the goal tools; with model gpt-5.5 also web_search.
 //   With the switches of ISOLATION below:
 //   - no hook process started, and the same prompt got "NO_TOOL" for the
-//     shell, the file listing and the web page (a real run, with the
-//     switches the plan named; goals, sleep_tool, shell_snapshot and
-//     web_search="disabled" were added after it and are covered by the
-//     request reading below). Before shell_snapshot was switched off Codex
-//     itself still started the user's shell to take a snapshot of it, which
-//     reads the user's shell startup file; the prompt is not part of that.
+//     shell, the file listing and the web page (two real runs: one with the
+//     switches the plan named, one with the whole list). With shell_snapshot
+//     on, Codex itself still started the user's shell to take a snapshot of
+//     it, which reads the user's shell startup file (the prompt is not part
+//     of that); with the whole list no shell process started at all.
+//   - a judgment through codexOneshot (two made-up sentences) answered in
+//     8 s with the items error, error, agent_message and nothing else.
 //   - the request to the model carries no shell, no MCP, no web search, no
 //     image and no plugin tool. What Codex has no switch for stays: for the
 //     default model `exec` (a JavaScript isolate; its own description says
