@@ -2790,3 +2790,28 @@ test("turnEnded saves the paragraphs the turn named as still holding the term, t
     await t.cleanup();
   }
 });
+
+// A receipt names the model that did the work: for the link of a change the
+// model the session runs on (after a refusal fallback, the other model), not
+// the alias that was asked for.
+test("the receipt of a recorded change names the model the session runs on", async () => {
+  const t = await setup({ getModel: () => "opus", getRunModel: () => "claude-opus-5" });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({ ok: true, word_comment_id: 5, paragraph_index: 2, before: "b", after: "a" }),
+    };
+    const r = await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.1", find: "degrees", replace: "°C", rationale: { what: "w", why: "y", addresses: "a" } },
+      { ref: "R1.1" },
+    );
+    assert.equal(r.ok, true, r.message);
+    const link = (await readDecisions(t.dir)).find((d) => d.kind === "requirement_link");
+    assert.equal(link.model, "claude-opus-5");
+  } finally {
+    await t.cleanup();
+  }
+});
+

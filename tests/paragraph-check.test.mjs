@@ -260,6 +260,8 @@ test("service: review_check_paragraphs asks the model of the edits, saves what i
       jobs.push(options);
       return {
         model: options?.claudeModel ?? "haiku",
+        // What the request ran on, as the router reports it.
+        used: () => ({ ran: "claude-opus-9-1" }),
         run: async (req) => {
           shots.push(req);
           return {
@@ -341,7 +343,8 @@ test("service: review_check_paragraphs asks the model of the edits, saves what i
     assert.equal(shots.length, 1);
     assert.ok(shots[0].timeoutMs >= 300_000);
     assert.ok(shots[0].prompt.includes("The culture grew slowly and was kept warm."));
-    assert.equal(r.consistency.model, "claude-opus-9");
+    // On file: the model that ran, not the one asked for.
+    assert.equal(r.consistency.model, "claude-opus-9-1");
     assert.deepEqual(r.consistency.paragraphs, [
       { index: 1, id: "p1", change_ids: ["R1.1-1", "R1.1-2"], many: false },
     ]);
@@ -358,7 +361,7 @@ test("service: review_check_paragraphs asks the model of the edits, saves what i
     assert.deepEqual(rev.consistency.findings, r.consistency.findings);
     assert.deepEqual(r.revision.consistency, rev.consistency);
     assert.ok(
-      lines.includes("[review] paragraph check paragraphs=1 findings=1 model=claude-opus-9"),
+      lines.includes("[review] paragraph check paragraphs=1 findings=1 model=claude-opus-9-1"),
     );
     assert.equal(
       lines.some((l) => l.includes("Both at once") || l.includes("grew slowly")),

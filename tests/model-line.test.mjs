@@ -127,7 +127,7 @@ test("fallbackNotice: what the chat says when the CLI moved the session to anoth
       { original: "claude-opus-5-5", fallback: "claude-opus-5", scope: "session" },
       models,
     ),
-    "Opus 5.5 declined a request of this turn, and Claude Code ran it again on Opus 5. The session stays on Opus 5 from here on. To go back to the model you chose, pick it again in the chat box or in Setup.",
+    "Opus 5.5 declined a request of this turn, and Claude Code ran it again on Opus 5. The next turn asks Opus 5.5 once more; if it declines again, this document stays on Opus 5.",
   );
   assert.equal(
     fallbackNotice(
@@ -137,3 +137,37 @@ test("fallbackNotice: what the chat says when the CLI moved the session to anoth
     "Opus 5.5 declined a request of this turn, and Claude Code ran it again on Opus 5. Only that answer came from Opus 5; the session keeps its model.",
   );
 });
+
+// The chosen model declined two turns in a row: the document stays on the
+// other model, and that is a state, not a warning repeated every turn.
+test("a model that declines the manuscript: the notice once, then a state in the line and a note for Setup", async () => {
+  const { fallbackNotice, roleText, declinedNote } = await import("../taskpane/shared/model-line.js");
+  const models = [
+    ...MODELS,
+    { value: "claude-opus-5", displayName: "Opus 5", resolvedModel: "claude-opus-5" },
+  ];
+  const f = { original: "claude-opus-5-5", fallback: "claude-opus-5", scope: "session", category: "bio" };
+  assert.equal(
+    fallbackNotice({ ...f, stay: true }, models),
+    "Opus 5.5 declined this manuscript again (bio). Edits of this document now stay on Opus 5: asking Opus 5.5 before every turn would spend a refused request each time. To use another model, choose it in the chat box or in Setup.",
+  );
+  const choice = { provider: "claude", model: "opus" };
+  const once = { provider: "claude", asked: "opus", ran: "claude-opus-5", declined: { ...f, stay: false } };
+  assert.equal(roleText("turn", { used: once, choice }, models), "Edits: asked for Claude · Opus 5.5, ran on Claude · Opus 5");
+  const stays = { ...once, declined: { ...f, stay: true } };
+  assert.equal(
+    roleText("turn", { used: stays, choice }, models),
+    "Edits: Claude · Opus 5 (Opus 5.5 declines this manuscript: bio)",
+  );
+  assert.equal(
+    roleText("turn", { used: { ...stays, declined: { ...f, category: null, stay: true } }, choice }, models),
+    "Edits: Claude · Opus 5 (Opus 5.5 declines this manuscript)",
+  );
+  assert.equal(
+    declinedNote(stays, models),
+    "Opus 5.5 declines this manuscript (bio), so edits run on Opus 5. You can choose another model here.",
+  );
+  assert.equal(declinedNote(once, models), "");
+  assert.equal(declinedNote(null, models), "");
+});
+

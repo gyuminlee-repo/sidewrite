@@ -251,3 +251,32 @@ test("refusalFallback: the log line and the pane event of a model_refusal_fallba
   assert.match(local.log, / scope=local category=-$/);
   assert.equal(JSON.stringify(refusalFallback(msg)).includes("prose"), false);
 });
+
+// A real revision: the chosen model declined every one of 18 turns of a
+// manuscript (the CLI ran each again on another model), and going back to
+// the chosen model before each turn spent one refused request a turn. After
+// the second refusal in a row of the same kind the document stays on the
+// other model.
+test("declineStep and staysOnFallback: one more try after the first refusal, then the document stays", async () => {
+  const { declineStep, staysOnFallback } = await import("../daemon/model-list.mjs");
+  const f = { asked: "opus", original: "claude-opus-5-5", fallback: "claude-opus-5", category: "bio" };
+  const first = declineStep(undefined, f);
+  assert.deepEqual(first, { ...f, count: 1, stay: false });
+  assert.equal(staysOnFallback(first, "opus"), null);
+  const second = declineStep(first, f);
+  assert.deepEqual(second, { ...f, count: 2, stay: true });
+  assert.equal(staysOnFallback(second, "opus"), second);
+  assert.equal(declineStep(second, f).count, 3);
+  // Another kind of refusal, or another model asked for, starts the count again.
+  assert.deepEqual(declineStep(first, { ...f, category: "cyber" }), {
+    ...f,
+    category: "cyber",
+    count: 1,
+    stay: false,
+  });
+  assert.equal(declineStep(first, { ...f, asked: "sonnet" }).count, 1);
+  // The record holds for the model that declined only: another choice is tried.
+  assert.equal(staysOnFallback(second, "sonnet"), null);
+  assert.equal(staysOnFallback(undefined, "opus"), null);
+});
+
