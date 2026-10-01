@@ -76,21 +76,31 @@ const LIST = [
   },
 ];
 
-test("turn menu: the CLI and Claude providers, only a turn-ready one enabled; judgment menu: available only", () => {
+test("edits menu: every provider, only a turn-ready one enabled, the others with their reason; writing and judgment menus: available only", () => {
   const t = providerRows(LIST, "turn");
   assert.deepEqual(
     t.map((r) => r.id),
-    ["claude", "antigravity"],
+    LIST.map((r) => r.id),
   );
   assert.deepEqual(
     t.filter((r) => r.enabled).map((r) => r.id),
     ["claude"],
   );
   assert.match(t.find((r) => r.id === "antigravity").note, /denies the office tools/);
-  assert.equal(
-    t.some((r) => r.id === "deepseek"),
-    false,
+  // A provider that is not offered for edits is listed, disabled, with why.
+  assert.deepEqual(
+    [t.find((r) => r.id === "ollama").text, t.find((r) => r.id === "ollama").note],
+    [
+      "Ollama (local) (not for edits)",
+      "Judgments only: review turns are not offered for this provider.",
+    ],
   );
+  assert.equal(
+    t.find((r) => r.id === "deepseek").text,
+    "DeepSeek (Connection failed (ECONNRESET))",
+  );
+  // Writing is offered by whatever is available, as a judgment is.
+  assert.deepEqual(providerRows(LIST, "writing"), providerRows(LIST, "oneshot"));
   const o = providerRows(LIST, "oneshot");
   assert.deepEqual(
     o.filter((r) => r.enabled).map((r) => r.id),
@@ -105,7 +115,7 @@ test("turn menu: the CLI and Claude providers, only a turn-ready one enabled; ju
     "DeepSeek (Connection failed (ECONNRESET))",
   );
   assert.equal(o.find((r) => r.id === "ollama").text, "Ollama (local)");
-  assert.equal(t.find((r) => r.id === "antigravity").text, "agy (judgments only)");
+  assert.equal(t.find((r) => r.id === "antigravity").text, "agy (not for edits)");
 });
 
 test("a stored choice that stopped passing falls back to Claude", () => {
@@ -169,6 +179,8 @@ test("model rows: the provider's list, the current one selected, a first row for
     { value: "", label: "Default model", selected: true },
     { value: "sonnet", label: "Sonnet 5.5", selected: false },
   ]);
+  // The first row says what the default of the role is.
+  assert.equal(modelRows(LIST[0], null, "Best model (default)")[0].label, "Best model (default)");
   assert.deepEqual(modelRows(LIST[3], null), [
     { value: "", label: "No model listed", selected: true },
   ]);
