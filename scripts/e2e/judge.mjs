@@ -19,6 +19,7 @@ export const WORD_EDITS = {
   reading: "measuring",
   measuring: "recording",
   monitoring: "tracking",
+  monitored: "tracked",
   followed: "tracked",
 };
 
