@@ -186,10 +186,10 @@ export function createReviewService({
   // a comment removed anyway can be restored with its text (onEdit).
   const inflight = new Map();
   let lastToken = 0;
-  function hold(key, ref, comment = null) {
+  function hold(d, ref, comment = null) {
     let path;
     try {
-      path = docFor(key).path;
+      path = d.path;
     } catch {
       return () => {};
     }
@@ -217,10 +217,10 @@ export function createReviewService({
   }
   // The comment a change lands under; restored when it was removed anyway,
   // so an edit Word applied is never thrown away.
-  function withComment(key, rev, ref) {
+  function withComment(d, rev, ref) {
     if (findComment(rev, ref)) return rev;
     log(`[review] comment ${ref} was missing; restored to keep the change`);
-    return restoreComment(rev, ref, remembered(docFor(key).path, ref));
+    return restoreComment(rev, ref, remembered(d.path, ref));
   }
   const turnHolds = new Map(); // pane key -> release of its review turn hold
   // Ledger check generation by revision file and item id: each check of an
@@ -239,21 +239,45 @@ export function createReviewService({
     }
     return { doc, path: revisionPathFor(doc) };
   }
-  const load = (key) => {
-    const { doc, path } = docFor(key);
-    return loadRevision(path, doc);
-  };
-  const update = (key, fn) => {
-    const { doc, path } = docFor(key);
-    return withRevision(path, doc, fn);
-  };
+  // The document of a pane, read from its live context ONCE, when a request
+  // or a tool call starts. Everything that runs after an await (the answer
+  // of Word, a late answer, a job that called a model) uses this handle and
+  // never the context again: a dropped socket removes the pane's context,
+  // and a document saved under a new name changes it under the same key
+  // (Codex review 15: the path was read again after the tool call, threw,
+  // and an applied edit was lost). A pane with no usable document gives a
+  // handle that throws the "save the document first" error on first use.
+  function at(key) {
+    let found = null;
+    let error = null;
+    try {
+      found = docFor(key);
+    } catch (e) {
+      error = e;
+    }
+    const need = () => {
+      if (error) throw error;
+      return found;
+    };
+    return {
+      key,
+      get doc() {
+        return need().doc;
+      },
+      get path() {
+        return need().path;
+      },
+    };
+  }
+  const load = (d) => loadRevision(d.path, d.doc);
+  const update = (d, fn) => withRevision(d.path, d.doc, fn);
 
   // Decision receipts (decision-log.mjs). A receipt never stops the feature
   // it records: a failure only logs.
-  async function receipt(key, records) {
+  async function receipt(d, records) {
     if (!records.length) return;
     try {
-      await appendDecisions(decisionsPathFor(docFor(key).doc), records);
+      await appendDecisions(decisionsPathFor(d.doc), records);
     } catch (e) {
       log(`[review] decision log failed: ${e?.message ?? e}`);
     }
@@ -263,23 +287,26 @@ export function createReviewService({
   // An applying item not in here was left by a daemon that stopped.
   const applying = new Map();
   const applyingKey = (ref, id) => `${ref}\0${id}`;
-  function activeFor(key) {
-    const { path } = docFor(key);
+  function activeFor(d) {
+    const { path } = d;
     if (!applying.has(path)) applying.set(path, new Set());
     return applying.get(path);
   }
-  const clearStale = (key, rev) => markStaleApplying(rev, activeFor(key));
+  const clearStale = (d, rev) => markStaleApplying(rev, activeFor(d));
   const backupChains = new Map();
 
-  function trackedEditDeps(key) {
+  // begin(): the handle of one tool call, taken before Word is called;
+  // applyTrackedEdit gives it back to every function below as `at`/`d`.
+  function trackedEditDeps(key, fixed = null) {
     return {
       log,
-      getLedger: async () => (await load(key)).ledger,
+      begin: () => fixed ?? at(key),
+      getLedger: async (d = at(key)) => (await load(d)).ledger,
       // L2 sources and L5 ids for office_tracked_edit. recent_changes: the
       // changes recorded since the snapshot (earlier edits of this turn), so
       // the forbid check reads the paragraphs as they are now.
-      getReviewContext: async (ref) => {
-        const rev = await load(key);
+      getReviewContext: async (ref, d = at(key)) => {
+        const rev = await load(d);
         const c = findComment(rev, ref);
         const since = rev.snapshot?.taken_at;
         return {
@@ -295,17 +322,17 @@ export function createReviewService({
             : [],
         };
       },
-      onEdit: async ({ ref, change }) => {
+      onEdit: async ({ ref, change, at: d = at(key) }) => {
         let saved = null;
         let comment = null;
-        await update(key, (rev) => {
-          const base = withComment(key, rev, ref);
+        await update(d, (rev) => {
+          const base = withComment(d, rev, ref);
           const r = addChange(base, ref, change);
           saved = r.change;
           comment = findComment(base, ref);
           return r.revision;
         });
-        await receipt(key, [
+        await receipt(d, [
           decisionRecord({
             kind: "requirement_link",
             input: {
@@ -329,12 +356,20 @@ export function createReviewService({
       // marked by review_override). A normal edit gets an item of its own
       // in the file here, so a refresh or a restarted daemon can still find
       // out whether Word applied it (Codex review 14).
-      onOutcomeUnknown: async ({ id, ref, record, attempt, args, blocked_id = null }) => {
+      onOutcomeUnknown: async ({
+        id,
+        ref,
+        record,
+        attempt,
+        args,
+        blocked_id = null,
+        at: d = at(key),
+      }) => {
         let own = false;
         if (!blocked_id && attempt && args) {
           let saved = null;
-          await update(key, (rev) => {
-            const r = addUnknownEdit(withComment(key, rev, ref), ref, { args, attempt });
+          await update(d, (rev) => {
+            const r = addUnknownEdit(withComment(d, rev, ref), ref, { args, attempt });
             saved = r.blocked;
             return r.revision;
           });
@@ -346,13 +381,22 @@ export function createReviewService({
         if (!id) return;
         const timer = setTimeout(() => forgetLate(id), lateResultTtlMs);
         timer.unref?.();
-        pendingLate.set(id, { key, ref, record, blocked_id, own, timer, release: hold(key, ref) });
+        pendingLate.set(id, {
+          key,
+          at: d,
+          ref,
+          record,
+          blocked_id,
+          own,
+          timer,
+          release: hold(d, ref),
+        });
       },
-      holdRef: (ref) => hold(key, ref),
-      onBlocked: async ({ ref, args, blocked_by }) => {
+      holdRef: (ref, d = at(key)) => hold(d, ref),
+      onBlocked: async ({ ref, args, blocked_by, at: d = at(key) }) => {
         let saved = null;
-        await update(key, (rev) => {
-          const r = addBlocked(withComment(key, rev, ref), ref, { args, blocked_by });
+        await update(d, (rev) => {
+          const r = addBlocked(withComment(d, rev, ref), ref, { args, blocked_by });
           saved = r.blocked;
           return r.revision;
         });
@@ -368,7 +412,7 @@ export function createReviewService({
   async function lateToolResult(key, entry) {
     // Held until the result is recorded, so a save in between keeps the comment.
     const p = pendingLate.get(entry.id);
-    const held = p ? hold(p.key, p.ref) : () => {};
+    const held = p ? hold(p.at, p.ref) : () => {};
     try {
       return await recordLate(entry);
     } finally {
@@ -387,7 +431,7 @@ export function createReviewService({
       log(`[review] late result not applied ${entry.id}: ${why}`);
       // Word answered that the normal edit is not in the document.
       if (p.own) {
-        await update(p.key, (rev) =>
+        await update(p.at, (rev) =>
           findComment(rev, p.ref)?.blocked.some((b) => b.id === p.blocked_id)
             ? takeBlocked(rev, p.ref, p.blocked_id).revision
             : null,
@@ -397,7 +441,7 @@ export function createReviewService({
     }
     log(`[review] late result recorded ${entry.id}`);
     if (p.blocked_id) {
-      await update(p.key, (rev) =>
+      await update(p.at, (rev) =>
         findComment(rev, p.ref)?.blocked.some((b) => b.id === p.blocked_id)
           ? takeBlocked(rev, p.ref, p.blocked_id).revision
           : null,
@@ -425,8 +469,8 @@ export function createReviewService({
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";
 
-  async function buildFor(key, ref, paragraphs) {
-    const rev = await load(key);
+  async function buildFor(d, ref, paragraphs) {
+    const rev = await load(d);
     const comment = findComment(rev, ref);
     if (!comment) throw new Error(`No reviewer comment ${ref}. Save the comment list first.`);
     const built = buildReviewPrompt({
@@ -440,10 +484,12 @@ export function createReviewService({
 
   const impl = {
     async review_load(msg, key) {
-      const { path } = docFor(key);
-      return { path, revision: await update(key, (rev) => clearStale(key, rev)) };
+      const d = at(key);
+      const { path } = d;
+      return { path, revision: await update(d, (rev) => clearStale(d, rev)) };
     },
     async review_split(msg, key) {
+      const d = at(key);
       const text = String(msg.text ?? "");
       // A receipt only when the model was asked (a regex split is no LLM decision).
       let asked = false;
@@ -483,16 +529,17 @@ export function createReviewService({
           }),
         );
       }
-      if (records.length) await receipt(key, records);
+      if (records.length) await receipt(d, records);
       return { ...r, comments: x.comments, warnings: [...r.warnings, ...x.warnings] };
     },
     async review_save_comments(msg, key) {
+      const d = at(key);
       const incoming = Array.isArray(msg.comments) ? msg.comments : [];
-      const { path } = docFor(key);
+      const { path } = d;
       const listed = new Set(incoming.map((c) => c?.ref));
       let kept = [];
       // Read inside the chain: what is held when the save runs, not when asked.
-      const revision = await update(key, (rev) => {
+      const revision = await update(d, (rev) => {
         const held = heldRefs(path, rev);
         kept = rev.comments.map((c) => c.ref).filter((r) => !listed.has(r) && held.has(r));
         return replaceComments(rev, incoming, held);
@@ -501,33 +548,37 @@ export function createReviewService({
       return { revision, warnings: kept.length ? [keptWarning(kept)] : [] };
     },
     async review_set_status(msg, key) {
-      return { revision: await update(key, (rev) => setCommentStatus(rev, msg.ref, msg.status)) };
+      const d = at(key);
+      return { revision: await update(d, (rev) => setCommentStatus(rev, msg.ref, msg.status)) };
     },
     async review_set_requirements(msg, key) {
+      const d = at(key);
       const texts = Array.isArray(msg.requirements) ? msg.requirements : [];
-      return { revision: await update(key, (rev) => setRequirements(rev, msg.ref, texts)) };
+      return { revision: await update(d, (rev) => setRequirements(rev, msg.ref, texts)) };
     },
     async review_preview(msg, key) {
-      const { built } = await buildFor(key, msg.ref, msg.paragraphs);
+      const d = at(key);
+      const { built } = await buildFor(d, msg.ref, msg.paragraphs);
       log(
         formatPromptLog(msg.ref, built, { paragraphs: msg.paragraphs?.length ?? 0, preview: true }),
       );
       return { prompt: built.text };
     },
     async review_propose(msg, key, host) {
-      const { built, comment } = await buildFor(key, msg.ref, msg.paragraphs);
+      const d = at(key);
+      const { built, comment } = await buildFor(d, msg.ref, msg.paragraphs);
       pushTurn(key, host, built.text, { ref: msg.ref });
       turnHolds.get(key)?.();
       turnHolds.set(
         key,
-        hold(key, msg.ref, {
+        hold(d, msg.ref, {
           reviewer: comment.reviewer,
           text: comment.text,
           requirements: comment.requirements,
         }),
       );
       log(formatPromptLog(msg.ref, built, { paragraphs: msg.paragraphs?.length ?? 0 }));
-      const revision = await update(key, (rev) =>
+      const revision = await update(d, (rev) =>
         findComment(rev, msg.ref).status === "pending"
           ? setCommentStatus(rev, msg.ref, "in_progress")
           : null,
@@ -535,14 +586,15 @@ export function createReviewService({
       return { started: true, ref: msg.ref, started_at: new Date().toISOString(), revision };
     },
     async review_refresh(msg, key) {
+      const d = at(key);
       const snapshot = msg.snapshot ?? { paragraphs: [], comments: [] };
       const texts = snapshotTexts(snapshot);
       let rows = [];
       let external = [];
       let resolved = [];
       let dropped = [];
-      const revision = await update(key, (old) => {
-        const r0 = resolveUnknownOverrides(clearStale(key, old) ?? old, snapshot);
+      const revision = await update(d, (old) => {
+        const r0 = resolveUnknownOverrides(clearStale(d, old) ?? old, snapshot);
         const rev = r0.revision;
         resolved = r0.resolved;
         dropped = r0.dropped;
@@ -597,16 +649,19 @@ export function createReviewService({
       return { rows, counts, external, revision };
     },
     async review_external_dismiss(msg, key) {
-      return { revision: await update(key, (rev) => dismissExternal(rev, msg.id)) };
+      const d = at(key);
+      return { revision: await update(d, (rev) => dismissExternal(rev, msg.id)) };
     },
     // msg.ids: Word comment ids the task pane's comment cleanup deleted.
     async review_comments_cleaned(msg, key) {
+      const d = at(key);
       const ids = Array.isArray(msg.ids) ? msg.ids : [];
-      const revision = await update(key, (rev) => markCommentsCleaned(rev, ids));
+      const revision = await update(d, (rev) => markCommentsCleaned(rev, ids));
       log(`[review] comments cleaned ids=${ids.length}`);
       return { revision };
     },
     async review_override(msg, key) {
+      const d = at(key);
       // Claimed inside the revision chain: an overlapping override of the
       // same item finds it applying and is refused before Word is called.
       // An applying item left by a stopped daemon is taken as outcome_unknown
@@ -614,11 +669,11 @@ export function createReviewService({
       // The id joins `active` in the same step, before any other request of
       // the chain can read the file.
       let blocked = null;
-      const active = activeFor(key);
+      const active = activeFor(d);
       const held = applyingKey(msg.ref, msg.blocked_id);
       try {
-        await update(key, (rev) => {
-          const r = claimBlocked(clearStale(key, rev) ?? rev, msg.ref, msg.blocked_id, {
+        await update(d, (rev) => {
+          const r = claimBlocked(clearStale(d, rev) ?? rev, msg.ref, msg.blocked_id, {
             force: msg.force === true,
           });
           blocked = r.blocked;
@@ -629,10 +684,9 @@ export function createReviewService({
         if (blocked) active.delete(held); // claimed, then the save failed
         throw e;
       }
-      const restore = () =>
-        update(key, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state));
+      const restore = () => update(d, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state));
       try {
-        const base = trackedEditDeps(key);
+        const base = trackedEditDeps(key, d);
         let attempt = null;
         const deps = {
           ...base,
@@ -656,7 +710,7 @@ export function createReviewService({
         }
         if (r.code === "OutcomeUnknown" && attempt) {
           log(`[review] override outcome unknown ${blocked.id} id=${attempt.tool_call_id}`);
-          const revision = await update(key, (x) =>
+          const revision = await update(d, (x) =>
             markBlockedUnknown(x, msg.ref, blocked.id, attempt),
           );
           return { applied: false, outcome_unknown: true, result: r, revision };
@@ -666,15 +720,16 @@ export function createReviewService({
           return { applied: false, result: r, revision };
         }
         log(`[review] override ${msg.blocked_id} approved for ${blocked.blocked_by.join(",")}`);
-        const revision = await update(key, (x) => takeBlocked(x, msg.ref, msg.blocked_id).revision);
+        const revision = await update(d, (x) => takeBlocked(x, msg.ref, msg.blocked_id).revision);
         return { applied: true, result: r, revision };
       } finally {
         active.delete(held);
       }
     },
     async ledger_add(msg, key) {
+      const d = at(key);
       let item = null;
-      const revision = await update(key, (rev) => {
+      const revision = await update(d, (rev) => {
         const r = addLedgerItem(rev, msg.item);
         item = r.item;
         return r.revision;
@@ -683,21 +738,24 @@ export function createReviewService({
       return { item, revision };
     },
     async ledger_update(msg, key) {
+      const d = at(key);
       return {
-        revision: await update(key, (rev) => updateLedgerItem(rev, msg.id, msg.patch ?? {})),
+        revision: await update(d, (rev) => updateLedgerItem(rev, msg.id, msg.patch ?? {})),
       };
     },
     async ledger_remove(msg, key) {
-      return { revision: await update(key, (rev) => removeLedgerItem(rev, msg.id)) };
+      const d = at(key);
+      return { revision: await update(d, (rev) => removeLedgerItem(rev, msg.id)) };
     },
     async ledger_check(msg, key) {
+      const d = at(key);
       // Taken on arrival, before the file read: a check that reads the file
       // later is still the older one. An older check never lowers the mark.
       const gen = ++lastCheckGen;
-      const rev = await load(key);
+      const rev = await load(d);
       const wanted = Array.isArray(msg.ids) && msg.ids.length ? new Set(msg.ids) : null;
       const items = rev.ledger.filter((i) => !wanted || wanted.has(i.id));
-      const { path } = docFor(key);
+      const { path } = d;
       const genKey = (id) => `${path}\0${id}`;
       for (const i of items) {
         if ((checkGen.get(genKey(i.id)) ?? 0) < gen) checkGen.set(genKey(i.id), gen);
@@ -709,23 +767,23 @@ export function createReviewService({
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
         oneshot,
         full: msg.full === true,
-        onDecision: (d) =>
+        onDecision: (x) =>
           decisions.push(
             decisionRecord({
               kind: "ledger_check",
-              input: { instruction: d.instruction, paragraph: d.paragraph },
+              input: { instruction: x.instruction, paragraph: x.paragraph },
               model: oneshotModel,
               output: {
-                item_id: d.item_id,
-                paragraph_index: d.paragraph_index,
-                verdict: d.verdict,
-                ...(d.error ? { error: String(d.error).slice(0, 200) } : {}),
+                item_id: x.item_id,
+                paragraph_index: x.paragraph_index,
+                verdict: x.verdict,
+                ...(x.error ? { error: String(x.error).slice(0, 200) } : {}),
               },
             }),
           ),
       });
-      await receipt(key, decisions);
-      const at = new Date().toISOString();
+      await receipt(d, decisions);
+      const checkedAt = new Date().toISOString();
       for (const r of outcomes) {
         const unsure = r.unsure.length ? ` unsure=${r.unsure.length}` : "";
         log(
@@ -733,7 +791,7 @@ export function createReviewService({
         );
         log(`[review] ledger scope ${r.id} mode=${r.mode} paragraphs=${r.checked}/${r.total}`);
       }
-      const revision = await update(key, (x) => {
+      const revision = await update(d, (x) => {
         let next = x;
         for (const r of outcomes) {
           // The rule may have been edited or removed while the check ran: its
@@ -756,7 +814,7 @@ export function createReviewService({
           next = updateLedgerItem(next, r.id, {
             status: r.status,
             violation_count: r.violations.length,
-            checked_at: at,
+            checked_at: checkedAt,
             violations: r.violations,
             unsure: r.unsure,
             checked_hashes: r.checked_hashes,
@@ -767,7 +825,8 @@ export function createReviewService({
       return { outcomes, revision };
     },
     async comments_backup(msg, key) {
-      const { doc } = docFor(key);
+      const d = at(key);
+      const { doc } = d;
       const backup = msg.backup;
       if (!backup || !Array.isArray(backup.comments))
         throw new Error("backup.comments is required");

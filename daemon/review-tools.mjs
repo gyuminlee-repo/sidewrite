@@ -143,9 +143,13 @@ function fail(message, extra = {}) {
   return { ok: false, message, ...extra };
 }
 
-// deps: { call(name, args), getLedger(), getReviewContext(ref), onEdit({ref, change}),
+// deps: { begin(), call(name, args), getLedger(), getReviewContext(ref), onEdit({ref, change}),
 //         onBlocked({ref, args, blocked_by}), onOutcomeUnknown({id, ref, record}),
 //         holdRef(ref) -> release, log }
+// begin (optional): called once, before anything else. What it returns
+// (review-service.mjs: the document of the pane, as it is now) is handed to
+// every other function of this call as its last argument or as `at`, also
+// when Word answers late: none of them reads the pane's context again.
 // holdRef (optional): marks the comment as in use while Word is called, so a
 // comment-list save does not drop it; the returned function ends that.
 // onOutcomeUnknown: the task pane did not answer. `args` is the edit as it
@@ -183,7 +187,8 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     rationale: args.rationale,
   };
 
-  const ctx = (await deps.getReviewContext?.(turn.ref)) ?? {};
+  const at = deps.begin?.();
+  const ctx = (await deps.getReviewContext?.(turn.ref, at)) ?? {};
   const known = new Set((ctx.requirements ?? []).map((r) => r.id));
   const unknown = (args.rationale?.requirement_ids ?? []).filter((id) => !known.has(id));
   if (unknown.length) {
@@ -198,7 +203,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   // Forbid list: the new text on its own, and the paragraph as it will read
   // after the edit (a forbidden phrase formed with the words next to it).
   // Without a known target every occurrence of `find` is tried.
-  const ledger = (await deps.getLedger?.()) ?? [];
+  const ledger = (await deps.getLedger?.(at)) ?? [];
   const around = forbidHitsAfterEdit(ledger, target === null ? current : [current[target]], {
     find: args.find,
     text: newText,
@@ -208,7 +213,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   const excepted = override?.blocked_by ?? [];
   const open = hits.filter((id) => !excepted.includes(id));
   if (open.length) {
-    const blocked = await deps.onBlocked?.({ ref: turn.ref, args: edit, blocked_by: open });
+    const blocked = await deps.onBlocked?.({ ref: turn.ref, args: edit, blocked_by: open, at });
     deps.log?.(`[review] blocked ${turn.ref} by=${open.join(",")}`);
     return fail(
       `Not applied: the new text, alone or with the words next to it, matches forbidden rule(s) ${open.join(", ")}. Rephrase without it; the author can approve an exception in the Review tab.`,
@@ -246,6 +251,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
     if (r.ok === false && !commentMissing) return r;
     return recordApplied(deps, turn.ref, r, {
+      at,
       texts: current,
       kind,
       newText,
@@ -262,7 +268,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   const commentText = formatRationaleComment(turn.ref, rationale, { lost });
   // The comment stays in the list until the answer is recorded (or handed
   // to onOutcomeUnknown, which holds it on its own).
-  const release = deps.holdRef?.(turn.ref);
+  const release = deps.holdRef?.(turn.ref, at);
   try {
     let r;
     try {
@@ -293,7 +299,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
           unsourced_terms: unsourced,
         }),
       };
-      await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt, args: edit });
+      await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt, args: edit, at });
       return fail(
         `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
         { code: "OutcomeUnknown", tool_call_id: id },
@@ -409,7 +415,7 @@ async function recordApplied(
   deps,
   ref,
   r,
-  { texts, kind, newText, narrow, rationale, excepted, lost, unsourced, find, commentMissing },
+  { at, texts, kind, newText, narrow, rationale, excepted, lost, unsourced, find, commentMissing },
 ) {
   // The task pane reports whether it could apply the narrowed range (the cut
   // find must occur once inside the located hit); otherwise the full range.
@@ -437,7 +443,7 @@ async function recordApplied(
       narrowFind: narrowed ? narrow.find : null,
     }),
   };
-  const saved = await deps.onEdit?.({ ref: ref, change });
+  const saved = await deps.onEdit?.({ ref: ref, change, at });
   const id = saved?.id ?? "?";
   deps.log?.(
     `[review] change recorded ${id} kind=${appliedKind} comment=${change.word_comment_id} paragraph=${change.paragraph_index}` +
