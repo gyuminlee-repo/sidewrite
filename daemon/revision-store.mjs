@@ -80,6 +80,10 @@ export const ChangeSchema = z.object({
   from_review: z.array(z.string()).default([]),
   // L3: the find/replace the model asked for, when the applied range is smaller.
   narrowed_from: z.object({ find: z.string(), text: z.string() }).nullable().default(null),
+  // A part of a paragraph rewritten as a whole (review-tools.mjs
+  // applyTrackedRewrite): the id its parts share. They also share one
+  // rationale comment (word_comment_id).
+  rewrite_id: z.string().nullable().default(null),
   // Up to 3 words before and after the changed range at edit time, so one
   // change can be judged apart from others in the same paragraph. null for
   // changes recorded before this field (whole-paragraph rule).
@@ -485,6 +489,15 @@ export function withRevision(path, manuscript, fn) {
 // ---- pure operations (return a new revision) --------------------------------
 
 const clone = (x) => structuredClone(x);
+
+// Order of changes for replaying them on the snapshot (currentTexts): by
+// the time they were recorded, and within one instant by the number of their
+// id (the parts of a rewrite can be recorded in the same millisecond).
+export function byCreated(a, b) {
+  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+  const n = (x) => Number(String(x.id ?? "").match(/(\d+)$/)?.[1] ?? 0);
+  return n(a) - n(b);
+}
 
 export function findComment(rev, ref) {
   return rev.comments.find((c) => c.ref === ref) ?? null;

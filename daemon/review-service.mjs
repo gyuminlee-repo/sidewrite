@@ -62,6 +62,7 @@ import {
   authorAnswers,
   setRequirementOutside,
   setSameTerm,
+  byCreated,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -132,7 +133,12 @@ export function resolveUnknownOverrides(rev, snapshot) {
       );
       const { narrow: _narrow, ...full } = b.attempt.change;
       const judged = [full, narrowedAttempt(b.attempt.change)].filter(Boolean).map((form) => {
-        const change = { ...form, word_comment_id: comment ? String(comment.id) : null };
+        // A part of a rewrite that adds no comment is under the comment of
+        // its paragraph (form.word_comment_id).
+        const change = {
+          ...form,
+          word_comment_id: comment ? String(comment.id) : (form.word_comment_id ?? null),
+        };
         const row = classifyChange(change, snapshot);
         const p = paras.find((x) => x.index === row.paragraph_index);
         // Plain containment: Word joins pending inserted and deleted text with
@@ -164,7 +170,7 @@ export function resolveUnknownOverrides(rev, snapshot) {
         ...change,
         paragraph_index: row.paragraph_index,
         paragraph_id: p?.id ?? null,
-        comment_missing: comment ? null : "CommentNotFound",
+        comment_missing: comment || change.word_comment_id != null ? null : "CommentNotFound",
       });
       next = takeBlocked(added.revision, c.ref, b.id).revision;
       if (comment) used.add(String(comment.id));
@@ -476,7 +482,7 @@ export function createReviewService({
             ? rev.comments
                 .flatMap((x) => x.changes)
                 .filter((ch) => ch.created_at > since)
-                .sort((a, b) => (a.created_at < b.created_at ? -1 : 1))
+                .sort(byCreated)
             : [],
         };
       },
@@ -587,6 +593,8 @@ export function createReviewService({
       // Does the task pane compare the paragraph before a tracked edit? One
       // that does not say so in its hello is sent no edit.
       paneChecksTarget: (d = at(key)) => d.caps.includes(TARGET_HASH_CAP),
+      // A capability the task pane named in its hello (review-tools.mjs REWRITE_CAP).
+      paneCan: (cap, d = at(key)) => d.caps.includes(cap),
       // Word applied the edit and its record could not be saved. change: as
       // it was applied; kept for the next load or refresh (recordUnsaved).
       onRecordFailed: async ({ ref, attempt_id, change, at: d = at(key) }) => {
@@ -745,7 +753,7 @@ export function createReviewService({
               rev.comments
                 .flatMap((c) => c.changes)
                 .filter((ch) => ch.created_at > rev.snapshot.taken_at)
-                .sort((a, b) => (a.created_at < b.created_at ? -1 : 1)),
+                .sort(byCreated),
             ),
             ids: rev.snapshot.ids,
             seen: manuscriptSeen(key),

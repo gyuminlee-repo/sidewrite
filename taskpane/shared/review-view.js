@@ -328,15 +328,20 @@ export function invariantReport(revision, comments) {
   const uncommented = expected.filter(bare);
   const missing = expected.filter((ch) => !bare(ch) && !ids.has(String(ch.word_comment_id)));
   const orphans = [...ids].filter((id) => !recorded.has(id));
+  // The parts of a rewritten paragraph share one comment: comments are
+  // counted, not changes.
+  const wanted =
+    new Set(expected.filter((ch) => !bare(ch)).map((ch) => String(ch.word_comment_id))).size +
+    uncommented.length;
   return {
     changes: changes.length,
-    expected_comments: expected.length,
+    expected_comments: wanted,
     tool_comments: ids.size,
     missing_comment: missing.map((ch) => ch.id),
     uncommented: uncommented.map((ch) => ch.id),
     unrecorded_comment_ids: orphans,
     ok:
-      expected.length === ids.size &&
+      wanted === ids.size &&
       missing.length === 0 &&
       uncommented.length === 0 &&
       orphans.length === 0,
@@ -368,13 +373,15 @@ export function commentsToResolve(rows, revision, comments) {
   const open = new Set((comments ?? []).filter((c) => !c.resolved).map((c) => String(c.id)));
   const byId = new Map();
   for (const c of revision?.comments ?? []) for (const ch of c.changes ?? []) byId.set(ch.id, ch);
-  const out = [];
+  // A comment the parts of a rewrite share is resolved when every part is decided.
+  const decided = new Map();
   for (const r of rows ?? []) {
-    if (r.state !== "accepted" && r.state !== "rejected") continue;
     const id = byId.get(r.change_id)?.word_comment_id;
-    if (id != null && open.has(String(id))) out.push(String(id));
+    if (id == null) continue;
+    const done = r.state === "accepted" || r.state === "rejected";
+    decided.set(String(id), (decided.get(String(id)) ?? true) && done);
   }
-  return out;
+  return [...decided].filter(([id, all]) => all && open.has(id)).map(([id]) => id);
 }
 
 export const STATE_LABELS = {
@@ -455,6 +462,7 @@ export function changeFlags(ch) {
   if (ch?.from_review?.length)
     out.push({ kind: "unsourced", text: `From the review: ${ch.from_review.join(", ")}` });
   if (ch?.narrowed_from) out.push({ kind: "narrowed", text: "Narrowed" });
+  if (ch?.rewrite_id) out.push({ kind: "narrowed", text: "Rewrite" });
   return out;
 }
 

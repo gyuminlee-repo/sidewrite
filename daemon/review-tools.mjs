@@ -20,8 +20,17 @@ import {
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
 import { newNumbers } from "./number-guard.mjs";
+import { rewriteSegments } from "./word-diff.mjs";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
+// The ways a review turn changes the document: one tracked edit, or a
+// paragraph rewritten as a whole (applyTrackedRewrite), which reaches Word
+// as tracked edits too.
+export const REVIEW_WRITE_TOOLS = new Set([REVIEW_WRITE_TOOL, "office_tracked_rewrite"]);
+// What a task pane must name in its hello to be sent the parts of a
+// rewrite: it can add an edit without a comment and refuse a paragraph
+// that is not plain text.
+export const REWRITE_CAP = "tracked_rewrite";
 // The capability a task pane must name in its hello to be sent a tracked
 // edit (taskpane/shared/tools-word.js PANE_CAPS): it compares the paragraph
 // with expected_before_hash before it edits.
@@ -69,7 +78,7 @@ export const REVIEW_BLOCKED_TOOLS = new Set([
 export const REVIEW_NOTE_TOOLS = new Set(["office_ask_author", "office_requirement_outside"]);
 
 export function reviewTurnToolAllowed(name) {
-  return REVIEW_READ_TOOLS.has(name) || REVIEW_NOTE_TOOLS.has(name) || name === REVIEW_WRITE_TOOL;
+  return REVIEW_READ_TOOLS.has(name) || REVIEW_NOTE_TOOLS.has(name) || REVIEW_WRITE_TOOLS.has(name);
 }
 
 // Wrap the bridge call used by every office/excel tool handler.
@@ -302,7 +311,15 @@ function fail(message, extra = {}) {
 // turn: { ref } of the current review turn, or null.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
-export async function applyTrackedEdit(deps, args, turn, { override = null } = {}) {
+// part: set only by applyTrackedRewrite, for one edit of a paragraph that is
+// rewritten as a whole: { rewrite_id, comment_text, comment (true: this part
+// carries the rationale comment of the paragraph; false: it adds none and
+// is recorded under comment_id), comment_id, plain_only, lost, unsourced,
+// fromReview }. The number guard, the forbid list and the fact checks have
+// run on the paragraph as a whole there; here they are not run again (a
+// number moved from one sentence to another is no new number, though the
+// part that puts it in does not hold it).
+export async function applyTrackedEdit(deps, args, turn, { override = null, part = null } = {}) {
   if (!turn)
     return fail("office_tracked_edit works only in a review turn started from the Review tab.");
   if (args.comment_ref !== turn.ref) {
@@ -358,17 +375,19 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   // author can confirm, so the edit is refused and the model asks. Unit
   // notation changes no number; a deletion adds none. An approved forbid
   // exception does not lift this. The log holds the count, not the number.
-  const numbers = newNumbers({
-    kind,
-    find: args.find,
-    text: newText,
-    sources: [
-      ctx.comment_text ?? "",
-      ...(ctx.author_texts ?? []),
-      ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
-      ...(target === null ? [] : [current[target]]),
-    ],
-  });
+  const numbers = part
+    ? []
+    : newNumbers({
+        kind,
+        find: args.find,
+        text: newText,
+        sources: [
+          ctx.comment_text ?? "",
+          ...(ctx.author_texts ?? []),
+          ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
+          ...(target === null ? [] : [current[target]]),
+        ],
+      });
   if (numbers.length) {
     deps.log?.(`[review] number needs author ${turn.ref} count=${numbers.length}`);
     return fail(
@@ -381,7 +400,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     text: newText,
     kind,
   });
-  const hits = [...new Set([...forbidHits(ledger, newText), ...around])];
+  const hits = part ? [] : [...new Set([...forbidHits(ledger, newText), ...around])];
   const excepted = override?.blocked_by ?? [];
   const open = hits.filter((id) => !excepted.includes(id));
   if (open.length) {
@@ -402,22 +421,27 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   // L1-L3 (edit-facts.mjs). Sources for L2: the manuscript snapshot of the
   // last status refresh, the comment, and the text being replaced.
   const texts = ctx.paragraphs ?? [];
-  const lost =
-    kind === "insert"
+  const lost = part
+    ? part.lost
+    : kind === "insert"
       ? []
       : lostFacts(args.find, args.replace, {
           sentenceStart: startsSentence(args.find, target === null ? texts : [current[target]]),
         });
-  const unsourced =
-    kind === "delete" ? [] : unsourcedTerms(newText, [...texts, ctx.comment_text ?? "", args.find]);
+  const unsourced = part
+    ? part.unsourced
+    : kind === "delete"
+      ? []
+      : unsourcedTerms(newText, [...texts, ctx.comment_text ?? "", args.find]);
   // Facts of the new text (quantities, names: edit-facts.mjs extractFacts)
   // that the review has and the manuscript does not: taken from the
   // reviewer. They pass as sourced above; the rationale comment tells the
   // author they were not checked against a source. A plain word the reviewer
   // suggested is wording, not a fact, and is not marked.
   const own = [...texts, args.find].join("\n");
-  const fromReview =
-    kind === "delete"
+  const fromReview = part
+    ? part.fromReview
+    : kind === "delete"
       ? []
       : [
           ...new Set(
@@ -428,7 +452,8 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         ];
   const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
 
-  const commentText = formatRationaleComment(turn.ref, rationale, { lost, fromReview });
+  const commentText =
+    part?.comment_text ?? formatRationaleComment(turn.ref, rationale, { lost, fromReview });
   // The edit as it would read in the document (unknownAttempt). It goes into
   // the review file BEFORE Word is called (onAttempt), so the stretch between
   // "Word applied it" and "the file says so" is never empty: a daemon that
@@ -447,6 +472,9 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       lost_facts: lost,
       unsourced_terms: unsourced,
       from_review: fromReview,
+      ...(part ? { rewrite_id: part.rewrite_id } : {}),
+      // A part without a comment of its own: the comment of its paragraph.
+      ...(part && !part.comment ? { word_comment_id: part.comment_id } : {}),
       // The narrower form the task pane applies when it can (L3). Word's
       // answer says which one went in; when that answer is never saved, a
       // refresh looks for both (narrowedAttempt).
@@ -525,6 +553,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       lost,
       unsourced,
       fromReview,
+      part,
       find: args.find,
       commentMissing,
       // change: the change as Word applied it (narrowed or not, with its
@@ -554,6 +583,10 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         ...(args.paragraph_hint ? { paragraph_hint: args.paragraph_hint } : {}),
         ...(narrow ? { narrow } : {}),
         comment_text: commentText,
+        // A part of a rewrite: no comment of its own, or (the first one
+        // sent) only for a paragraph of plain text.
+        ...(part && !part.comment ? { no_comment: true } : {}),
+        ...(part?.plain_only ? { plain_only: true } : {}),
         // The paragraph everything above was judged on: its text as it
         // reads now here (reviewed view: the snapshot with the recorded
         // changes in it), hashed. The task pane hashes the paragraph it is
@@ -606,6 +639,229 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     pre?.end?.();
     release?.();
   }
+}
+
+export const TRACKED_REWRITE_DESCRIPTION =
+  "Review turns only. Rewrite ONE paragraph as a whole: give its paragraph id and the full new text of the paragraph. " +
+  "Use it when three or more places of a paragraph have to change or its argument changes; for one or two words use office_tracked_edit. " +
+  "Only the words that differ are put into the document as tracked changes, with one rationale comment for the paragraph. " +
+  "Start from the paragraph as it reads now (pending changes of other comments included) and keep every sentence you do not mean to change exactly as it is. " +
+  "A paragraph with fields, pictures or footnotes is refused (ParagraphNotPlain): use office_tracked_edit there.";
+
+export const trackedRewriteShape = {
+  comment_ref: commentRef('Reviewer comment the rewrite answers, e.g. "R1.3".'),
+  paragraph_id: z
+    .string()
+    .describe("Id of the paragraph, as the manuscript in the prompt gives it."),
+  text: z.string().min(1).describe("The whole paragraph as it should read."),
+  what: z.string().min(1).describe("What changed in the paragraph."),
+  why: z.string().min(1).describe("Why."),
+  addresses: z.string().min(1).describe("Which part of the reviewer comment this answers."),
+  requirement_ids: z
+    .array(z.string())
+    .optional()
+    .describe("Ids of the listed requests the rewrite handles (q1, q2)."),
+};
+
+// office_tracked_rewrite. deps: those of applyTrackedEdit, and paneCan(cap)
+// -> boolean. The paragraph as it reads now (the last status refresh with
+// the changes recorded since) and the new text are compared word by word
+// (word-diff.mjs); each run of words that differs is one office_tracked_edit
+// through applyTrackedEdit, from the last to the first, so every one of them
+// is written to the review file before Word is called, is checked against
+// the paragraph as it reads then (expected_before_hash) and is recorded on
+// its own. What is judged on text is judged once, on the paragraph as a
+// whole, before the first of them: the number guard (sources: the comment,
+// author instructions and answers, and the paragraph itself), the forbid
+// list (a rule the paragraph already broke and still breaks does not count;
+// a hit is refused here and is not kept for an exception, which only a
+// single edit can get), facts that are lost, words without a source. The
+// first edit sent carries the one rationale comment of the paragraph and
+// asks the task pane to refuse a paragraph that is not plain text; the
+// others add no comment and are recorded under that comment. When Word
+// refuses a part, the rewrite stops there: what went in stays on record.
+export async function applyTrackedRewrite(deps, args, turn) {
+  const t = await noteTurn(deps, "office_tracked_rewrite", args, turn);
+  if (t.error) return t.error;
+  const { ctx, at } = t;
+  const known = new Set((ctx.requirements ?? []).map((r) => r.id));
+  const unknown = (args.requirement_ids ?? []).filter((id) => !known.has(id));
+  if (unknown.length) {
+    return fail(
+      `Unknown requirement id(s) ${unknown.join(", ")} for ${turn.ref}. Valid ids: ${[...known].join(", ") || "(none listed)"}.`,
+    );
+  }
+  if (deps.paneCan && !deps.paneCan(REWRITE_CAP, at)) {
+    return fail(
+      "Not applied: the task pane is older than the daemon (or not connected) and cannot take a rewritten paragraph. Use office_tracked_edit, or tell the author to reload the task pane.",
+      { code: "TaskPaneOutdated" },
+    );
+  }
+  const current = currentTexts(ctx.paragraphs, ctx.recent_changes);
+  const ids = ctx.paragraph_ids ?? [];
+  const byId = ids.some((id) => id != null) ? ids.indexOf(args.paragraph_id) : -1;
+  const m = /^p(\d+)$/.exec(args.paragraph_id);
+  const index = byId !== -1 ? byId : m && Number(m[1]) < current.length ? Number(m[1]) : -1;
+  if (index === -1) {
+    return fail(`No paragraph ${args.paragraph_id} in the manuscript of the last status refresh.`, {
+      code: "ParagraphNotFound",
+    });
+  }
+  const before = current[index];
+  const after = normalizeParaText(args.text);
+  const cut = rewriteSegments(before, after);
+  if (cut.error) {
+    return fail(
+      `Not applied: ${cut.error}. Change this paragraph with office_tracked_edit, one place at a time.`,
+      { code: "RewriteNotExpressible" },
+    );
+  }
+  if (!cut.segments.length) {
+    return fail(`Nothing to change: paragraph ${args.paragraph_id} already reads the same.`);
+  }
+  const ledger = (await deps.getLedger?.(at)) ?? [];
+  const broken = brokenForbidRules(ledger);
+  if (broken.length) {
+    const bad = broken.map((b) => b.id);
+    deps.log?.(`[review] refused ${turn.ref}: forbid rule(s) ${bad.join(",")} do not compile`);
+    return fail(
+      `Not applied: forbidden rule(s) ${bad.join(", ")} cannot be checked. No edit is applied until the author fixes or removes the rule in the Review tab. Do not retry; tell the author.`,
+      { code: "ForbidRuleBroken", broken_rules: bad },
+    );
+  }
+  const had = forbidHits(ledger, before);
+  const hits = forbidHits(ledger, after).filter((id) => !had.includes(id));
+  if (hits.length) {
+    deps.log?.(`[review] rewrite blocked ${turn.ref} by=${hits.join(",")}`);
+    return fail(
+      `Not applied: the new paragraph matches forbidden rule(s) ${hits.join(", ")}. Write it without that; an exception can be approved only for a single office_tracked_edit.`,
+      { code: "RewriteBlocked", blocked_by: hits },
+    );
+  }
+  const numbers = newNumbers({
+    kind: "replace",
+    find: before,
+    text: after,
+    sources: [
+      ctx.comment_text ?? "",
+      ...(ctx.author_texts ?? []),
+      ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
+    ],
+  });
+  if (numbers.length) {
+    deps.log?.(`[review] number needs author ${turn.ref} count=${numbers.length}`);
+    return fail(
+      `Not applied: the new paragraph holds a number (${numbers.join(", ")}) that is not in the paragraph as it reads now, the reviewer comment, an author instruction or an author answer. Which value is right is a fact only the author can confirm. Leave it as it is and ask with office_ask_author. Do not try another number.`,
+      { code: "NumberNeedsAuthor", numbers },
+    );
+  }
+  const texts = ctx.paragraphs ?? [];
+  const lost = lostFacts(before, after, { sentenceStart: true });
+  const unsourced = unsourcedTerms(after, [...texts, ctx.comment_text ?? "", before]);
+  const own = [...texts, before].join("\n");
+  const fromReview = [
+    ...new Set(
+      extractFacts(after)
+        .map((f) => f.text)
+        .filter((x) => !factPresent(x, own) && factPresent(x, ctx.comment_text ?? "")),
+    ),
+  ];
+  const rationale = {
+    what: args.what,
+    why: args.why,
+    addresses: args.addresses,
+    ...(args.requirement_ids?.length ? { requirement_ids: args.requirement_ids } : {}),
+  };
+  const commentText = formatRationaleComment(turn.ref, rationale, { lost, fromReview });
+  const rewriteId = `${turn.ref}-w${Date.now().toString(36)}`;
+  const parts = cut.segments;
+  const changeIds = [];
+  let commentId = null;
+  let stopped = null;
+  // From the last to the first: an edit never moves one that is still to come.
+  for (let k = parts.length - 1; k >= 0; k--) {
+    const first = k === parts.length - 1;
+    const r = await applyTrackedEdit(
+      deps,
+      {
+        comment_ref: args.comment_ref,
+        find: parts[k].find,
+        replace: parts[k].replace,
+        paragraph_hint: args.paragraph_id,
+        rationale,
+      },
+      turn,
+      {
+        part: {
+          rewrite_id: rewriteId,
+          comment_text: commentText,
+          comment: first,
+          comment_id: commentId,
+          plain_only: first,
+          lost: first ? lost : [],
+          unsourced: first ? unsourced : [],
+          fromReview: first ? fromReview : [],
+        },
+      },
+    );
+    if (r?.change_id) changeIds.push(r.change_id);
+    if (first && r?.word_comment_id != null) commentId = String(r.word_comment_id);
+    if (!r?.ok) {
+      stopped = r ?? { code: "EmptyResult", message: "no answer" };
+      break;
+    }
+  }
+  const applied = changeIds.length;
+  deps.log?.(
+    `[review] rewrite ${turn.ref} paragraph=${index} parts=${parts.length} applied=${applied}` +
+      `${stopped ? ` stopped=${stopped.code ?? "refused"}` : ""}`,
+  );
+  if (stopped) {
+    const now = currentTexts(
+      ctx.paragraphs,
+      ((await deps.getReviewContext?.(turn.ref, at)) ?? ctx).recent_changes,
+    )[index];
+    if (!applied) {
+      return fail(
+        `Not applied: ${stopped.message ?? stopped.code ?? "the task pane refused the first part"} Nothing of the rewrite is in the document.${stopped.code === "ParagraphNotPlain" ? " Change this paragraph with office_tracked_edit, one place at a time." : ""}`,
+        { code: stopped.code ?? "RewriteStopped", applied_parts: 0, parts: parts.length },
+      );
+    }
+    return fail(
+      `The rewrite stopped: ${applied} of ${parts.length} parts are in the document (changes ${changeIds.join(", ")}), then a part was refused (${stopped.code ?? stopped.message ?? "refused"}). Do not send the rewrite again. The paragraph now reads as given in paragraph_now: finish it with office_tracked_edit, or tell the author.`,
+      {
+        code: "RewriteStopped",
+        applied_parts: applied,
+        parts: parts.length,
+        change_ids: changeIds,
+        paragraph_now: now,
+      },
+    );
+  }
+  return {
+    ok: true,
+    change_ids: changeIds,
+    parts: parts.length,
+    paragraph_index: index,
+    word_comment_id: commentId,
+    lost_facts: lost,
+    unsourced_terms: unsourced,
+    from_review: fromReview,
+    ...(unsourced.length || fromReview.length
+      ? {
+          warning: [
+            unsourced.length
+              ? `Not in the manuscript or the comment: ${unsourced.join(", ")}. Name them in your answer so the author can check where they come from.`
+              : "",
+            fromReview.length
+              ? `From the review, not checked against the source: ${fromReview.join(", ")}.`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+        }
+      : {}),
+  };
 }
 
 // The paragraph a tracked edit lands in, by the rule of toolTrackedEdit
@@ -689,7 +945,7 @@ export function unknownAttempt(texts, target, ids, change) {
   }
   return {
     ...change,
-    word_comment_id: null,
+    word_comment_id: change.word_comment_id ?? null,
     paragraph_index: one ? one.index : null,
     paragraph_id: one ? (ids?.[one.index] ?? null) : null,
     before: one ? one.t : "",
@@ -748,6 +1004,7 @@ async function recordApplied(
     lost,
     unsourced,
     fromReview = [],
+    part = null,
     find,
     commentMissing,
     onFailed,
@@ -758,7 +1015,14 @@ async function recordApplied(
   const narrowed = !!(narrow && r.narrowed === true);
   const appliedKind = narrowed ? (narrow.replace === "" ? "delete" : "replace") : kind;
   const change = {
-    word_comment_id: r.word_comment_id == null ? null : String(r.word_comment_id),
+    // A part of a rewrite that added no comment is under the comment of its paragraph.
+    word_comment_id:
+      part && !part.comment
+        ? (part.comment_id ?? null)
+        : r.word_comment_id == null
+          ? null
+          : String(r.word_comment_id),
+    ...(part ? { rewrite_id: part.rewrite_id } : {}),
     paragraph_index: r.paragraph_index ?? null,
     paragraph_id: r.paragraph_id ?? null,
     kind: appliedKind,

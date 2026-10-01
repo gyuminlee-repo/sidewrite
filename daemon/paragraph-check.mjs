@@ -20,6 +20,7 @@
 // (the pane does that), so indexes are those of the document as it is.
 
 import { currentTexts } from "./review-tools.mjs";
+import { byCreated } from "./revision-store.mjs";
 import { commentFence } from "./review-prompt.mjs";
 
 export const CHECK_KINDS = ["contradiction", "conflict", "review_as_source"];
@@ -42,9 +43,7 @@ export function paragraphsToCheck(rev) {
   );
   const texts = currentTexts(
     snap.paragraphs,
-    all
-      .filter((ch) => ch.created_at > snap.taken_at)
-      .sort((a, b) => (a.created_at < b.created_at ? -1 : 1)),
+    all.filter((ch) => ch.created_at > snap.taken_at).sort(byCreated),
   );
   const at = (ch) => {
     const byId = ch.paragraph_id == null ? -1 : (snap.ids ?? []).indexOf(ch.paragraph_id);
