@@ -6,7 +6,8 @@
 // candidate is the guideline sentence as written, and it cites that sentence.
 // A count rule is kept only when its own sentence names the section, has
 // the number, counts the same thing with it and says in which direction the
-// number limits it; otherwise the sentence stays as a model-checked rule and
+// number limits it, and, when the sentence names several sections, when the
+// number stands in the clause of that section alone; otherwise the sentence stays as a model-checked rule and
 // a warning says what was missing. A reply that is malformed, partial or carries any text
 // yields no candidate at all.
 //
@@ -150,6 +151,23 @@ export const SECTION_TERMS = {
   conclusion: ["conclusion", "conclusions"],
 };
 
+// When is a number confirmed as the limit of a section? The unit stands next
+// to the number and the direction right before or after it (below), so those
+// two are tied to the number. The number is tied to the section when
+//   - the sentence names no other section, or
+//   - the clause that holds the number names the rule's section and no other.
+// A clause is the stretch between two of these breaks. A break does not count
+// inside a number ("1,000"), inside a section name ("materials and methods"),
+// between the two numbers of a range ("150 and 250"), or where it only joins
+// section names ("the abstract and the introduction", "Introduction, Methods,
+// and Results"): those sections share one clause, the sentence does not say
+// whether the limit holds for each or for all together, and nothing is
+// confirmed. Anything not confirmed stays a model-checked rule.
+export const CLAUSE_BREAKS = {
+  marks: [";", ","],
+  words: ["and", "but", "while", "whereas", "or"],
+};
+
 // The words that name what each target counts. A number other than 1 needs
 // the plural ("6 figure panels" does not count figures).
 export const UNIT_WORDS = {
@@ -224,6 +242,50 @@ export function numbersIn(sentence) {
 
 const sectionNamed = (section, lower) => wholeWord(SECTION_TERMS[section], "s?").test(lower);
 
+// Every place where the sentence names a section, in reading order.
+function sectionMentions(lower) {
+  const out = [];
+  for (const section of SECTIONS) {
+    const re = new RegExp(wholeWord(SECTION_TERMS[section], "s?").source, "g");
+    for (const m of lower.matchAll(re)) {
+      out.push({ section, start: m.index, end: m.index + m[0].length });
+    }
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+const MARKS = CLAUSE_BREAKS.marks.map(esc).join("");
+const BREAK = new RegExp(`[${MARKS}]|(?<![a-z])(?:${alt(CLAUSE_BREAKS.words)})(?![a-z])`, "g");
+const JOINERS = alt([...CLAUSE_BREAKS.words, "the", "a", "an"]);
+const ONLY_JOINS = new RegExp(`^(?:\\s|[${MARKS}/&]|(?<![a-z])(?:${JOINERS})(?![a-z]))*$`);
+
+// The sections named in the clause that holds the number at `span` (see
+// CLAUSE_BREAKS for what a clause is).
+function sectionsInClause(span, spans, mentions, lower) {
+  const within = (list, a, b) => list.some((x) => a >= x.start && b <= x.end);
+  const joins = (list, a, b) =>
+    list.some((x, i) => {
+      const next = list[i + 1];
+      return (
+        next && a >= x.end && b <= next.start && ONLY_JOINS.test(lower.slice(x.end, next.start))
+      );
+    });
+  let from = 0;
+  let to = lower.length;
+  for (const m of lower.matchAll(BREAK)) {
+    const [a, b] = [m.index, m.index + m[0].length];
+    if (within(spans, a, b) || within(mentions, a, b)) continue;
+    if (joins(spans, a, b) || joins(mentions, a, b)) continue;
+    if (b <= span.start) from = b;
+    else if (a >= span.end) {
+      to = a;
+      break;
+    }
+  }
+  const inside = mentions.filter((x) => x.start >= from && x.end <= to);
+  return [...new Set(inside.map((x) => x.section))];
+}
+
 // Does the number at `span` count the target's unit? "together" when figures
 // and tables are counted as one.
 function countsUnit(target, span, lower) {
@@ -297,12 +359,23 @@ function unsupported(rule, sentence) {
     return `the section "${rule.section}" is not named in the sentence`;
   }
   const what = UNIT_WORDS[rule.target].plural[0];
+  const mentions = rule.section ? sectionMentions(lower) : [];
+  const several = [...new Set(mentions.map((x) => x.section))];
   for (const [side, n] of [
     ["min", rule.min],
     ["max", rule.max],
   ]) {
     if (n === undefined) continue;
-    const here = spans.filter((s) => s.value === n);
+    let here = spans.filter((s) => s.value === n);
+    if (several.length > 1) {
+      here = here.filter((s) => {
+        const named = sectionsInClause(s, spans, mentions, lower);
+        return named.length === 1 && named[0] === rule.section;
+      });
+      if (!here.length) {
+        return `the sentence names several sections (${several.join(", ")}) and does not tie ${n} to the ${rule.section} alone`;
+      }
+    }
     const counted = here.map((s) => countsUnit(rule.target, s, lower));
     if (counted.includes("together") && !counted.includes(true)) {
       return "the sentence counts figures and tables together";

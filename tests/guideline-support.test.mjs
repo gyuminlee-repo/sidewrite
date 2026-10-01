@@ -10,6 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   candidatesFromLabels,
+  CLAUSE_BREAKS,
   DIRECTION,
   SECTION_TERMS,
   SECTION_PATTERNS,
@@ -240,4 +241,116 @@ test("a section order names its sections as whole words", () => {
   const rule = { target: "section_order", order };
   assert.equal(kind("Arrange the text as Methods, then Results.", rule), "count");
   assert.equal(kind("Arrange the methodsless text as resultsets.", rule), "llm");
+});
+
+// ---- a sentence that names several sections
+//
+// The number must stand in the clause of the section the rule names, and that
+// clause must name no other section.
+
+const TWO = "The abstract must not exceed 250 words, and the methods must not exceed 1000 words.";
+const LISTED = "Abstract: at most 250 words; Introduction: at most 600 words.";
+const RANGE_THEN =
+  "The abstract should be between 150 and 250 words, but the discussion may have up to 1500 words.";
+
+const TIED = [
+  [TWO, words("abstract", { max: 250 })],
+  [TWO, words("methods", { max: 1000 })],
+  [LISTED, words("abstract", { max: 250 })],
+  [LISTED, words("introduction", { max: 600 })],
+  [
+    "The abstract is limited to 250 words, whereas the Materials and Methods section is limited to 1,500 words.",
+    words("methods", { max: 1500 }),
+  ],
+  [RANGE_THEN, words("abstract", { min: 150, max: 250 })],
+  [RANGE_THEN, words("discussion", { max: 1500 })],
+  [
+    "The introduction has at most 600 words; the results and the discussion are free.",
+    words("introduction", { max: 600 }),
+  ],
+  [
+    "Unlike the summary, which is short, the conclusions have at most 400 words.",
+    words("conclusion", { max: 400 }),
+  ],
+  // "resultset" is not a section: only one section is named, as before.
+  [
+    "The abstract must not exceed 250 words, and the resultset must not exceed 1000 words.",
+    words("abstract", { max: 250 }),
+  ],
+];
+
+const NOT_TIED = {
+  "the number of the other section": [TWO, words("abstract", { max: 1000 })],
+  "the number of the other section, the other way round": [TWO, words("methods", { max: 250 })],
+  "the number of the other entry of a list": [LISTED, words("abstract", { max: 600 })],
+  "the upper end of one section's range under another section": [
+    RANGE_THEN,
+    words("discussion", { max: 250 }),
+  ],
+  "two sections joined by and, first one": [
+    "The abstract and the introduction must not exceed 250 words.",
+    words("abstract", { max: 250 }),
+  ],
+  "two sections joined by and, second one": [
+    "The abstract and the introduction must not exceed 250 words.",
+    words("introduction", { max: 250 }),
+  ],
+  "sections counted together": [
+    "The results and discussion sections together must not exceed 3000 words.",
+    words("results", { max: 3000 }),
+  ],
+  "a list of sections with one limit": [
+    "Introduction, Methods, and Results must not exceed 3000 words.",
+    words("results", { max: 3000 }),
+  ],
+  "a clause with the number that names no section": [
+    "The methods must follow the abstract, which must not exceed 250 words.",
+    words("methods", { max: 250 }),
+  ],
+  "a break word inside another word leaves both sections in one clause": [
+    "The abstract must not exceed 250 words andor the methods must not exceed 1000 words.",
+    words("abstract", { max: 250 }),
+  ],
+};
+
+test("several sections: at least five cases the code must accept and five it must not", () => {
+  assert.ok(TIED.length >= 5 && Object.keys(NOT_TIED).length >= 5);
+});
+
+for (const [sentence, rule] of TIED) {
+  test(`a count rule stands among several sections: ${JSON.stringify(rule)} in ${JSON.stringify(sentence)}`, () => {
+    const r = one(sentence, rule);
+    assert.deepEqual(r.warnings, []);
+    assert.equal(r.candidates[0].check.type, "count");
+    assert.equal(r.candidates[0].check.section, SECTION_PATTERNS[rule.section]);
+  });
+}
+
+for (const [name, [sentence, rule]] of Object.entries(NOT_TIED)) {
+  test(`no count rule from ${name}`, () => {
+    const r = one(sentence, rule);
+    assert.deepEqual(r.candidates[0].check, { type: "llm" });
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0], /^s1: the sentence names several sections \(/);
+  });
+}
+
+test("the clause breaks are a list the code reads; each one separates two sections, and only as a whole word", () => {
+  assert.ok(CLAUSE_BREAKS.marks.length >= 2 && CLAUSE_BREAKS.words.length >= 3);
+  const both = (sep) =>
+    `The abstract must not exceed 250 words${sep}the methods must not exceed 1000 words.`;
+  for (const mark of CLAUSE_BREAKS.marks) {
+    assert.equal(kind(both(`${mark} `), words("abstract", { max: 250 })), "count", mark);
+    assert.equal(kind(both(`${mark} `), words("abstract", { max: 1000 })), "llm", mark);
+  }
+  for (const word of CLAUSE_BREAKS.words) {
+    assert.equal(kind(both(` ${word} `), words("abstract", { max: 250 })), "count", word);
+    assert.equal(
+      kind(both(` ${word.toUpperCase()} `), words("methods", { max: 1000 })),
+      "count",
+      word,
+    );
+    assert.equal(kind(both(` ${word} `), words("methods", { max: 250 })), "llm", word);
+    assert.equal(kind(both(` x${word}x `), words("abstract", { max: 250 })), "llm", word);
+  }
 });
