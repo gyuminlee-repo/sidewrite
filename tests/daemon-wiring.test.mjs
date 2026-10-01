@@ -156,3 +156,17 @@ test("the pane is told what each request ran on: one-shots by the router, the se
   // No option of the session or of a one-shot lowers thinking or effort.
   assert.equal(/\b(thinking|effort|maxThinkingTokens)\s*:/.test(code), false);
 });
+
+test("a refusal fallback of the CLI is logged, told to the pane, and recorded as the model the session runs on", () => {
+  const at = code.indexOf('msg.subtype === "model_refusal_fallback"');
+  assert.ok(at > 0);
+  const body = code.slice(at, at + 500);
+  assert.match(body, /const f = refusalFallback\(msg\);/);
+  assert.match(body, /console\.log\(f\.log\);/);
+  assert.match(body, /bridge\.sendAssistantEvent\(f\.event, session\?\.key\);/);
+  // set_model compares session.model with the model the user chose: with the
+  // fallback recorded, choosing the model again restarts the session on it.
+  assert.match(body, /if \(f\.session && session\) session\.model = msg\.fallback_model;/);
+  // The daemon itself names no fallback model.
+  assert.equal(/fallbackModel/.test(code), false);
+});

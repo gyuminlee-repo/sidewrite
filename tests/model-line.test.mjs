@@ -115,3 +115,25 @@ test("modelLineText: the three kinds of work in one line", () => {
     "Edits: Claude · Opus 5.5 (not used yet)   Writing: Claude · Opus 5.5 (not used yet)   Judgments: Claude · Haiku 4.5 (not used yet)",
   );
 });
+
+test("fallbackNotice: what the chat says when the CLI moved the session to another model", async () => {
+  const { fallbackNotice } = await import("../taskpane/shared/model-line.js");
+  const models = [
+    ...MODELS,
+    { value: "claude-opus-5", displayName: "Opus 5", resolvedModel: "claude-opus-5" },
+  ];
+  assert.equal(
+    fallbackNotice(
+      { original: "claude-opus-5-5", fallback: "claude-opus-5", scope: "session" },
+      models,
+    ),
+    "Opus 5.5 declined a request of this turn, and Claude Code ran it again on Opus 5. The session stays on Opus 5 from here on. To go back to the model you chose, pick it again in the chat box or in Setup.",
+  );
+  assert.equal(
+    fallbackNotice(
+      { original: "claude-opus-5-5", fallback: "claude-opus-5", scope: "local" },
+      models,
+    ),
+    "Opus 5.5 declined a request of this turn, and Claude Code ran it again on Opus 5. Only that answer came from Opus 5; the session keeps its model.",
+  );
+});
