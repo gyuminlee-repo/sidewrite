@@ -20,7 +20,9 @@
 //                   own; the tool adds them
 //   rule_xref       no other reviewer is named
 //                   (these three read all the prose the letter prints for the
-//                   comment: the answer text and the reasons for declining)
+//                   comment: the answer text and the reasons for declining;
+//                   in the translation paragraph only forbidden expressions
+//                   and other reviewers are looked for)
 //   rule_*          profile rules of the answer text: word cap, opening
 //   warn only       lost_facts, pending_changes, rule_quote_words, translation
 //                   (the second language is on and an answer has none)
@@ -31,7 +33,7 @@
 import { checkRegexItem, inScope } from "./ledger-check.mjs";
 import { lostFacts } from "./edit-facts.mjs";
 import { CITABLE, viewText, snapshotHash, staleReasons } from "./response-quotes.mjs";
-import { answerProse } from "./response-model.mjs";
+import { answerProse, glossLine } from "./response-model.mjs";
 import { normalizeParaText } from "./revision-classify.mjs";
 
 // Counted by code, never taken from the model.
@@ -226,6 +228,28 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
       ? [...new Set(reviewersNamed(prose).filter((n) => n !== c.reviewer))]
       : [];
     if (others.length) add("rule_xref", "fail", c.ref, `mentions Reviewer ${others.join(", ")}`);
+
+    // The translation paragraph, when the letter prints one: only what does
+    // not depend on the language (a forbidden name, another reviewer).
+    const translation = L.gloss_enabled ? glossLine(c, L) : "";
+    if (translation) {
+      for (const item of items) {
+        if ((item.check.expect ?? "absent") !== "absent") continue;
+        const out = checkRegexItem(item, [{ index: 0, text: translation }]);
+        if (out.status === "violations")
+          add(
+            "ledger",
+            "fail",
+            c.ref,
+            `${item.id} in the translation: ${out.violations.map((v) => v.match).join(", ")}`,
+          );
+      }
+      const named = L.forbid_cross_reviewer
+        ? [...new Set(reviewersNamed(translation).filter((n) => n !== c.reviewer))]
+        : [];
+      if (named.length)
+        add("rule_xref", "fail", c.ref, `the translation mentions Reviewer ${named.join(", ")}`);
+    }
 
     // The rules below are about the answer text itself.
     if (!text) continue;

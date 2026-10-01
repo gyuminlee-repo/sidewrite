@@ -31,7 +31,14 @@ const squash = (s) =>
 //
 // The letter (buildLetterModel) and the checks of the letter's rules
 // (response-check.mjs, the LLM rules in response-service.mjs) all read this
-// one list, so nothing is printed that was not checked.
+// one list, so no answer paragraph is printed that was not checked.
+//
+// The other prose the letter prints for a comment is the translation
+// paragraph (glossLine below). It is in another language, so only the rules
+// that do not depend on the language are read in it: the forbidden
+// expressions (regex) and the other-reviewer rule. A phrase an answer must
+// have, the position rule, the word cap, the opening and the LLM rules are
+// about the answer in the letter's language and are not asked of it.
 export function answerProse(c) {
   const r = c.response;
   const out = linesOf(r?.text);
@@ -45,6 +52,15 @@ export function answerProse(c) {
   }
   return out;
 }
+
+// The translation paragraph of a comment as the letter prints it (one line,
+// the profile's prefix in front), or "" when the answer has none. L:
+// profile.response_letter. Whether it is printed is the caller's question
+// (gloss_enabled).
+export const glossLine = (c, L) =>
+  c.response?.gloss
+    ? `${L.gloss_prefix ?? ""}${c.response.gloss}`.replace(/\s*\r?\n\s*/g, " ")
+    : "";
 
 // R1.12 -> "12", E.2 -> "2".
 const commentNumber = (ref) => String(ref).slice(String(ref).lastIndexOf(".") + 1);
@@ -88,12 +104,8 @@ export function buildLetterModel(rev, profile, { gloss = false } = {}) {
     const r = c.response;
     const citations = (r?.citations ?? []).filter((cit) => !cit.problem);
     for (const t of answerProse(c)) add("response", t, body);
-    if (gloss && r?.gloss)
-      add(
-        "gloss",
-        `${L.gloss_prefix ?? ""}${r.gloss}`.replace(/\s*\r?\n\s*/g, " "),
-        profile.colors.response_kr ?? null,
-      );
+    const translation = gloss ? glossLine(c, L) : "";
+    if (translation) add("gloss", translation, profile.colors.response_kr ?? null);
     if (c.declined && !citations.length) add("declined", L.declined_line, body);
     for (const cit of citations) {
       const removed = cit.kind === "removed";

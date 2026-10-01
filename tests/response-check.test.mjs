@@ -583,7 +583,7 @@ test("an edit Word did not answer is a warning: it may be in the manuscript with
 });
 
 // ---- the reasons for declining are printed as answer paragraphs -----------------
-import { answerProse, buildLetterModel } from "../daemon/response-model.mjs";
+import { answerProse, buildLetterModel, glossLine } from "../daemon/response-model.mjs";
 
 const printed = (input) =>
   buildLetterModel(input.revision, input.profile)
@@ -656,6 +656,62 @@ test("the rules of the letter are checked in everything the letter prints as the
   input = declinedComment("Outside the scope of this study.");
   thank(input);
   assert.deepEqual(ids(checkResponses(input)), ["ledger:R1.1"]);
+});
+
+test("the translation paragraph: forbidden expressions and other reviewers are looked for in it too", () => {
+  const glossed = (gloss, letter = {}) =>
+    good(
+      (r) => {
+        r.comments[0].response.gloss = gloss;
+        r.ledger.push({
+          id: "L4",
+          kind: "forbid",
+          text: "do not name the kit",
+          scope: "response",
+          check: { type: "regex", pattern: "KitName", flags: "" },
+        });
+      },
+      { gloss_enabled: true, gloss_lang: "German", gloss_prefix: "[DE] ", ...letter },
+    );
+  // A name is the same in every language.
+  let input = glossed("Wir nennen jetzt die Einheit und das KitName.");
+  let rows = checkResponses(input);
+  assert.deepEqual(ids(rows), ["ledger:R1.1"]);
+  assert.equal(rows[0].detail, "L4 in the translation: KitName");
+  // So is a reviewer number, in the letter's own wording or as a comment id.
+  input = glossed("Wie Reviewer 2 in R2.4 schreibt, nennen wir die Einheit.", {
+    forbid_cross_reviewer: true,
+  });
+  rows = checkResponses(input);
+  assert.deepEqual(ids(rows), ["rule_xref:R1.1"]);
+  assert.equal(rows[0].detail, "the translation mentions Reviewer 2");
+  // A clean translation; and one that is not printed (the second language is off).
+  assert.deepEqual(checkResponses(glossed("Wir nennen jetzt die Einheit.")), []);
+  assert.deepEqual(
+    checkResponses(glossed("Das KitName.", { gloss_enabled: false, forbid_cross_reviewer: true })),
+    [],
+  );
+  // A phrase the answer must have is asked of the answer, not of its translation.
+  input = glossed("Wir nennen jetzt die Einheit.");
+  input.revision.ledger.push({
+    id: "L5",
+    kind: "instruction",
+    text: "say 'now'",
+    scope: "response",
+    check: { type: "regex", pattern: "\\bnow\\b", flags: "", expect: "present" },
+  });
+  assert.deepEqual(checkResponses(input), []);
+  // The checked text is the paragraph as the letter prints it.
+  assert.equal(
+    glossLine(input.revision.comments[0], input.profile.response_letter),
+    "[DE] Wir nennen jetzt die Einheit.",
+  );
+  assert.deepEqual(
+    buildLetterModel(input.revision, input.profile, { gloss: true })
+      .paragraphs.filter((p) => p.kind === "gloss")
+      .map((p) => p.text),
+    ["[DE] Wir nennen jetzt die Einheit."],
+  );
 });
 
 test("what is checked is what is printed: one list for the letter and the checks", () => {
