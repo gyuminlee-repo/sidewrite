@@ -43,6 +43,7 @@ import {
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
 import { initResponsePane } from "./response-pane.js";
+import { initToolsPane } from "./tools-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
@@ -135,6 +136,7 @@ let attachSelection = true;
 
 let reviewPane = null; // Review tab controller (Word), set in Office.onReady
 let responsePane = null; // Response tab controller (Word), set in Office.onReady
+let toolsPane = null; // Tools tab controller (Word), set in Office.onReady
 let providersPane = null; // Providers section of the Setup tab, set in Office.onReady
 
 function setComposerDisabled(disabled) {
@@ -749,6 +751,7 @@ async function handleServerMessage(msg) {
       refreshWorkspaceFromDaemon();
       reviewPane?.reload();
       responsePane?.reload();
+      toolsPane?.reload();
       loadModelMenu();
       providersPane?.reload();
       break;
@@ -812,6 +815,10 @@ async function handleServerMessage(msg) {
 
     case "response_event":
       responsePane?.onEvent(msg);
+      break;
+
+    case "tools_event":
+      toolsPane?.onEvent(msg);
       break;
 
     case "pong":
@@ -1246,6 +1253,12 @@ Office.onReady((info) => {
       sendRequest,
       providersReady: () => providersPane?.whenRestored() ?? null,
       word: { collectReviewSnapshot, collectHeadings, exportRenderPdf },
+    });
+    // Tools tab: it reads Word and never writes to it.
+    toolsPane = initToolsPane({
+      sendRequest,
+      providersReady: () => providersPane?.whenRestored() ?? null,
+      word: {},
     });
   }
 

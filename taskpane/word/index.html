@@ -42,6 +42,7 @@
       <button class="tab" data-tab="chat" aria-current="page">Chat</button>
       <button class="tab" data-tab="review">Review</button>
       <button class="tab" data-tab="response">Response</button>
+      <button class="tab" data-tab="tools">Tools</button>
       <button class="tab" data-tab="library">Presets</button>
       <button class="tab" data-tab="setup">Setup</button>
     </nav>
@@ -286,6 +287,14 @@
             Apply to this paper
           </button>
         </details>
+      </div>
+    </section>
+
+    <!-- Tools tab content: selection, journal rules, checks, copies (tools-pane.js) -->
+    <section class="tab-content" data-tab="tools" hidden>
+      <div class="setup-content" id="tools-root">
+        <p class="setup-help" id="tools-doc"></p>
+        <div id="tools-message" hidden></div>
       </div>
     </section>
 

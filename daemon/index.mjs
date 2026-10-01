@@ -27,6 +27,7 @@ import {
 } from "./limit-detect.mjs";
 import { createReviewService } from "./review-service.mjs";
 import { createResponseService } from "./response-service.mjs";
+import { createAuxService } from "./aux-service.mjs";
 import { markStale } from "./response-quotes.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
 import { createModelCache, modelChange, resolveModelChoice } from "./model-list.mjs";
@@ -629,6 +630,12 @@ const response = createResponseService({
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
 });
 
+// Tools tab: selection, journal rules, checks and copies of the manuscript.
+const aux = createAuxService({
+  getContext: (key) => bridge.getContext(key),
+  sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
+});
+
 // Review turns of a CLI provider: the MCP endpoint they call and their
 // runner. A route is open only while its turn runs (cli-turns.mjs).
 mcpHttp = createMcpHttp({
@@ -674,6 +681,7 @@ const bridge = createBridge({
   extraHandlers: {
     ...review.handlers,
     ...response.handlers,
+    ...aux.handlers,
     pick_path: async (msg, reply) => {
       try {
         const result = await pickPathFromMain({
