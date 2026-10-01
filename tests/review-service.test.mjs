@@ -1695,3 +1695,64 @@ test("ledger_suggest is a job: candidates from the review text, one receipt, not
     await t.cleanup();
   }
 });
+
+// P14: one-shot judgments go to the provider chosen in the pane (key "k").
+test("review_split uses the pane's one-shot and its model label", async () => {
+  const used = [];
+  const t = await setup({
+    oneshotFor: (key) => async () => (
+      used.push(key),
+      { ok: true, json: { lines: [] }, text: "{}" }
+    ),
+    oneshotModelFor: (key) => `ollama:qwen3.5:9b@${key}`,
+  });
+  try {
+    await t.ask("review_split", { text: "Reviewer 1\nOne comment only." });
+    assert.ok(used.includes("k"));
+    // The comment_split and requirement_extract receipts name the routed model.
+    const log = await readDecisions(t.dir);
+    assert.ok(log.length >= 1);
+    assert.ok(log.every((r) => r.model === "ollama:qwen3.5:9b@k"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("ledger_check and ledger_suggest use the pane's one-shot too; the default stays the constructor's", async () => {
+  const used = [];
+  const routed = async (req) => {
+    used.push(req.system.slice(0, 12));
+    return { ok: false, error: "routed provider is down" };
+  };
+  const t = await setup({
+    // The constructor's one-shot must not be asked once a route exists.
+    oneshot: async () => {
+      throw new Error("the default one-shot was used");
+    },
+    oneshotModel: "haiku",
+    oneshotFor: (key) => (key === "k" ? routed : null),
+    oneshotModelFor: (key) => `codex:gpt-6.1-sol@${key}`,
+  });
+  try {
+    await t.ask("ledger_add", {
+      item: { kind: "instruction", text: "Use SI units", check: { type: "llm" } },
+    });
+    const check = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 1, text: "Ten feet.", reviewed_text: "Ten feet." }] },
+      full: true,
+    });
+    assert.equal(check.ok, true);
+    const suggest = await t.ask("ledger_suggest", { text: "Reviewer 1\nUse SI units throughout." });
+    assert.deepEqual([suggest.ok, suggest.method], [true, "regex"]);
+    assert.match(suggest.warnings.join(" "), /routed provider is down/);
+    assert.equal(used.length, 2, "one ledger check batch and one suggestion were routed");
+    const log = await readDecisions(t.dir);
+    assert.deepEqual([...new Set(log.map((r) => r.kind))].sort(), [
+      "ledger_check",
+      "ledger_suggest",
+    ]);
+    assert.ok(log.every((r) => r.model === "codex:gpt-6.1-sol@k"));
+  } finally {
+    await t.cleanup();
+  }
+});

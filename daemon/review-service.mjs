@@ -150,6 +150,11 @@ export function createReviewService({
   // Model names for decision receipts: the one-shot model, and the model of
   // the drafting session of a pane (getModel(key)). null when unknown.
   oneshotModel = null,
+  // P14: the one-shot of a pane and its receipt label, when judgments go to
+  // the provider chosen in that pane (providers/oneshot-router.mjs). The
+  // defaults are the two arguments above, for every pane.
+  oneshotFor = () => oneshot,
+  oneshotModelFor = () => oneshotModel,
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -412,12 +417,15 @@ export function createReviewService({
     async review_split(msg, key) {
       const text = String(msg.text ?? "");
       // A receipt only when the model was asked (a regex split is no LLM decision).
+      // Taken once: a change of provider in the pane applies to the next request.
+      const shot = oneshotFor(key);
+      const shotModel = oneshotModelFor(key);
       let asked = false;
       const ask =
-        oneshot &&
+        shot &&
         ((req) => {
           asked = true;
-          return oneshot(req);
+          return shot(req);
         });
       const r = await splitReview(text, { patterns: msg.patterns, oneshot: ask });
       const records = [];
@@ -426,7 +434,7 @@ export function createReviewService({
           decisionRecord({
             kind: "comment_split",
             input: text,
-            model: oneshotModel,
+            model: shotModel,
             output: {
               method: r.method,
               refs: r.comments.map((c) => c.ref),
@@ -438,13 +446,13 @@ export function createReviewService({
       }
       // L5: once the comments are known, whichever split made them. A save of
       // the edited list does not come here, so it never runs again on it.
-      const x = await extractRequirements(r.comments, { oneshot });
+      const x = await extractRequirements(r.comments, { oneshot: shot });
       if (x.asked) {
         records.push(
           decisionRecord({
             kind: "requirement_extract",
             input: x.input,
-            model: oneshotModel,
+            model: shotModel,
             output: { requests: x.requests },
           }),
         );
@@ -679,12 +687,12 @@ export function createReviewService({
     },
     // P15: rule candidates from the review text (ledger-suggest.mjs). Nothing
     // is stored: the author picks candidates in the pane, which sends them
-    // back through ledger_import. Uses the one-shot of this service; the
-    // provider routing of P14 replaces `oneshot` and `oneshotModel` here.
+    // back through ledger_import.
     async ledger_suggest(msg, key) {
       const text = String(msg.text ?? "");
       if (!text.trim()) throw new Error("Paste or load the review text first.");
-      const r = await suggestLedger(text, { oneshot });
+      const shotModel = oneshotModelFor(key);
+      const r = await suggestLedger(text, { oneshot: oneshotFor(key) });
       log(
         `[review] ledger suggest method=${r.method} candidates=${r.candidates.length} warnings=${r.warnings.length}`,
       );
@@ -694,7 +702,7 @@ export function createReviewService({
           decisionRecord({
             kind: "ledger_suggest",
             input: r.input,
-            model: oneshotModel,
+            model: shotModel,
             output: {
               method: r.method,
               candidates: r.candidates.length,
@@ -727,15 +735,16 @@ export function createReviewService({
       const paragraphs = msg.snapshot?.paragraphs ?? [];
       // L10: changed paragraphs only unless msg.full (the "Full check" button).
       const decisions = [];
+      const shotModel = oneshotModelFor(key);
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
-        oneshot,
+        oneshot: oneshotFor(key),
         full: msg.full === true,
         onDecision: (d) =>
           decisions.push(
             decisionRecord({
               kind: "ledger_check",
               input: { instruction: d.instruction, paragraph: d.paragraph },
-              model: oneshotModel,
+              model: shotModel,
               output: {
                 item_id: d.item_id,
                 paragraph_index: d.paragraph_index,
