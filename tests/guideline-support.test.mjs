@@ -9,9 +9,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ADVISORY,
   candidatesFromLabels,
   CLAUSE_BREAKS,
   DIRECTION,
+  LIMIT_NEGATION,
   ORDER_DOUBT,
   ORDER_KEEPS,
   SECTION_TERMS,
@@ -538,3 +540,130 @@ for (const [name, [sentence, rule]] of Object.entries(OTHER_RANGE)) {
     );
   });
 }
+
+// ---- a limit that is denied, or a number that is only advice
+//
+// "No maximum" is not a maximum, and "about 250 words" is not a limit.
+
+const FIRM = [
+  [
+    "There is no minimum length, but the abstract must not exceed 250 words.",
+    words("abstract", { max: 250 }),
+  ],
+  [
+    "The abstract must not exceed 250 words; a structured format is recommended.",
+    words("abstract", { max: 250 }),
+  ],
+  [
+    "The maximum length of the abstract is 250 words, not counting the title.",
+    words("abstract", { max: 250 }),
+  ],
+  // "roundabout", "casino" and "notable" hold "about", "no" and "not", but not as words.
+  ["The roundabout abstract must not exceed 250 words.", words("abstract", { max: 250 })],
+  ["The casino maximum for the abstract is 250 words.", words("abstract", { max: 250 })],
+  ["A notable limit of 6 keywords applies.", { target: "keywords", max: 6 }],
+];
+
+const NOT_FIRM = {
+  "a maximum that is denied, with a suggested number": [
+    "The abstract has no maximum length; 250 words is a suggestion.",
+    words("abstract", { max: 250 }),
+    /suggestion|denies/,
+  ],
+  "a limit that is denied": [
+    "The abstract is not limited to 250 words.",
+    words("abstract", { max: 250 }),
+    /upper limit/,
+  ],
+  "no limit of": [
+    "There is no limit of 250 words for the abstract.",
+    words("abstract", { max: 250 }),
+    /upper limit/,
+  ],
+  "a maximum that is denied, alone": [
+    "The abstract has no maximum length, and 250 words is fine.",
+    words("abstract", { max: 250 }),
+    /upper limit/,
+  ],
+  "a typical length": [
+    "The abstract is typically at most 250 words.",
+    words("abstract", { max: 250 }),
+    /"typically"/,
+  ],
+  "a suggested maximum": [
+    "We suggest a maximum of 250 words for the abstract.",
+    words("abstract", { max: 250 }),
+    /"suggest"/,
+  ],
+  "an approximate number": [
+    "Approximately 250 words is the recommended maximum for the abstract.",
+    words("abstract", { max: 250 }),
+    /"approximately"/,
+  ],
+  "a minimum that is denied": [
+    "Without a minimum, the abstract runs to about 250 words.",
+    words("abstract", { min: 250 }),
+    /"about"|lower limit/,
+  ],
+  "an ideal number of keywords": [
+    "About 6 keywords at most are ideal.",
+    { target: "keywords", max: 6 },
+    /"about"/,
+  ],
+};
+
+test("denied limits and advice: at least five cases the code must accept and five it must not", () => {
+  assert.ok(FIRM.length >= 5 && Object.keys(NOT_FIRM).length >= 5);
+});
+
+for (const [sentence, rule] of FIRM) {
+  test(`a count rule stands as a firm limit: ${JSON.stringify(rule)} in ${JSON.stringify(sentence)}`, () => {
+    assert.deepEqual(one(sentence, rule).warnings, []);
+    assert.equal(kind(sentence, rule), "count");
+  });
+}
+
+for (const [name, [sentence, rule, why]] of Object.entries(NOT_FIRM)) {
+  test(`no count rule from ${name}`, () => {
+    const r = one(sentence, rule);
+    assert.deepEqual(r.candidates[0].check, { type: "llm" });
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0], why);
+  });
+}
+
+test("the negations and the words of advice are lists the code reads; each one works, and only as a whole word", () => {
+  assert.ok(LIMIT_NEGATION.length >= 3 && ADVISORY.length >= 6);
+  for (const side of ["max", "min"]) {
+    for (const phrase of DIRECTION[side].before) {
+      for (const neg of LIMIT_NEGATION) {
+        const denied = `The abstract: ${neg} ${phrase} 250 words.`;
+        assert.equal(kind(denied, words("abstract", { [side]: 250 })), "llm", `${neg} ${phrase}`);
+        const article = `The abstract: ${neg.toUpperCase()} a ${phrase} 250 words.`;
+        assert.equal(
+          kind(article, words("abstract", { [side]: 250 })),
+          "llm",
+          `${neg} a ${phrase}`,
+        );
+        const glued = `The abstract: x${neg} ${phrase} 250 words.`;
+        assert.equal(kind(glued, words("abstract", { [side]: 250 })), "count", `x${neg} ${phrase}`);
+      }
+    }
+  }
+  for (const word of ADVISORY) {
+    const rule = words("abstract", { max: 250 });
+    assert.equal(kind(`The abstract (${word}): at most 250 words.`, rule), "llm", word);
+    assert.equal(
+      kind(`The abstract (${word.toUpperCase()}): at most 250 words.`, rule),
+      "llm",
+      word,
+    );
+    assert.equal(kind(`The abstract (x${word}x): at most 250 words.`, rule), "count", word);
+    // In another clause the word says nothing about this number.
+    assert.equal(
+      kind(`The abstract: at most 250 words; ${word} is another matter.`, rule),
+      "count",
+      word,
+    );
+  }
+});

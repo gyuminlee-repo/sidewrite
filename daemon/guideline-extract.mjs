@@ -249,6 +249,39 @@ export const DIRECTION = {
   },
 };
 
+// A direction word says nothing when it is denied ("no maximum", "not limited
+// to", "without a limit"): one of these words right before it, with at most
+// an article in between. Such a sentence stays a model-checked rule.
+export const LIMIT_NEGATION = ["no", "not", "never", "without", "nor"];
+
+// A number given as advice is not a limit ("about 250 words", "250 words is a
+// suggestion"). One of these words in the clause of the number (CLAUSE_BREAKS)
+// keeps the sentence a model-checked rule.
+export const ADVISORY = [
+  "about",
+  "approximately",
+  "around",
+  "roughly",
+  "typically",
+  "usually",
+  "generally",
+  "normally",
+  "ideally",
+  "ideal",
+  "preferably",
+  "suggest",
+  "suggests",
+  "suggested",
+  "suggestion",
+  "recommend",
+  "recommends",
+  "recommended",
+  "recommendation",
+  "guide",
+  "guideline",
+  "aim",
+];
+
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
 const alt = (list) =>
   [...list]
@@ -296,9 +329,9 @@ const BREAK = new RegExp(`[${MARKS}]|(?<![a-z])(?:${alt(CLAUSE_BREAKS.words)})(?
 const JOINERS = alt([...CLAUSE_BREAKS.words, "the", "a", "an"]);
 const ONLY_JOINS = new RegExp(`^(?:\\s|[${MARKS}/&]|(?<![a-z])(?:${JOINERS})(?![a-z]))*$`);
 
-// The sections named in the clause that holds the number at `span` (see
+// [start, end] of the clause that holds the number at `span` (see
 // CLAUSE_BREAKS for what a clause is).
-function sectionsInClause(span, spans, mentions, lower) {
+function clauseOf(span, spans, mentions, lower) {
   const within = (list, a, b) => list.some((x) => a >= x.start && b <= x.end);
   const joins = (list, a, b) =>
     list.some((x, i) => {
@@ -319,6 +352,12 @@ function sectionsInClause(span, spans, mentions, lower) {
       break;
     }
   }
+  return [from, to];
+}
+
+// The sections named in the clause that holds the number at `span`.
+function sectionsInClause(span, spans, mentions, lower) {
+  const [from, to] = clauseOf(span, spans, mentions, lower);
   const inside = mentions.filter((x) => x.start >= from && x.end <= to);
   return [...new Set(inside.map((x) => x.section))];
 }
@@ -360,8 +399,10 @@ function rangesIn(spans, lower) {
 
 const FILLER = /(?:[\s:(]|(?<![a-z])(?:of|a|an|the|total|is|be)(?![a-z]))*$/;
 
+const DENIED = new RegExp(`(?<![a-z])(?:${alt(LIMIT_NEGATION)})(?:\\s+(?:a|an|the|any))?\\s+$`);
+
 // Does the sentence say that the number at `span` is a limit on `side`
-// ("max" or "min")?
+// ("max" or "min")? A direction word that is denied says nothing.
 function saysLimit(side, span, spans, lower) {
   const other = side === "max" ? "min" : "max";
   // The number itself must stand in the range: the same value elsewhere in
@@ -370,15 +411,20 @@ function saysLimit(side, span, spans, lower) {
     return true;
   }
   const lead = lower.slice(0, span.start).replace(FILLER, "");
-  if (new RegExp(`(?<![a-z])(?:${alt(DIRECTION[side].before)})$`).test(lead)) return true;
+  const before = new RegExp(`(?<![a-z])(?:${alt(DIRECTION[side].before)})$`).exec(lead);
+  if (before) return !DENIED.test(lead.slice(0, before.index));
   const trail = new RegExp(
     `^(?:[\\s-]+[a-z]+){0,2}\\s+(?:${alt(DIRECTION[side].after)})\\s*(?:[.;,)\\]]|$)`,
   );
   if (trail.test(lower.slice(span.end))) return true;
-  // One number in the sentence and words of one direction only: "The maximum
-  // length of the introduction is 600 words."
-  const has = (s) => wholeWord([...DIRECTION[s].before, ...DIRECTION[s].after]).test(lower);
-  return spans.length === 1 && has(side) && !has(other);
+  // One number in the sentence and words of one direction only, none of them
+  // denied: "The maximum length of the introduction is 600 words."
+  const said = (s) => {
+    const re = new RegExp(wholeWord([...DIRECTION[s].before, ...DIRECTION[s].after]).source, "g");
+    return [...lower.matchAll(re)].map((m) => DENIED.test(lower.slice(0, m.index)));
+  };
+  const [mine, theirs] = [said(side), said(other)];
+  return spans.length === 1 && mine.length > 0 && !mine.includes(true) && theirs.length === 0;
 }
 
 // What a count rule claims that its sentence does not say, or null.
@@ -410,8 +456,8 @@ function unsupported(rule, sentence) {
     return `the section "${rule.section}" is not named in the sentence`;
   }
   const what = UNIT_WORDS[rule.target].plural[0];
-  const mentions = rule.section ? sectionMentions(lower) : [];
-  const several = [...new Set(mentions.map((x) => x.section))];
+  const mentions = sectionMentions(lower);
+  const several = rule.section ? [...new Set(mentions.map((x) => x.section))] : [];
   for (const [side, n] of [
     ["min", rule.min],
     ["max", rule.max],
@@ -433,7 +479,15 @@ function unsupported(rule, sentence) {
     }
     const bound = here.filter((_, i) => counted[i] === true);
     if (!bound.length) return `${n} does not count ${what} in the sentence`;
-    if (!bound.some((s) => saysLimit(side, s, spans, lower))) {
+    const advice = bound.map((s) => {
+      const [from, to] = clauseOf(s, spans, mentions, lower);
+      return wholeWord(ADVISORY).exec(lower.slice(from, to))?.[0];
+    });
+    if (advice.every(Boolean)) {
+      return `the sentence gives ${n} as advice ("${advice[0]}"), not as a limit`;
+    }
+    const firm = bound.filter((_, i) => !advice[i]);
+    if (!firm.some((s) => saysLimit(side, s, spans, lower))) {
       const limit = side === "max" ? "an upper limit" : "a lower limit";
       return `the sentence does not say that ${n} is ${limit}`;
     }
