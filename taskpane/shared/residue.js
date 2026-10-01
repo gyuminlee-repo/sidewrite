@@ -8,9 +8,10 @@
 // deleted that the new text no longer has in any form (the first letters
 // are compared, so "inhibits" stays when "inhibited" comes in) and that is
 // not a common function word. Assumed: English prose. Numbers are not
-// terms. A word found in more than `maxPlaces` paragraphs is taken to be
-// vocabulary of the paper and not the claim, and is left out; at most
-// `maxTerms` terms are reported, those in the fewest places first.
+// terms. A word found in more than a fifth of the paragraphs (never fewer
+// than 3, never more than `maxPlaces`) is taken to be vocabulary of the
+// paper and not the claim, and is left out: "growth" in a paper on growth.
+// At most `maxTerms` terms are reported, those in the fewest places first.
 // Places: paragraphs of the last status refresh (as they read with every
 // tracked change applied) that hold the term as a whole word, any case.
 
@@ -49,6 +50,8 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // changes took nothing out.
 export function stillPresent(comment, paragraphs, { maxPlaces = 15, maxTerms = 8 } = {}) {
   const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
+  const filled = texts.filter((t) => t.trim()).length;
+  const most = Math.min(maxPlaces, Math.max(3, Math.ceil(filled / 5)));
   const by = new Map();
   for (const ch of comment?.changes ?? []) {
     if (ch.state === "rejected") continue;
@@ -58,7 +61,7 @@ export function stillPresent(comment, paragraphs, { maxPlaces = 15, maxTerms = 8
   for (const [term, change_ids] of by) {
     const re = new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(term)}(?![\\p{L}\\p{N}])`, "iu");
     const places = texts.flatMap((t, i) => (re.test(t) ? [i] : []));
-    if (places.length && places.length <= maxPlaces) rows.push({ term, change_ids, places });
+    if (places.length && places.length <= most) rows.push({ term, change_ids, places });
   }
   return rows.sort((a, b) => a.places.length - b.places.length).slice(0, maxTerms);
 }

@@ -101,6 +101,26 @@ test("stillPresent: a word that is in many paragraphs is no claim term; the list
   assert.deepEqual(stillPresent(comment, [...many, "An essential point."]), [
     { term: "essential", change_ids: ["R1.1-1"], places: [20] },
   ]);
+  // In a short paper too: a word in more than a fifth of the paragraphs (and
+  // in more than 3) is the paper's vocabulary. Seen in a real turn on a
+  // made-up paper: "growth", taken out with one sentence of a legend.
+  const short = [
+    "Growth of strain X",
+    "Deletion lowered growth.",
+    "The mutant grew slowly.",
+    "Growth was followed daily.",
+    "Slower growth is a target.",
+    "Figure 2. Growth of both strains. The mutant grew at half the rate.",
+    "Gene A is essential.",
+  ];
+  const legend = {
+    ref: "R1.1",
+    changes: [ch("R1.1-1", "Gene A is essential for growth.", "The mutant grew at half the rate.")],
+  };
+  assert.deepEqual(
+    stillPresent(legend, short).map((r) => r.term),
+    ["essential"],
+  );
   // At most `maxTerms` terms, the ones in the fewest places first.
   const paper = ["alpha1x bravo2x", "bravo2x", "charlie delta", "charlie"];
   const c = { ref: "R1.1", changes: [ch("R1.1-1", "alphaa bravoo charlie deltaa", "")] };
