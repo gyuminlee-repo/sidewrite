@@ -1,7 +1,9 @@
 // A real HTTP server that sends its headers at once and its body late, and
 // the requests of this add-in against it. Run as a process of its own by
 // the tests (providers-openai-compat, providers-probe):
-//   node tests/helpers/stalled-body.mjs chat | probe
+//   node tests/helpers/stalled-body.mjs chat | probe | temperature
+// (temperature: servers that answer at once, HTTP 400 for a request with a
+// temperature; real requests all the same, so they run here too.)
 // It prints one JSON line and ends with process.exit: on Node 20.11 a
 // process that aborted a fetch in the middle of a body and then ends by
 // itself can spin at 100% CPU while it shuts down (seen on 2026-10-01, about
@@ -56,6 +58,56 @@ if (scenario === "chat") {
     }),
   );
   out = { ms: rows.ms, ollama: rows.result.find((r) => r.id === "ollama") };
+} else if (scenario === "temperature") {
+  const NO_TEMPERATURE = {
+    error: {
+      message:
+        "Unsupported value: 'temperature' does not support 0 with this model. Only the default (1) value is supported.",
+      param: "temperature",
+    },
+  };
+  const ANSWER = { choices: [{ message: { content: '{"a":1}' } }] };
+  // answer(body) -> [status, json]; what each request carried is kept.
+  const provider = async (answer) => {
+    const bodies = [];
+    const s = createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => {
+        const sent = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        bodies.push(sent);
+        const [status, json] = answer(sent);
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(json));
+      });
+    });
+    await new Promise((r) => s.listen(0, "127.0.0.1", r));
+    return { bodies, baseUrl: `http://127.0.0.1:${s.address().port}/v1` };
+  };
+  const ask = async (answer) => {
+    const p = await provider(answer);
+    const result = await chatOneshot({
+      baseUrl: p.baseUrl,
+      model: "o-reasoner",
+      system: "S",
+      prompt: "P",
+    });
+    return {
+      result,
+      temperatures: p.bodies.map((b) => ("temperature" in b ? b.temperature : "none")),
+      same_messages: p.bodies.every(
+        (b) => JSON.stringify(b.messages) === JSON.stringify(p.bodies[0].messages),
+      ),
+    };
+  };
+  out = {
+    // 400 for a request with a temperature, an answer without.
+    picky: await ask((b) => ("temperature" in b ? [400, NO_TEMPERATURE] : [200, ANSWER])),
+    // 400 about temperature whatever is sent.
+    never: await ask(() => [400, NO_TEMPERATURE]),
+    // 400 for another reason.
+    other: await ask(() => [400, { error: { message: "model not found" } }]),
+  };
 } else {
   out = { error: `unknown scenario ${scenario}` };
 }

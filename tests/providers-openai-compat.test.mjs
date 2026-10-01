@@ -169,73 +169,23 @@ test("body fields of the preset are sent; those for JSON only when JSON is expec
 
 // A reasoning model refuses a temperature (HTTP 400 naming the parameter).
 // The request is then sent once more without it; any other 400 stays a
-// failure. A local server stands in for the provider: nothing is sent out.
-async function localProvider(answer) {
-  const http = await import("node:http");
-  const bodies = [];
-  const server = http.createServer((req, res) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      bodies.push(body);
-      const [status, json] = answer(body, bodies.length);
-      res.writeHead(status, { "content-type": "application/json", connection: "close" });
-      res.end(JSON.stringify(json));
-    });
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  return {
-    bodies,
-    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
-    close: () =>
-      new Promise((r) => {
-        server.close(r);
-        server.closeAllConnections();
-      }),
-  };
-}
-const NO_TEMPERATURE = {
-  error: {
-    message:
-      "Unsupported value: 'temperature' does not support 0 with this model. Only the default (1) value is supported.",
-    param: "temperature",
-  },
-};
-const ANSWER = { choices: [{ message: { content: '{"a":1}' } }] };
-
+// failure. A local server stands in for the provider (in the helper process):
+// nothing is sent out.
 test("a 400 about temperature is retried once without it; another 400 is not", async () => {
-  const picky = await localProvider((body) =>
-    "temperature" in body ? [400, NO_TEMPERATURE] : [200, ANSWER],
-  );
-  const never = await localProvider(() => [400, NO_TEMPERATURE]);
-  const other = await localProvider(() => [400, { error: { message: "model not found" } }]);
-  try {
-    const req = { model: "o-reasoner", system: "S", prompt: "P" };
-    const r = await chatOneshot({ ...req, baseUrl: picky.baseUrl });
-    assert.deepEqual([r.ok, r.json], [true, { a: 1 }]);
-    assert.deepEqual(
-      picky.bodies.map((b) => b.temperature),
-      [0, undefined],
-    );
-    assert.deepEqual(
-      picky.bodies[1].messages,
-      picky.bodies[0].messages,
-      "the same request otherwise",
-    );
+  const r = await stalledBody("temperature");
+  assert.deepEqual([r.picky.result.ok, r.picky.result.json], [true, { a: 1 }]);
+  assert.deepEqual(r.picky.temperatures, [0, "none"]);
+  assert.equal(r.picky.same_messages, true, "the same request otherwise");
 
-    const still = await chatOneshot({ ...req, baseUrl: never.baseUrl });
-    assert.equal(still.ok, false);
-    assert.match(still.error, /^HTTP 400: Unsupported value: 'temperature'/);
-    assert.equal(never.bodies.length, 2, "once more, not again and again");
+  assert.equal(r.never.result.ok, false);
+  assert.match(r.never.result.error, /^HTTP 400: Unsupported value: 'temperature'/);
+  assert.deepEqual(r.never.temperatures, [0, "none"], "once more, not again and again");
 
-    const bad = await chatOneshot({ ...req, baseUrl: other.baseUrl });
-    assert.deepEqual(bad, { ok: false, error: "HTTP 400: model not found" });
-    assert.equal(other.bodies.length, 1, "no retry for another reason");
-  } finally {
-    await Promise.all([picky.close(), never.close(), other.close()]);
-  }
+  assert.deepEqual(r.other.result, { ok: false, error: "HTTP 400: model not found" });
+  assert.deepEqual(r.other.temperatures, [0], "no retry for another reason");
 });
+
+const ANSWER = { choices: [{ message: { content: '{"a":1}' } }] };
 
 test("the temperature is the preset's (body): 0 unless it says otherwise, none when it says null", async () => {
   const f = reply(200, ANSWER);

@@ -5,6 +5,11 @@
 // request fields of the provider's preset (registry.mjs): body goes into
 // every request, jsonBody only when JSON is expected.
 //
+// temperature is 0 unless the preset's body gives another (null: none). A
+// model that takes no temperature (reasoning models) answers HTTP 400 and
+// names the parameter: the request is then sent once more without it. No
+// other 400 is sent again.
+//
 // The API key goes into the Authorization header and nowhere else; a server
 // that echoes it in an error message has it cut out of the returned error.
 
@@ -55,37 +60,44 @@ export async function chatOneshot(
   // The timer runs until the body has been read, not only until the headers
   // came: a server that answers 200 and then stalls is a timeout too. The
   // abort also ends a body read that is under way.
+  const request = {
+    model,
+    messages: [
+      { role: "system", content: String(system ?? "") },
+      { role: "user", content: String(prompt ?? "") },
+    ],
+    temperature: 0,
+    stream: false,
+    ...body,
+    ...(expectJson ? jsonBody : null),
+  };
+  if (request.temperature == null) delete request.temperature;
   let content;
   let finish;
   try {
     let res;
-    try {
-      res = await fetchFn(`${String(baseUrl).replace(/\/+$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: String(system ?? "") },
-            { role: "user", content: String(prompt ?? "") },
-          ],
-          temperature: 0,
-          stream: false,
-          ...body,
-          ...(expectJson ? jsonBody : null),
-        }),
-        signal: abort.signal,
-      });
-    } catch (e) {
-      if (e?.name === "TimeoutError" || e?.name === "AbortError") return timedOut;
-      return { ok: false, error: `Connection failed (${e?.cause?.code ?? e?.code ?? e?.name})` };
-    }
-    if (!res.ok) {
+    for (;;) {
+      try {
+        res = await fetchFn(`${String(baseUrl).replace(/\/+$/, "")}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+          },
+          body: JSON.stringify(request),
+          signal: abort.signal,
+        });
+      } catch (e) {
+        if (e?.name === "TimeoutError" || e?.name === "AbortError") return timedOut;
+        return { ok: false, error: `Connection failed (${e?.cause?.code ?? e?.code ?? e?.name})` };
+      }
+      if (res.ok) break;
       const detail = scrub(await errorDetail(res));
       if (abort.signal.aborted) return timedOut;
+      if (res.status === 400 && "temperature" in request && /temperature/i.test(detail)) {
+        delete request.temperature; // once: the next 400 finds none to drop
+        continue;
+      }
       const error = `HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
       return res.status === 429
         ? { ok: false, error, limited: { limited: true, kind: "rate_limit", text: detail } }
