@@ -1161,7 +1161,8 @@ test("ledger suggestions: a checklist from the review text; Add selected imports
 
 // P15 "Propose all": one review turn per open comment, the next one only
 // after the turn_done of the one before.
-async function proposeAllSetup({ providersReady } = {}) {
+// beforeSnapshot: awaited by every status refresh before it reads Word.
+async function proposeAllSetup({ providersReady, beforeSnapshot = null } = {}) {
   const { createTurnState } = await import("../taskpane/shared/turn-state.js");
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
@@ -1209,7 +1210,10 @@ async function proposeAllSetup({ providersReady } = {}) {
   pane = initReviewPane({
     sendRequest,
     word: {
-      collectReviewSnapshot: async () => ({ paragraphs: [], comments: doc.comments }),
+      collectReviewSnapshot: async () => {
+        await beforeSnapshot?.();
+        return { paragraphs: [], comments: doc.comments };
+      },
       selectionParagraphs: async () => [{ index: 1, text: "selected" }],
     },
     onTurnStarted() {
@@ -1223,7 +1227,7 @@ async function proposeAllSetup({ providersReady } = {}) {
   const $ = (id) => document.getElementById(id);
   const wait = () => new Promise((r) => setTimeout(r, 5));
   // What the daemon sends when the turn of `ref` ends: turn_done says how.
-  const endTurn = (ref, error = null) => {
+  const endTurn = (ref, error = null, more = {}) => {
     turn.onAssistantEvent({ event: "turn_complete" });
     pane.onEvent({
       type: "review_event",
@@ -1231,6 +1235,7 @@ async function proposeAllSetup({ providersReady } = {}) {
       ref,
       ok: !error,
       ...(error ? { error } : {}),
+      ...more,
     });
   };
   return { pane, turn, proposals, sent, fail, doc, $, wait, endTurn };
@@ -2108,4 +2113,87 @@ test("Refresh status, Clean up tool comments and Delete all run once at a time",
     assert.equal(calls[name], 1);
   }
   assert.equal(t.requests.filter((r) => r.type === "review_refresh").length, 1);
+});
+
+// Stop pressed after Propose changes and before the request has gone out
+// (the pane reads the selection and refreshes the status first): the daemon
+// has no turn to stop yet, so the pane itself must not send the request.
+// Otherwise the turn would start, and change Word, after the author's Stop.
+test("Stop before review_propose is sent: the request is not sent and the turn is released", async () => {
+  let open = null;
+  let held = null;
+  const t = await proposeAllSetup({
+    beforeSnapshot: () => held,
+  });
+  try {
+    assert.equal(t.pane.onStop(), false, "nothing is starting");
+    held = new Promise((r) => (open = r));
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    const clicked = first.click();
+    await t.wait();
+    assert.equal(t.turn.inFlight, true);
+    assert.equal(t.pane.onStop(), true, "a turn is on its way");
+    held = null;
+    open();
+    await clicked;
+    assert.deepEqual(t.proposals, [], "no review_propose went out");
+    assert.equal(t.turn.inFlight, false);
+    assert.equal(t.$("review-message").textContent, "The turn was stopped.");
+    // The next press is a new turn.
+    await first.click();
+    assert.deepEqual(t.proposals, [["R1.1", 0]]);
+    assert.equal(t.pane.onStop(), false, "the request is out: the daemon stops it");
+    t.endTurn("R1.1");
+    await t.wait();
+    // In a Propose all run the stop ends the run.
+    held = new Promise((r) => (open = r));
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    assert.equal(t.pane.onStop(), true);
+    held = null;
+    open();
+    await all;
+    assert.deepEqual(t.proposals, [["R1.1", 0]]);
+    assert.match(
+      t.$("review-message").textContent,
+      /^Propose all stopped at R1\.1: The turn was stopped\./,
+    );
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// A turn that worked and left a request of the comment without a change:
+// turn_done carries a notice and the message line shows it after the counts.
+test("turn_done with a notice: the line of the status check ends with it", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    const notice =
+      "1 of 2 requests have a proposed change; q2 has none: the value is not in the manuscript.";
+    t.endTurn("R1.1", null, { notice });
+    await t.wait();
+    const line = t.$("review-message").textContent;
+    assert.match(line, /^Accepted 0, /);
+    assert.ok(line.endsWith(` ${notice}`), line);
+    // Without one the line is the counts alone.
+    await first.click();
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.match(t.$("review-message").textContent, /^Accepted 0, .*found 0\.$/);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+test("the Stop button tells the Review tab before it tells the daemon", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../taskpane/shared/taskpane.js", import.meta.url), "utf8");
+  const at = src.indexOf('$stopAgent?.addEventListener("click"');
+  const body = src.slice(at, at + 400);
+  assert.match(body, /reviewPane\?\.onStop\?\.\(\);/);
+  assert.ok(
+    body.indexOf("reviewPane?.onStop?.()") < body.indexOf('wsSend({ type: "stop_agent" })'),
+  );
 });
