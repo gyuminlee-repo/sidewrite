@@ -85,7 +85,9 @@ test("editsModelValue: the stored choice, else the daemon's default, else opus",
 test("storedEditsModel: a stored model is a choice only when the user made it", async () => {
   const { storedEditsModel } = await import("../taskpane/shared/model-menu.js");
   assert.equal(storedEditsModel({ model: "sonnet" }), null, "the old default, saved unasked");
-  assert.equal(storedEditsModel({ model: "opus", modelChosen: false }), null);
+  // Any other stored model can only have come from the menu: it is a choice.
+  assert.equal(storedEditsModel({ model: "opus" }), "opus");
+  assert.equal(storedEditsModel({ model: "haiku", modelChosen: false }), "haiku");
   assert.equal(storedEditsModel({ model: "sonnet", modelChosen: true }), "sonnet");
   assert.equal(storedEditsModel({ model: "claude-fable-5", modelChosen: true }), "claude-fable-5");
   // A malformed or retired value is no choice, marked or not.
