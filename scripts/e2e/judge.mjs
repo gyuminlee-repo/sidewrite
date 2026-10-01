@@ -33,6 +33,15 @@ function decisionFor(decisions, ref, i) {
   return d[Math.min(i, d.length - 1)];
 }
 
+// The text of the rationale comment of a change as Word was given it
+// (review-tools.mjs applyTrackedEdit): the lines of lost facts and of words
+// from the review belong to it. A change is found in Word by this text.
+export const commentTextOf = (ref, ch) =>
+  formatRationaleComment(ref, ch.rationale, {
+    lost: ch.lost_facts ?? [],
+    fromReview: ch.from_review ?? [],
+  });
+
 // ops for word-com.ps1 apply. A change without a rationale comment cannot be
 // found in Word and is listed in `skipped`.
 export function buildComPlan(revision, decisions = DEFAULT_DECISIONS) {
@@ -51,7 +60,7 @@ export function buildComPlan(revision, decisions = DEFAULT_DECISIONS) {
         kind: ch.kind,
         find: ch.find,
         text: ch.text,
-        comment_text: formatRationaleComment(c.ref, ch.rationale, { lost: ch.lost_facts ?? [] }),
+        comment_text: commentTextOf(c.ref, ch),
         replacements: WORD_EDITS,
       });
     });
@@ -255,7 +264,7 @@ export function resolvedMatch(revision, word, message = "") {
     for (const ch of c.changes ?? []) {
       if (ch.state !== "accepted" && ch.state !== "rejected") continue;
       if (!ch.word_comment_id || ch.comment_missing || ch.comment_cleaned_at) continue;
-      const text = formatRationaleComment(c.ref, ch.rationale, { lost: ch.lost_facts ?? [] });
+      const text = commentTextOf(c.ref, ch);
       const com = byText.get(norm(text));
       seen.push({ id: ch.id, done: com ? com.done === true : null });
     }
@@ -735,9 +744,7 @@ export function siblingMatch(revision, view, word, { ref, hand }) {
         ? ["accepted", "Accepted"]
         : null;
   const sibling = (word?.revisions ?? []).some((r) => r.type === 1 && has(r.text, hand.trim()));
-  const text = ch
-    ? norm(formatRationaleComment(ref, ch.rationale, { lost: ch.lost_facts ?? [] }))
-    : "";
+  const text = ch ? norm(commentTextOf(ref, ch)) : "";
   const com = (word?.comments ?? []).find((c) => norm(c.text) === text);
   return {
     pass: !!want && sibling && ch.state === want[0] && badge === want[1] && com?.done === true,

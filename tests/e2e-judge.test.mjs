@@ -1,8 +1,14 @@
 // Known answers for the pure parts of the acceptance runner (scripts/e2e).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildComPlan, judge, minimalFind, rewriteCommand } from "../scripts/e2e/judge.mjs";
-import { formatRationaleComment } from "../daemon/review-tools.mjs";
+import {
+  buildComPlan,
+  judge,
+  minimalFind,
+  resolvedMatch,
+  rewriteCommand,
+} from "../scripts/e2e/judge.mjs";
+import { applyTrackedEdit, formatRationaleComment } from "../daemon/review-tools.mjs";
 
 const rationale = { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] };
 const change = (id, extra = {}) => ({
@@ -45,6 +51,82 @@ test("buildComPlan: decisions per comment, first R1.3 change edited, comment tex
   const r14 = ops.find((o) => o.change_id === "R1.4-1");
   assert.equal(r14.comment_text, formatRationaleComment("R1.4", rationale, { lost: ["250 mL"] }));
   assert.match(r14.comment_text, /^\[R1\.4\] w \/ y \/ a \[q1\]\n/);
+});
+
+// The plan finds a change in Word by the text of its rationale comment, so
+// that text has to be the one the daemon gave Word, line for line. An
+// insertion that takes a word from the review gets a last line "From the
+// review, ..." (an acceptance run failed on it: "rationale comment not
+// found"). Here the daemon writes the edit to a Word that is not there, and
+// the plan is built from what it recorded: no model chooses the form.
+test("buildComPlan: the comment text of an insertion with a word from the review is the one Word was given", async () => {
+  const sent = [];
+  const recorded = [];
+  const deps = {
+    log: () => {},
+    getLedger: async () => [],
+    getReviewContext: async () => ({
+      requirements: [{ id: "q1", text: "state the unit" }],
+      comment_text: "The temperature has no unit. State it as degrees Celsius.",
+      paragraphs: ["Methods", "The invented flasks were held at 30 degrees for two days."],
+      paragraph_ids: null,
+      recent_changes: [],
+      author_texts: [],
+    }),
+    call: async (name, args) => {
+      sent.push(args);
+      return {
+        ok: true,
+        word_comment_id: 9,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      };
+    },
+    onEdit: async ({ change }) => {
+      recorded.push(change);
+      return { id: "R1.1-1" };
+    },
+    paneChecksTarget: () => true,
+  };
+  const r = await applyTrackedEdit(
+    deps,
+    {
+      comment_ref: "R1.1",
+      find: "held at 30 degrees",
+      insert_after: " Celsius",
+      rationale: {
+        what: "Added the unit.",
+        why: "The reviewer asks for it.",
+        addresses: "the unit",
+        requirement_ids: ["q1"],
+      },
+    },
+    { ref: "R1.1" },
+  );
+  assert.equal(r.ok, true, r.message);
+  assert.deepEqual([recorded[0].kind, recorded[0].from_review], ["insert", ["Celsius"]]);
+  assert.match(sent[0].comment_text, /\nFrom the review, not checked against the source: Celsius$/);
+  const { ops, skipped } = buildComPlan({
+    comments: [{ ref: "R1.1", changes: [{ ...recorded[0], id: "R1.1-1" }] }],
+  });
+  assert.deepEqual(skipped, []);
+  assert.deepEqual([ops[0].kind, ops[0].op], ["insert", "accept"]);
+  assert.equal(ops[0].comment_text, sent[0].comment_text);
+  // The judge of the resolved comments looks the comment up by the same text.
+  const accepted = { ...recorded[0], id: "R1.1-1", state: "accepted" };
+  const resolved = resolvedMatch(
+    { comments: [{ ref: "R1.1", changes: [accepted] }] },
+    { comments: [{ text: sent[0].comment_text, done: true }] },
+  );
+  assert.equal(resolved.pass, true, resolved.got);
+  // Both last lines together, in the order the daemon writes them.
+  const both = change("R1.4-1", { lost_facts: ["250 mL"], from_review: ["Celsius"] });
+  assert.equal(
+    buildComPlan({ comments: [{ ref: "R1.4", changes: [both] }] }).ops[0].comment_text,
+    formatRationaleComment("R1.4", rationale, { lost: ["250 mL"], fromReview: ["Celsius"] }),
+  );
 });
 
 test("minimalFind: replaces sharing an edge word are not minimal", () => {
@@ -296,7 +378,6 @@ test("exitDecision: failed verify commands and features_error fail the run; a co
 // C1: after accept/reject and Refresh the rationale comment of the change is
 // resolved. Read from Word over COM (Comment.Done), not from the pane.
 test("resolvedMatch: comments of accepted and rejected changes are Done in Word, edited ones need not be", async () => {
-  const { resolvedMatch } = await import("../scripts/e2e/judge.mjs");
   const text = (ref, id) =>
     formatRationaleComment(ref, { ...rationale, what: `w ${id}` }, { lost: [] });
   const ch = (ref, n, state, extra = {}) =>
