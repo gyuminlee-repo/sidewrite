@@ -26,6 +26,8 @@
 // Not wired yet: the caller passes the pane's format snapshot and the
 // heading list, and offers each finding to the author.
 
+import { referenceSection, paraText, wordsIn } from "./ref-section.mjs";
+
 // A statistics symbol: one letter P, p, Q, q before a comparison, "value(s)"
 // or "adjusted"; t before "("; n before = or a comparison. Not after a
 // letter, a digit or a full stop, so author initials ("P.E.") and strain
@@ -121,34 +123,13 @@ function textFindings(p, rules) {
   return out.sort((a, b) => a.start - b.start);
 }
 
-const plainText = (p) =>
-  (p.runs ?? [])
-    .map((r) => String(r.text ?? ""))
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim();
-const words = (t) => (t ? t.split(" ").length : 0);
+const plainText = paraText;
+const words = wordsIn;
 
-const REF_HEAD = "^(?:\\d[\\d.]*\\s+)?(?:references?|bibliography|literature cited|works cited)$";
-
-// Indexes of the paragraphs of the reference list: after a short line that
-// matches the head pattern, up to a line that matches an end pattern.
+// Indexes of the reference list: its heading line and every paragraph in it.
 function referenceIndexes(paragraphs, profile) {
-  const head = new RegExp(profile.ref_section_head || REF_HEAD, "i");
-  const ends = list(profile.ref_section_end_heads).map((s) => new RegExp(s, "i"));
-  const isHead = (t, re) => words(t) <= 6 && re.test(t);
-  const out = new Set();
-  let inside = false;
-  for (const p of paragraphs) {
-    const t = plainText(p);
-    if (inside && ends.some((re) => isHead(t, re))) inside = false;
-    else if (inside) out.add(p.index);
-    else if (isHead(t, head)) {
-      inside = true;
-      out.add(p.index);
-    }
-  }
-  return out;
+  const { heads, entries } = referenceSection(paragraphs, profile);
+  return new Set([...heads, ...entries.map((p) => p.index)]);
 }
 
 const CAPTION = /^(?:Fig(?:ure|\.)?|Table)\s*S?\d+/i;
