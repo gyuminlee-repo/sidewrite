@@ -22,19 +22,21 @@ the last body paragraph.
 Usage: python3 scripts/e2e/make_aux_fixture.py [--variant v1] [output.docx]
        python3 scripts/e2e/make_aux_fixture.py --profile   (prints PROFILE as JSON)
        python3 scripts/e2e/make_aux_fixture.py --dump x.docx   (paragraphs as JSON, for tests)
+
+Writing a fixture needs python-docx (a development tool; the fixtures are
+committed). --profile and --dump use the standard library only.
 """
 import datetime
 import json
 import sys
+import re
+import zipfile
 from pathlib import Path
-
-from docx import Document
-from docx.shared import Pt
 
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 OUT = {"current": FIXTURES / "aux_manuscript.docx", "v1": FIXTURES / "aux_manuscript_v1.docx"}
 FIXED_TIME = datetime.datetime(2026, 1, 1, 0, 0, 0)
-INDENT = Pt(36)
+INDENT_PT = 36
 
 GENUS, EPITHET, FORMULA = "Examplea", "fictiva", "CO2"
 SPECIES = "%s %s" % (GENUS, EPITHET)
@@ -114,9 +116,11 @@ CAPTION = "Table 1. Invented plate layout of the placeholder run."
 CLOSING = "No real data are in this document."
 
 
-def add_body(doc, pieces, indent, variant):
+def add_body(doc, pieces, indent_pt, variant):
+    from docx.shared import Pt
+
     para = doc.add_paragraph()
-    para.paragraph_format.first_line_indent = indent
+    para.paragraph_format.first_line_indent = Pt(indent_pt)
     for text, fmt in pieces:
         if variant == "v1":
             for old, new in V1_REWRITES.items():
@@ -135,6 +139,9 @@ def abstract_text():
 
 
 def build(out_path, variant="current"):
+    from docx import Document
+    from docx.shared import Pt
+
     doc = Document()
     normal = doc.styles["Normal"]
     normal.font.name = "Times New Roman"
@@ -150,17 +157,17 @@ def build(out_path, variant="current"):
 
     doc.add_paragraph(TITLE, style="Title")
     doc.add_paragraph("Abstract", style="Heading 1")
-    doc.add_paragraph(abstract_text()).paragraph_format.first_line_indent = INDENT
+    doc.add_paragraph(abstract_text()).paragraph_format.first_line_indent = Pt(INDENT_PT)
     doc.add_paragraph(KEYWORDS)
     doc.add_paragraph("Methods", style="Heading 1")
     for pieces in (CLEAN_1, STAT, SPECIES_PLAIN, FORMULA_PLAIN):
-        add_body(doc, pieces, INDENT, variant)
-    add_body(doc, FLUSH, Pt(0), variant)
+        add_body(doc, pieces, INDENT_PT, variant)
+    add_body(doc, FLUSH, 0, variant)
     doc.add_paragraph("Results", style="Heading 1")
     for pieces in (CLEAN_2, CLEAN_3):
-        add_body(doc, pieces, INDENT, variant)
+        add_body(doc, pieces, INDENT_PT, variant)
     if variant != "v1":
-        add_body(doc, LAST, INDENT, variant)
+        add_body(doc, LAST, INDENT_PT, variant)
     doc.add_paragraph(CAPTION)
     doc.add_table(rows=2, cols=2)
     doc.add_paragraph(CLOSING)
@@ -170,23 +177,36 @@ def build(out_path, variant="current"):
     return out_path
 
 
+ENTITIES = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+
+
 def dump(path):
     """The paragraphs of a docx as the format check needs them, for tests:
-    [{ xml, text, first_line, table_level, heading }] in document order."""
-    from docx.oxml.ns import qn
-    from lxml import etree
-
+    [{ xml, text, first_line, table_level, heading }] in document order.
+    Standard library only. The fixtures have no nested paragraphs (no text
+    boxes), so a paragraph is the text from <w:p> to the next </w:p>."""
+    with zipfile.ZipFile(path) as z:
+        doc = z.read("word/document.xml").decode("utf-8")
     out = []
-    for p in Document(path).element.body.iter(qn("w:p")):
-        ind = p.find("%s/%s" % (qn("w:pPr"), qn("w:ind")))
-        first = ind.get(qn("w:firstLine")) if ind is not None else None
-        style = p.find("%s/%s" % (qn("w:pPr"), qn("w:pStyle")))
+    level = 0
+    for m in re.finditer(r"<w:tbl>|<w:tbl\s[^>]*>|</w:tbl>|<w:p/>|<w:p\s[^>]*/>|<w:p>.*?</w:p>|<w:p\s[^>]*[^/]>.*?</w:p>", doc, re.S):
+        piece = m.group(0)
+        if piece.startswith("<w:tbl"):
+            level += 1
+            continue
+        if piece == "</w:tbl>":
+            level -= 1
+            continue
+        first = re.search(r'<w:ind\b[^>]*\bw:firstLine="(\d+)"', piece)
+        style = re.search(r'<w:pStyle w:val="([^"]+)"', piece)
+        text = "".join(re.findall(r"<w:t(?:\s[^>]*)?>(.*?)</w:t>", piece, re.S))
+        text = re.sub(r"&(\w+);", lambda e: ENTITIES.get(e.group(1), e.group(0)), text)
         out.append({
-            "xml": etree.tostring(p, encoding="unicode"),
-            "text": "".join(t.text or "" for t in p.iter(qn("w:t"))),
-            "first_line": int(first) / 20 if first else 0,
-            "table_level": sum(1 for a in p.iterancestors(qn("w:tbl"))),
-            "heading": style is not None and style.get(qn("w:val")).startswith("Heading"),
+            "xml": piece,
+            "text": text,
+            "first_line": int(first.group(1)) / 20 if first else 0,
+            "table_level": level,
+            "heading": bool(style and style.group(1).startswith("Heading")),
         })
     return out
 

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { markedOutPath, runMarkedDiff, MARKED_NOTICE, NEEDS_LXML } from "../daemon/marked-diff.mjs";
 import { SAVE_FIRST } from "../daemon/doc-tools.mjs";
 import { DISK_NOTICE } from "../daemon/doc-bytes.mjs";
+import { missing } from "./fixtures/py-packages.mjs";
 
 const NOW = new Date(2031, 0, 2, 3, 4, 5);
 const SUMMARY = { written: true, checks: 13, failures: 0, mode: "color", paragraphs: { n_mod: 2 } };
@@ -182,33 +183,37 @@ const realPy = (script, args) =>
     });
   });
 
-test("with the real tool: a marked copy next to the document, and a second one beside it", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "marked-"));
-  const fixtures = join(ROOT, "tests", "fixtures");
-  const baseline = join(dir, "base.docx");
-  const clean = join(dir, "paper.docx");
-  await copyFile(join(fixtures, "spike_manuscript.docx"), baseline);
-  await copyFile(join(fixtures, "review_manuscript.docx"), clean);
-  const first = await runMarkedDiff({
-    baseline,
-    clean,
-    docPath: clean,
-    runPy: realPy,
-    exists: existsSync,
-    root: ROOT,
-  });
-  assert.equal(first.ok, true, first.error);
-  assert.equal(first.path, join(dir, "paper_marked.docx"));
-  assert.deepEqual([first.report.written, first.report.failures], [true, 0]);
-  const second = await runMarkedDiff({
-    baseline,
-    clean,
-    docPath: clean,
-    runPy: realPy,
-    exists: existsSync,
-    root: ROOT,
-  });
-  assert.equal(second.ok, true, second.error);
-  assert.notEqual(second.path, first.path);
-  assert.equal((await readdir(dir)).length, 4);
-});
+test(
+  "with the real tool: a marked copy next to the document, and a second one beside it",
+  { skip: missing("lxml") },
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "marked-"));
+    const fixtures = join(ROOT, "tests", "fixtures");
+    const baseline = join(dir, "base.docx");
+    const clean = join(dir, "paper.docx");
+    await copyFile(join(fixtures, "spike_manuscript.docx"), baseline);
+    await copyFile(join(fixtures, "review_manuscript.docx"), clean);
+    const first = await runMarkedDiff({
+      baseline,
+      clean,
+      docPath: clean,
+      runPy: realPy,
+      exists: existsSync,
+      root: ROOT,
+    });
+    assert.equal(first.ok, true, first.error);
+    assert.equal(first.path, join(dir, "paper_marked.docx"));
+    assert.deepEqual([first.report.written, first.report.failures], [true, 0]);
+    const second = await runMarkedDiff({
+      baseline,
+      clean,
+      docPath: clean,
+      runPy: realPy,
+      exists: existsSync,
+      root: ROOT,
+    });
+    assert.equal(second.ok, true, second.error);
+    assert.notEqual(second.path, first.path);
+    assert.equal((await readdir(dir)).length, 4);
+  },
+);

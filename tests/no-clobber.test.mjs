@@ -14,6 +14,7 @@ import { runMarkedDiff } from "../daemon/marked-diff.mjs";
 import { siblingPath, moveExclusive } from "../daemon/doc-tools.mjs";
 import { createUploads } from "../daemon/uploads.mjs";
 import { toChunks } from "../daemon/doc-bytes.mjs";
+import { missing } from "./fixtures/py-packages.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const FIXTURES = join(ROOT, "tests", "fixtures");
@@ -72,7 +73,7 @@ test("anonymized copies made in the same second all stay, each as it was written
   assert.equal((await readdir(dir)).length, 4);
 });
 
-test("marked copies made in the same second all stay", async () => {
+test("marked copies made in the same second all stay", { skip: missing("lxml") }, async () => {
   const dir = await newDir();
   const clean = join(dir, "paper.docx");
   await copyFile(join(FIXTURES, "review_manuscript.docx"), clean);
@@ -96,75 +97,83 @@ test("marked copies made in the same second all stay", async () => {
   assert.equal((await readdir(dir)).length, 4);
 });
 
-test("a name that was free when it was picked but is taken when the tool writes is not overwritten", async () => {
-  // The check and the write are two steps: another process can create the file in between.
-  const dir = await newDir();
-  const src = join(dir, "paper.docx");
-  await copyFile(join(FIXTURES, "review_manuscript.docx"), src);
-  const theirs = Buffer.from("somebody else's file, written between the check and the write");
-  for (const [name, run] of [
-    [
-      "paper_anonymized.docx",
-      (exists) => runAnonymize({ src, runPy: realPy, exists, now: NOW, root: ROOT }),
-    ],
-    [
-      "paper_marked.docx",
-      (exists) =>
-        runMarkedDiff({
-          baseline: join(FIXTURES, "spike_manuscript.docx"),
-          clean: src,
-          docPath: src,
-          runPy: realPy,
-          exists,
-          now: NOW,
-          root: ROOT,
-        }),
-    ],
-  ]) {
-    const target = join(dir, name);
-    await writeFile(target, theirs);
-    // The name check is told the file is not there the first time it asks.
-    let asked = 0;
-    const r = await run((p) => (p === target && asked++ === 0 ? false : existsSync(p)));
-    assert.ok((await readFile(target)).equals(theirs), `${name} was overwritten`);
-    assert.equal(r.ok, true, r.error);
-    assert.notEqual(r.path, target);
-  }
-});
+test(
+  "a name that was free when it was picked but is taken when the tool writes is not overwritten",
+  { skip: missing("lxml") },
+  async () => {
+    // The check and the write are two steps: another process can create the file in between.
+    const dir = await newDir();
+    const src = join(dir, "paper.docx");
+    await copyFile(join(FIXTURES, "review_manuscript.docx"), src);
+    const theirs = Buffer.from("somebody else's file, written between the check and the write");
+    for (const [name, run] of [
+      [
+        "paper_anonymized.docx",
+        (exists) => runAnonymize({ src, runPy: realPy, exists, now: NOW, root: ROOT }),
+      ],
+      [
+        "paper_marked.docx",
+        (exists) =>
+          runMarkedDiff({
+            baseline: join(FIXTURES, "spike_manuscript.docx"),
+            clean: src,
+            docPath: src,
+            runPy: realPy,
+            exists,
+            now: NOW,
+            root: ROOT,
+          }),
+      ],
+    ]) {
+      const target = join(dir, name);
+      await writeFile(target, theirs);
+      // The name check is told the file is not there the first time it asks.
+      let asked = 0;
+      const r = await run((p) => (p === target && asked++ === 0 ? false : existsSync(p)));
+      assert.ok((await readFile(target)).equals(theirs), `${name} was overwritten`);
+      assert.equal(r.ok, true, r.error);
+      assert.notEqual(r.path, target);
+    }
+  },
+);
 
-test("the Python tools refuse an existing output unless they are told to overwrite", async () => {
-  const dir = await newDir();
-  const src = join(dir, "paper.docx");
-  await copyFile(join(FIXTURES, "review_manuscript.docx"), src);
-  const old = Buffer.from("an earlier copy");
-  const cases = [
-    [join(ROOT, "tools", "anonymize_docx.py"), ["--in", src]],
-    [
-      join(ROOT, "tools", "build_marked_diff.py"),
-      ["--baseline", join(FIXTURES, "spike_manuscript.docx"), "--clean", src],
-    ],
-  ];
-  for (const [tool, args] of cases) {
-    const out = join(dir, "out.docx");
-    await writeFile(out, old);
-    const refused = await realPy(tool, [...args, "--out", out]);
-    assert.equal(refused.code, 2, tool);
-    assert.match(refused.stderr, /already exists/);
-    assert.ok((await readFile(out)).equals(old));
-    const forced = await realPy(tool, [...args, "--out", out, "--overwrite"]);
-    assert.equal(forced.code, 0, forced.stderr);
-    assert.ok(!(await readFile(out)).equals(old));
-    assert.deepEqual((await readdir(dir)).sort(), ["out.docx", "paper.docx"]);
-  }
-  // The marked-diff report file is not overwritten either.
-  const report = join(dir, "report.json");
-  await writeFile(report, old);
-  const [tool, args] = cases[1];
-  const r = await realPy(tool, [...args, "--out", join(dir, "new.docx"), "--report", report]);
-  assert.equal(r.code, 2);
-  assert.ok((await readFile(report)).equals(old));
-  assert.equal(existsSync(join(dir, "new.docx")), false);
-});
+test(
+  "the Python tools refuse an existing output unless they are told to overwrite",
+  { skip: missing("lxml") },
+  async () => {
+    const dir = await newDir();
+    const src = join(dir, "paper.docx");
+    await copyFile(join(FIXTURES, "review_manuscript.docx"), src);
+    const old = Buffer.from("an earlier copy");
+    const cases = [
+      [join(ROOT, "tools", "anonymize_docx.py"), ["--in", src]],
+      [
+        join(ROOT, "tools", "build_marked_diff.py"),
+        ["--baseline", join(FIXTURES, "spike_manuscript.docx"), "--clean", src],
+      ],
+    ];
+    for (const [tool, args] of cases) {
+      const out = join(dir, "out.docx");
+      await writeFile(out, old);
+      const refused = await realPy(tool, [...args, "--out", out]);
+      assert.equal(refused.code, 2, tool);
+      assert.match(refused.stderr, /already exists/);
+      assert.ok((await readFile(out)).equals(old));
+      const forced = await realPy(tool, [...args, "--out", out, "--overwrite"]);
+      assert.equal(forced.code, 0, forced.stderr);
+      assert.ok(!(await readFile(out)).equals(old));
+      assert.deepEqual((await readdir(dir)).sort(), ["out.docx", "paper.docx"]);
+    }
+    // The marked-diff report file is not overwritten either.
+    const report = join(dir, "report.json");
+    await writeFile(report, old);
+    const [tool, args] = cases[1];
+    const r = await realPy(tool, [...args, "--out", join(dir, "new.docx"), "--report", report]);
+    assert.equal(r.code, 2);
+    assert.ok((await readFile(report)).equals(old));
+    assert.equal(existsSync(join(dir, "new.docx")), false);
+  },
+);
 
 test("a copy that failed its check is set aside without replacing an earlier set-aside copy", async () => {
   const dir = await newDir();

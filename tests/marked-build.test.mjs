@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { createAuxService, AUX_JOBS, MARKED_MODES } from "../daemon/aux-service.mjs";
 import { MARKED_NOTICE } from "../daemon/marked-diff.mjs";
 import { DISK_NOTICE } from "../daemon/doc-bytes.mjs";
+import { missing } from "./fixtures/py-packages.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURES = join(ROOT, "tests", "fixtures");
@@ -65,36 +66,40 @@ test("marked_build is a job and takes the two modes of the tool", () => {
 });
 
 for (const mode of MARKED_MODES) {
-  test(`${mode}: the button writes the file the script writes, next to the manuscript`, async () => {
-    const t = await setup();
-    try {
-      const r = await t.job({ mode, baseline_base64: t.baseline_base64 });
-      assert.equal(r.ok, true, r.error);
-      assert.equal(r.path, join(t.dir, "paper_marked.docx"));
-      assert.equal(r.name, "paper_marked.docx");
-      assert.equal(r.mode, mode);
-      assert.equal(r.report.mode, mode);
-      assert.deepEqual([r.report.written, r.report.failures], [true, 0]);
-      assert.equal(r.notice, `${MARKED_NOTICE} ${DISK_NOTICE}`);
-      // The manuscript is not touched and the baseline copy is gone.
-      assert.deepEqual((await readdir(t.dir)).sort(), ["paper.docx", "paper_marked.docx"]);
-      const byScript = join(t.dir, "by_script.docx");
-      const code = await script([
-        "--baseline",
-        join(FIXTURES, "spike_manuscript.docx"),
-        "--clean",
-        t.doc,
-        "--out",
-        byScript,
-        "--mode",
-        mode,
-      ]);
-      assert.equal(code, 0);
-      assert.ok((await readFile(r.path)).equals(await readFile(byScript)));
-    } finally {
-      await t.done();
-    }
-  });
+  test(
+    `${mode}: the button writes the file the script writes, next to the manuscript`,
+    { skip: missing("lxml") },
+    async () => {
+      const t = await setup();
+      try {
+        const r = await t.job({ mode, baseline_base64: t.baseline_base64 });
+        assert.equal(r.ok, true, r.error);
+        assert.equal(r.path, join(t.dir, "paper_marked.docx"));
+        assert.equal(r.name, "paper_marked.docx");
+        assert.equal(r.mode, mode);
+        assert.equal(r.report.mode, mode);
+        assert.deepEqual([r.report.written, r.report.failures], [true, 0]);
+        assert.equal(r.notice, `${MARKED_NOTICE} ${DISK_NOTICE}`);
+        // The manuscript is not touched and the baseline copy is gone.
+        assert.deepEqual((await readdir(t.dir)).sort(), ["paper.docx", "paper_marked.docx"]);
+        const byScript = join(t.dir, "by_script.docx");
+        const code = await script([
+          "--baseline",
+          join(FIXTURES, "spike_manuscript.docx"),
+          "--clean",
+          t.doc,
+          "--out",
+          byScript,
+          "--mode",
+          mode,
+        ]);
+        assert.equal(code, 0);
+        assert.ok((await readFile(r.path)).equals(await readFile(byScript)));
+      } finally {
+        await t.done();
+      }
+    },
+  );
 }
 
 test("a refusal of the tool (exit 2) is the error of the job, with its paragraph number", async () => {

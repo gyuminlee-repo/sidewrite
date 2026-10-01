@@ -17,6 +17,7 @@ import {
   show,
   uncovered,
 } from "../scripts/e2e/marked-diff-word-lib.mjs";
+import { missing } from "./fixtures/py-packages.mjs";
 
 const HELPER = fileURLToPath(new URL("../scripts/e2e/marked_diff_pairs.py", import.meta.url));
 
@@ -74,14 +75,18 @@ test("the selection is fixed, 30 to 100 pairs, and covers every kind of change",
   assert.deepEqual(uncovered(PAIRS.filter((p) => !p.covers.includes("tab"))), ["tab"]);
 });
 
-test("every selected pair is in the corpus and is one the tool is expected to write", () => {
-  const corpus = JSON.parse(execFileSync("python3", [HELPER, "--list"], { encoding: "utf8" }));
-  const refused = new Map(corpus.map((c) => [c.name, c.refused]));
-  for (const p of PAIRS) {
-    assert.ok(refused.has(p.name), `not in the corpus: ${p.name}`);
-    assert.equal(refused.get(p.name), false, `expected to be refused: ${p.name}`);
-  }
-});
+test(
+  "every selected pair is in the corpus and is one the tool is expected to write",
+  { skip: missing("docx", "lxml") },
+  () => {
+    const corpus = JSON.parse(execFileSync("python3", [HELPER, "--list"], { encoding: "utf8" }));
+    const refused = new Map(corpus.map((c) => [c.name, c.refused]));
+    for (const p of PAIRS) {
+      assert.ok(refused.has(p.name), `not in the corpus: ${p.name}`);
+      assert.equal(refused.get(p.name), false, `expected to be refused: ${p.name}`);
+    }
+  },
+);
 
 test("two equal structures do not differ; bookmarks count only when asked", () => {
   assert.equal(compareStructure(CLEAN, structuredClone(CLEAN)), null);
