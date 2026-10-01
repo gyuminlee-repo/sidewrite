@@ -56,6 +56,7 @@ import {
   trackedPlaced,
   table,
 } from "./judge.mjs";
+import { pauseResident } from "./resident-unit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
@@ -299,6 +300,25 @@ const count = (f, re) => (readLog(f).match(re) ?? []).length;
 
 let daemon = null;
 let daemonLog = LOG;
+// The resident daemon of this machine (scripts/install), stopped in setup()
+// while the run has its own on the same ports. It is started again when this
+// process ends, whichever way: the end of the run, process.exit, an error
+// nobody caught, Ctrl-C.
+let resident = { paused: false, resume: () => {} };
+process.on("exit", () => resident.resume());
+for (const [signal, code] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]) {
+  process.on(signal, () => {
+    // The run's own daemon first, and until its ports are free: a resident
+    // unit started while they are held fails and, after a few tries, stays
+    // down.
+    stopDaemon()
+      .catch((e) => console.error(`run-acceptance: ${e.message}`))
+      .finally(() => process.exit(code));
+  });
+}
 // append: keep the log and write on (a restart in the middle of a run).
 async function startDaemon(logFile, extraEnv = {}, { append = false } = {}) {
   const from = append ? readLog(logFile).length : 0;
@@ -405,6 +425,10 @@ async function setup() {
   fs.mkdirSync(TOOLS, { recursive: true });
   for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1"])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
+  // The installed daemon holds both ports: it makes way for the run.
+  resident = pauseResident();
+  if (resident.paused)
+    await until(() => !listening(WS_PORT) && !listening(HTTP_PORT), 10_000, "ports free");
   if (listening(WS_PORT) || listening(HTTP_PORT))
     die(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
   fs.rmSync(KNOB_LOG, { force: true });

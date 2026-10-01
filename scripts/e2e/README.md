@@ -33,7 +33,12 @@ this stage (`S4-30..S4-33,S4-37`).
 - Node on Windows and an existing `playwright-core` package on Windows (no
   browser download is needed: the runner only attaches over CDP).
 - Ports 47833/47834 free (no other Draftspect daemon) and a free CDP port
-  (default 9333).
+  (default 9333). The installed daemon (`scripts/install`, a systemd user
+  unit) is the one exception: when it is active the run stops it at the
+  start and starts it again when the run ends, also after a failure or
+  Ctrl-C (`resident-unit.mjs`). With `--keep-on-fail` the run's own daemon
+  stays on the ports, so the unit cannot come back until that daemon is
+  stopped; then `bash scripts/install/daemon-service.sh install`.
 - The run folder must be on a Windows drive (for example under `/mnt/d`).
   Windows scripts are copied there and run from there, never from a UNC path.
 
