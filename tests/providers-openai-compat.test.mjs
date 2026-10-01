@@ -98,3 +98,30 @@ test("a trailing slash of the base URL and a think block left open are handled",
   assert.equal(reply.seen.url, "https://x/v1/chat/completions");
   assert.deepEqual(r.json, { a: 1 });
 });
+
+// A server that sends its headers and then stalls the body (Codex review of
+// stage 2.5): the timeout covers the body too, for a good and an error status.
+test("the timeout runs until the body is read: a stalled body is a timeout, not a success", async () => {
+  const r = await stalledBody("chat");
+  for (const name of ["good", "bad"]) {
+    assert.deepEqual(r[name].result, { ok: false, error: "timed out after 70 ms" }, name);
+    assert.ok(r[name].ms < 350, `${name}: returned after ${r[name].ms} ms, before the body came`);
+  }
+  // The same server answers in time when the limit allows it.
+  assert.deepEqual([r.patient.result.ok, r.patient.result.json], [true, { ok: true }]);
+  assert.ok(r.patient.ms >= 350, "that answer waited for the late body");
+});
+
+// The real requests run in a process of their own (tests/helpers/
+// stalled-body.mjs says why) and print what they got.
+async function stalledBody(scenario) {
+  const { execFile } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const helper = fileURLToPath(new URL("./helpers/stalled-body.mjs", import.meta.url));
+  const stdout = await new Promise((resolve, reject) =>
+    execFile(process.execPath, [helper, scenario], { timeout: 30_000 }, (err, out, errText) =>
+      err ? reject(new Error(`${err.message}\n${errText}`)) : resolve(out),
+    ),
+  );
+  return JSON.parse(stdout);
+}

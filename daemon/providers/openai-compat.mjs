@@ -39,45 +39,51 @@ export async function chatOneshot(
     () => abort.abort(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
     timeoutMs,
   );
-  let res;
-  try {
-    res = await fetchFn(`${String(baseUrl).replace(/\/+$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: String(system ?? "") },
-          { role: "user", content: String(prompt ?? "") },
-        ],
-        temperature: 0,
-        stream: false,
-      }),
-      signal: abort.signal,
-    });
-  } catch (e) {
-    if (e?.name === "TimeoutError" || e?.name === "AbortError") {
-      return { ok: false, error: `timed out after ${timeoutMs} ms` };
-    }
-    return { ok: false, error: `Connection failed (${e?.cause?.code ?? e?.code ?? e?.name})` };
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!res.ok) {
-    const detail = scrub(await errorDetail(res));
-    const error = `HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
-    return res.status === 429
-      ? { ok: false, error, limited: { limited: true, kind: "rate_limit", text: detail } }
-      : { ok: false, error };
-  }
+  const timedOut = { ok: false, error: `timed out after ${timeoutMs} ms` };
+  // The timer runs until the body has been read, not only until the headers
+  // came: a server that answers 200 and then stalls is a timeout too. The
+  // abort also ends a body read that is under way.
   let content;
   try {
-    content = (await res.json())?.choices?.[0]?.message?.content;
-  } catch {
-    return { ok: false, error: "the reply was not JSON from the server" };
+    let res;
+    try {
+      res = await fetchFn(`${String(baseUrl).replace(/\/+$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: String(system ?? "") },
+            { role: "user", content: String(prompt ?? "") },
+          ],
+          temperature: 0,
+          stream: false,
+        }),
+        signal: abort.signal,
+      });
+    } catch (e) {
+      if (e?.name === "TimeoutError" || e?.name === "AbortError") return timedOut;
+      return { ok: false, error: `Connection failed (${e?.cause?.code ?? e?.code ?? e?.name})` };
+    }
+    if (!res.ok) {
+      const detail = scrub(await errorDetail(res));
+      if (abort.signal.aborted) return timedOut;
+      const error = `HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
+      return res.status === 429
+        ? { ok: false, error, limited: { limited: true, kind: "rate_limit", text: detail } }
+        : { ok: false, error };
+    }
+    try {
+      content = (await res.json())?.choices?.[0]?.message?.content;
+    } catch {
+      if (abort.signal.aborted) return timedOut;
+      return { ok: false, error: "the reply was not JSON from the server" };
+    }
+  } finally {
+    clearTimeout(timer);
   }
   if (typeof content !== "string") return { ok: false, error: "the reply had no message" };
   const text = stripThinking(content);

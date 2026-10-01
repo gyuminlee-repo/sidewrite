@@ -191,7 +191,14 @@ async function probeOllama({ fetchFn }, preset) {
     return { reason: `Ollama is not running (no answer from ${origin})` };
   }
   if (!res.ok) return { reason: `Ollama is not running (${origin} answered HTTP ${res.status})` };
-  const models = ollamaChatModels(await res.json());
+  // The signal of the request also ends a body that stalls after the headers.
+  let tags;
+  try {
+    tags = await res.json();
+  } catch (e) {
+    return { reason: `Ollama did not finish its answer (${netCode(e)})` };
+  }
+  const models = ollamaChatModels(tags);
   if (!models.length) return { reason: "Ollama has no chat model (run: ollama pull <model>)" };
   return { available: true, models };
 }

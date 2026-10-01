@@ -328,3 +328,27 @@ test("probe cache: one probe for concurrent callers, again after the ttl or a re
   assert.equal(n, 3);
   assert.equal(cache.current()[0].id, "p3");
 });
+
+// The probe's requests carry AbortSignal.timeout, which also ends a body
+// read: a server that sends headers and stalls is a reason, not a hang.
+// (Ollama's limit is 2 s; the key providers use the same signal for /models.)
+test("a server that stalls the body of its model list is a row with the reason", async () => {
+  const r = await stalledBody("probe");
+  assert.ok(r.ms < 4_000, `ended at Ollama's limit, not at the body (${r.ms} ms)`);
+  assert.equal(r.ollama.available, false);
+  assert.equal(r.ollama.reason, "Ollama did not finish its answer (timeout)");
+});
+
+// The real requests run in a process of their own (tests/helpers/
+// stalled-body.mjs says why) and print what they got.
+async function stalledBody(scenario) {
+  const { execFile } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const helper = fileURLToPath(new URL("./helpers/stalled-body.mjs", import.meta.url));
+  const stdout = await new Promise((resolve, reject) =>
+    execFile(process.execPath, [helper, scenario], { timeout: 30_000 }, (err, out, errText) =>
+      err ? reject(new Error(`${err.message}\n${errText}`)) : resolve(out),
+    ),
+  );
+  return JSON.parse(stdout);
+}
