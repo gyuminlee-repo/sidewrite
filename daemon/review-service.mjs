@@ -33,6 +33,7 @@ import {
   addChange,
   applyStates,
   addBlocked,
+  addUnknownEdit,
   takeBlocked,
   markBlockedUnknown,
   claimBlocked,
@@ -84,6 +85,7 @@ async function exists(p) {
 export function resolveUnknownOverrides(rev, snapshot) {
   let next = rev;
   const resolved = [];
+  const dropped = [];
   const used = new Set(
     rev.comments.flatMap((c) => c.changes.map((ch) => ch.word_comment_id).filter(Boolean)),
   );
@@ -91,6 +93,7 @@ export function resolveUnknownOverrides(rev, snapshot) {
   for (const c of rev.comments) {
     for (const b of c.blocked) {
       if (b.state !== "outcome_unknown" || !b.attempt?.change?.context) continue;
+      const own = b.blocked_by.length === 0;
       const comment = (snapshot.comments ?? []).find(
         (x) =>
           !used.has(String(x.id)) &&
@@ -106,10 +109,21 @@ export function resolveUnknownOverrides(rev, snapshot) {
       // no space, so a word-bounded match would miss it.
       const newTextThere =
         !!p && normalizeParaText(p.text).includes(normalizeParaText(change.text));
+      // Its rationale comment in the document settles a pending deletion too:
+      // the task pane adds the comment only after the edit.
       const applied =
         row.state === "accepted" ||
-        (row.state === "pending" && change.kind !== "delete" && newTextThere);
-      if (!applied) continue;
+        (row.state === "pending" && (!!comment || (change.kind !== "delete" && newTextThere)));
+      if (!applied) {
+        // A normal edit whose own range still reads the old form, with no
+        // rationale comment: not applied, nothing is left to wait for. An
+        // approved exception stays, so the author can decide again.
+        if (own && !comment && row.state === "rejected") {
+          next = takeBlocked(next, c.ref, b.id).revision;
+          dropped.push({ ref: c.ref, blocked_id: b.id, tool_call_id: b.attempt.tool_call_id });
+        }
+        continue;
+      }
       const added = addChange(next, c.ref, {
         ...change,
         paragraph_index: row.paragraph_index,
@@ -124,10 +138,11 @@ export function resolveUnknownOverrides(rev, snapshot) {
         change_id: added.change.id,
         tool_call_id: b.attempt.tool_call_id,
         state: row.state,
+        own,
       });
     }
   }
-  return { revision: next, resolved };
+  return { revision: next, resolved, dropped };
 }
 
 // What a ledger check result depends on: the rule, not its last result.
@@ -322,11 +337,28 @@ export function createReviewService({
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
         return saved;
       },
-      onOutcomeUnknown: ({ id, ref, record, blocked_id = null }) => {
+      // blocked_id: the approved exception the edit came from (its item is
+      // marked by review_override). A normal edit gets an item of its own
+      // in the file here, so a refresh or a restarted daemon can still find
+      // out whether Word applied it (Codex review 14).
+      onOutcomeUnknown: async ({ id, ref, record, attempt, args, blocked_id = null }) => {
+        let own = false;
+        if (!blocked_id && attempt && args) {
+          let saved = null;
+          await update(key, (rev) => {
+            const r = addUnknownEdit(withComment(key, rev, ref), ref, { args, attempt });
+            saved = r.blocked;
+            return r.revision;
+          });
+          blocked_id = saved.id;
+          own = true;
+          log(`[review] outcome unknown ${saved.id} kept for refresh id=${id}`);
+          sendEvent(key, { type: "review_event", event: "edit_blocked", ref, blocked: saved });
+        }
         if (!id) return;
         const timer = setTimeout(() => forgetLate(id), lateResultTtlMs);
         timer.unref?.();
-        pendingLate.set(id, { key, ref, record, blocked_id, timer, release: hold(key, ref) });
+        pendingLate.set(id, { key, ref, record, blocked_id, own, timer, release: hold(key, ref) });
       },
       holdRef: (ref) => hold(key, ref),
       onBlocked: async ({ ref, args, blocked_by }) => {
@@ -365,6 +397,14 @@ export function createReviewService({
     if (!out?.ok) {
       const why = entry.ok ? (out?.code ?? out?.message ?? "not applied") : entry.error;
       log(`[review] late result not applied ${entry.id}: ${why}`);
+      // Word answered that the normal edit is not in the document.
+      if (p.own) {
+        await update(p.key, (rev) =>
+          findComment(rev, p.ref)?.blocked.some((b) => b.id === p.blocked_id)
+            ? takeBlocked(rev, p.ref, p.blocked_id).revision
+            : null,
+        );
+      }
       return null;
     }
     log(`[review] late result recorded ${entry.id}`);
@@ -374,7 +414,9 @@ export function createReviewService({
           ? takeBlocked(rev, p.ref, p.blocked_id).revision
           : null,
       );
-      log(`[review] override ${p.blocked_id} applied late as ${out.change_id}`);
+      log(
+        `[review] ${p.own ? "edit" : "override"} ${p.blocked_id} applied late as ${out.change_id}`,
+      );
     }
     sendEvent(p.key, {
       type: "review_event",
@@ -524,10 +566,12 @@ export function createReviewService({
       let rows = [];
       let external = [];
       let resolved = [];
+      let dropped = [];
       const revision = await update(key, (old) => {
         const r0 = resolveUnknownOverrides(clearStale(key, old) ?? old, snapshot);
         const rev = r0.revision;
         resolved = r0.resolved;
+        dropped = r0.dropped;
         rows = classifyRevision(rev, snapshot);
         let next = applyStates(rev, rows);
         // L4: changes since the last refresh that no review change explains.
@@ -548,7 +592,14 @@ export function createReviewService({
       for (const x of resolved) {
         forgetLate(x.tool_call_id);
         log(
-          `[review] override ${x.blocked_id} found applied in refresh as ${x.change_id} state=${x.state}`,
+          `[review] ${x.own ? "edit" : "override"} ${x.blocked_id} found applied in refresh as ${x.change_id} state=${x.state}`,
+        );
+      }
+      // Not forgotten as a late result: should Word answer after all, the
+      // answer is still recorded.
+      for (const x of dropped) {
+        log(
+          `[review] edit ${x.blocked_id} not applied (old text in place, no rationale comment); dropped`,
         );
       }
       const counts = summarizeStates(rows);

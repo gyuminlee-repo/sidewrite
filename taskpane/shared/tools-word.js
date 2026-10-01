@@ -135,6 +135,47 @@ function findIndexById(paragraphs, id, idMode) {
   return i;
 }
 
+// Index in paragraphs.items of each paragraph in `firsts` (a Paragraph taken
+// from a range, a comment or the selection; null gives -1). With
+// uniqueLocalId the id decides. Without it the text does, and when several
+// paragraphs have that text, the place: the paragraph's own range is
+// compared with each of them (one more sync, only then). Looking a twin up
+// by its text alone gave the first one (Codex review 14).
+const SAME_PLACE = ["Equal", "Inside", "InsideStart", "InsideEnd"];
+export async function paragraphIndexes(context, paragraphs, idMode, firsts) {
+  const out = [];
+  const open = [];
+  firsts.forEach((first, n) => {
+    if (!first) {
+      out[n] = -1;
+    } else if (idMode === "uniqueLocalId") {
+      out[n] = paragraphs.items.findIndex((p) => p.uniqueLocalId === first.uniqueLocalId);
+    } else {
+      const same = [];
+      paragraphs.items.forEach((p, i) => {
+        if (p.text === first.text) same.push(i);
+      });
+      if (same.length <= 1) {
+        out[n] = same.length ? same[0] : -1;
+      } else {
+        const own = first.getRange("Whole");
+        const where = same.map((i) =>
+          own.compareLocationWith(paragraphs.items[i].getRange("Whole")),
+        );
+        open.push({ n, same, where });
+      }
+    }
+  });
+  if (open.length) {
+    await context.sync();
+    for (const { n, same, where } of open) {
+      const k = where.findIndex((w) => SAME_PLACE.includes(w.value));
+      out[n] = k === -1 ? -1 : same[k];
+    }
+  }
+  return out;
+}
+
 // Run `body` with the document's changeTrackingMode set to TrackAll if
 // `track_changes` is truthy, and unconditionally restore it in `finally` so
 // that exceptions thrown mid-edit don't leave Word stuck in Track All mode.
@@ -984,8 +1025,8 @@ export async function toolClearComments(args) {
 
     // Scoped path: determine which paragraph each comment is anchored on.
     // For each comment, load its contentRange.paragraphs (the paragraph[s]
-    // the comment is anchored in). Then match by text against our snapshot
-    // to derive paragraph indices.
+    // the comment is anchored in) and find the index of the first one
+    // (paragraphIndexes).
     const { paragraphs, idMode } = await getParagraphsWithIds(context);
     const snapshot = snapshotParagraphs(paragraphs, idMode);
 
@@ -1008,26 +1049,23 @@ export async function toolClearComments(args) {
 
     const probes = comments.items.map((c) => {
       const paras = c.contentRange.paragraphs;
-      paras.load("items/text");
+      paras.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId, items/text" : "items/text");
       return { comment: c, paras };
     });
     await context.sync();
 
+    // The paragraph of each comment's anchor: by id, or by its place when
+    // paragraphs share a text (paragraphIndexes), so a comment on a twin
+    // outside the scope is not cleared for the twin inside it.
+    const anchors = await paragraphIndexes(
+      context,
+      paragraphs,
+      idMode,
+      probes.map(({ paras }) => paras.items[0] ?? null),
+    );
     let deletedCount = 0;
-    for (const { comment, paras } of probes) {
-      if (paras.items.length === 0) continue;
-      // Map a comment to a paragraph by its anchor text. Office.js doesn't
-      // expose a stable paragraph handle for a comment's contentRange, so
-      // we match on text. Edge case under `paragraph_ids` scope: if two
-      // paragraphs have *identical* text and only one is in scope,
-      // findIndex returns the first occurrence — a comment anchored on the
-      // out-of-scope twin can match the in-scope one (or vice-versa) and
-      // get cleared (or skipped) wrongly. Acceptable: clear-comments is a
-      // bulk reset, identical-paragraph docs are rare, and the user can
-      // re-run. `heading_section` / `all: true` scopes are unaffected —
-      // they select by index range, not text.
-      const firstText = paras.items[0].text;
-      const idx = snapshot.findIndex((p) => p.text === firstText);
+    for (const [n, { comment }] of probes.entries()) {
+      const idx = anchors[n];
       if (idx !== -1 && allowedIdxs.has(idx)) {
         comment.delete();
         deletedCount += 1;
@@ -1509,6 +1547,8 @@ export async function toolTrackedEdit({
     all.load("items");
     await context.sync();
     let hits = all.items;
+    // The paragraph the hint picked, when it was read.
+    let hinted = -1;
     if (hits.length > 1 && paragraph_hint) {
       const idx = findIndexById(paragraphs, paragraph_hint, idMode);
       if (idx === -1)
@@ -1521,6 +1561,7 @@ export async function toolTrackedEdit({
       inPara.load("items");
       await context.sync();
       hits = inPara.items;
+      hinted = idx;
     }
     if (hits.length === 0) return { ok: false, code: "NotFound", message: `"${find}" not found` };
     if (hits.length > 1) {
@@ -1536,9 +1577,7 @@ export async function toolTrackedEdit({
     para.load(idMode === "uniqueLocalId" ? "text, uniqueLocalId" : "text");
     await context.sync();
     const paragraphIndex =
-      idMode === "uniqueLocalId"
-        ? paragraphs.items.findIndex((p) => p.uniqueLocalId === para.uniqueLocalId)
-        : paragraphs.items.findIndex((p) => p.text === para.text);
+      hinted !== -1 ? hinted : (await paragraphIndexes(context, paragraphs, idMode, [para]))[0];
     const before = normalizeParaText(para.text);
     // after is computed from the full find/replace: narrowing cuts only
     // words both sides share, so the sentence comes out the same.
@@ -1669,14 +1708,12 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
       context,
       paragraphs.items.map((p) => p.getRange("Whole")),
     );
-    const indexOf = (first) => {
-      if (!first) return null;
-      const i =
-        idMode === "uniqueLocalId"
-          ? paragraphs.items.findIndex((p) => p.uniqueLocalId === first.uniqueLocalId)
-          : paragraphs.items.findIndex((p) => p.text === first.text);
-      return i === -1 ? null : i;
-    };
+    const anchors = await paragraphIndexes(
+      context,
+      paragraphs,
+      idMode,
+      probes.map(({ ps }) => ps.items[0] ?? null),
+    );
     return {
       paragraphs: paragraphs.items.map((p, i) => ({
         index: i,
@@ -1685,7 +1722,7 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
         reviewed_text: reviewed ? reviewed[i] : null,
         ...countRevisionMarks(oox[i].value),
       })),
-      comments: probes.map(({ c, r, ps }) => {
+      comments: probes.map(({ c, r, ps }, n) => {
         const first = ps.items[0];
         return {
           id: String(c.id),
@@ -1694,7 +1731,7 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
           resolved: c.resolved,
           anchor_text: r.text,
           paragraph_id: idMode === "uniqueLocalId" && first ? first.uniqueLocalId : null,
-          paragraph_index: indexOf(first),
+          paragraph_index: anchors[n] === -1 ? null : anchors[n],
           ...(replies
             ? {
                 replies: c.replies.items.map((x) => ({
@@ -1718,17 +1755,13 @@ export async function selectionParagraphs(max = 10) {
     const sel = context.document.getSelection().paragraphs;
     sel.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId, items/text" : "items/text");
     await context.sync();
-    return sel.items.slice(0, max).map((p) => {
-      const index =
-        idMode === "uniqueLocalId"
-          ? paragraphs.items.findIndex((x) => x.uniqueLocalId === p.uniqueLocalId)
-          : paragraphs.items.findIndex((x) => x.text === p.text);
-      return {
-        id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
-        index,
-        text: normalizeParaText(p.text),
-      };
-    });
+    const picked = sel.items.slice(0, max);
+    const indexes = await paragraphIndexes(context, paragraphs, idMode, picked);
+    return picked.map((p, n) => ({
+      id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
+      index: indexes[n],
+      text: normalizeParaText(p.text),
+    }));
   });
 }
 

@@ -233,7 +233,14 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
 
   function blockedRow(ref, b) {
     const newText = b.args.replace ?? b.args.insert_after ?? "";
-    const label = el("span", { text: `Blocked by ${b.blocked_by.join(", ")}: "${newText}" ` });
+    // No forbid rule: a normal edit Word did not answer. It is no exception,
+    // so it has no Allow button, only the re-apply below.
+    const own = b.blocked_by.length === 0;
+    const label = el("span", {
+      text: own
+        ? `No answer from Word: "${newText}" `
+        : `Blocked by ${b.blocked_by.join(", ")}: "${newText}" `,
+    });
     if (b.state === "applying" || state.applyingBlocked.has(b.id)) {
       const busy = el("button", {
         type: "button",
@@ -295,8 +302,11 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       "div",
       { class: "review-blocked" },
       label,
-      el("span", { class: "review-unknown", text: UNKNOWN_HINT + " " }),
-      allow,
+      el("span", {
+        class: "review-unknown",
+        text: (own ? UNKNOWN_HINT.replace("this exception", "this edit") : UNKNOWN_HINT) + " ",
+      }),
+      ...(own ? [] : [allow]),
       reapply,
     );
   }

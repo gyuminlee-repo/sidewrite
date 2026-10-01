@@ -706,3 +706,32 @@ test("currentTexts puts a recorded change into the paragraph Word reported", asy
     ["This is a new material.", TWO_PARAS[1]],
   );
 });
+
+test("a change records whether its paragraph had an identical twin when it was made", async () => {
+  const twin = "Cells were held at 30 degrees.";
+  const run = async (paragraphs, hint) => {
+    const d = crossDeps({ paragraphs, paragraph_ids: paragraphs.map((_, k) => `U${k}`) });
+    d.getLedger = async () => [];
+    d.call = async () => ({
+      ok: true,
+      word_comment_id: 5,
+      paragraph_index: 2,
+      before: twin,
+      after: "Cells were held at 30 °C.",
+    });
+    await applyTrackedEdit(
+      d,
+      {
+        comment_ref: "R1.3",
+        find: "30 degrees",
+        replace: "30 °C",
+        ...(hint ? { paragraph_hint: hint } : {}),
+        rationale: R,
+      },
+      { ref: "R1.3" },
+    );
+    return d.edits[0][1].duplicate_before;
+  };
+  assert.equal(await run([twin, "Middle.", twin], "U2"), true);
+  assert.equal(await run(["Other.", "Middle.", twin], null), false);
+});

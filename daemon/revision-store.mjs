@@ -60,6 +60,10 @@ export const ChangeSchema = z.object({
   // change can be judged apart from others in the same paragraph. null for
   // changes recorded before this field (whole-paragraph rule).
   context: z.object({ left: z.string(), right: z.string() }).nullable().default(null),
+  // Another paragraph had the same text as this one when the change was
+  // made: the old text alone then does not say which of them this is
+  // (revision-classify.mjs locateParagraph).
+  duplicate_before: z.boolean().default(false),
   // The edit was applied but its rationale comment was not anchored: the
   // task pane error code (CommentAnchorMissing or CommentInsertFailed).
   // word_comment_id is then null.
@@ -86,7 +90,11 @@ const Attempt = z.object({
 const Blocked = z.object({
   id: z.string(),
   args: z.record(z.string(), z.unknown()),
-  blocked_by: z.array(z.string()).min(1),
+  // Ledger ids of the forbid rules that refused the edit. Empty: a normal
+  // edit (nothing refused it) that Word did not answer, kept here as
+  // outcome_unknown with its attempt until a refresh or a late answer
+  // settles it (addUnknownEdit).
+  blocked_by: z.array(z.string()),
   created_at: z.string(),
   // outcome_unknown: an override was sent and not answered; it may be in the
   // document, so a plain second override is refused (review-service.mjs).
@@ -512,6 +520,25 @@ export function addBlocked(rev, ref, { args, blocked_by }, now = new Date()) {
   c.blocked_seq = blockedSeq(c) + 1;
   const id = `${ref}-b${c.blocked_seq}`;
   const row = { id, args: clone(args), blocked_by: [...blocked_by], created_at: now.toISOString() };
+  c.blocked.push(row);
+  return { revision: next, blocked: row };
+}
+
+// A tracked edit no forbid rule refused and Word did not answer: it may be
+// in the document. Kept like an unanswered exception (state outcome_unknown,
+// attempt), with no rule in blocked_by.
+export function addUnknownEdit(rev, ref, { args, attempt }, now = new Date()) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  c.blocked_seq = blockedSeq(c) + 1;
+  const row = {
+    id: `${ref}-b${c.blocked_seq}`,
+    args: clone(args),
+    blocked_by: [],
+    created_at: now.toISOString(),
+    state: "outcome_unknown",
+    attempt: Attempt.parse(clone(attempt)),
+  };
   c.blocked.push(row);
   return { revision: next, blocked: row };
 }

@@ -1190,3 +1190,49 @@ test("auto refresh: focus and a turn end refresh quietly; not while there are no
     delete globalThis.window;
   }
 });
+
+// Codex review 14: a normal edit Word did not answer is kept in the file with
+// no forbid rule. It is no exception: no Allow button, only the re-apply.
+test("an unanswered normal edit: named as such, no Allow exception, re-apply with force", async () => {
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [],
+        blocked: [
+          {
+            id: "R1.1-b1",
+            args: { find: "30 degrees", replace: "30 °C" },
+            blocked_by: [],
+            created_at: "2026-01-01T00:00:00Z",
+            state: "outcome_unknown",
+            attempt: null,
+          },
+        ],
+      },
+    ],
+    ledger: [],
+  };
+  const respond = { review_override: () => ({ ok: true, applied: true, revision }) };
+  const t = await setup({ revision, respond });
+  const find = (re) => findAll(t.$("review-comments"), (n) => re.test(n.textContent));
+  assert.equal(find(/^No answer from Word: "30 °C" $/).length, 1);
+  assert.equal(find(/Blocked by/).length, 0);
+  assert.equal(find(/^Allow exception$/).length, 0);
+  assert.equal(find(/Refresh status/).length, 1);
+  assert.equal(
+    findAll(t.$("review-decisions"), (n) =>
+      /^R1\.1 edit with no answer from Word: "30 °C"$/.test(n.textContent),
+    ).length,
+    1,
+  );
+  assert.equal(find(/this edit may already be applied/).length, 1);
+  await find(/Re-apply anyway/)[0].click();
+  await find(/Re-apply anyway/)[0].click();
+  const sent = t.requests.filter((r) => r.type === "review_override");
+  assert.deepEqual(sent[0].payload, { ref: "R1.1", blocked_id: "R1.1-b1", force: true });
+});

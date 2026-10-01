@@ -464,6 +464,22 @@ test("L7 pendingDecisions gathers blocked edits, unchecked ledger items and open
     ],
   );
   assert.equal(view.pendingDecisions({ comments: [], ledger: [] }).total, 0);
+  // A normal edit Word did not answer (no forbid rule): named as such.
+  const unanswered = view.pendingDecisions({
+    comments: [
+      {
+        ref: "R1.3",
+        requirements: [],
+        changes: [],
+        blocked: [{ id: "R1.3-b2", args: { replace: "the medium" }, blocked_by: [] }],
+      },
+    ],
+    ledger: [],
+  });
+  assert.deepEqual(
+    unanswered.blocked.map((x) => x.text),
+    ['R1.3 edit with no answer from Word: "the medium"'],
+  );
 });
 
 test("ledgerStatusText names the stage that checks a non-manuscript item", () => {
