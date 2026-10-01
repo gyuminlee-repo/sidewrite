@@ -34,10 +34,16 @@ function fakeWord({ fail = () => false, throwOnInsertComment = false } = {}) {
       return c;
     },
     compareLocationWith: () => ({ value: "Before" }),
+    // The paragraph is compared before the edit (expected_before_hash).
+    getRange() {
+      return this;
+    },
+    getReviewedText: () => ({ value: text }),
   });
   para = { ...range(PARA), uniqueLocalId: "P1", style: "Normal" };
   const document = {
     load() {},
+    getSelection: () => ({ select() {} }),
     get changeTrackingMode() {
       return state.mode;
     },
@@ -61,16 +67,26 @@ function fakeWord({ fail = () => false, throwOnInsertComment = false } = {}) {
     run: async (fn) => fn(context),
     InsertLocation: { replace: "Replace", after: "After" },
     ChangeTrackingMode: { trackAll: "TrackAll" },
+    ChangeTrackingVersion: { current: "Current" },
   };
   return state;
 }
 
 const { toolTrackedEdit } = await import("../taskpane/shared/tools-word.js");
-const REPLACE = { find: "30 degrees", replace: "30 °C", comment_text: "[R1.1] unit / R1.1 / q1" };
+const { paragraphHash } = await import("../daemon/doc-diff.mjs");
+// The paragraph is as the daemon read it: the comparison before the edit passes.
+const expected_before_hash = paragraphHash(PARA);
+const REPLACE = {
+  find: "30 degrees",
+  replace: "30 °C",
+  comment_text: "[R1.1] unit / R1.1 / q1",
+  expected_before_hash,
+};
 const INSERT = {
   find: "for 2 h.",
   insert_after: " Samples were run in triplicate.",
   comment_text: "[R1.1] n / R1.1 / q2",
+  expected_before_hash,
 };
 
 const partial = (r) => [r.ok, r.applied, r.code, r.paragraph_index, r.paragraph_id, r.narrowed];

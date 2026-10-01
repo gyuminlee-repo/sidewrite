@@ -9,7 +9,7 @@
 //   ledger_add, ledger_update, ledger_remove, ledger_check, comments_backup
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
-//     | "late_result_recorded" | "job_done", ... }
+//     | "late_result_recorded" | "stale_target" | "job_done", ... }
 // Jobs (JOB_TYPES): the reply is { ok: true, accepted: true, job_id } at once
 // and the result follows as { event: "job_done", job_id, result }, result
 // being what the reply would have held ({ ok: true, ... } or { ok: false,
@@ -429,6 +429,12 @@ export function createReviewService({
         sendEvent(key, { type: "review_event", event: "edit_blocked", ref, blocked: saved });
       },
       holdRef: (ref, d = at(key)) => hold(d, ref),
+      // The task pane refused an edit because its paragraph is not as the
+      // snapshot here has it. The snapshot comes from the task pane only
+      // (review_refresh), so it is asked to refresh.
+      onStaleTarget: async ({ ref }) => {
+        sendEvent(key, { type: "review_event", event: "stale_target", ref });
+      },
       onBlocked: async ({ ref, args, blocked_by, at: d = at(key) }) => {
         let saved = null;
         await update(d, (rev) => {

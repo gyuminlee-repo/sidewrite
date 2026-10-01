@@ -11,6 +11,7 @@ import { z } from "zod";
 import { forbidHits, forbidHitsAfterEdit, brokenForbidRules } from "./ledger-check.mjs";
 import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
+import { paragraphHash } from "./doc-diff.mjs";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
 
@@ -311,7 +312,22 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
     if (r.ok === false && !commentMissing) {
       await notApplied();
-      return r;
+      if (r.code !== "StaleTarget") return r;
+      // The task pane found the paragraph not as it was judged here and
+      // changed nothing. The judgement (forbid list, lost facts) was made
+      // on a text that is gone, so nothing is recorded; the task pane is
+      // asked for a status refresh (onStaleTarget), which brings the
+      // paragraph as it is now, and the model proposes again on that.
+      deps.log?.(
+        `[review] stale target ${turn.ref} paragraph=${r.paragraph_index ?? "?"} expected=${target ?? "unknown"}`,
+      );
+      await Promise.resolve(deps.onStaleTarget?.({ ref: turn.ref, at })).catch(() => {});
+      return fail(
+        target === null
+          ? `Not applied: the paragraph of "${args.find}" could not be told from the last status refresh, so the edit was not checked and Word was left unchanged. Read the paragraph again and propose the edit with a find that occurs once (or a paragraph_hint). The task pane is refreshing the status; if this repeats, tell the author to press Refresh status.`
+          : `Not applied: the paragraph changed in Word after it was last read, so the edit was checked against a text that is no longer there. Word was left unchanged. Read the paragraph again and propose the edit against its current text. The task pane is refreshing the status; if this repeats, tell the author to press Refresh status.`,
+        { code: "StaleTarget", paragraph_index: r.paragraph_index ?? null },
+      );
     }
     return recordApplied(deps, turn.ref, r, {
       at,
@@ -341,6 +357,18 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         ...(args.paragraph_hint ? { paragraph_hint: args.paragraph_hint } : {}),
         ...(narrow ? { narrow } : {}),
         comment_text: commentText,
+        // The paragraph everything above was judged on: its text as it
+        // reads now here (reviewed view: the snapshot with the recorded
+        // changes in it), hashed. The task pane hashes the paragraph it is
+        // about to edit the same way and changes nothing when they differ
+        // (StaleTarget). Without a known target no hash goes out and the
+        // task pane refuses any paragraph it finds: nothing was judged.
+        ...(target === null
+          ? {}
+          : {
+              expected_before_hash: paragraphHash(current[target]),
+              expected_paragraph: { index: target, id: ctx.paragraph_ids?.[target] ?? null },
+            }),
       });
     } catch (e) {
       // An error the task pane sent back: its edit batch failed, nothing was
@@ -555,7 +583,18 @@ async function recordApplied(
   if (lost.length) deps.log?.(`[review] lost facts ${id}: ${lost.join("; ")}`);
   if (unsourced.length) deps.log?.(`[review] unsourced ${id}: ${unsourced.join("; ")}`);
   if (commentMissing) deps.log?.(`[review] comment missing ${id} code=${commentMissing}`);
+  // A task pane that compares the paragraph before the edit says so
+  // (tools-word.js target_checked). One that does not is older than this
+  // daemon: its edit is in the document and is recorded, but it was not
+  // held against the paragraph the checks above were made on.
+  const unchecked = r.target_checked !== true;
+  if (unchecked) deps.log?.(`[review] target not checked ${id}: task pane older than the daemon`);
   const warnings = [
+    ...(unchecked
+      ? [
+          `The task pane applied this change but did not compare the paragraph with the one the edit was checked against (it is older than the daemon). Tell the author to reload the task pane and to look at change ${id}.`,
+        ]
+      : []),
     ...(commentMissing
       ? [
           `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,

@@ -1158,3 +1158,43 @@ test("Preview prompt and Propose changes send the same paragraphs under the sele
   assert.deepEqual(sent("review_preview")[1], sent("review_propose")[1]);
   assert.equal(selectionReads, 2);
 });
+
+// H2: a tracked edit the task pane refused because its paragraph changed
+// (StaleTarget). The daemon has the document only from a status refresh, so
+// it asks for one. H1: an attempt that is still with Word is not listed.
+test("stale_target refreshes the status with the document as it is now; a running attempt is not shown", async () => {
+  const row = (id, state, blocked_by) => ({ id, args: { replace: "x" }, blocked_by, state });
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [],
+        blocked: [row("R1.1-b1", "applying", []), row("R1.1-b2", "outcome_unknown", [])],
+      },
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const now = { paragraphs: [{ index: 0, text: "A novel material." }], comments: [] };
+  const t = await setup({
+    revision,
+    respond: {
+      review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+    },
+    word: { collectReviewSnapshot: async () => now },
+  });
+  const rows = () =>
+    findAll(t.$("review-comments"), (n) => n.attributes.class === "review-blocked").length;
+  assert.equal(rows(), 1, "the unanswered edit only");
+  assert.equal(t.requests.filter((r) => r.type === "review_refresh").length, 0);
+  t.pane.onEvent({ type: "review_event", event: "stale_target", ref: "R1.1" });
+  await settle();
+  assert.deepEqual(
+    t.requests.filter((r) => r.type === "review_refresh").map((r) => r.payload),
+    [{ snapshot: now }],
+  );
+});

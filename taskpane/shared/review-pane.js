@@ -804,6 +804,13 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         load()
           .catch((e) => say(e.message, true))
           .finally(render);
+      } else if (msg.event === "stale_target") {
+        // A tracked edit was refused: its paragraph is no longer as the
+        // daemon has it. A refresh gives the daemon the document as it is.
+        load()
+          .then(refresh)
+          .catch((e) => say(e.message, true))
+          .finally(render);
       } else if (msg.event === "change_recorded" || msg.event === "edit_blocked") {
         load()
           .catch((e) => say(e.message, true))

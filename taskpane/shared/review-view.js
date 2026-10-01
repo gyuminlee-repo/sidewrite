@@ -10,6 +10,21 @@ export function normalizeParaText(s) {
     .trim();
 }
 
+// Same function as daemon/doc-diff.mjs paragraphHash (FNV-1a 32 bit over the
+// UTF-16 code units of the normalized text, 8 hex digits); the test runs
+// both on one corpus. The daemon sends the hash of the paragraph it judged a
+// tracked edit on, the task pane compares it with the paragraph it is about
+// to edit (tools-word.js toolTrackedEdit).
+export function paragraphHash(text) {
+  const s = normalizeParaText(text);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
 // The paragraph as it reads once this one change is accepted. Computed from
 // the text before the edit, because while the change is pending the Word
 // paragraph.text holds both the inserted and the deleted text.

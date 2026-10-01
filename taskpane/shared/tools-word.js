@@ -1,6 +1,7 @@
 /* global Word */
 import {
   normalizeParaText,
+  paragraphHash,
   computeAfterText,
   countRevisionMarks,
   trackedRuns,
@@ -1526,6 +1527,25 @@ export async function toolHeaderFooter({ which, text }) {
 // narrow ({ find, replace }, from daemon/edit-facts.mjs narrowEdit, L3): the
 // changed words only. Used when narrow.find occurs exactly once inside the
 // located hit; otherwise the full find/replace. The result says which.
+// expected_before_hash: paragraphHash of the paragraph the daemon judged the
+// edit on (forbid list, lost facts). The paragraph this function is about to
+// edit is hashed the same way right before the edit, and when the two differ
+// nothing is changed (StaleTarget): the author changed the paragraph after
+// the daemon read it, so the edit was judged on a text that is gone.
+// What is hashed: the REVIEWED text of the paragraph (getReviewedText
+// current: pending tracked changes counted as accepted), normalized. That is
+// the text the daemon has: its snapshot is collectReviewSnapshot's
+// reviewed_text, and it puts its own recorded changes in as accepted
+// (review-tools.mjs currentTexts). The raw paragraph.text still holds
+// tracked-deleted words, so it differs from the daemon's text after the
+// first edit of a paragraph, and it does not show a tracked deletion the
+// author made next to the edit. A Word without getReviewedText gives the raw
+// text, as it does in the snapshot. The paragraph compared is the one the
+// hit is in, wherever it now stands: one that moved with its text unchanged
+// passes, and so does a twin with the same text.
+// No hash (the daemon could not tell the paragraph, so it judged none) is
+// refused as well. expected_paragraph ({ index, id }: where the daemon saw
+// the paragraph) only goes into the message.
 export async function toolTrackedEdit({
   find,
   replace,
@@ -1533,6 +1553,8 @@ export async function toolTrackedEdit({
   paragraph_hint,
   narrow,
   comment_text,
+  expected_before_hash,
+  expected_paragraph,
 }) {
   if (typeof find !== "string" || !find) throw new Error("`find` is required");
   if (find.length > 255) throw new Error("`find` exceeds the 255-character limit of Word search");
@@ -1602,6 +1624,24 @@ export async function toolTrackedEdit({
     }
 
     return await withTrackChanges(context, true, async () => {
+      // The last read before the edit, in this Word.run: the next batch
+      // that changes the document is the edit itself.
+      para.load("text");
+      const reviewed = await getReviewedTextBatch(context, [para.getRange("Whole")]);
+      const now = paragraphHash(reviewed ? reviewed[0] : para.text);
+      const sent = typeof expected_before_hash === "string" && expected_before_hash !== "";
+      if (!sent || now !== expected_before_hash) {
+        const seen = expected_paragraph ? ` (read at index ${expected_paragraph.index})` : "";
+        return {
+          ok: false,
+          code: "StaleTarget",
+          paragraph_index: paragraphIndex,
+          paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
+          message: sent
+            ? `The paragraph of "${find}" changed since it was read${seen}; nothing was changed`
+            : `The paragraph of "${find}" was not checked before the edit; nothing was changed`,
+        };
+      }
       const inserted = isInsert
         ? hit.insertText(insert_after, Word.InsertLocation.after)
         : target.insertText(editReplace, Word.InsertLocation.replace);
@@ -1617,6 +1657,9 @@ export async function toolTrackedEdit({
         before,
         after: computed.after,
         narrowed,
+        // The paragraph was compared with expected_before_hash. The daemon
+        // flags an applied result without this (an older task pane).
+        target_checked: true,
       };
       return await afterEditApplied(applied, async () => {
         let anchor;

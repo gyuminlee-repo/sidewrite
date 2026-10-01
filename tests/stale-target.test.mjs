@@ -292,7 +292,7 @@ test("daemon: an applied edit the task pane did not check (an old task pane) is 
   assert.match(r.warning, /did not compare|reload the task pane/i);
   const checked = deps(ctx, OK);
   const ok = await applyTrackedEdit(checked, ARGS, { ref: "R1.1" });
-  assert.equal(ok.warning, undefined);
+  assert.doesNotMatch(ok.warning ?? "", /reload the task pane/i);
 });
 
 // ---- daemon and task pane together -------------------------------------------------
@@ -373,7 +373,8 @@ test("together: the paragraph is as the daemon read it: applied and recorded, al
     let word = fakeDoc(["Title", "A useful material."]);
     const r = await w.edit();
     assert.equal(r.ok, true, JSON.stringify(r));
-    assert.deepEqual([word.edits.length, r.warning], [1, undefined]);
+    assert.equal(word.edits.length, 1);
+    assert.doesNotMatch(r.warning ?? "", /reload the task pane/i);
     // The paragraph now holds a pending tracked replace; the next edit of it
     // is compared with the reviewed form, which the recorded change gives.
     word = fakeDoc([
