@@ -54,39 +54,86 @@ function squeezeMap(s) {
   return { text, at };
 }
 
-const hitsOf = (hay, needle) => {
-  const out = [];
-  if (!needle) return out;
-  for (let p = hay.indexOf(needle); p !== -1; p = hay.indexOf(needle, p + 1)) out.push(p);
-  return out;
-};
+const WORD_CHAR = /[\p{L}\p{N}]/u;
 
-// Offset in `text` of the place the change touched, or null when no form of
-// it is there exactly once. Forms, most specific first: the new text between
-// its recorded context words, with one side of the context, alone, then the
-// context alone (the author rewrote the new text).
+// Start indexes of `form` in the squeezed text m.text. A side given as
+// `wordStart` / `wordEnd` must not cut a word of the source text `src`:
+// context words are whole words, the changed text itself may be part of one.
+function hitsOf(src, m, form, { wordStart = false, wordEnd = false } = {}) {
+  const out = [];
+  if (!form) return out;
+  for (let p = m.text.indexOf(form); p !== -1; p = m.text.indexOf(form, p + 1)) {
+    const a = m.at[p];
+    const b = m.at[p + form.length - 1];
+    if (wordStart && WORD_CHAR.test(src[a]) && a > 0 && WORD_CHAR.test(src[a - 1])) continue;
+    if (wordEnd && WORD_CHAR.test(src[b]) && WORD_CHAR.test(src[b + 1] ?? "")) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+// Offset in `text` of the place the change touched, or null when that place
+// cannot be told. A wrong quote is worse than none, so the recorded context
+// words (up to three on each side of the changed range) decide, not the new
+// text on its own:
+//
+//   0. The old text standing between its context words (for an insertion:
+//      the two context sides next to each other) means the change is not in
+//      effect there. null, also when the new form turns up somewhere else.
+//   1. The new text between both context sides, exactly once: that place.
+//   2. Otherwise every piece of context that is in the paragraph exactly once
+//      names a place: left + new text, new text + right, left alone, right
+//      alone (the author rewrote the new text). They must all lie in one
+//      sentence; that sentence is the place. If they disagree, or no piece of
+//      the context is left (the sentence was rewritten as a whole), null.
+//   3. The new text alone is trusted in one case only: the change recorded no
+//      context on either side AND its state is "accepted". Without context
+//      the classifier calls a change accepted only when the paragraph reads
+//      exactly as it did right after the change, so a single occurrence of
+//      the new text is the change itself. In any other state a single
+//      occurrence may be another sentence that happens to use the same
+//      words, and it is not taken.
 export function changeOffset(text, change) {
-  const m = squeezeMap(String(text ?? ""));
+  const src = String(text ?? "");
+  const m = squeezeMap(src);
   if (!m.at.length) return null;
-  const needle = squeeze(change.kind === "delete" ? "" : change.text);
+  const del = change.kind === "delete";
+  const needle = squeeze(del ? "" : change.text);
   const left = squeeze(change.context?.left);
   const right = squeeze(change.context?.right);
-  const forms = [
-    [left + needle + right, left.length],
-    [left + needle, left.length],
-    [needle + right, 0],
-    [needle, 0],
-    [left, left.length],
-    [right, 0],
-  ];
-  const tried = new Set();
-  for (const [form, skip] of forms) {
-    if (!form || tried.has(`${form}\n${skip}`)) continue;
-    tried.add(`${form}\n${skip}`);
-    const hits = hitsOf(m.text, form);
-    if (hits.length === 1) return m.at[Math.min(hits[0] + skip, m.at.length - 1)];
+  const at = (i) => m.at[Math.min(Math.max(i, 0), m.at.length - 1)];
+  const hits = (form, wordStart, wordEnd) => hitsOf(src, m, form, { wordStart, wordEnd });
+
+  if (!left && !right) {
+    const alone = hits(needle, false, false);
+    return change.state === "accepted" && alone.length === 1 ? at(alone[0]) : null;
   }
-  return null;
+
+  const full = left + needle + right;
+  const find = squeeze(change.find);
+  const old = change.kind === "insert" ? left + right : find ? left + find + right : "";
+  // An old form that is part of the new one ("30" -> "30 °C" at a paragraph
+  // end) says nothing.
+  if (old && !full.includes(old) && hits(old, !!left, !!right).length) return null;
+
+  const whole = hits(full, !!left, !!right);
+  if (whole.length === 1) return at(whole[0] + left.length);
+
+  const places = [];
+  const one = (form, wordStart, wordEnd, place) => {
+    const h = hits(form, wordStart, wordEnd);
+    if (h.length === 1) places.push(at(place(h[0])));
+  };
+  if (needle && left) one(left + needle, true, false, (p) => p + left.length);
+  if (needle && right) one(needle + right, false, true, (p) => p);
+  if (left) one(left, true, false, (p) => p + left.length);
+  // The right side starts after the change: the character before it is the
+  // end of the changed text (it may end a sentence). After a deletion there
+  // is no such text, and the right side itself is the place.
+  if (right) one(right, false, true, (p) => (del ? p : p - 1));
+  if (!places.length) return null;
+  const sentence = sentenceAt(src, places[0]);
+  return places.every((p) => sentenceAt(src, p) === sentence) ? places[0] : null;
 }
 
 // The sentence of `text` that holds `offset`, or null.

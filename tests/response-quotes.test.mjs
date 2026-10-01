@@ -174,6 +174,133 @@ test("a change that cannot be placed in its paragraph is reported, never guessed
   assert.equal(changeOffset("a b a", { kind: "replace", text: "a", context: null }), null);
 });
 
+// ---- a wrong quote is worse than none ----------------------------------------
+//
+// A unit change in the first sentence; the same unit also stands in the last.
+const UNIT = {
+  kind: "replace",
+  find: "degrees",
+  text: "°C",
+  state: "user_edited",
+  context: { left: "kept at 30 ", right: " overnight" },
+};
+const FIRST = "Cells were kept at 30 degrees Celsius overnight.";
+const OTHER = "Storage was at 4 °C.";
+const where = (text, change) => {
+  const off = changeOffset(text, change);
+  return off == null ? null : sentenceAt(text, off);
+};
+
+test("the new text found once elsewhere is not the change when its context is still in place", () => {
+  // The author wrote the unit out again; "°C" now only stands in another sentence.
+  assert.equal(where(`${FIRST} ${OTHER}`, UNIT), FIRST);
+  const [c] = citationsFor(
+    { changes: [{ ...UNIT, id: "R1.1-1", paragraph_index: 0 }] },
+    { paragraphs: [{ index: 0, text: `${FIRST} ${OTHER}` }] },
+    [],
+  );
+  assert.deepEqual([c.quote, c.problem], [FIRST, null]);
+});
+
+test("with both context sides and the new text in place, a second use elsewhere changes nothing", () => {
+  const accepted = "Cells were kept at 30 °C overnight.";
+  assert.equal(where(`${accepted} ${OTHER}`, { ...UNIT, state: "accepted" }), accepted);
+  assert.equal(where(`${OTHER} ${accepted}`, { ...UNIT, state: "accepted" }), accepted);
+});
+
+test("one context side still in place is enough to stay in the sentence of the change", () => {
+  const leftOnly = "Cells were kept at 30 degrees Celsius for one night.";
+  assert.equal(where(`${leftOnly} ${OTHER}`, UNIT), leftOnly);
+  const rightOnly = "Cells stayed near 30 degrees Celsius overnight.";
+  assert.equal(where(`${rightOnly} ${OTHER}`, UNIT), rightOnly);
+  // The right side alone, where the rewritten text ends its sentence.
+  const ends = { ...UNIT, context: { left: "kept at 30 ", right: " Storage was at" } };
+  const rewritten = "Cells stayed near 30 degrees Celsius.";
+  assert.equal(where(`${rewritten} ${OTHER}`, ends), rewritten);
+});
+
+test("a sentence rewritten as a whole cannot be placed, whatever stands elsewhere", () => {
+  const text = `The culture was grown warm for one night. ${OTHER}`;
+  assert.equal(changeOffset(text, UNIT), null);
+  const [c] = citationsFor(
+    { changes: [{ ...UNIT, id: "R1.1-1", paragraph_index: 0 }] },
+    { paragraphs: [{ index: 0, text }] },
+    [],
+  );
+  assert.deepEqual([c.quote, c.problem], ["", "sentence not found"]);
+});
+
+test("context sides that point at two sentences place nothing", () => {
+  assert.equal(
+    changeOffset("Cells were kept at 30 units. Storage at 4 °C was overnight.", UNIT),
+    null,
+  );
+});
+
+test("the old text back between its context words means the change is not there", () => {
+  // Reverted to the letter: "degrees" stands again where "°C" was put.
+  assert.equal(changeOffset(`Cells were kept at 30 degrees overnight. ${OTHER}`, UNIT), null);
+  // Also when the new form turns up in another sentence.
+  assert.equal(
+    changeOffset(
+      "Cells were kept at 30 degrees overnight. Controls were kept at 30 °C overnight.",
+      UNIT,
+    ),
+    null,
+  );
+});
+
+test("a context word counts as a whole word only", () => {
+  // "at" is inside "separate"; the place of the change is gone.
+  const short = { ...UNIT, context: { left: "at ", right: "" } };
+  assert.equal(changeOffset("Each separate flask was cooled.", short), null);
+  assert.equal(
+    where("Each flask was held at room temperature.", short),
+    "Each flask was held at room temperature.",
+  );
+});
+
+test("without recorded context the new text alone counts only for an accepted change", () => {
+  const bare = { kind: "replace", find: "degrees", text: "°C", context: null };
+  const text = `Cells were grown overnight. ${OTHER}`;
+  // accepted without context: the paragraph reads exactly as after the change.
+  assert.equal(where(text, { ...bare, state: "accepted" }), OTHER);
+  assert.equal(changeOffset(text, { ...bare, state: "user_edited" }), null);
+  assert.equal(changeOffset(text, bare), null);
+  assert.equal(changeOffset(`Kept at 30 °C. ${OTHER}`, { ...bare, state: "accepted" }), null);
+  assert.equal(
+    changeOffset(text, { ...bare, state: "accepted", context: { left: "", right: "" } }),
+    text.indexOf("°C"),
+  );
+});
+
+test("a deletion: taken back, in effect, and with one context side left", () => {
+  const del = {
+    kind: "delete",
+    find: "approximately ",
+    text: "",
+    state: "user_edited",
+    context: { left: "were kept at ", right: "30 °C." },
+  };
+  // Taken back by the author, and the shortened form stands in another sentence.
+  assert.equal(
+    changeOffset("Cells were kept at approximately 30 °C. Controls were kept at 30 °C.", del),
+    null,
+  );
+  // In effect.
+  assert.equal(
+    where("Cells were kept at 30 °C. Controls were stored cold.", del),
+    "Cells were kept at 30 °C.",
+  );
+  // The author rewrote what follows; the words before the deletion are still there.
+  assert.equal(
+    where("Cells were kept at room temperature. Controls were stored cold.", del),
+    "Cells were kept at room temperature.",
+  );
+  // Nothing of it left.
+  assert.equal(changeOffset("Cells grew warm. Controls were stored cold.", del), null);
+});
+
 test("sentenceAt gives the sentence that holds the offset, or null", () => {
   const t = viewText(snap.paragraphs[1]);
   assert.equal(sentenceAt(t, 0), "Flasks were shaken.");
