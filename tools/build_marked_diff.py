@@ -3,24 +3,41 @@
 
 Colour mode (default): deleted text is struck through in --delete-rgb, inserted text is in --insert-rgb, everything
 else is unchanged. Track-changes mode (--mode track_changes): the same diff is written as Word revision marks
-(inserted runs inside w:ins, deleted runs inside w:del with w:delText, a wholly deleted paragraph gets a deleted
-paragraph mark), with --author and --date on every mark. The diff is the same in both modes; only the writer differs.
-The output is the clean docx with only word/document.xml replaced.
+(inserted runs inside w:ins, deleted runs inside w:del with w:delText), with --author and --date on every mark. The
+diff is the same in both modes; only the writer differs. The output is the clean docx with only word/document.xml
+replaced.
+
+Structure is marked like text. A paragraph mark that is new (a new paragraph, a paragraph split in two) or gone (a
+deleted paragraph, two paragraphs joined, an empty paragraph that was removed) is an inserted or deleted paragraph
+mark: w:ins / w:del in the mark's run properties in track-changes mode, the insert colour / strike and delete
+colour on the mark in colour mode. Where a baseline paragraph ended inside what is now one clean paragraph, the
+paragraph is split there and the first part ends in a deleted paragraph mark. A table whose rows or columns
+changed, that is new, gone or stands at another place is shown as a deleted table and an inserted table: its rows
+carry w:trPr/w:del or w:ins in track-changes mode, every paragraph mark in it the mark formatting in colour mode.
 
 How the diff is made: paragraphs are aligned first (exact matches anchor the alignment), changed paragraphs are
 diffed word by word, and runs of paragraphs without a counterpart are re-paired sentence by sentence, so a rewritten
 paragraph shows the sentences that stayed. A paragraph that moved (a re-sorted reference list, for example) is paired
-with its new place when it is similar enough. When sentences of several baseline paragraphs end up struck inside one
-clean paragraph, a struck line break keeps the baseline paragraph boundaries visible.
+with its new place when it is similar enough.
 
 What is read how: pending tracked changes are carried out (accepted) in both files before they are compared, so the
 output holds this tool's marks only; pending cell insertions, deletions and merges are refused. Text that is struck through in the
 baseline is read as already deleted. In colour mode a clean file that already has struck-through text, or text in the
-insert colour, cannot be marked (the marks could not be told apart) and is refused.
+insert colour, or a paragraph mark formatted like one of this tool's, cannot be marked (the marks could not be told
+apart) and is refused.
 
-The result is checked before it is written: accepting every mark must give the clean text and rejecting every mark
-the baseline text, paragraph by paragraph, and the check itself is tested by damaging a copy. When a check fails
-nothing is written and the exit code is 1. The output is never one of the inputs, and an output or report file
+The result is checked before it is written: accepting every mark must give the clean document and rejecting every
+mark the baseline, in text and in structure: every paragraph (empty ones too) with its text, tabs and breaks by kind
+(line, page, column, clear), every table with its rows, cells and cell paragraphs, and on the accept side the text
+inside every bookmark and the order of paragraphs and tables. Not compared on the reject side: where a table stands
+among the paragraphs, and in colour mode page and column breaks (a deleted one is left out there, because a struck
+break would still break the page). The check itself is tested by damaging a copy. When a check fails nothing is
+written and the exit code is 1.
+
+What is refused (exit 2) instead of written wrong: nested tables; a changed paragraph with a field, a footnote
+reference, a drawing or another element the writer cannot rebuild; a paragraph of one document before a table or at
+the end of a cell or of the document where the other document has no paragraph at all (a paragraph mark cannot
+show that); pending cell insertions, deletions and merges. The output is never one of the inputs, and an output or report file
 that already exists is refused unless --overwrite is given (the write creates the name exclusively).
 
 Needs lxml.
@@ -68,7 +85,7 @@ SHORT_PARA_CHARS = 80          # a wholly struck baseline paragraph shorter than
 BREAK_CHARS = {'\n': {}, '\f': {'type': 'page'}, '\x1d': {'type': 'column'},
                '\x1c': {'clear': 'left'}, '\x1e': {'clear': 'right'}, '\x1f': {'clear': 'all'}}
 PAGE_BREAKS = '\f\x1d'            # page and column breaks: never written as deleted text (a struck break still breaks the page)
-SEP_CHAR = '\v'                # text form of the struck line break that separates baseline paragraphs inside one paragraph
+SEP_CHAR = '\v'                # in segment text only: a baseline paragraph ends here. Never written to a file: the paragraph is split there
 ABSORB_MIN_DICE = 0.25         # min content-word Dice for an unmatched neighbouring baseline paragraph to be struck inside a rewritten clean paragraph (--absorb)
 STOPWORDS = frozenset('the a an of and or to in on for with by from as at is are was were be been this that these those it its which who whom into than then also both each per not no'.split())
 STRUCK_PARA_LIMIT = 0.90       # metric: paragraph counted when struck share exceeds this
@@ -158,15 +175,18 @@ REV_REFUSED = ('cellIns', 'cellDel', 'cellMerge', 'customXmlDelRangeStart', 'cus
 REV_PROPERTY_PARENTS = ('rPr', 'numPr', 'trPr', 'ctrlPr')   # here ins/del is a flag on the parent, not a wrapper
 
 
-def accept_revisions(xml):
-    """(document.xml in its accepted state, number of pending revision elements carried out).
+def resolve_revisions(xml, side='accept'):
+    """(document.xml with every tracked change accepted or, with side='reject', rejected; number of revision
+    elements carried out).
 
-    The bytes are returned as they came when the document has no pending change. Otherwise: deleted and moved-away
+    The bytes are returned as they came when the document has no tracked change. Accepting: deleted and moved-away
     content is removed, inserted and moved-in content is unwrapped, a paragraph whose mark is deleted is joined with
-    the paragraph after it (which keeps its own properties, as in Word), a deleted table row is removed, and recorded
-    old formatting (w:rPrChange and the like) and move range markers are dropped. Pending cell insertions, deletions
-    and merges are refused."""
+    the paragraph after it (which keeps its own properties, as in Word), a deleted table row is removed. Rejecting
+    is the same with the two kinds exchanged (and w:delText turned back into w:t). On both sides recorded old
+    formatting (w:rPrChange and the like) and move range markers are dropped: the tool compares text and
+    structure, not formatting. Pending cell insertions, deletions and merges are refused."""
     root = etree.fromstring(xml)
+    gone, kept = (REV_GONE, REV_KEPT) if side == 'accept' else (REV_KEPT, REV_GONE)
     names = set(REV_GONE + REV_KEPT + REV_PROPERTY_CHANGES + REV_RANGE_MARKERS + REV_REFUSED)
     found = [e for e in root.iter() if isinstance(e.tag, str) and e.tag.startswith('{%s}' % W_NS) and ln(e) in names]
     if not found:
@@ -178,48 +198,48 @@ def accept_revisions(xml):
         if e.getparent() is not None:
             e.getparent().remove(e)
 
-    flags = [e for e in found if ln(e) in REV_GONE + REV_KEPT and ln(e.getparent()) in REV_PROPERTY_PARENTS]
+    flags = [e for e in found if ln(e) in gone + kept and ln(e.getparent()) in REV_PROPERTY_PARENTS]
+    joined = []
     for e in flags:
         owner, kind = e.getparent(), ln(e)
         drop(e)
-        if kind in REV_KEPT:
+        if kind in kept:
             continue
-        assert ln(owner) != 'ctrlPr', 'a pending deletion inside an equation is not handled; accept or reject it in Word first'
-        if ln(owner) == 'trPr':                       # deleted table row
+        assert ln(owner) != 'ctrlPr', 'a pending change inside an equation is not handled; accept or reject it in Word first'
+        if ln(owner) == 'trPr':                       # a row that goes
             row = owner.getparent()
             tbl = row.getparent()
             drop(row)
             if tbl is not None and tbl.find(q('tr')) is None:
                 drop(tbl)
-        elif ln(owner) == 'rPr' and ln(owner.getparent()) == 'pPr':   # deleted paragraph mark
-            para = owner.getparent().getparent()
-            para.set('joined-with-next', '1')
+        elif ln(owner) == 'rPr' and ln(owner.getparent()) == 'pPr':   # a paragraph mark that goes
+            joined.append(owner.getparent().getparent())
     flagged = {id(e) for e in flags}
-    wrappers = [e for e in found if ln(e) in REV_GONE + REV_KEPT and id(e) not in flagged]
+    wrappers = [e for e in found if ln(e) in gone + kept and id(e) not in flagged]
     for e in wrappers:
-        if ln(e) in REV_GONE:
+        if ln(e) in gone:
             drop(e)
     for e in wrappers:
-        if ln(e) in REV_KEPT and e.getparent() is not None:
+        if ln(e) in kept and e.getparent() is not None:
+            for t in e.iter(q('delText')):
+                t.tag = q('t')
             for ch in list(e):
                 e.addprevious(ch)
             drop(e)
     for e in found:
         if ln(e) in REV_PROPERTY_CHANGES + REV_RANGE_MARKERS:
             drop(e)
-    for para in [x for x in root.iter(q('p')) if x.get('joined-with-next')]:   # document order: a chain ends in the last one
-        del para.attrib['joined-with-next']
-        nxt = para.getnext()
-        if nxt is None or nxt.tag != q('p'):
-            continue                                  # last paragraph of a cell or before a table: the mark cannot go
-        at = 1 if len(nxt) and nxt[0].tag == q('pPr') else 0
-        for ch in [c for c in para if c.tag != q('pPr')]:
-            nxt.insert(at, ch)
-            at += 1
-        drop(para)
+    for para in joined:                               # document order: a chain ends in the last one
+        if para.getparent() is not None:
+            join_with_next(para)                      # no next paragraph (end of a cell, a table): the mark cannot go
     for e in [x for x in root.iter(q('rPr')) if len(x) == 0 and ln(x.getparent()) == 'pPr']:
         drop(e)                                       # a paragraph-mark rPr that only held the flag
     return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True), len(found)
+
+
+def accept_revisions(xml):
+    """Both inputs are read in this state: every pending tracked change carried out."""
+    return resolve_revisions(xml, 'accept')
 
 
 # ---------------------------------------------------------------- paragraph reading
@@ -267,8 +287,6 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
                 s = '\t'
             elif t == 'br':
                 s = break_char(ch)
-                if s == '\n' and ch.get(q('clear')) == 'none':  # separator written by this tool (see make_run)
-                    s = SEP_CHAR
             else:
                 para.special[t] += 1
                 continue
@@ -375,13 +393,14 @@ def diff_ops(bt, ct, merge_gap=None):
 
 
 def segments(ops, b, c):
-    """Turn ops into merged segments [(kind, text, key, rpr, link)]; deleted text never keeps a hyperlink or a page or column break."""
+    """Turn ops into merged segments [(kind, text, key, rpr, link)]; deleted text never keeps a hyperlink, and in colour mode
+    no page or column break either (a struck break would still break the page; inside w:del it does not)."""
     segs = []
     for kind, s, e in ops:
         src = b if kind == 'del' else c
         for i in range(s, e):
             ch = src.text[i]
-            if kind == 'del' and ch in PAGE_BREAKS:
+            if kind == 'del' and ch in PAGE_BREAKS and MODE == 'color':
                 continue
             key, rpr, link = src.fmt[i]
             link = None if kind == 'del' else link
@@ -438,8 +457,7 @@ def make_run(kind, text, rpr, styles):
             for k, v in BREAK_CHARS[part].items():
                 br.set(q(k), v)
         elif part == SEP_CHAR:
-            br = etree.SubElement(r, q('br'))
-            br.set(q('clear'), 'none')
+            raise AssertionError('a paragraph separator reached the run writer')   # rebuild_para splits there
         else:
             t = etree.SubElement(r, q(ttag))
             t.text = part
@@ -489,6 +507,194 @@ def colorize_in_place(p, rgb=None):
                 rpr_set(rpr, 'color', val=rgb or INSERT_RGB)
             n += 1
     return n
+
+
+# ---------------------------------------------------------------- paragraph marks
+# A paragraph ends in a paragraph mark, and that mark can be new or gone like any text: a new paragraph, a paragraph
+# split in two, two paragraphs joined, a deleted paragraph. The mark's own run properties (w:pPr/w:rPr) say so:
+# track_changes mode puts <w:ins> / <w:del> there, as Word does; colour mode formats the mark like inserted or
+# deleted text. Dropping a paragraph mark joins the paragraph with the one after it, which keeps its properties.
+def para_mark_rpr(p, create=False):
+    """The w:rPr of a paragraph's mark, or None."""
+    ppr = p.find(q('pPr'))
+    if ppr is None:
+        if not create:
+            return None
+        ppr = etree.Element(q('pPr'))
+        p.insert(0, ppr)
+    rpr = ppr.find(q('rPr'))
+    if rpr is None and create:
+        rpr = etree.Element(q('rPr'))
+        pos = next((i for i, ch in enumerate(ppr) if ln(ch) in ('sectPr', 'pPrChange')), len(ppr))
+        ppr.insert(pos, rpr)
+    return rpr
+
+
+def para_mark(p):
+    """'ins' | 'del' | None: the state of a paragraph's mark in a marked file."""
+    rpr = para_mark_rpr(p)
+    if rpr is None:
+        return None
+    if MODE == 'track_changes':
+        return 'ins' if rpr.find(q('ins')) is not None else 'del' if rpr.find(q('del')) is not None else None
+    return 'del' if is_deleted_rpr(rpr) else 'ins' if is_inserted_rpr(rpr) else None
+
+
+def set_para_mark(p, kind):
+    """Mark a paragraph's mark as inserted ('ins') or deleted ('del')."""
+    rpr = para_mark_rpr(p, create=True)
+    if MODE == 'track_changes':
+        rpr.insert(0, rev_mark(kind))
+    elif kind == 'del':
+        rpr_set(rpr, 'strike')
+        rpr_set(rpr, 'color', val=DELETE_RGB)
+    else:
+        rpr_set(rpr, 'color', val=INSERT_RGB)
+
+
+def set_row_mark(tr, kind):
+    """track_changes mode: mark a table row as inserted or deleted (w:trPr/w:ins|w:del)."""
+    trpr = tr.find(q('trPr'))
+    if trpr is None:
+        trpr = etree.Element(q('trPr'))
+        tr.insert(1 if len(tr) and ln(tr[0]) == 'tblPrEx' else 0, trpr)
+    pos = next((i for i, ch in enumerate(trpr) if ln(ch) == 'trPrChange'), len(trpr))
+    trpr.insert(pos, rev_mark(kind))
+
+
+BETWEEN_PARAGRAPHS = ('bookmarkStart', 'bookmarkEnd', 'proofErr', 'permStart', 'permEnd', 'commentRangeStart',
+                      'commentRangeEnd')   # may stand between two paragraphs without keeping them apart
+
+
+def after(p):
+    """What follows a paragraph: the next paragraph, a table, or whatever else ends the run of paragraphs (None at
+    the end). Range markers between two paragraphs are passed over."""
+    nxt = p.getnext()
+    while nxt is not None and isinstance(nxt.tag, str) and ln(nxt) in BETWEEN_PARAGRAPHS:
+        nxt = nxt.getnext()
+    return nxt
+
+
+def join_with_next(p):
+    """Drop a paragraph mark: the content goes to the front of the next paragraph, and so do the range markers
+    that stood between the two (they keep their place in the text). False when there is no next paragraph."""
+    nxt = after(p)
+    if nxt is None or nxt.tag != q('p'):
+        return False
+    between, e = [], p.getnext()
+    while e is not nxt:
+        between.append(e)
+        e = e.getnext()
+    at = 1 if len(nxt) and nxt[0].tag == q('pPr') else 0
+    for ch in [c for c in p if c.tag != q('pPr')] + between:
+        nxt.insert(at, ch)
+        at += 1
+    p.getparent().remove(p)
+    return True
+
+
+def swap_ppr(a, b):
+    """Exchange the paragraph properties of two paragraphs."""
+    pa, pb = a.find(q('pPr')), b.find(q('pPr'))
+    for el, ppr in ((a, pa), (b, pb)):
+        if ppr is not None:
+            el.remove(ppr)
+    if pb is not None:
+        a.insert(0, pb)
+    if pa is not None:
+        b.insert(0, pa)
+
+
+def ends(texts):
+    """End offset of each text in their concatenation."""
+    out, tot = [], 0
+    for t in texts:
+        tot += len(t)
+        out.append(tot)
+    return out
+
+
+def plan_marks(seq, cps, B, C, stats, new_tables=()):
+    """Give every paragraph of one container its mark, so that both documents' paragraphs come back.
+
+    seq: the output paragraphs in document order (the clean ones, the deleted ones, the pieces split off where a
+    baseline paragraph ended inside a clean one); cps: the clean paragraphs among them; B, C: all baseline and all
+    clean paragraphs of the container, empty ones included.
+
+    Every clean paragraph must end where a paragraph ends once the deletions are gone (accept), every baseline
+    paragraph where one ends once the insertions are gone (reject). A paragraph end of the output is a point with
+    two offsets, one in the accepted text and one in the rejected text. A point that ends a paragraph in both
+    documents keeps a plain mark, one that ends only a clean paragraph gets an inserted mark, one that ends only a
+    baseline paragraph a deleted mark, and one that ends neither is joined with the paragraph after it. Baseline
+    paragraph ends that have no point (empty baseline paragraphs) get a new empty paragraph with a deleted mark.
+
+    A mark that is dropped joins its paragraph with the next one, so the last paragraph before something that is
+    not a paragraph (the end of a cell, a table) must keep a plain mark. When it would not, the role moves there
+    from an earlier point at the same offset (what Word does when the last paragraph is deleted: the mark before
+    it is the deleted one), and the two paragraphs exchange their properties so the accepted one keeps the clean
+    properties.
+
+    What cannot be written is refused: a paragraph of one document before a table, or at the end of a cell or of
+    the document, where the other document has no paragraph at all (a file whose body ends in a table, for
+    example). new_tables: ids of the clean tables that have no baseline table; an inserted paragraph mark right
+    before one of them is fine, the table goes when it is rejected.
+
+    Returns, for every baseline paragraph, the output paragraph that ends it."""
+    if not seq:
+        return []
+    side = no_page_breaks if MODE == 'color' else (lambda t: t)
+    acc = [read_accept(p).text for p in seq]
+    rej = [side(read_reject(p).text) for p in seq]
+    want_c, want_b = [x.text for x in C], [side(x.text) for x in B]
+    assert ''.join(acc) == ''.join(want_c), 'the marked paragraphs do not add up to the clean text of this part'
+    assert ''.join(rej) == ''.join(want_b), 'the marked paragraphs do not add up to the baseline text of this part'
+    clean = {id(p) for p in cps}
+    pts = [{'el': p, 'a': a, 'r': r, 'C': id(p) in clean, 'B': False} for p, a, r in zip(seq, ends(acc), ends(rej))]
+    need = collections.Counter(ends(want_b))
+    for y in sorted(need):
+        here = [x for x in pts if x['r'] == y]
+        assert here or y == 0, 'a baseline paragraph ends inside a paragraph of the marked text'
+        made = [x for x in here if not x['C']][:need[y]]
+        for x in made + [x for x in here if x['C']][:need[y] - len(made)]:
+            x['B'] = True
+        for _ in range(need[y] - sum(x['B'] for x in here)):   # empty baseline paragraphs without a counterpart
+            new = etree.Element(q('p'))
+            if here:
+                at = max(i for i, x in enumerate(pts) if x['r'] == y)
+                pts[at]['el'].addnext(new)
+                pts.insert(at + 1, {'el': new, 'a': pts[at]['a'], 'r': y, 'C': False, 'B': True})
+            else:
+                pts[0]['el'].addprevious(new)
+                pts.insert(0, {'el': new, 'a': 0, 'r': 0, 'C': False, 'B': True})
+            stats['n_del_empty'] += 1
+    for i, x in enumerate(pts):
+        nxt = after(x['el'])
+        if (x['C'] and x['B']) or (nxt is not None and nxt.tag == q('p')):
+            continue
+        give, same = ('B', 'r') if x['C'] else ('C', 'a')     # the role this point lacks, and the offset it shares
+        j = i - 1
+        while j >= 0 and after(pts[j]['el']) is pts[j + 1]['el'] and pts[j][same] == x[same]:
+            if pts[j][give]:
+                pts[j][give], x[give] = False, True
+                if give == 'C':
+                    swap_ppr(pts[j]['el'], x['el'])
+                break
+            j -= 1
+        if not (x['C'] and x['B']) and not (x['C'] and nxt is not None and id(nxt) in new_tables):
+            where = 'a table' if nxt is not None and nxt.tag == q('tbl') else 'the end of this part'
+            one, other = ('clean document', 'baseline') if x['C'] else ('baseline', 'clean document')
+            raise AssertionError('the %s has a paragraph before %s where the %s has none; a paragraph mark cannot '
+                                 'show that' % (one, where, other))
+    owners = [x['el'] for x in pts if x['B']]
+    for x in pts:
+        if x['C'] and x['B']:
+            continue
+        if not x['C'] and not x['B']:
+            assert join_with_next(x['el']), 'a piece of a paragraph is left without a place'
+            continue
+        set_para_mark(x['el'], 'ins' if x['C'] else 'del')
+        stats['para_marks']['ins' if x['C'] else 'del'] += 1
+    return owners
 
 
 # ---------------------------------------------------------------- paragraph-level operations
@@ -559,25 +765,48 @@ def bookmarks_holding_deletions(root):
     return {k: v for k, v in held.items() if v}
 
 
-def rebuild_para(p, b, c, styles, stats, segs=None):
-    """Rewrite a clean paragraph as a word-level diff against its baseline counterpart (or prebuilt segments)."""
+def rebuild_para(p, b, c, styles, stats, segs=None, ppr_of=None):
+    """Rewrite a clean paragraph as a word-level diff against its baseline counterpart (or prebuilt segments).
+
+    Where the segments say that a baseline paragraph ends inside this paragraph (SEP_CHAR), the text before that
+    point becomes a paragraph of its own in front of p, with the properties ppr_of gives for that baseline
+    paragraph. Returns those new paragraphs; plan_marks gives them their deleted paragraph marks."""
     bad = {k: v for k, v in c.special.items() if k not in SAFE_CLEAN_TAGS and k != 'lastRenderedPageBreak'}
     assert not bad, 'unsupported element in changed clean paragraph %r: %s' % (c.text[:60], bad)
     if segs is None:
         segs = segments(diff_ops(b.text, c.text), b, c)
+    pieces, cur = [], []
+    for seg in place_marks(segs, c.marks):
+        if seg[0] == 'del' and SEP_CHAR in seg[1]:
+            assert seg[1].strip(SEP_CHAR) == '', 'a paragraph separator inside deleted text'
+            pieces += [(cur, seg[2][1])] + [([], seg[2][1])] * (len(seg[1]) - 1)
+            cur = []
+        else:
+            cur.append(seg)
     for ch in list(p):
         if ln(ch) != 'pPr':
             p.remove(ch)
-    for e in build_children(place_marks(segs, c.marks), styles):
+    new = []
+    for part, bi in pieces:
+        x = etree.Element(q('p'))
+        ppr = ppr_of(bi) if ppr_of else None
+        if ppr is not None and len(ppr):
+            x.append(ppr)
+        for e in build_children(part, styles):
+            x.append(e)
+        p.addprevious(x)
+        new.append(x)
+    for e in build_children(cur, styles):
         p.append(e)
     stats['marked'].append((b if isinstance(b, str) else b.text, c.text, marked_string(segs)))
     stats['exp_ins'].append(''.join(t for k, t, *_ in segs if k == 'ins'))
     stats['exp_del'].append(''.join(t for k, t, *_ in segs if k == 'del'))
+    return new
 
 
-def make_deleted_para(bp, b, styles, numids, stats):
-    """New paragraph holding baseline text as deletions; pPr comes from the baseline without structure elements."""
-    p = etree.Element(q('p'))
+def deleted_ppr(bp, styles, numids, stats):
+    """Paragraph properties for baseline text shown in the clean document: the baseline's, without structure
+    elements and without a style or a numbering the clean document does not have. None when there are none."""
     ppr = bp.find(q('pPr'))
     if ppr is not None:
         ppr = copy.deepcopy(ppr)
@@ -594,11 +823,13 @@ def make_deleted_para(bp, b, styles, numids, stats):
             if numids is not None and (ni is None or ni.get(q('val')) not in numids):
                 ppr.remove(npr)
                 stats['dropped_numpr'] += 1
-    if MODE == 'track_changes':   # deleted paragraph mark, so accept-all removes the paragraph itself
-        if ppr is None:
-            ppr = etree.Element(q('pPr'))
-        prpr = etree.SubElement(ppr, q('rPr'))
-        prpr.append(rev_mark('del'))
+    return ppr
+
+
+def make_deleted_para(bp, b, styles, numids, stats):
+    """New paragraph holding baseline text as deletions; its mark is set by the caller."""
+    p = etree.Element(q('p'))
+    ppr = deleted_ppr(bp, styles, numids, stats)
     if ppr is not None and len(ppr):
         p.append(ppr)
     for k, v in b.special.items():
@@ -949,14 +1180,15 @@ def sentence_realign(ali, B, C, min_ratio):
 
             def put(bi, segs, whole_del=False):
                 """Append segments; bi is the baseline paragraph they come from (None = inserted clean text).
-                A struck line break keeps baseline paragraph boundaries (and a struck heading's own line) visible."""
+                Where the baseline paragraph changes, a separator says so (SEP_CHAR): rebuild_para splits the
+                paragraph there, so a baseline paragraph boundary (and a struck heading's own line) stays one."""
                 if bi is None:
                     if state['short_del']:
-                        parts.append(['del', SEP_CHAR, '', None, None])
+                        parts.append(['del', SEP_CHAR, ('sep', state['last_b']), None, None])
                     state['short_del'] = False
                 else:
                     if state['last_b'] is not None and bi != state['last_b']:
-                        parts.append(['del', SEP_CHAR, '', None, None])
+                        parts.append(['del', SEP_CHAR, ('sep', state['last_b']), None, None])
                     state['last_b'] = bi
                     state['short_del'] = whole_del and len(B[bi].text.strip()) < SHORT_PARA_CHARS
                 parts.extend(segs)
@@ -989,33 +1221,51 @@ def sentence_realign(ali, B, C, min_ratio):
                 else:
                     out.append(('ins', None, ci, None))
         # keep deleted paragraphs in baseline order relative to clean paragraphs that carry baseline text
-        for p in range(start, len(out)):
-            if out[p][0] != 'del':
-                continue
-            bi, q = out[p][1], p
-            while q > start and out[q - 1][0] == 'seg' and max(out[q - 1][3][1]) > bi and min(out[q - 1][3][1]) > bi:
-                out[q - 1], out[q] = out[q], out[q - 1]
-                q -= 1
-            while q + 1 < len(out) and out[q + 1][0] == 'seg' and max(out[q + 1][3][1]) < bi:
-                out[q + 1], out[q] = out[q], out[q + 1]
-                q += 1
+        moved = True
+        while moved:                              # until nothing moves: a deleted paragraph can wait behind another one
+            moved = False
+            for p in range(start, len(out)):
+                if out[p][0] != 'del':
+                    continue
+                bi, q = out[p][1], p
+                while q > start and out[q - 1][0] == 'seg' and max(out[q - 1][3][1]) > bi and min(out[q - 1][3][1]) > bi:
+                    out[q - 1], out[q] = out[q], out[q - 1]
+                    q -= 1
+                while q + 1 < len(out) and out[q + 1][0] == 'seg' and max(out[q + 1][3][1]) < bi:
+                    out[q + 1], out[q] = out[q], out[q + 1]
+                    q += 1
+                moved = moved or q != p
     return out
 
 
-def apply_container(bps, cps, styles, numids, stats):
-    """Diff one list of baseline paragraphs against one list of clean paragraphs, editing the clean tree in place."""
+def apply_container(bps, cps, styles, numids, stats, tables=None):
+    """Diff one list of baseline paragraphs against one list of clean paragraphs, editing the clean tree in place.
+
+    tables (the document body only): {'before': tables that stand before each baseline paragraph, 'match': {id of a
+    clean table: its baseline table or None}, 'new': ids of the clean tables that will be marked as inserted}; a
+    deleted paragraph is put on the side of a table where it stood.
+    Returns, for every baseline paragraph, the output paragraph that ends it (see plan_marks)."""
     B = [read_para(p) for p in bps]
-    assert not any(SEP_CHAR in x.text for x in B), 'baseline already contains a separator break'
     C = [read_para(p, skip_rpr=lambda r: False) for p in cps]
     ali = align_paras([x.text for x in B], [x.text for x in C])
     ali = sentence_realign(ali, B, C, SENT_MATCH_MIN_RATIO)
+    seq = list(cps)                                   # the output paragraphs of this container, in document order
+    head = {}                                         # id of a clean paragraph -> the first piece split off in front of it
+
+    def at(p):
+        return next(i for i, e in enumerate(seq) if e is p)
+
     for tag, bi, ci, extra in ali:
         if tag == 'eq':
             stats['n_eq'] += 1
         elif tag == 'seg':
             assert not C[ci].special.get('drawing'), 'text differs in clean paragraph with drawing: %r' % C[ci].text[:60]
             segs, used = extra
-            rebuild_para(cps[ci], ' \u00b6 '.join(B[u].text for u in used), C[ci], styles, stats, segs)
+            new = rebuild_para(cps[ci], ' \u00b6 '.join(B[u].text for u in used), C[ci], styles, stats, segs,
+                               lambda b: deleted_ppr(bps[b], styles, numids, stats))
+            seq[at(cps[ci]):at(cps[ci])] = new
+            if new:
+                head[id(cps[ci])] = new[0]
             stats['n_mod'] += 1
         elif tag == 'ins':
             stats['n_ins'] += 1
@@ -1023,24 +1273,59 @@ def apply_container(bps, cps, styles, numids, stats):
                 colorize_in_place(cps[ci])
                 stats['exp_ins'].append(C[ci].text)
                 stats['marked'].append(('', C[ci].text, '{+%s+}' % C[ci].text))
+
+    def empties_before(i):
+        """How many empty baseline paragraphs stand right before baseline paragraph i."""
+        n = 0
+        while i - n - 1 >= 0 and not B[i - n - 1].text:
+            n += 1
+        return n
+
+    blank = {id(x) for x, c in zip(cps, C) if not c.text}   # the empty clean paragraphs
+
+    def is_table(e, later):
+        """Is e a clean table that this deleted paragraph must stay behind (later=False) or ahead of (later=True)?"""
+        if e is None or e.tag != q('tbl') or tables is None or tables['match'].get(id(e)) is None:
+            return False
+        return (tables['match'][id(e)] >= tables['before'][bi]) == later
+
     last = None
     for idx, (tag, bi, ci, extra) in enumerate(ali):
         if tag != 'del':
             last = cps[ci] if ci is not None else last
             continue
         stats['n_del'] += 1
-        if not B[bi].text.strip():
-            stats['n_del_empty'] += 1
-            continue
         newp = make_deleted_para(bps[bi], B[bi], styles, numids, stats)
         nxt = next((cps[a[2]] for a in ali[idx + 1:] if a[0] != 'del'), None)
         if nxt is not None:
-            nxt.addprevious(newp)
+            first = head.get(id(nxt), nxt)
+            k = at(first)
+            run = 0                                   # empty clean paragraphs right before it ...
+            while k - run - 1 >= 0 and id(seq[k - run - 1]) in blank:
+                run += 1
+            first = seq[k - (run - min(run, empties_before(bi)))]   # ... of which the baseline had this many before it
+            anchor = first
+            while is_table(anchor.getprevious(), later=True):   # the table came after this paragraph: stay ahead of it
+                anchor = anchor.getprevious()
+            anchor.addprevious(newp)
+            seq.insert(at(first), newp)
+        elif last is None:                            # the clean paragraphs of this part are all empty
+            cps[0].addprevious(newp)
+            seq.insert(at(cps[0]), newp)
+            last = newp
         else:
-            assert last is not None, 'no clean paragraph to anchor a deleted paragraph'
-            last.addnext(newp)
+            k = at(last)
+            for _ in range(empties_before(bi)):       # behind as many empty clean paragraphs as the baseline had before it
+                if k + 1 < len(seq) and id(seq[k + 1]) in blank:
+                    k += 1
+            anchor = seq[k]
+            while is_table(anchor.getnext(), later=False):      # the table came before this paragraph: go behind it
+                anchor = anchor.getnext()
+            anchor.addnext(newp)
+            seq.insert(k + 1, newp)
             last = newp
         stats['deleted_paras'].append(B[bi].text[:100])
+    return plan_marks(seq, cps, B, C, stats, tables['new'] if tables else ())
 
 
 # ---------------------------------------------------------------- document level
@@ -1073,8 +1358,21 @@ def cell_paras(tc):
     return ps
 
 
+def mark_table(t, kind):
+    """Mark a whole table as inserted or deleted: its rows in track_changes mode (w:trPr/w:ins|w:del); in colour
+    mode every paragraph mark in it (a row whose paragraph marks are all inserted, or all deleted, is an inserted
+    or deleted row: that is how the check reads it)."""
+    if MODE == 'track_changes':
+        for tr in t.iter(q('tr')):
+            set_row_mark(tr, kind)
+    else:
+        for p in t.iter(q('p')):
+            if not in_box(p):
+                set_para_mark(p, kind)
+
+
 def deleted_table(bt, styles, numids, stats):
-    """Baseline table copy with every paragraph converted to deleted text (each cell keeps a paragraph)."""
+    """Baseline table copy, marked as deleted: every paragraph as deleted text (each cell keeps a paragraph)."""
     t = copy.deepcopy(bt)
     for tc in t.iter(q('tc')):
         for p in tc.findall(q('p')):
@@ -1084,7 +1382,35 @@ def deleted_table(bt, styles, numids, stats):
             tc.remove(p)
         if tc.find(q('p')) is None:
             tc.append(etree.Element(q('p')))
+    mark_table(t, 'del')
     return t
+
+
+def match_tables(bts, cts):
+    """Pair baseline and clean tables in order: [(baseline index | None, clean index | None)].
+    Tables with the same text anchor the pairing; between two anchors tables are paired in order."""
+    text = lambda t: ''.join(t.itertext())
+    out = []
+    sm = difflib.SequenceMatcher(None, [text(t) for t in bts], [text(t) for t in cts], autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        n = min(i2 - i1, j2 - j1)
+        out += [(i1 + k, j1 + k) for k in range(n)]
+        out += [(i, None) for i in range(i1 + n, i2)] + [(None, j) for j in range(j1 + n, j2)]
+    return out
+
+
+def table_places(root):
+    """(body paragraphs before each top-level table, top-level tables before each body paragraph)."""
+    held = top_tables(root)                           # held: an id is only stable while its element object lives
+    tops = {id(t) for t in held}
+    paras_before, tables_before = [], []
+    for e in root.iter(q('p'), q('tbl')):
+        if e.tag == q('tbl'):
+            if id(e) in tops:
+                paras_before.append(len(tables_before))
+        elif not in_box(e) and not any(a.tag == q('tbl') for a in e.iterancestors()):
+            tables_before.append(len(paras_before))
+    return paras_before, tables_before
 
 
 def build_document(base_xml, clean_xml, styles, numids):
@@ -1092,34 +1418,72 @@ def build_document(base_xml, clean_xml, styles, numids):
     broot, croot = etree.fromstring(base_xml), etree.fromstring(clean_xml)
     stats = {'n_eq': 0, 'n_mod': 0, 'n_ins': 0, 'n_del': 0, 'n_del_empty': 0, 'marked': [], 'exp_ins': [],
              'exp_del': [], 'deleted_paras': [], 'dropped_pstyle': 0, 'dropped_numpr': 0,
-             'dropped_baseline_special': collections.Counter(), 'tables': []}
-    apply_container(body_paras(broot), body_paras(croot), styles, numids, stats)
+             'dropped_baseline_special': collections.Counter(), 'tables': [],
+             'para_marks': collections.Counter()}
     bts, cts = top_tables(broot), top_tables(croot)
-    for k, ct in enumerate(cts):
-        if k < len(bts) and table_dims(bts[k]) == table_dims(ct):
-            for btc, ctc in zip(bts[k].iter(q('tc')), ct.iter(q('tc'))):
+    pairs = match_tables(bts, cts)
+    paras_before, tables_before = table_places(broot)
+    at_base = {id(cts[ck]): bk for bk, ck in pairs if ck is not None}   # output table -> its baseline table (or None)
+    bps, cps = body_paras(broot), body_paras(croot)
+    assert bps and cps, 'a document without a paragraph outside its tables'
+    same_dims = lambda bk, ck: table_dims(bts[bk]) == table_dims(cts[ck])
+    new = {id(cts[ck]) for bk, ck in pairs if ck is not None and bk is None}   # no deleted table will stand next to these
+    owners = apply_container(bps, cps, styles, numids, stats, {'before': tables_before, 'match': at_base, 'new': new})
+    assert len(owners) == len(bps), 'not every baseline paragraph has its place in the marked text'
+    out_paras = body_paras(croot)
+    first = out_paras[0]
+    place = {id(x): i for i, x in enumerate(out_paras)}
+    clean_before, _ = table_places(croot)             # output body paragraphs before each clean table
+
+    def in_place(bk, ck):
+        """Does the clean table stand between the same two baseline paragraphs as its baseline table?"""
+        n, here = paras_before[bk], clean_before[ck]
+        return (n == 0 or place[id(owners[n - 1])] < here) and (n == len(bps) or place[id(owners[n])] >= here)
+    held = []                                         # the deleted table copies: at_base is keyed by id
+
+    def known(e, bk, later):
+        """Is e a table of the output whose baseline table stands after (later) or before the baseline table bk?"""
+        if e is None or e.tag != q('tbl') or at_base.get(id(e)) is None:
+            return False
+        return (at_base[id(e)] > bk) == later
+
+    for bk, ck in pairs:
+        if ck is not None and bk is not None and same_dims(bk, ck) and in_place(bk, ck):
+            for btc, ctc in zip(bts[bk].iter(q('tc')), cts[ck].iter(q('tc'))):
                 apply_container(cell_paras(btc), cell_paras(ctc), styles, numids, stats)
-            stats['tables'].append('table %d: cell-by-cell (%s)' % (k + 1, table_dims(ct)))
-        else:
+            stats['tables'].append('table %d: cell-by-cell (%s)' % (ck + 1, table_dims(cts[ck])))
+            continue
+        old = deleted_table(bts[bk], styles, numids, stats) if bk is not None else None
+        if ck is not None:
+            ct = cts[ck]
             for p in ct.iter(q('p')):
                 text = read_para(p, lambda r: False).text
                 if text:
                     colorize_in_place(p)
-                    stats['exp_ins'].append(text)   # the check counts inserted text per paragraph: cells are paragraphs too
+                    stats['exp_ins'].append(text)
                     stats['marked'].append(('', text, '{+%s+}' % text))
+            mark_table(ct, 'ins')
             stats['tables'].append('table %d: whole-table insert (baseline dims %s, clean dims %s)'
-                                   % (k + 1, table_dims(bts[k]) if k < len(bts) else None, table_dims(ct)))
-            if k < len(bts):
-                ct.addprevious(deleted_table(bts[k], styles, numids, stats))
-                stats['tables'].append('table %d: baseline table inserted as deleted' % (k + 1))
-    for k in range(len(cts), len(bts)):
-        if not cts and not ''.join(bts[k].itertext()).strip():
-            # textless baseline table (empty layout table) removed in clean: nothing to strike, no anchor needed
-            stats['tables'].append('baseline table %d: textless, removed in clean, nothing to strike' % (k + 1))
+                                   % (ck + 1, table_dims(bts[bk]) if bk is not None else None, table_dims(ct)))
+        if old is None:
             continue
-        assert cts, 'baseline has tables but clean has none: no anchor'
-        cts[-1].addnext(deleted_table(bts[k], styles, numids, stats))
-        stats['tables'].append('baseline table %d: deleted, placed after last clean table' % (k + 1))
+        if ck is not None and in_place(bk, ck):
+            cts[ck].addprevious(old)
+            stats['tables'].append('table %d: baseline table inserted as deleted' % (ck + 1))
+        elif paras_before[bk]:                        # a table that is gone or moved: behind the paragraph it followed
+            anchor = owners[paras_before[bk] - 1]
+            while known(anchor.getnext(), bk, later=False):
+                anchor = anchor.getnext()
+            anchor.addnext(old)
+            stats['tables'].append('baseline table %d: deleted' % (bk + 1))
+        else:                                         # ... or, when it opened the document, ahead of the first paragraph
+            anchor = first
+            while known(anchor.getprevious(), bk, later=True):
+                anchor = anchor.getprevious()
+            anchor.addprevious(old)
+            stats['tables'].append('baseline table %d: deleted' % (bk + 1))
+        held.append(old)
+        at_base[id(old)] = bk
     stats['warnings'] = []
     if MODE == 'color':
         stats['warnings'] = ['bookmark "%s" now also holds %d character(s) of deleted text (struck); a cross-reference '
@@ -1184,9 +1548,12 @@ def write_docx(clean_path, out_path, doc_xml):
 
 
 def colour_conflicts(clean_xml):
-    """(struck runs, runs in the insert colour) with text in the clean document: colour mode cannot mark such a file."""
+    """(struck runs, runs in the insert colour, paragraph marks formatted like a mark of this tool) in the clean
+    document: colour mode cannot mark such a file, the marks could not be told apart."""
     struck = coloured = 0
-    for r in etree.fromstring(clean_xml).iter(q('r')):
+    root = etree.fromstring(clean_xml)
+    marks = sum(1 for p in root.iter(q('p')) if para_mark(p))
+    for r in root.iter(q('r')):
         if not any(ln(ch) in ('t', 'tab', 'br') for ch in r if isinstance(ch.tag, str)):
             continue
         rpr = r.find(q('rPr'))
@@ -1194,7 +1561,7 @@ def colour_conflicts(clean_xml):
             struck += 1
         elif rpr_color(rpr) == INSERT_RGB:
             coloured += 1
-    return struck, coloured
+    return struck, coloured, marks
 
 
 # ---------------------------------------------------------------- verification and metrics
@@ -1246,6 +1613,103 @@ def read_only(p, kind):
 def no_page_breaks(text):
     """Text without its page and column breaks (deleted ones are not written, so the reject side is compared without them)."""
     return ''.join(ch for ch in text if ch not in PAGE_BREAKS)
+
+
+def view_root(marked_xml, side):
+    """The marked document with every mark accepted ('accept') or rejected ('reject'), as a tree without marks.
+
+    track_changes mode: resolve_revisions. Colour mode: the runs marked as deleted (accept) or inserted (reject)
+    go, a row whose paragraph marks are all of that kind goes, and a paragraph whose mark is of that kind is
+    joined with the next one."""
+    if MODE == 'track_changes':
+        return etree.fromstring(resolve_revisions(marked_xml, side)[0])
+    root = etree.fromstring(marked_xml)
+    gone = 'del' if side == 'accept' else 'ins'
+    for tr in list(root.iter(q('tr'))):
+        if {para_mark(x) for x in tr.iter(q('p'))} == {gone}:
+            tr.getparent().remove(tr)
+    for t in list(root.iter(q('tbl'))):
+        if t.find(q('tr')) is None:
+            t.getparent().remove(t)
+    for r in list(root.iter(q('r'))):
+        if run_kind(r) == gone:
+            r.getparent().remove(r)
+    for x in [x for x in root.iter(q('p')) if para_mark(x) == gone]:
+        join_with_next(x)
+    return root
+
+
+def structure(root, baseline=False):
+    """What the round-trip check compares of a document without marks:
+    'flow'      the order of body paragraphs ('p') and top-level tables ('t'),
+    'body'      the text of every body paragraph, empty ones included, with tabs and typed breaks (BREAK_CHARS),
+    'tables'    for every top-level table its rows, their cells and the text of every paragraph of each cell,
+    'bookmarks' the text between the start and the end of every bookmark.
+    baseline=True reads struck text as already deleted, as the diff does."""
+    read = (lambda x: read_para(x).text) if baseline else (lambda x: read_para(x, lambda r: False).text)
+    held = top_tables(root)                           # held: an id is only stable while its element object lives
+    tops = {id(t) for t in held}
+    flow, body = [], []
+    for e in root.iter(q('p'), q('tbl')):
+        if e.tag == q('tbl'):
+            if id(e) in tops:
+                flow.append('t')
+        elif not in_box(e) and not any(a.tag == q('tbl') for a in e.iterancestors()):
+            flow.append('p')
+            body.append(read(e))
+    tables = [[[[read(x) for x in tc.iter(q('p')) if not in_box(x)] for tc in tr.findall(q('tc'))]
+               for tr in t.findall(q('tr'))] for t in held]
+    opened, marks = {}, {}
+    for e in root.iter(q('bookmarkStart'), q('bookmarkEnd'), q('r')):
+        if ln(e) == 'bookmarkStart':
+            opened[e.get(q('id'))] = e.get(q('name')) or ''
+            marks.setdefault(e.get(q('name')) or '', '')
+        elif ln(e) == 'bookmarkEnd':
+            opened.pop(e.get(q('id')), None)
+        else:
+            text = ''.join(t.text or '' for t in e.iter(q('t'), q('delText')))
+            for name in opened.values():
+                marks[name] += text
+    return {'flow': flow, 'body': body, 'tables': tables, 'bookmarks': marks}
+
+
+def first_difference(name, got, want):
+    """[] when equal, else one line that says where two lists (or dicts) differ."""
+    if got == want:
+        return []
+    if isinstance(got, dict):
+        key = next(k for k in sorted(set(got) | set(want)) if got.get(k) != want.get(k))
+        return ['%s: %r is %r where %r is expected' % (name, key, got.get(key), want.get(key))]
+    if len(got) != len(want):
+        return ['%s: %d where %d are expected' % (name, len(got), len(want))]
+    i = next(i for i, (g, w) in enumerate(zip(got, want)) if g != w)
+    return ['%s: #%d is %s where %s is expected' % (name, i + 1, repr(got[i])[:70], repr(want[i])[:70])]
+
+
+def structure_failures(marked_xml, base_xml, clean_xml):
+    """The round trip on structure: accepting every mark must give the structure of the clean document, rejecting
+    every mark the structure of the baseline (see structure). Returns (accept failures, reject failures).
+
+    Not compared on the reject side: where a table stands among the paragraphs, bookmarks (the output carries the
+    clean document's), and, in colour mode only, page and column breaks (a deleted one is not written)."""
+    want_c = structure(etree.fromstring(clean_xml))
+    want_b = structure(etree.fromstring(base_xml), baseline=True)
+    acc, rej = structure(view_root(marked_xml, 'accept')), structure(view_root(marked_xml, 'reject'))
+    a = []
+    for key, label in (('flow', 'order of paragraphs and tables'), ('body', 'body paragraphs'),
+                       ('tables', 'tables'), ('bookmarks', 'bookmarks')):
+        a += first_difference('accept-all, %s' % label, acc[key], want_c[key])
+    if MODE == 'color':
+        strip = lambda v: no_page_breaks(v) if isinstance(v, str) else [strip(x) for x in v]
+        rej, want_b = {k: strip(rej[k]) for k in ('body', 'tables')}, {k: strip(want_b[k]) for k in ('body', 'tables')}
+    r = first_difference('reject-all, body paragraphs', rej['body'], want_b['body'])
+    r += first_difference('reject-all, tables', rej['tables'], want_b['tables'])
+    return a, r
+
+
+def words_of(texts):
+    """The words of some texts as a multiset (which paragraph holds them does not matter)."""
+    return collections.Counter(w for t in texts for w in t.replace(SEP_CHAR, ' ').split())
 
 
 def nonempty(texts):
@@ -1305,11 +1769,12 @@ def boundary_check(orig_raw, old, context=30):
 
 
 def verify(marked_xml, base_xml, clean_xml):
-    """Paragraph-level two-way restoration and colour checks; returns dict with counts and failure list."""
+    """Two-way restoration of the text paragraph by paragraph, and of the structure; returns counts and failures."""
     m, b, c = (etree.fromstring(x) for x in (marked_xml, base_xml, clean_xml))
-    acc = nonempty([read_accept(p).text for p in para_list(m)])
-    orig_raw = nonempty([no_page_breaks(read_reject(p).text) for p in para_list(m)])
-    orig = nonempty([t.replace(SEP_CHAR, '') for t in orig_raw])
+    plain = lambda x: read_para(x, lambda r: False).text
+    acc = nonempty([plain(p) for p in para_list(view_root(marked_xml, 'accept'))])
+    orig_raw = nonempty([no_page_breaks(plain(p)) for p in para_list(view_root(marked_xml, 'reject'))])
+    orig = orig_raw
     new = nonempty([read_para(p, lambda r: False).text for p in para_list(c)])
     old = nonempty([no_page_breaks(read_para(p).text) for p in para_list(b)])
     fails = []
@@ -1321,9 +1786,11 @@ def verify(marked_xml, base_xml, clean_xml):
     fails += group_compare('reject-all == baseline', orig, old)
     fails += boundary_check(orig_raw, old)
     tc_no_p = sum(1 for tc in m.iter(q('tc')) if tc.find(q('p')) is None)
-    ins_by_para = collections.Counter(read_only(p, 'ins').text for p in para_list(m))
-    del_by_para = collections.Counter(read_only(p, 'del').text for p in para_list(m))
-    return {'paragraphs_compared': len(new) + len(old), 'failures': fails,
+    ins_by_para = words_of(read_only(p, 'ins').text for p in para_list(m))
+    del_by_para = words_of(read_only(p, 'del').text for p in para_list(m))
+    s_acc, s_rej = structure_failures(marked_xml, base_xml, clean_xml)
+    return {'paragraphs_compared': len(new) + len(old), 'failures': fails, 'structure_accept': s_acc,
+            'structure_reject': s_rej, 'wrong': fails + s_acc + s_rej,
             'tc_no_p': tc_no_p, 'insert_runs': sum(1 for r in m.iter(q('r')) if run_kind(r) == 'ins'),
             'delete_runs': sum(1 for r in m.iter(q('r')) if run_kind(r) == 'del'),
             'ins_by_para': ins_by_para, 'del_by_para': del_by_para}
@@ -1406,13 +1873,18 @@ def tamper_merge_paragraphs(xml):
     return None
 
 
-def tamper_drop_separators(xml):
-    """Positive control E: delete every struck separator break, gluing the baseline paragraphs it separated."""
+def tamper_clear_mark(xml):
+    """Positive control E: take the mark off the first paragraph mark this tool marked as inserted or deleted."""
     root = etree.fromstring(xml)
-    brs = [br for br in root.iter(q('br')) if br.get(q('clear')) == 'none']
-    for br in brs:
-        br.getparent().remove(br)
-    return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True) if brs else None
+    for x in para_list(root):
+        kind = para_mark(x)
+        if kind:
+            rpr = para_mark_rpr(x)
+            for tag in ((kind,) if MODE == 'track_changes' else ('strike', 'color')):
+                for e in rpr.findall(q(tag)):
+                    rpr.remove(e)
+            return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+    return None
 
 
 def zip_checks(clean_path, out_path):
@@ -1502,7 +1974,11 @@ def run(a):
         styles, numids = style_ids(zc)
     (base_xml, n_base), (clean_xml, n_clean) = accept_revisions(base_xml), accept_revisions(clean_xml)
     if MODE == 'color':
-        struck, coloured = colour_conflicts(clean_xml)
+        struck, coloured, marks = colour_conflicts(clean_xml)
+        if marks:
+            raise Refused('the clean document has %d paragraph mark(s) formatted in the insert colour %s or struck in '
+                          'the delete colour %s, which is how colour mode shows a new or deleted paragraph; choose '
+                          'other colours with --insert-rgb / --delete-rgb' % (marks, INSERT_RGB, DELETE_RGB))
         if coloured:
             raise Refused('the clean document already has %d run(s) in the insert colour %s; '
                           'choose another colour with --insert-rgb' % (coloured, INSERT_RGB))
@@ -1547,14 +2023,17 @@ def report(a, out_path, base_xml, clean_xml, st):
     v = verify(out_xml, base_xml, clean_xml)
     rec('two-way restoration, paragraph by paragraph (%d paragraphs)' % v['paragraphs_compared'],
         not v['failures'], '; '.join(v['failures'][:5]))
+    rec('accept-all has the structure of the clean document (paragraphs with empty ones, breaks, tables, bookmarks)',
+        not v['structure_accept'], '; '.join(v['structure_accept'][:3]))
+    rec('reject-all has the structure of the baseline (paragraphs with empty ones, breaks, tables)',
+        not v['structure_reject'], '; '.join(v['structure_reject'][:3]))
     rec('every w:tc contains a w:p', v['tc_no_p'] == 0, 'w:tc without w:p: %d' % v['tc_no_p'])
-    exp_i, exp_d = collections.Counter(x for x in st['exp_ins'] if x), collections.Counter(x for x in st['exp_del'] if x)
-    got_i = collections.Counter(k for k in v['ins_by_para'].elements() if k)
-    got_d = collections.Counter(k for k in v['del_by_para'].elements() if k)
+    exp_i, exp_d = words_of(st['exp_ins']), words_of(st['exp_del'])
+    got_i, got_d = v['ins_by_para'], v['del_by_para']
     ins_lab, del_lab = ('w:ins', 'w:del') if MODE == 'track_changes' else (INSERT_RGB, 'strike')
-    rec('%s runs concatenated per paragraph == expected insert text (%d paragraphs)' % (ins_lab, sum(exp_i.values())),
+    rec('words in %s runs == words the diff inserted (%d words)' % (ins_lab, sum(exp_i.values())),
         exp_i == got_i, 'missing %s extra %s' % (list((exp_i - got_i))[:2], list((got_i - exp_i))[:2]))
-    rec('%s runs concatenated per paragraph == expected delete text (%d paragraphs)' % (del_lab, sum(exp_d.values())),
+    rec('words in %s runs == words the diff deleted (%d words)' % (del_lab, sum(exp_d.values())),
         exp_d == got_d, 'missing %s extra %s' % (list((exp_d - got_d))[:2], list((got_d - exp_d))[:2]))
     for label, pick in (('positive control A (word removed from an unchanged run)', 'eq'),
                         ('positive control B (word removed from a deleted run)', 'del'),
@@ -1563,21 +2042,22 @@ def report(a, out_path, base_xml, clean_xml, st):
         if tam is None:
             lines.append('SKIP %s: no suitable run' % label)
             continue
-        caught = bool(verify(tam, base_xml, clean_xml)['failures'])
+        caught = bool(verify(tam, base_xml, clean_xml)['wrong'])
         rec(label + ' is caught as FAIL', caught)
     for label, fn in (('positive control D (two baseline paragraphs merged into one)', tamper_merge_paragraphs),
-                      ('positive control E (separator breaks removed)', tamper_drop_separators)):
+                      ('positive control E (the mark taken off an inserted or deleted paragraph mark)', tamper_clear_mark)):
         tam = fn(out_xml)
         if tam is None:
             lines.append('SKIP %s: no suitable site' % label)
             continue
-        rec(label + ' is caught as FAIL', bool(verify(tam, base_xml, clean_xml)['failures']))
+        rec(label + ' is caught as FAIL', bool(verify(tam, base_xml, clean_xml)['wrong']))
     m_after = metrics(out_xml)
 
     print('\n'.join(lines))
     print('mode: %s (insert runs %d, delete runs %d)' % (MODE, v['insert_runs'], v['delete_runs']))
-    print('paragraphs: eq %d, mod %d, ins %d, del %d (empty baseline del %d); tables: %s' %
-          (st['n_eq'], st['n_mod'], st['n_ins'], st['n_del'], st['n_del_empty'], st['tables']))
+    print('paragraphs: eq %d, mod %d, ins %d, del %d (empty baseline del %d); paragraph marks: inserted %d, deleted %d; tables: %s' %
+          (st['n_eq'], st['n_mod'], st['n_ins'], st['n_del'], st['n_del_empty'], st['para_marks']['ins'],
+           st['para_marks']['del'], st['tables']))
     print('dropped: pStyle %d, numPr %d, baseline non-text elements in deleted paras %s' %
           (st['dropped_pstyle'], st['dropped_numpr'], dict(st['dropped_baseline_special'])))
     for w in st['warnings']:
@@ -1596,7 +2076,7 @@ def report(a, out_path, base_xml, clean_xml, st):
                              'RESCUE_MIN_RATIO': RESCUE_MIN_RATIO},
                'paragraphs': {k: st[k] for k in ('n_eq', 'n_mod', 'n_ins', 'n_del', 'n_del_empty')},
                'tables': st['tables'], 'accepted_revisions': st['accepted_revisions'],
-               'warnings': st['warnings'],
+               'warnings': st['warnings'], 'paragraph_marks': dict(st['para_marks']),
                'dropped': {'pStyle': st['dropped_pstyle'], 'numPr': st['dropped_numpr'],
                            'baseline_special': dict(st['dropped_baseline_special'])},
                'metrics': {k: v for k, v in m_after.items() if k != 'over90_detail'}, 'verify_lines': lines,
@@ -1605,7 +2085,7 @@ def report(a, out_path, base_xml, clean_xml, st):
             json.dump(rep, f, ensure_ascii=False, indent=1)
     return failed, {'checks': total, 'failures': failed, 'mode': MODE, 'insert_runs': v['insert_runs'],
                     'delete_runs': v['delete_runs'], 'accepted_revisions': st['accepted_revisions'],
-                    'warnings': st['warnings'],
+                    'warnings': st['warnings'], 'paragraph_marks': dict(st['para_marks']),
                     'paragraphs': {k: st[k] for k in ('n_eq', 'n_mod', 'n_ins', 'n_del', 'n_del_empty')}}
 
 

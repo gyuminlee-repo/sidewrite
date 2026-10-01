@@ -202,13 +202,31 @@ class TableText(Case):
         clean = self.doc([P1, P2], table([["Row one."]]))
         self.check(base, clean, [P1, P2, "Row one.", "Row two."], [P1, P2, "Row one."])
 
-    def test_every_table_removed_is_refused_with_a_reason(self):
-        # Known limit: a deleted table is placed next to a clean table; with none left there is no place for it.
+    def test_the_only_table_removed(self):
+        # The deleted table is put behind the paragraph it followed in the baseline; it needs no other table.
+        base = self.doc([P1, P2, "A last paragraph."], lambda d: d.paragraphs[1]._p.addnext(d.add_table(1, 1)._tbl))
+        for cell in Document(base).tables[0].rows[0].cells:
+            self.assertEqual(cell.text, "")
+        clean = self.doc([P1, P2, "A last paragraph."])
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                body = Document(out).element.body
+                self.assertEqual([x.tag.split("}")[1] for x in body][:4], ["p", "p", "tbl", "p"])
+
+    def test_text_behind_a_last_table_where_the_clean_document_has_no_paragraph_is_refused(self):
+        # python-docx leaves no paragraph behind a last table. The clean document then has a paragraph there
+        # (the last one) where the baseline has none after its table: no paragraph mark can show that.
         base = self.doc([P1, P2], table([["Only table."]]))
-        clean = self.doc([P1, P2])
+        clean = self.doc([P1, P2, "A last paragraph."], table([["Only table."]]))
+        code, out, summary, log = self.run_tool(base, clean)
+        self.assertEqual(code, 0, log)
+        clean = self.doc([P1], table([["Only table."]]))
+        base = self.doc([P1], both(table([["Only table."]]), lambda d: d.add_paragraph().add_run("A last paragraph.")))
         code, out, summary, log = self.run_tool(base, clean)
         self.assertEqual(code, 2, log)
-        self.assertIn("no anchor", log)
+        self.assertIn("a paragraph mark cannot show that", log)
         self.assertFalse(out.exists())
 
 
@@ -257,8 +275,8 @@ class PendingRevisions(Case):
                 self.assertEqual(code, 0, log)
                 accept, reject = self.accept_reject(out)
                 self.assertEqual(accept, new)
-                # A deleted sentence may be shown struck in the neighbouring paragraph (the tool keeps the old
-                # paragraph boundary as a struck line break), so the old text is compared as a whole.
+                # A deleted sentence may be shown in a paragraph of its own or in the neighbouring one, and this
+                # helper does not join paragraphs at their marks, so the old text is compared as a whole.
                 self.assertEqual("".join(reject), "".join(old))
                 xml = doc_xml(out)
                 for word in self.LEFTOVERS:
@@ -563,6 +581,128 @@ class BreakKinds(Case):
         self.assertEqual(code, 0, log)
         self.assertIn('<w:br w:type="column"/>', doc_xml(out))
         self.assertGreater(summary["insert_runs"], 0)
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import marked_diff_corpus as corpus  # noqa: E402
+
+
+class ParagraphMarks(Case):
+    """A paragraph that is new or gone is marked in its paragraph mark, so the paragraph itself comes and goes."""
+
+    MODES = ("color", "track_changes")
+    NEW = "A paragraph that is new in the clean document."
+
+    def views(self, out, mode):
+        """(accept-all, reject-all) as lists of paragraph texts, empty paragraphs included, by the corpus reader."""
+        return tuple([x[1] for x in corpus.structure_read(corpus.view(out, mode, side))[0] if x[0] == "p"]
+                     for side in ("accept", "reject"))
+
+    def test_a_new_paragraph_between_two_has_an_inserted_paragraph_mark(self):
+        base = self.doc([P1, P2])
+        clean = self.doc([P1, self.NEW, P2])
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertEqual(self.views(out, mode), ([P1, self.NEW, P2], [P1, P2]))
+                self.assertEqual(summary["paragraph_marks"], {"ins": 1})
+                mark = Document(out).paragraphs[1]._p.find(qn("w:pPr") + "/" + qn("w:rPr"))
+                if mode == "track_changes":
+                    self.assertIsNotNone(mark.find(qn("w:ins")))
+                else:
+                    self.assertEqual(mark.find(qn("w:color")).get(qn("w:val")), "FF0000")
+
+    def test_a_deleted_paragraph_has_a_deleted_paragraph_mark(self):
+        base = self.doc([P1, self.NEW, P2])
+        clean = self.doc([P1, P2])
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertEqual(self.views(out, mode), ([P1, P2], [P1, self.NEW, P2]))
+                self.assertEqual(summary["paragraph_marks"], {"del": 1})
+
+    def test_paragraphs_at_the_end_come_and_go_too(self):
+        for old, new in (([P1, P2], [P1, P2, self.NEW]), ([P1, P2, self.NEW], [P1, P2])):
+            base, clean = self.doc(old), self.doc(new)
+            for mode in self.MODES:
+                with self.subTest(mode=mode, added=len(new) > len(old)):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    self.assertEqual(self.views(out, mode), (new, old))
+
+    def test_empty_paragraphs_come_and_go(self):
+        for old, new in (([P1, P2], [P1, "", P2]), ([P1, "", "", P2], [P1, P2]), ([P1, "", P2], [P1, "", P2])):
+            base, clean = self.doc(old), self.doc(new)
+            for mode in self.MODES:
+                with self.subTest(mode=mode, old=len(old), new=len(new)):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    self.assertEqual(self.views(out, mode), (new, old))
+
+    def test_a_split_and_a_join_are_a_paragraph_mark(self):
+        for old, new in (([P1 + " " + P2, "A last paragraph."], [P1, P2, "A last paragraph."]),
+                         ([P1, P2, "A last paragraph."], [P1 + " " + P2, "A last paragraph."])):
+            base, clean = self.doc(old), self.doc(new)
+            for mode in self.MODES:
+                with self.subTest(mode=mode, split=len(new) > len(old)):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    self.assertEqual(self.views(out, mode), (new, old))
+                    self.assertNotIn('w:clear="none"', doc_xml(out))
+
+    def test_a_line_break_written_with_clear_none_is_a_line_break(self):
+        base = self.doc([P1, P2], with_break({"clear": "none"}))
+        for clean in (self.doc([P1, P2], with_break({"clear": "none"})), self.doc([P1, P2_NEW], with_break({"clear": "none"}))):
+            for mode in self.MODES:
+                with self.subTest(mode=mode):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    self.assertEqual(doc_xml(out).count("<w:br"), 1)
+
+    def test_a_clean_file_with_a_paragraph_mark_in_the_insert_colour_is_refused_in_colour_mode(self):
+        def red_mark(d):
+            rpr = el("w:rPr")
+            rpr.append(el("w:color", val="FF0000"))
+            d.paragraphs[0]._p.get_or_add_pPr().append(rpr)
+
+        base, clean = self.doc([P1, P2]), self.doc([P1, P2_NEW], red_mark)
+        code, out, summary, log = self.run_tool(base, clean)
+        self.assertEqual(code, 2, log)
+        self.assertIn("paragraph mark", log)
+        code, out, summary, log = self.run_tool(base, clean, "--insert-rgb", "0000FF")
+        self.assertEqual(code, 0, log)
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertEqual(code, 0, log)
+
+
+class TableRows(Case):
+    """A table whose rows changed is a deleted table and an inserted table, with the rows marked."""
+
+    def test_a_table_that_lost_a_row_round_trips_in_track_changes_mode(self):
+        base = self.doc([P1, P2], both(table([["Row one."], ["Row two."]]), lambda d: d.add_paragraph().add_run("End.")))
+        clean = self.doc([P1, P2], both(table([["Row one."]]), lambda d: d.add_paragraph().add_run("End.")))
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertEqual(code, 0, log)
+        tool = tool_module()
+        xml = doc_xml(out).encode("utf-8")
+        for side, rows in (("accept", 1), ("reject", 2)):
+            resolved = tool.resolve_revisions(xml, side)[0].decode("utf-8")
+            self.assertEqual((resolved.count("<w:tbl>"), resolved.count("<w:tr>") + resolved.count("<w:tr ")), (1, rows), side)
+        # ... and by the corpus module's own reader.
+        tables = lambda side: [x[1] for x in corpus.structure_read(corpus.view(out, "track_changes", side))[0] if x[0] == "t"]
+        self.assertEqual(tables("accept"), [((("Row one.",),),)])
+        self.assertEqual(tables("reject"), [((("Row one.",),), (("Row two.",),))])
+
+    def test_the_same_in_colour_mode(self):
+        base = self.doc([P1, P2], both(table([["Row one."], ["Row two."]]), lambda d: d.add_paragraph().add_run("End.")))
+        clean = self.doc([P1, P2], both(table([["Row one."]]), lambda d: d.add_paragraph().add_run("End.")))
+        code, out, summary, log = self.run_tool(base, clean)
+        self.assertEqual(code, 0, log)
+        tables = lambda side: [x[1] for x in corpus.structure_read(corpus.view(out, "color", side))[0] if x[0] == "t"]
+        self.assertEqual(tables("accept"), [((("Row one.",),),)])
+        self.assertEqual(tables("reject"), [((("Row one.",),), (("Row two.",),))])
 
 
 if __name__ == "__main__":
