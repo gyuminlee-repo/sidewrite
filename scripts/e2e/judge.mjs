@@ -177,17 +177,25 @@ export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = t
 // The log line of a proposal turn whose request was built (proposal-turns.mjs).
 const PROPOSAL_STARTED = /^\[proposal\] prompt ref=\S+ provider=codex:/m;
 
+// The row of the step that chooses Codex for review turns, when the pane did
+// not offer it (run-acceptance.mjs turnProvider).
+const CODEX_NOT_OFFERED = (rows) =>
+  (rows ?? []).some((r) => r.step === "select-provider turn=codex" && r.result === "SKIP");
+
 // Features whose verify_command can pass only when something happened that
 // the run cannot force. trigger: the daemon log line of that event.
+// absent(rows): when given, the skip also needs this proof that the event
+// could not come about. An event that could have come and did not is a
+// failure, not a skip.
 export const CONDITIONS = {
   // A turn that ended on a Claude usage limit.
   "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
   // A proposal turn of Codex (S25-42..45). None starts when the pane does
   // not offer Codex for review turns (not installed, not signed in).
-  "S25-42": { trigger: PROPOSAL_STARTED },
-  "S25-43": { trigger: PROPOSAL_STARTED },
-  "S25-44": { trigger: PROPOSAL_STARTED },
-  "S25-45": { trigger: PROPOSAL_STARTED },
+  "S25-42": { trigger: PROPOSAL_STARTED, absent: CODEX_NOT_OFFERED },
+  "S25-43": { trigger: PROPOSAL_STARTED, absent: CODEX_NOT_OFFERED },
+  "S25-44": { trigger: PROPOSAL_STARTED, absent: CODEX_NOT_OFFERED },
+  "S25-45": { trigger: PROPOSAL_STARTED, absent: CODEX_NOT_OFFERED },
 };
 const TURN_LOGGED = /^\[agent\] turn complete \(/m;
 
@@ -195,7 +203,8 @@ const TURN_LOGGED = /^\[agent\] turn complete \(/m;
 // conditional: ids given with --conditional; logs: text of the daemon logs
 // this run wrote. A conditional feature that failed is
 // SKIPPED-CONDITION-NOT-MET only when its trigger is provably absent: the
-// logs show finished turns and none with the trigger. Otherwise it counts.
+// logs show finished turns and none with the trigger, and, for a condition
+// with `absent`, the rows show why it could not come. Otherwise it counts.
 export function exitDecision({ failed, rows, features, featuresError, conditional = [], logs }) {
   const reasons = [];
   if (failed) reasons.push("the run stopped on an error");
@@ -205,7 +214,12 @@ export function exitDecision({ failed, rows, features, featuresError, conditiona
   const out = (features ?? []).map((f) => {
     if (f.exit === 0) return { ...f, status: "PASS" };
     const cond = conditional.includes(f.id) ? CONDITIONS[f.id] : null;
-    if (cond && TURN_LOGGED.test(text) && !cond.trigger.test(text)) {
+    if (
+      cond &&
+      TURN_LOGGED.test(text) &&
+      !cond.trigger.test(text) &&
+      (!cond.absent || cond.absent(rows))
+    ) {
       return { ...f, status: "SKIPPED-CONDITION-NOT-MET" };
     }
     reasons.push(`verify command failed: ${f.id} (exit ${f.exit})`);
@@ -891,6 +905,18 @@ export const JUDGES = {
     expect: "the model menu filled from the account (tooltip: Models your Claude account can use)",
     got: `${r.title} | ${(r.options ?? []).map((o) => o.value).join(",")}`,
   }),
+  // A proposal turn (Codex, or a fixture): ctx.log holds the daemon log of
+  // the step, ctx.outcome the outcome its done line must have (null: any).
+  "propose-proposal": (r, ctx) => {
+    const done = proposalLog(ctx.provider, ctx.ref, ctx.log).done;
+    return {
+      pass: !!done && (ctx.outcome == null || done.outcome === ctx.outcome),
+      expect: `[proposal] done ref=${ctx.ref} ... outcome=${ctx.outcome ?? "(any)"}`,
+      got: done
+        ? `outcome=${done.outcome} proposals=${done.proposals} applied=${done.applied} stopped_at=${done.stopped_at}`
+        : `no [proposal] done line for ${ctx.ref}`,
+    };
+  },
   "propose-stop": (r) => ({
     pass: r.stopped === true && /^(Ready|Stopped)$/.test(String(r.agent_status ?? "")),
     expect: "Stop pressed while the turn ran; the pane is free again (Ready or Stopped)",

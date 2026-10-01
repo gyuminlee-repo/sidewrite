@@ -571,8 +571,17 @@ async function mainS25() {
     pane("open-review");
     return { select: r, selected };
   };
-  const proposeWith = (ref, what) =>
-    note("propose", pane("propose", { ref }), { label: `propose ${ref} (${what})`, judge: "none" });
+  // A proposal turn, judged from the daemon log of the step: it came to its
+  // end, with the outcome that is expected (null: any end).
+  const proposeWith = (ref, what, { provider = "codex", outcome = null } = {}) => {
+    const from = logAt();
+    const r = pane("propose", { ref });
+    return note("propose", r, {
+      label: `propose ${ref} (${what})`,
+      judge: "propose-proposal",
+      ctx: { ref, provider, outcome, log: logFrom(from) },
+    });
+  };
 
   note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
 
@@ -674,7 +683,7 @@ async function mainS25() {
     const refs = Object.keys(JSON.parse(fs.readFileSync(opt["proposal-fixture"], "utf8")));
     for (const ref of codex.selected ? refs : []) {
       const from = logAt();
-      proposeWith(ref, "fixture");
+      proposeWith(ref, "fixture", { provider: "fixture" });
       const e = fixtureTurnEvidence({
         ref,
         log: logFrom(from),
@@ -691,7 +700,7 @@ async function mainS25() {
     return;
   }
   let at = logAt();
-  if (codex.selected) proposeWith("R1.1", "codex");
+  if (codex.selected) proposeWith("R1.1", "codex", { outcome: "ok" });
   // S25-42: the changes are tracked changes in Word, each with its comment.
   marker(
     "s25-proposal-turn",
@@ -745,8 +754,13 @@ async function mainS25() {
     await startDaemon(KNOB_LOG, { CC_OFFICE_REVIEW_PROMPT_FORBID: "0" });
     await until(() => readLog(KNOB_LOG).includes(`active doc: ${win}`), 120_000, "pane reconnect");
     await sleep(3000);
-    proposeWith("R1.3", "codex, forbid list off");
+    const r = pane("propose", { ref: "R1.3" });
     guardLog += readLog(KNOB_LOG);
+    note("propose", r, {
+      label: "propose R1.3 (codex, forbid list off)",
+      judge: "propose-proposal",
+      ctx: { ref: "R1.3", provider: "codex", outcome: null, log: readLog(KNOB_LOG) },
+    });
     await stopDaemon();
     const back = logAt();
     await startDaemon(LOG, {}, { append: true });

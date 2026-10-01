@@ -629,7 +629,9 @@ test("exitDecision: a proposal turn feature is skipped only when no proposal tur
   );
   const features = ids.map((id) => ({ id, exit: 1 }));
   const claudeOnly = "[agent] turn complete (success) slash=false output=true\n";
-  const d = exitDecision({ rows: [], features, conditional: ids, logs: claudeOnly });
+  // The pane did not offer Codex: the row of the step that chooses it says SKIP.
+  const rows = [{ step: "select-provider turn=codex", result: "SKIP", got: "not signed in" }];
+  const d = exitDecision({ rows, features, conditional: ids, logs: claudeOnly });
   assert.deepEqual(
     d.features.map((f) => f.status),
     ids.map(() => "SKIPPED-CONDITION-NOT-MET"),
@@ -1571,6 +1573,12 @@ test("judge propose-proposal: the turn of the step has a done line, with the out
 test("run-acceptance.mjs judges every proposal turn it runs", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../scripts/e2e/run-acceptance.mjs", import.meta.url), "utf8");
-  assert.equal(/judge: "none"/.test(src), false);
-  assert.match(src, /judge: "propose-proposal"/);
+  const at = src.indexOf("const proposeWith =");
+  const body = src.slice(at, at + 500);
+  assert.match(body, /judge: "propose-proposal"/);
+  const flow = src.slice(
+    src.indexOf("async function mainS25"),
+    src.indexOf("async function mode14"),
+  );
+  assert.equal(/judge: "none"/.test(flow), false, "no step of the stage 2.5 flow goes unjudged");
 });
