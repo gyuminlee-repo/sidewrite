@@ -46,8 +46,6 @@ const CONNECTION_LOST =
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 // "Propose all": the longest wait for the end of one review turn.
 const TURN_WAIT_MS = 30 * 60_000;
-// How long a turn that reported an error may still send its turn_done.
-const TURN_ERROR_GRACE_MS = 5_000;
 
 export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
   const root = document.getElementById("review-root");
@@ -595,8 +593,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
 
   // ---- P15: Propose all -------------------------------------------------------
   // A turn of the queue ends at its turn_done (after the reload and refresh
-  // that event starts), at an error or stop of the turn (onTurnError), at a
-  // new connection (reload), or after TURN_WAIT_MS without any of them.
+  // that event starts), at a new connection (reload), or after TURN_WAIT_MS
+  // without either. turn_done says how the turn ended ({ ok, error }): a
+  // usage limit, a refusal, a stop or a crash ends the run. The error event
+  // of the chat is not used: the daemon may send it after turn_done.
   function waitTurn(ref) {
     return new Promise((resolve) => {
       const timer = setTimeout(
@@ -612,22 +612,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     if (!w) return;
     state.turnWaiters.delete(ref);
     clearTimeout(w.timer);
-    clearTimeout(w.grace);
-    w.resolve(w.error ? { ok: false, error: w.error } : result);
+    w.resolve(result);
   }
   function endAllWaits(error) {
     for (const ref of [...state.turnWaiters.keys()]) endWait(ref, { ok: false, error });
-  }
-  // The error is kept and the wait ends at the turn_done that comes with it
-  // (before or after), so the summary of the run is written after the
-  // refresh of that turn_done; without one it ends after a short grace.
-  function failWaits(error) {
-    for (const [ref, w] of state.turnWaiters) {
-      if (w.error) continue;
-      w.error = error;
-      w.grace = setTimeout(() => endWait(ref), TURN_ERROR_GRACE_MS);
-      w.grace.unref?.();
-    }
   }
   const queue = createProposeQueue({
     // The selection is not sent: it belongs to one comment, not to all.
@@ -1010,7 +998,13 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           .catch((e) => say(e.message, true))
           .finally(() => {
             render();
-            endWait(msg.ref, { ok: true }); // Propose all: the next comment may start
+            // Propose all: the next comment may start, unless this turn failed.
+            endWait(
+              msg.ref,
+              msg.ok === false
+                ? { ok: false, error: msg.error || "The turn ended with an error." }
+                : { ok: true },
+            );
           });
       } else if (msg.event === "late_result_recorded") {
         // A tracked edit that timed out was applied after all and is now recorded.
@@ -1027,11 +1021,6 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     // Any turn of the pane (chat or review) started or ended.
     setTurnBusy(busy) {
       for (const b of proposeButtons) b.disabled = busy || queue.running;
-    },
-    // The running turn ended on an error or was stopped (taskpane.js): a
-    // "Propose all" run ends there instead of starting the next comment.
-    onTurnError(error) {
-      failWaits(error || "The turn ended with an error.");
     },
     // Any turn of the pane ended (taskpane.js, TURN_END_EVENTS).
     onAnyTurnEnded: () => auto.trigger("turn"),

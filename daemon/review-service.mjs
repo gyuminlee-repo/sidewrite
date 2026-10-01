@@ -11,6 +11,8 @@
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
 //     | "late_result_recorded" | "job_done", ... }
+//   turn_done: { ref, ok, error? }. ok false: the turn ended on a usage limit,
+//   a refusal, an API error, an empty turn, a stop or a crash (error says which).
 // Jobs (JOB_TYPES): the reply is { ok: true, accepted: true, job_id } at once
 // and the result follows as { event: "job_done", job_id, result }, result
 // being what the reply would have held ({ ok: true, ... } or { ok: false,
@@ -369,11 +371,22 @@ export function createReviewService({
     return out;
   }
 
-  function turnEnded(key, turn) {
+  // outcome: { ok: true } or { ok: false, error } (index.mjs endTurnState).
+  // It goes with turn_done itself: the daemon sends the error event of a
+  // usage limit after turn_done, so the pane cannot pair the two by order.
+  function turnEnded(key, turn, outcome = { ok: true }) {
     turnHolds.get(key)?.();
     turnHolds.delete(key);
-    log(`[review] turn done ${turn.ref}`);
-    sendEvent(key, { type: "review_event", event: "turn_done", ref: turn.ref });
+    const failed = outcome?.ok === false;
+    const error = failed ? String(outcome.error ?? "The turn ended with an error.") : null;
+    log(`[review] turn done ${turn.ref}${failed ? ` failed: ${error}` : ""}`);
+    sendEvent(key, {
+      type: "review_event",
+      event: "turn_done",
+      ref: turn.ref,
+      ok: !failed,
+      ...(failed ? { error } : {}),
+    });
   }
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";

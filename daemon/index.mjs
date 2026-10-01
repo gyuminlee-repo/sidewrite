@@ -21,6 +21,7 @@ import { getContextEntries, setContextEntries } from "./context.mjs";
 import {
   detectUsageLimit,
   turnCompleteEvents,
+  turnOutcome,
   emptyTurnStats,
   noteMessage,
 } from "./limit-detect.mjs";
@@ -537,13 +538,15 @@ const review = createReviewService({
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
 });
 
-// Clear per-turn state when a turn ends for any reason.
-function endTurnState(key) {
+// Clear per-turn state when a turn ends for any reason. outcome: how it
+// ended ({ ok: true } or { ok: false, error }); a review turn's turn_done
+// carries it to the task pane.
+function endTurnState(key, outcome = { ok: true }) {
   turnBusy.delete(key);
   const turn = reviewTurnByKey.get(key);
   if (turn) {
     reviewTurnByKey.delete(key);
-    review.turnEnded(key, turn);
+    review.turnEnded(key, turn, outcome);
   }
 }
 
@@ -1062,7 +1065,7 @@ async function startSessionForFolder(
   if (prior) {
     prior.abortController.abort();
     bridge.clearUserMessages(key);
-    endTurnState(key);
+    endTurnState(key, { ok: false, error: "The session was restarted." });
   }
 
   const abortController = new AbortController();
@@ -1175,7 +1178,7 @@ async function startSessionForFolder(
           ? `Claude usage limit reached. ${rateLimitHint}`
           : "The agent stopped unexpectedly — this is usually a Claude usage limit. Wait for your limit to reset, or set ANTHROPIC_API_KEY to use an API key.";
         bridge.sendAssistantEvent({ event: "turn_complete", subtype: "stream_ended" }, key);
-        endTurnState(key);
+        endTurnState(key, { ok: false, error: friendly });
         const { key: rkey, cwd: rcwd, sessionId: rsid, host: rhost } = session;
         if (allowFailureRestart(key)) {
           bridge.sendAssistantEvent({ event: "error", error: friendly }, key);
@@ -1210,7 +1213,7 @@ async function startSessionForFolder(
         // startSessionForFolder then builds cleanly.
         if (sessionFor(key) === session && session.interrupted) {
           bridge.sendAssistantEvent({ event: "turn_complete", interrupted: true }, key);
-          endTurnState(key);
+          endTurnState(key, { ok: false, error: "The turn was stopped." });
           const { key: rkey, cwd: rcwd, sessionId: rsid, host: rhost } = session;
           scheduleSessionStart(rcwd, rsid, rkey, rhost, "post-stop");
         }
@@ -1230,7 +1233,7 @@ async function startSessionForFolder(
         } else {
           bridge.sendAssistantEvent({ event: "error", error: msgText }, key);
         }
-        endTurnState(key);
+        endTurnState(key, { ok: false, error: msgText });
       }
     } finally {
       session.settled = true;
@@ -1370,7 +1373,7 @@ function handleAgentMessage(msg, session) {
         session.turnProducedOutput = false;
       }
       for (const ev of events) bridge.sendAssistantEvent(ev, session?.key);
-      if (session?.key) endTurnState(session.key);
+      if (session?.key) endTurnState(session.key, turnOutcome(events));
       break;
     }
     case "user": {

@@ -1016,11 +1016,16 @@ async function proposeAllSetup() {
   await pane.reload();
   const $ = (id) => document.getElementById(id);
   const wait = () => new Promise((r) => setTimeout(r, 5));
-  // What the daemon sends when the turn of `ref` ends.
+  // What the daemon sends when the turn of `ref` ends: turn_done says how.
   const endTurn = (ref, error = null) => {
-    turn.onAssistantEvent({ event: error ? "error" : "turn_complete" });
-    if (error) pane.onTurnError(error);
-    pane.onEvent({ type: "review_event", event: "turn_done", ref });
+    turn.onAssistantEvent({ event: "turn_complete" });
+    pane.onEvent({
+      type: "review_event",
+      event: "turn_done",
+      ref,
+      ok: !error,
+      ...(error ? { error } : {}),
+    });
   };
   return { pane, turn, proposals, $, wait, endTurn };
 }
@@ -1099,19 +1104,42 @@ test("Propose all: Stop after this one lets the turn end and starts no other; a 
   }
 });
 
-// The usage-limit path of the daemon: turn_complete, turn_done, then error.
-test("Propose all: an error that comes after turn_done still stops the queue and keeps the summary", async () => {
+// The usage-limit path of the daemon sends turn_complete, turn_done, then the
+// error event. turn_done says the turn failed, so the queue stops whenever
+// the error event comes: here after the refresh of turn_done has finished.
+test("Propose all: a failed turn_done stops the queue even when the error event comes late", async () => {
   const t = await proposeAllSetup();
   try {
     const all = t.$("review-propose-all").click();
     await t.wait();
-    t.turn.onAssistantEvent({ event: "turn_complete", subtype: "stream_ended" });
-    t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.1" });
-    t.pane.onTurnError("Claude usage limit reached.");
-    await all;
+    t.endTurn("R1.1", "Claude usage limit reached.");
+    await all; // the refresh of turn_done is over, the run has ended
+    t.turn.onAssistantEvent({ event: "error", error: "Claude usage limit reached." });
+    await t.wait();
+    assert.equal(t.proposals.length, 1, "R1.3 is not started");
+    assert.match(
+      t.$("review-message").textContent,
+      /^Propose all stopped at R1\.1: Claude usage limit reached\. 0 of 3 proposed\./,
+    );
+    assert.equal(t.pane.onTurnError, undefined, "no timing-dependent error hook");
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// An error event alone decides nothing: the turn_done of that turn does.
+test("Propose all: an error event without a failed turn_done does not end the wait", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.turn.onAssistantEvent({ event: "error", error: "x" });
     await t.wait();
     assert.equal(t.proposals.length, 1);
-    assert.match(t.$("review-message").textContent, /^Propose all stopped at R1\.1: Claude usage/);
+    assert.equal(t.$("review-propose-stop").hidden, false, "still waiting for turn_done");
+    t.endTurn("R1.1", "x");
+    await all;
+    assert.match(t.$("review-message").textContent, /stopped at R1\.1: x/);
   } finally {
     await t.pane.reload();
   }

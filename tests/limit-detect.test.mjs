@@ -271,3 +271,32 @@ test("L8 not empty: tool calls, text, no stats, an answer, an error subtype", ()
     assert.notEqual(turnCompleteEvents(result, null, stats)[0].subtype, "empty");
   }
 });
+
+// The outcome a review turn_done carries (review-service.mjs turnEnded): the
+// pane's "Propose all" reads it there, not from the order of the events.
+test("turnOutcome: ok for a plain turn_complete; the error text of a limit, refusal, API error or empty turn", async () => {
+  const { turnOutcome } = await import("../daemon/limit-detect.mjs");
+  assert.deepEqual(turnOutcome(turnCompleteEvents({ subtype: "success", result: "done" }, null)), {
+    ok: true,
+  });
+  const limit = turnOutcome(
+    turnCompleteEvents(
+      { subtype: "success" },
+      { limited: true, kind: "limit", text: "Resets 5pm." },
+    ),
+  );
+  assert.deepEqual(limit, {
+    ok: false,
+    error: "Claude usage limit reached. Resets 5pm.",
+    subtype: "usage_limit",
+  });
+  const refusal = turnOutcome(
+    turnCompleteEvents({ subtype: "success" }, { limited: true, kind: "refusal", text: "" }),
+  );
+  assert.deepEqual([refusal.ok, refusal.subtype], [false, "refusal"]);
+  const empty = turnOutcome(
+    turnCompleteEvents({ subtype: "success", result: "" }, null, { text: 0, tool_use: 0 }),
+  );
+  assert.deepEqual([empty.ok, empty.subtype], [false, "empty"]);
+  assert.deepEqual(turnOutcome([]), { ok: true });
+});

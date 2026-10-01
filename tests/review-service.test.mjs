@@ -453,8 +453,24 @@ test("turnEnded pushes turn_done", async () => {
   const t = await setup();
   try {
     t.svc.turnEnded("k", { ref: "R1.1" });
-    assert.deepEqual(t.events.at(-1), { type: "review_event", event: "turn_done", ref: "R1.1" });
+    assert.deepEqual(t.events.at(-1), {
+      type: "review_event",
+      event: "turn_done",
+      ref: "R1.1",
+      ok: true,
+    });
     assert.equal(t.lines.at(-1), "[review] turn done R1.1");
+    // How the turn ended goes with turn_done itself: an error event sent
+    // before or after it is not what the pane's Propose all decides on.
+    t.svc.turnEnded("k", { ref: "R1.2" }, { ok: false, error: "Claude usage limit reached." });
+    assert.deepEqual(t.events.at(-1), {
+      type: "review_event",
+      event: "turn_done",
+      ref: "R1.2",
+      ok: false,
+      error: "Claude usage limit reached.",
+    });
+    assert.equal(t.lines.at(-1), "[review] turn done R1.2 failed: Claude usage limit reached.");
   } finally {
     await t.cleanup();
   }

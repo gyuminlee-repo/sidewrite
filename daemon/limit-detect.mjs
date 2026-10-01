@@ -146,3 +146,14 @@ export function turnCompleteEvents(result, usageLimit, stats = null) {
   }
   return [{ event: "turn_complete", subtype: result?.subtype }];
 }
+
+// How a turn ended, from the events turnCompleteEvents made for it:
+// { ok: true }, or { ok: false, error, subtype } when they hold an error.
+// The review turn_done carries it (review-service.mjs turnEnded), so the
+// task pane does not have to pair turn_done with an error event by timing.
+export function turnOutcome(events) {
+  const err = (events ?? []).find((e) => e.event === "error");
+  if (!err) return { ok: true };
+  const done = (events ?? []).find((e) => e.event === "turn_complete");
+  return { ok: false, error: err.error, subtype: done?.subtype ?? null };
+}
