@@ -1851,6 +1851,8 @@ test("Add rationale comment: the text comes from the daemon, Word gets the comme
         ok: true,
         change_id: p.change_id,
         comment_text: "[R1.1] w / y / a",
+        // Comment ids the daemon has on other changes: handed on to Word.
+        known_comment_ids: ["31"],
         change: {
           kind: "replace",
           find: "degrees",
@@ -1887,6 +1889,7 @@ test("Add rationale comment: the text comes from the daemon, Word gets the comme
     paragraph_id: "U9",
     paragraph_index: 9,
     comment_text: "[R1.1] w / y / a",
+    known_comment_ids: ["31"],
   });
   assert.deepEqual(sent("review_comment_set"), [
     { ref: "R1.1", change_id: "R1.1-1", word_comment_id: "77" },

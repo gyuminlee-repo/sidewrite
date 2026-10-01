@@ -154,6 +154,10 @@ export function resolveUnknownOverrides(rev, snapshot) {
   return { revision: next, resolved, dropped };
 }
 
+// Word comment ids of the rationale comments on record.
+const recordedCommentIds = (rev) =>
+  rev.comments.flatMap((c) => c.changes.map((ch) => ch.word_comment_id).filter(Boolean));
+
 // What a ledger check result depends on: the rule, not its last result.
 // review_save_comments: comments work still points at are not removed.
 export const keptWarning = (refs) =>
@@ -346,6 +350,7 @@ export function createReviewService({
           comment_text: [c?.section, c?.text ?? ""].filter((x) => x !== undefined).join("\n"),
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
+          comment_ids: recordedCommentIds(rev),
           recent_changes: since
             ? rev.comments
                 .flatMap((x) => x.changes)
@@ -777,7 +782,8 @@ export function createReviewService({
     // changed on this way.
     async review_comment_text(msg, key) {
       const d = at(key);
-      const ch = findComment(await load(d), msg.ref)?.changes.find((x) => x.id === msg.change_id);
+      const rev = await load(d);
+      const ch = findComment(rev, msg.ref)?.changes.find((x) => x.id === msg.change_id);
       if (!ch) throw new Error(`No change ${msg.change_id} under ${msg.ref}`);
       if (ch.word_comment_id != null) {
         throw new Error(`${ch.id} already has its rationale comment.`);
@@ -787,6 +793,8 @@ export function createReviewService({
         // As applyTrackedEdit composed it for the edit (the stored rationale
         // holds the note of an approved exception; lost facts on the last line).
         comment_text: formatRationaleComment(msg.ref, ch.rationale, { lost: ch.lost_facts }),
+        // The task pane reuses none of these for this change.
+        known_comment_ids: recordedCommentIds(rev),
         change: {
           kind: ch.kind,
           find: ch.find,

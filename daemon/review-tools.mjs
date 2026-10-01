@@ -388,6 +388,9 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         // about to edit the same way and changes nothing when they differ
         // (StaleTarget). Without a known target no hash goes out and the
         // task pane refuses any paragraph it finds: nothing was judged.
+        // Comment ids already on record: the task pane's second try for the
+        // comment reuses none of them (tools-word.js existingComment).
+        ...(ctx.comment_ids?.length ? { known_comment_ids: ctx.comment_ids } : {}),
         ...(target === null
           ? {}
           : {

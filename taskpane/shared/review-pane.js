@@ -237,7 +237,11 @@ export function initReviewPane({
         guard(async () => {
           const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
           const t = await ask("review_comment_text", { ref, change_id: ch.id });
-          const r = await word.addChangeComment({ ...t.change, comment_text: t.comment_text });
+          const r = await word.addChangeComment({
+            ...t.change,
+            comment_text: t.comment_text,
+            known_comment_ids: t.known_comment_ids,
+          });
           if (!r.ok)
             throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
           await ask("review_comment_set", {

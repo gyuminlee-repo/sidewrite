@@ -244,6 +244,7 @@ test("service: the comment text of a change is the one its edit would have carri
     assert.equal(t.ok, true, t.error);
     assert.equal(t.comment_text, sent, "the same text the task pane was given with the edit");
     assert.equal(t.comment_text, formatRationaleComment("R1.1", rationale, { lost: r.lost_facts }));
+    assert.deepEqual(t.known_comment_ids, [], "no comment is on record yet");
     assert.deepEqual(
       [
         t.change.kind,
@@ -277,6 +278,35 @@ test("service: the comment text of a change is the one its edit would have carri
       (await ask("review_comment_text", { ref: "R1.1", change_id: "R1.1-9" })).ok,
       false,
     );
+
+    // A second change with the same rationale, again without its comment: the
+    // id of the first comment goes out with the edit and with the comment
+    // text, so the task pane takes it for neither.
+    let known = null;
+    const r2 = await applyTrackedEdit(
+      {
+        ...svc.trackedEditDeps("k"),
+        call: async (name, args) => {
+          known = args.known_comment_ids;
+          return {
+            ok: false,
+            code: "CommentInsertFailed",
+            applied: true,
+            paragraph_index: 1,
+            paragraph_id: "U1",
+            before: "It was kept warm.",
+            after: "It was kept warm throughout.",
+            target_checked: true,
+          };
+        },
+      },
+      { comment_ref: "R1.1", find: "kept warm", insert_after: " throughout", rationale },
+      { ref: "R1.1" },
+    );
+    assert.equal(r2.comment_missing, "CommentInsertFailed", JSON.stringify(r2));
+    assert.deepEqual(known, ["55"]);
+    const t2 = await ask("review_comment_text", { ref: "R1.1", change_id: "R1.1-2" });
+    assert.deepEqual([t2.ok, t2.known_comment_ids], [true, ["55"]]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -308,7 +338,7 @@ test("task pane: a comment with the same text on another change of the paragraph
   assert.deepEqual([b.ok, b.word_comment_id, b.existed], [true, "C2", false]);
   assert.deepEqual(
     s.comments.map((c) => c.start),
-    [6, 22],
+    [6, 24],
   );
   // Each finds its own on a second press.
   assert.deepEqual(

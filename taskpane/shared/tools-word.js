@@ -1562,6 +1562,7 @@ export async function toolTrackedEdit({
   comment_text,
   expected_before_hash,
   expected_paragraph,
+  known_comment_ids,
 }) {
   if (typeof find !== "string" || !find) throw new Error("`find` is required");
   if (find.length > 255) throw new Error("`find` exceeds the 255-character limit of Word search");
@@ -1668,10 +1669,8 @@ export async function toolTrackedEdit({
         // flags an applied result without this (an older task pane).
         target_checked: true,
       };
-      // The comment the edit may have got although its sync threw: looked
-      // for before the second try, so that try adds no second comment.
-      const commentThere = () => existingComment(context, para, comment_text);
-      return await afterEditApplied(applied, commentThere, async (at) => {
+      // The range the comment of this edit goes on, or undefined.
+      const anchorOf = async (at) => {
         let anchor;
         if (isInsert) {
           anchor = inserted;
@@ -1699,6 +1698,20 @@ export async function toolTrackedEdit({
             anchor = again.items[0];
           }
         }
+        return anchor;
+      };
+      // The comment the edit may have got although its sync threw: looked
+      // for before the second try, so that try adds no second comment.
+      // It is this edit's only when it lies where this edit puts its comment
+      // (the same anchor), not on another change with the same rationale.
+      const commentThere = async () => {
+        const anchor = await anchorOf(() => {});
+        return anchor
+          ? existingComment(context, para, comment_text, [anchor], known_comment_ids)
+          : null;
+      };
+      return await afterEditApplied(applied, commentThere, async (at) => {
+        const anchor = await anchorOf(at);
         if (!anchor) {
           return {
             ok: false,
@@ -1728,8 +1741,10 @@ export async function toolTrackedEdit({
 // pure insertion: its own words. The anchor must be the only such place in
 // the paragraph; otherwise no comment is added (CommentAnchorMissing). A
 // comment with this text that is already on the paragraph is returned as it
-// is (existed: true), so a second press adds no second comment. Nothing of
-// the document text is changed.
+// is, when it lies on those words and the daemon does not have it on another
+// change (existingComment), is returned as it is (existed: true), so a
+// second press adds no second comment. Nothing of the document text is
+// changed.
 export async function addChangeComment({
   kind,
   find,
@@ -1737,6 +1752,7 @@ export async function addChangeComment({
   paragraph_id,
   paragraph_index,
   comment_text,
+  known_comment_ids,
 }) {
   if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
   return await Word.run(async (context) => {
@@ -1755,8 +1771,6 @@ export async function addChangeComment({
       };
     }
     const para = paragraphs.items[k];
-    const there = await existingComment(context, para, comment_text);
-    if (there) return { ...there, existed: true };
 
     const hitsOf = async (q) => {
       if (typeof q !== "string" || !q.trim() || q.length > 255) return [];
@@ -1786,6 +1800,12 @@ export async function addChangeComment({
           "The words of the change are not in its paragraph exactly once; no place for the comment",
       };
     }
+    // A comment with this text that lies on the words of this change is its
+    // comment already (a second press, or an insert whose sync threw).
+    const mine = () =>
+      existingComment(context, para, comment_text, [anchor, ...news], known_comment_ids);
+    const there = await mine();
+    if (there) return { ...there, existed: true };
     const insert = async () => {
       const c = anchor.insertComment(comment_text);
       c.load("id");
@@ -1796,21 +1816,44 @@ export async function addChangeComment({
       return await insert();
     } catch {
       // Once more, as in afterEditApplied: the comment may be there after all.
-      const now = await existingComment(context, para, comment_text);
+      const now = await mine();
       return now ? { ...now, existed: true } : await insert();
     }
   });
 }
 
-// The comment with this text on the paragraph, as { ok, word_comment_id },
-// or null.
-async function existingComment(context, para, comment_text) {
+// The comment of THIS change that is already in the paragraph, as { ok,
+// word_comment_id }, or null. The text alone does not say whose it is: two
+// changes of one reviewer comment in one paragraph can carry the same
+// rationale. So a comment counts only when
+//   - its text is comment_text,
+//   - the daemon does not have it on another change (taken: the comment ids
+//     on record, known_comment_ids of the call), and
+//   - its range overlaps one of `places`, the ranges of this change (the
+//     anchor an edit puts its comment on; the anchor and the new words of a
+//     later add).
+// A comment whose place cannot be told (no place given) is not reused: a
+// second comment on one change shows as an unrecorded tool comment at the
+// next refresh, a shared one would stay unnoticed.
+const APART = ["Before", "After", "AdjacentBefore", "AdjacentAfter", "Unrelated"];
+async function existingComment(context, para, comment_text, places, taken) {
   const comments = para.getComments();
   comments.load("items/id, items/content");
   await context.sync();
   const want = normalizeParaText(comment_text);
-  const c = comments.items.find((x) => normalizeParaText(x.content) === want);
-  return c ? { ok: true, word_comment_id: c.id } : null;
+  const skip = new Set((taken ?? []).map(String));
+  const same = comments.items.filter(
+    (x) => normalizeParaText(x.content) === want && !skip.has(String(x.id)),
+  );
+  const at = (places ?? []).filter(Boolean);
+  if (!same.length || !at.length) return null;
+  const where = same.map((c) => {
+    const r = c.getRange();
+    return at.map((place) => r.compareLocationWith(place));
+  });
+  await context.sync();
+  const k = where.findIndex((ws) => ws.some((w) => !APART.includes(w.value)));
+  return k === -1 ? null : { ok: true, word_comment_id: same[k].id };
 }
 
 // What goes to the daemon log about a failed comment step: the step, the
