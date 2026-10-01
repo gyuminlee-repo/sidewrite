@@ -231,8 +231,9 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // R{reviewer}.0, the others take the next numbers and the numbered comments
 // go on after them (so "1." under the second section is then R1.2); the same
 // holds in an editor block and in a later block. Without any reviewer head
-// the text before the first comment is dropped (and named by the check). A reviewer block with no head of any kind is split
-// at blank lines when it has more than one paragraph (a weak split: it does
+// the text before the first comment is dropped (and named by the check) and
+// takes no number, so "1." stays R1.1 however many sections of text come
+// before it. A reviewer block with no head of any kind is split at blank lines when it has more than one paragraph (a weak split: it does
 // not stop the model split), else kept whole as R{reviewer}.1.
 //
 // Limits, left to the model split or the user:
@@ -593,9 +594,10 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     // text under "Minor comments" does not end up under "Major comments".
     // The first is the preamble (R{n}.0 in a first block); the others, and
     // all of them in a later block, take the next numbers when the first
-    // comment comes.
+    // comment comes. Without a reviewer head they are not returned, so they
+    // take no number either.
     const before = [];
-    let numbered = false;
+    let numbered = !b.headed;
     for (const p of parts) {
       const mode = modeOf(p);
       const { pre, items } = mode ? partItems(p.idx, mode) : { pre: p.idx, items: [] };
