@@ -131,32 +131,53 @@ test("cache: a fallback result is kept only for the short fallback ttl", async (
 // set_model (Codex review of stage 2.5): on the first connection the stored
 // model is taken before the account's list is in, so a message sent
 // meanwhile starts a session on it. When the list then replaces it, the
-// session must follow: the pane shows the replacement.
-test("modelChange: a session that started on the stored model follows the model the list allows", async () => {
+// session must follow: the pane shows the replacement. Whether it must is
+// read from the model the session really runs on, not guessed from the list
+// as it was: a session that started after the list came in is on the
+// replacement already, and restarting it dropped the first message.
+test("modelChange: a session restarts only when the model it runs on is not the one decided", async () => {
   const { modelChange } = await import("../daemon/model-list.mjs");
   const sdk = { source: "sdk", models: normalizeModels(SDK) };
-  // First connection, list not in yet (before: null): a well-formed id the
-  // account does not list would run until the list replaces it.
+  // A well-formed id the account does not list runs until the list is in.
   assert.equal(resolveModelChoice("claude-old-3", null), "claude-old-3");
+  // The session started on it: it must follow the replacement.
   assert.deepEqual(
-    modelChange({ prev: undefined, requested: "claude-old-3", before: null, after: sdk }),
+    modelChange({ requested: "claude-old-3", after: sdk, running: "claude-old-3" }),
     {
       model: "sonnet",
       restart: true,
     },
   );
-  // First connection, nothing replaced: no restart.
-  for (const requested of ["opus", "claude-fable-5", ""]) {
-    const c = modelChange({ prev: undefined, requested, before: null, after: sdk });
-    assert.equal(c.restart, false, requested);
+  // The session started when the list was in: it runs on the replacement.
+  assert.deepEqual(modelChange({ requested: "claude-old-3", after: sdk, running: "sonnet" }), {
+    model: "sonnet",
+    restart: false,
+  });
+  // No session, or one that has not read its model yet (it will read the
+  // one decided here): nothing to restart.
+  for (const running of [null, undefined]) {
+    assert.equal(modelChange({ requested: "claude-old-3", after: sdk, running }).restart, false);
+    assert.equal(modelChange({ requested: "opus", after: sdk, running }).restart, false);
   }
-  // A later choice: as before, a restart when the model changes.
-  assert.deepEqual(modelChange({ prev: "sonnet", requested: "opus", before: sdk, after: sdk }), {
+  // Nothing replaced: no restart.
+  for (const requested of ["opus", "claude-fable-5"]) {
+    const c = modelChange({ requested, after: sdk, running: requested });
+    assert.deepEqual(c, { model: requested, restart: false });
+  }
+  // A later choice: a restart when the model changes.
+  assert.deepEqual(modelChange({ requested: "opus", after: sdk, running: "sonnet" }), {
     model: "opus",
     restart: true,
   });
+  // What the list as it was would have allowed plays no part.
   assert.equal(
-    modelChange({ prev: "opus", requested: "opus", before: sdk, after: sdk }).restart,
+    modelChange({
+      prev: undefined,
+      before: null,
+      requested: "claude-old-3",
+      after: sdk,
+      running: "sonnet",
+    }).restart,
     false,
   );
 });
