@@ -492,9 +492,9 @@ test("providersEvidence: one entry per provider from the judgment menu, with the
         { id: "claude", text: "Claude (Agent SDK)", enabled: true, note: "" },
         {
           id: "codex",
-          text: "Codex CLI (judgments only)",
+          text: "Codex CLI (Not signed in (run: codex login))",
           enabled: false,
-          note: "Judgments only. x",
+          note: "Not signed in (run: codex login)",
         },
       ],
       oneshot: [
@@ -515,7 +515,7 @@ test("providersEvidence: one entry per provider from the judgment menu, with the
     enabled: true,
     note: "",
     turn_enabled: false,
-    turn_note: "Judgments only. x",
+    turn_note: "Not signed in (run: codex login)",
     state: "ok",
   });
   assert.deepEqual(e.openrouter, {
@@ -579,12 +579,12 @@ test("judge: the stage 2.5 pane steps", () => {
       ok: true,
       selected: { id: "claude", model: null },
       message: "",
-      refused: "Codex CLI (judgments only)",
+      refused: "Codex CLI (Not signed in (run: codex login))",
     },
     { id: "codex" },
   );
   assert.equal(refused.pass, false);
-  assert.match(refused.got, /Codex CLI \(judgments only\)/);
+  assert.match(refused.got, /Codex CLI \(Not signed in/);
 
   const loaded = {
     ok: true,
@@ -619,16 +619,35 @@ test("judge: the stage 2.5 pane steps", () => {
   assert.equal(judge("focus-refresh", { ok: true, changed: false, after: "" }).pass, false);
 });
 
-test("exitDecision: a CLI-turn feature is skipped only when no CLI review turn started", async () => {
-  const { exitDecision } = await import("../scripts/e2e/judge.mjs");
-  const features = [{ id: "S25-33", exit: 1 }];
+test("exitDecision: a proposal turn feature is skipped only when no proposal turn of Codex started", async () => {
+  const { exitDecision, CONDITIONS } = await import("../scripts/e2e/judge.mjs");
+  const ids = ["S25-42", "S25-43", "S25-44", "S25-45"];
+  // The features of the removed CLI turns have no condition any more.
+  assert.deepEqual(
+    Object.keys(CONDITIONS).filter((id) => id.startsWith("S25-")),
+    ids,
+  );
+  const features = ids.map((id) => ({ id, exit: 1 }));
   const claudeOnly = "[agent] turn complete (success) slash=false output=true\n";
-  const d = exitDecision({ rows: [], features, conditional: ["S25-33"], logs: claudeOnly });
-  assert.equal(d.features[0].status, "SKIPPED-CONDITION-NOT-MET");
+  const d = exitDecision({ rows: [], features, conditional: ids, logs: claudeOnly });
+  assert.deepEqual(
+    d.features.map((f) => f.status),
+    ids.map(() => "SKIPPED-CONDITION-NOT-MET"),
+  );
   assert.equal(d.code, 0);
-  const ran = claudeOnly + "[cli-turn] start provider=codex model=default ref=R1.1\n";
-  const f = exitDecision({ rows: [], features, conditional: ["S25-33"], logs: ran });
-  assert.equal(f.features[0].status, "FAIL");
+  // Codex ran a proposal turn: a failed feature counts, a passed one is PASS.
+  const ran =
+    claudeOnly +
+    "[proposal] prompt ref=R1.1 provider=codex:default scope=manuscript paragraphs=9 chars=5000\n";
+  const mixed = [
+    { id: "S25-42", exit: 0 },
+    { id: "S25-43", exit: 1 },
+  ];
+  const f = exitDecision({ rows: [], features: mixed, conditional: ids, logs: ran });
+  assert.deepEqual(
+    f.features.map((x) => x.status),
+    ["PASS", "FAIL"],
+  );
   assert.equal(f.code, 1);
   // Not named with --conditional: it counts.
   assert.equal(exitDecision({ rows: [], features, logs: claudeOnly }).code, 1);
@@ -641,7 +660,8 @@ test("exitDecision: a CLI-turn feature is skipped only when no CLI review turn s
 test("defaultFeatures and docStem follow the stage", async () => {
   const { defaultFeatures, docStem } = await import("../scripts/e2e/judge.mjs");
   assert.equal(defaultFeatures("s2"), "S2-18..S2-34");
-  assert.equal(defaultFeatures("s25"), "S25-30..S25-41");
+  // Up to the proposal turn features; ids the list does not have are passed over.
+  assert.equal(defaultFeatures("s25"), "S25-30..S25-45");
   assert.throws(() => defaultFeatures("s9"), /--features/);
   // The stage 2.5 feature list names paper.decisions.jsonl and paper.ledger.json.
   assert.equal(docStem("s2"), "review_manuscript");
@@ -704,119 +724,253 @@ test("ollamaSplitEvidence: Ollama chosen, the split done, a receipt with an olla
   assert.match(r.reason, /Ollama is not running/);
 });
 
-test("cliTurnEvidence: a CLI turn that started, used the endpoint and left a change with its comment", async () => {
-  const { cliTurnEvidence } = await import("../scripts/e2e/judge.mjs");
-  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
-  const log = [
-    "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.1",
-    "[mcp-http] POST route=ab key=k ref=R1.1",
-    "[cli-turn] done provider=codex code=0 tools=2",
+// ---- Proposal turns of Codex (S25-42..45) ----
+const CODEX_SELECT = { ok: true, selected: { id: "codex", model: null }, message: "" };
+const NOT_OFFERED = {
+  ok: true,
+  selected: { id: "claude", model: null },
+  refused: "Codex CLI (Not signed in (run: codex login))",
+};
+const proposalLog = (ref, done) =>
+  [
+    `[review] prompt ${ref} instructions=L1 forbid=L2 omitted_forbid=- paragraphs=0`,
+    `[proposal] prompt ref=${ref} provider=codex:default scope=manuscript paragraphs=9 chars=5200`,
+    "[providers] proposal provider=codex model=codex:default",
+    `[proposal] done ref=${ref} ${done}`,
+    "",
   ].join("\n");
+
+test("proposalTurnEvidence: the turn applied changes, each with its comment, and Word holds them", async () => {
+  const { proposalTurnEvidence } = await import("../scripts/e2e/judge.mjs");
+  const log = proposalLog(
+    "R1.1",
+    "proposals=2 applied=2 rejected=0 skipped=0 stopped_at=- outcome=ok",
+  );
   const revision = {
-    comments: [{ ref: "R1.1", changes: [{ id: "R1.1-1", word_comment_id: "12" }] }],
+    comments: [
+      {
+        ref: "R1.1",
+        changes: [
+          { id: "R1.1-1", word_comment_id: "12" },
+          { id: "R1.1-2", word_comment_id: "13" },
+        ],
+      },
+    ],
   };
-  const e = cliTurnEvidence({ provider: "codex", ref: "R1.1", select, log, revision });
+  const word = {
+    comments: [{ text: "[R1.1] a / b / c" }, { text: "[R1.1] d / e / f" }, { text: "Author note" }],
+    revisions: [{ type: 1, text: "30 °C" }],
+  };
+  const args = { provider: "codex", ref: "R1.1", select: CODEX_SELECT, log, revision, word };
+  const e = proposalTurnEvidence(args);
   assert.deepEqual(
-    [e.pass, e.started, e.done, e.endpoint_calls, e.changes],
-    [true, true, true, 1, 1],
+    [
+      e.pass,
+      e.started,
+      e.done.applied,
+      e.done.outcome,
+      e.changes,
+      e.word_comments,
+      e.word_revisions,
+    ],
+    [true, true, 2, "ok", 2, 2, 1],
   );
-  // No rationale comment, no change, or no finished turn: no pass.
+  // A change without its comment, a comment missing in Word, a turn that
+  // ended on an error, or no tracked change in Word: no pass.
   const bare = { comments: [{ ref: "R1.1", changes: [{ id: "R1.1-1", word_comment_id: null }] }] };
+  assert.equal(proposalTurnEvidence({ ...args, revision: bare }).pass, false);
   assert.equal(
-    cliTurnEvidence({ provider: "codex", ref: "R1.1", select, log, revision: bare }).pass,
+    proposalTurnEvidence({ ...args, word: { ...word, comments: word.comments.slice(1) } }).pass,
     false,
   );
-  assert.equal(
-    cliTurnEvidence({
-      provider: "codex",
-      ref: "R1.1",
-      select,
-      log: log.replace("code=0", "code=1"),
-      revision,
-    }).pass,
-    false,
-  );
-  assert.equal(
-    cliTurnEvidence({ provider: "antigravity", ref: "R1.1", select, log, revision }).pass,
-    false,
-    "the log lines of another provider do not count",
-  );
-  // The provider is not offered for review turns: nothing ran, and the reason is kept.
-  const refused = {
-    ok: true,
-    selected: { id: "claude", model: null },
-    refused: "Codex CLI (judgments only): Judgments only. Codex CLI will not call the office tools",
-  };
-  const n = cliTurnEvidence({ provider: "codex", ref: "R1.1", select: refused, log: "", revision });
+  assert.equal(proposalTurnEvidence({ ...args, word: { ...word, revisions: [] } }).pass, false);
+  const failed = log.replace("stopped_at=- outcome=ok", "stopped_at=P2 outcome=error");
+  assert.equal(proposalTurnEvidence({ ...args, log: failed }).pass, false);
+  const none = log.replace("applied=2", "applied=0");
+  assert.equal(proposalTurnEvidence({ ...args, log: none }).pass, false);
+  // The log lines of another comment do not count.
+  assert.equal(proposalTurnEvidence({ ...args, ref: "R1.2" }).pass, false);
+  // Codex is not offered: nothing ran, and the reason is kept.
+  const n = proposalTurnEvidence({ ...args, select: NOT_OFFERED, log: "" });
   assert.deepEqual([n.pass, n.started], [false, false]);
-  assert.match(n.reason, /judgments only/);
+  assert.match(n.reason, /Not signed in/);
 });
 
-test("guardEvidence: the forbid rule holds on a CLI turn; the count the feature reads is at the top", async () => {
-  const { guardEvidence } = await import("../scripts/e2e/judge.mjs");
-  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
-  const log = [
-    "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.3",
-    "[review] blocked R1.3 by=L2",
-    "[cli-turn] done provider=codex code=0 tools=3",
-  ].join("\n");
-  const clean = {
-    comments: [{ ref: "R1.3", changes: [{ id: "R1.3-1", text: "followed by optical density" }] }],
+test("proposalGuardEvidence: a proposal that breaks a forbid rule was blocked and is not in Word", async () => {
+  const { proposalGuardEvidence } = await import("../scripts/e2e/judge.mjs");
+  const log =
+    proposalLog("R1.3", "proposals=2 applied=1 rejected=0 skipped=0 stopped_at=P2 outcome=error") +
+    "[review] blocked R1.3 by=L2\n[proposal] stopped ref=R1.3 id=P2 code=Blocked\n";
+  const revision = {
+    comments: [
+      {
+        ref: "R1.3",
+        changes: [{ id: "R1.3-1", text: "followed by optical density" }],
+        blocked: [{ id: "B2", blocked_by: ["L2"], args: { replace: "a novel substrate" } }],
+      },
+    ],
   };
-  const e = guardEvidence({
+  const word = { comments: [], revisions: [{ type: 1, text: "optical density" }] };
+  const args = {
     provider: "codex",
     ref: "R1.3",
     forbidden: "\\bnovel",
-    select,
+    select: CODEX_SELECT,
     log,
-    revision: clean,
-  });
-  assert.deepEqual([e.pass, e.document_changes, e.blocked], [true, 0, true]);
-  const leaked = {
-    comments: [{ ref: "R1.3", changes: [{ id: "R1.3-1", text: "a novel substrate" }] }],
+    revision,
+    word,
   };
-  const bad = guardEvidence({
-    provider: "codex",
-    ref: "R1.3",
-    forbidden: "\\bnovel",
-    select,
-    log,
-    revision: leaked,
-  });
-  assert.deepEqual([bad.pass, bad.document_changes], [false, 1]);
-  const refused = { ok: true, selected: { id: "claude" }, refused: "Codex CLI (judgments only)" };
-  const n = guardEvidence({
-    provider: "codex",
-    ref: "R1.3",
-    forbidden: "\\bnovel",
-    select: refused,
-    log: "",
-    revision: clean,
-  });
+  const e = proposalGuardEvidence(args);
+  assert.deepEqual(
+    [e.pass, e.blocked, e.blocked_by, e.stopped, e.document_changes, e.blocked_items, e.word_leaks],
+    [true, true, "L2", true, 0, 1, 0],
+  );
+  // The word in a recorded change, or in a tracked change of Word: no pass.
+  const leaked = structuredClone(revision);
+  leaked.comments[0].changes.push({ id: "R1.3-2", text: "a novel substrate" });
+  assert.deepEqual(
+    [proposalGuardEvidence({ ...args, revision: leaked }).pass, 1],
+    [false, proposalGuardEvidence({ ...args, revision: leaked }).document_changes],
+  );
+  const inWord = { ...word, revisions: [{ type: 1, text: "a Novel substrate" }] };
+  assert.equal(proposalGuardEvidence({ ...args, word: inWord }).pass, false);
+  // The model never proposed the word: nothing was blocked, so nothing is shown.
+  const quiet = proposalLog(
+    "R1.3",
+    "proposals=1 applied=1 rejected=0 skipped=0 stopped_at=- outcome=ok",
+  );
+  const q = proposalGuardEvidence({ ...args, log: quiet });
+  assert.deepEqual([q.pass, q.blocked, q.stopped], [false, false, false]);
+  const n = proposalGuardEvidence({ ...args, select: NOT_OFFERED, log: "" });
   assert.deepEqual([n.pass, n.document_changes], [false, null]);
 });
 
-test("stopEvidence: Stop ended the CLI turn, the pane is ready and no CLI process is left", async () => {
-  const { stopEvidence } = await import("../scripts/e2e/judge.mjs");
-  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
-  const step = { ok: true, stopped: true, agent_status: "Ready", seconds: 12 };
-  const log =
-    "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.4\n[cli-turn] done provider=codex code=- tools=0\n";
-  assert.equal(stopEvidence({ select, step, log, processes: 0 }).pass, true);
-  assert.equal(stopEvidence({ select, step, log, processes: 1 }).pass, false);
-  assert.equal(
-    stopEvidence({ select, step: { ...step, stopped: false }, log, processes: 0 }).pass,
-    false,
+test("proposalStopEvidence: after Stop nothing of the turn is in the review file and no CLI is left", async () => {
+  const { proposalStopEvidence } = await import("../scripts/e2e/judge.mjs");
+  const step = { ok: true, stopped: true, agent_status: "Stopped", seconds: 9 };
+  const log = proposalLog(
+    "R1.4",
+    "proposals=0 applied=0 rejected=0 skipped=0 stopped_at=- outcome=stopped",
   );
-  assert.equal(
-    stopEvidence({ select, step: { ...step, agent_status: "Working" }, log, processes: 0 }).pass,
-    false,
+  const revision = { comments: [{ ref: "R1.4", changes: [], blocked: [] }] };
+  const args = {
+    provider: "codex",
+    ref: "R1.4",
+    select: CODEX_SELECT,
+    step,
+    log,
+    revision,
+    processes: 0,
+  };
+  const e = proposalStopEvidence(args);
+  assert.deepEqual(
+    [e.pass, e.stopped, e.where, e.changes, e.attempts, e.processes],
+    [true, true, "daemon", 0, 0, 0],
   );
+  // Stopped in the pane, before the request went out: no turn in the log.
+  const early = proposalStopEvidence({ ...args, log: "" });
+  assert.deepEqual([early.pass, early.where], [true, "pane"]);
+  // A change or an attempt of that comment, a CLI still running, a turn the
+  // log shows as ended otherwise, or no Stop at all: no pass.
+  const changed = { comments: [{ ref: "R1.4", changes: [{ id: "R1.4-1" }], blocked: [] }] };
+  assert.equal(proposalStopEvidence({ ...args, revision: changed }).pass, false);
+  const attempt = { comments: [{ ref: "R1.4", changes: [], blocked: [{ id: "B1" }] }] };
+  assert.equal(proposalStopEvidence({ ...args, revision: attempt }).pass, false);
+  assert.equal(proposalStopEvidence({ ...args, processes: 1 }).pass, false);
+  const ran = log.replace("outcome=stopped", "outcome=ok");
+  assert.equal(proposalStopEvidence({ ...args, log: ran }).pass, false);
+  assert.equal(proposalStopEvidence({ ...args, step: { ok: true, stopped: false } }).pass, false);
+  assert.equal(proposalStopEvidence({ ...args, select: NOT_OFFERED, step: null }).pass, false);
+  // The pane step: the pane is free again, as Ready or as Stopped.
   assert.equal(judge("propose-stop", step).pass, true);
+  assert.equal(judge("propose-stop", { ...step, agent_status: "Ready" }).pass, true);
+  assert.equal(judge("propose-stop", { ...step, agent_status: "Working" }).pass, false);
   assert.equal(
     judge("propose-stop", { ok: true, stopped: false, reason: "the turn ended before Stop" }).pass,
     false,
   );
+});
+
+test("proposalReceiptEvidence: one proposal_batch line for the turn, with ids and no text", async () => {
+  const { proposalReceiptEvidence } = await import("../scripts/e2e/judge.mjs");
+  const line = (over = {}) =>
+    JSON.stringify({
+      ts: "2026-10-01T00:00:00.000Z",
+      kind: "proposal_batch",
+      input_fingerprint: "a".repeat(64),
+      model: "codex:default",
+      output: {
+        turn_id: "t1",
+        ref: "R1.1",
+        retried: false,
+        stopped_at: null,
+        uncovered: [],
+        proposals: [
+          {
+            id: "P1",
+            paragraph_id: "p1",
+            op: "replace",
+            requirement_ids: ["q1"],
+            outcome: "applied",
+            code: null,
+            change_id: "R1.1-1",
+          },
+          {
+            id: "P2",
+            paragraph_id: null,
+            op: "replace",
+            requirement_ids: [],
+            outcome: "rejected",
+            code: "UnknownParagraph",
+          },
+        ],
+      },
+      expected: null,
+      ...over,
+    });
+  const other = JSON.stringify({ kind: "requirement_link", model: "haiku", output: {} });
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        changes: [{ id: "R1.1-1", find: "30 degrees for two days", text: "30 °C for two days" }],
+      },
+    ],
+  };
+  const args = {
+    provider: "codex",
+    ref: "R1.1",
+    select: CODEX_SELECT,
+    decisions: [other, line(), ""].join("\n"),
+    revision,
+  };
+  const e = proposalReceiptEvidence(args);
+  assert.deepEqual(
+    [e.pass, e.lines, e.model, e.applied, e.leaks],
+    [true, 1, "codex:default", ["R1.1-1"], 0],
+  );
+  // Two lines for one turn, none, another provider's model, an applied id the
+  // review file does not have, or text of a change in the line: no pass.
+  assert.equal(
+    proposalReceiptEvidence({ ...args, decisions: [line(), line()].join("\n") }).pass,
+    false,
+  );
+  assert.deepEqual(
+    [proposalReceiptEvidence({ ...args, decisions: other }).pass, 0],
+    [false, proposalReceiptEvidence({ ...args, decisions: other }).lines],
+  );
+  assert.equal(
+    proposalReceiptEvidence({ ...args, decisions: line({ model: "sonnet" }) }).pass,
+    false,
+  );
+  const gone = { comments: [{ ref: "R1.1", changes: [] }] };
+  assert.equal(proposalReceiptEvidence({ ...args, revision: gone }).pass, false);
+  const leaky = line({ note: "changed 30 degrees for two days" });
+  const l = proposalReceiptEvidence({ ...args, decisions: leaky });
+  assert.deepEqual([l.pass, l.leaks], [false, 1]);
+  const n = proposalReceiptEvidence({ ...args, select: NOT_OFFERED, decisions: other });
+  assert.equal(n.pass, false);
+  assert.match(n.reason, /Not signed in/);
 });
 
 test("focusEvidence, suggestEvidence and cleanupEvidence", async () => {
@@ -910,14 +1064,16 @@ test("the stage 2.5 feature commands pass on the evidence the builders write, an
   // The commands of the feature list that read an evidence file with jq.
   const S31 =
     "jq -e '.claude.enabled and .codex.enabled and (.openrouter.enabled|not) and (.openrouter.note|test(\"No API key\"))' /tmp/s25-providers.evidence.json";
-  const S34 =
-    "test -f /tmp/s25-codex-guard.ok && jq -e '.document_changes == 0' /tmp/s25-codex-guard.evidence.json";
+  const S43 =
+    "test -f /tmp/s25-proposal-guard.ok && jq -e '.document_changes == 0 and .word_leaks == 0 and .blocked_items >= 1' /tmp/s25-proposal-guard.evidence.json";
+  const S44 =
+    "test -f /tmp/s25-proposal-stop.ok && jq -e '.changes == 0 and .attempts == 0 and .processes == 0' /tmp/s25-proposal-stop.evidence.json";
   const S37 =
     "jq -e '.overlaps == 0 and .proposed == .open_before' /tmp/s25-propose-all.evidence.json";
   const S38 =
     "test -f /tmp/s25-focus-refresh.ok && grep -q '\\[review\\] external X' /tmp/daemon-s25.log";
   fs.writeFileSync(log, "");
-  for (const c of [S31, S34, S37, S38]) assert.notEqual(exit(c), 0, c);
+  for (const c of [S31, S43, S44, S37, S38]) assert.notEqual(exit(c), 0, c);
 
   const menu = (id, enabled, note = "") => ({ id, text: id, enabled, note });
   marker(
@@ -943,19 +1099,34 @@ test("the stage 2.5 feature commands pass on the evidence the builders write, an
     j.proposeAllEvidence({ message: "Propose all: 2 of 2 proposed.", log: turnLog }),
   );
   assert.equal(exit(S37), 0);
-  const select = { ok: true, selected: { id: "codex", model: "gpt-5.5" }, message: "" };
   marker(
-    "s25-codex-guard",
-    j.guardEvidence({
+    "s25-proposal-guard",
+    j.proposalGuardEvidence({
       provider: "codex",
       ref: "R1.3",
       forbidden: "\\bnovel",
-      select,
-      log: "[cli-turn] start provider=codex model=gpt-5.5 ref=R1.3\n[cli-turn] done provider=codex code=0 tools=1\n",
-      revision: { comments: [{ ref: "R1.3", changes: [] }] },
+      select: CODEX_SELECT,
+      log: "[proposal] prompt ref=R1.3 provider=codex:default scope=manuscript paragraphs=9 chars=1\n[review] blocked R1.3 by=L2\n[proposal] stopped ref=R1.3 id=P1 code=Blocked\n",
+      revision: {
+        comments: [{ ref: "R1.3", changes: [], blocked: [{ id: "B1", blocked_by: ["L2"] }] }],
+      },
+      word: { comments: [], revisions: [] },
     }),
   );
-  assert.equal(exit(S34), 0);
+  assert.equal(exit(S43), 0);
+  marker(
+    "s25-proposal-stop",
+    j.proposalStopEvidence({
+      provider: "codex",
+      ref: "R1.4",
+      select: CODEX_SELECT,
+      step: { ok: true, stopped: true, agent_status: "Stopped" },
+      log: "",
+      revision: { comments: [{ ref: "R1.4", changes: [], blocked: [] }] },
+      processes: 0,
+    }),
+  );
+  assert.equal(exit(S44), 0);
   marker(
     "s25-focus-refresh",
     j.focusEvidence({
