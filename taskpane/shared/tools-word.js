@@ -3,6 +3,7 @@ import {
   normalizeParaText,
   computeAfterText,
   countRevisionMarks,
+  trackedRuns,
   isToolComment,
   planBackupDelete,
 } from "./review-view.js";
@@ -1721,6 +1722,8 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
         text: p.text,
         reviewed_text: reviewed ? reviewed[i] : null,
         ...countRevisionMarks(oox[i].value),
+        // Which text is still tracked, run by run (revision-classify.mjs).
+        tracked: trackedRuns(oox[i].value),
       })),
       comments: probes.map(({ c, r, ps }, n) => {
         const first = ps.items[0];

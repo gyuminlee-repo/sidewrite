@@ -18,6 +18,8 @@ import {
   minimalFind,
   norm,
   resolvedMatch,
+  siblingMatch,
+  trackedPlaced,
   rewriteCommand,
   table,
 } from "./judge.mjs";
@@ -28,6 +30,8 @@ const WS_PORT = 47833;
 const HTTP_PORT = 47834;
 const OUTSIDE_SENTENCE =
   "Across the replicates the plateau optical density ranged from 0.82 to 0.91.";
+// The author's own tracked insertion next to the R1.4 change (siblingMatch).
+const HAND_INSERT = "Checked: ";
 const R13_REQUIREMENTS = [
   "say how growth was followed",
   "describe the synthetic carbon source as a novel substrate",
@@ -59,6 +63,8 @@ const { values: opt } = parseArgs({
     "skip-knob": { type: "boolean", default: false },
     // Leave out the second Word run on a compatibility mode 14 copy.
     "skip-mode14": { type: "boolean", default: false },
+    // Leave out the Word run on the document of tracked special characters.
+    "skip-special": { type: "boolean", default: false },
     // Leave Word and the daemon running when a step fails, to look at them.
     "keep-on-fail": { type: "boolean", default: false },
   },
@@ -84,6 +90,8 @@ const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
 const MODE14_LOG = LOG.replace(/\.log$/, "") + "-mode14.log";
 const MODE14_DIR = path.join(RUN, "mode14");
 const DOC14 = path.join(MODE14_DIR, "review_manuscript.docx");
+const SPECIAL_DIR = path.join(RUN, "special");
+const DOC_SPECIAL = path.join(SPECIAL_DIR, "tracked_special.docx");
 const winPath = (p) => execFileSync("wslpath", ["-w", p], { encoding: "utf8" }).trim();
 const unixPath = (p) => execFileSync("wslpath", ["-u", p], { encoding: "utf8" }).trim();
 
@@ -339,6 +347,25 @@ async function main() {
   const planFile = path.join(RUN, "com-plan.json");
   fs.writeFileSync(planFile, JSON.stringify(plan, null, 2));
   record.word.state_before = com("state");
+  // A tracked insertion of the author in the paragraph of the R1.4 change,
+  // left pending: R1.4 must then show its own state, not the paragraph's.
+  const r14 = plan.ops.find((o) => o.ref === "R1.4");
+  const hand = r14
+    ? com("hand-insert", [
+        "-PlanJson",
+        winPath(planFile),
+        "-ChangeId",
+        r14.change_id,
+        "-Text",
+        HAND_INSERT,
+      ])
+    : { ok: false, error: "no R1.4 change with a rationale comment" };
+  record.word.hand_insert = hand;
+  rows.push({
+    step: "word: tracked insertion next to R1.4",
+    result: hand.ok ? "PASS" : "FAIL",
+    got: hand.ok ? `revisions in the paragraph: ${hand.revisions_in_paragraph}` : hand.error,
+  });
   const applied = com("apply", ["-PlanJson", winPath(planFile)]);
   record.word.apply = applied;
   rows.push({
@@ -377,6 +404,18 @@ async function main() {
     step: "word: rationale comments resolved",
     result: resolved.pass ? "PASS" : "FAIL",
     got: resolved.got,
+  });
+  const sibling = siblingMatch(
+    JSON.parse(fs.readFileSync(REVISION, "utf8")),
+    after,
+    record.word.state_after_refresh,
+    { ref: "R1.4", hand: HAND_INSERT },
+  );
+  record.word.sibling = sibling;
+  rows.push({
+    step: "word: R1.4 next to a pending revision",
+    result: sibling.pass ? "PASS" : "FAIL",
+    got: sibling.got,
   });
   save();
 
@@ -523,8 +562,42 @@ async function mode14() {
   save();
 }
 
+// A document whose tracked insertions and deletions hold the run elements
+// that are text without being w:t (no-break hyphen, soft hyphen, tab, line
+// break, symbol). Opened in a Word of its own; the pane's snapshot must find
+// every tracked run in the paragraph text Word reports. No model turn.
+async function special() {
+  const src = path.join(SPECIAL_DIR, "source.docx");
+  fs.mkdirSync(SPECIAL_DIR, { recursive: true });
+  const built = execFileSync(
+    "python3",
+    [path.join(HERE, "make_tracked_special.py"), src, "--count"],
+    { encoding: "utf8" },
+  );
+  const expected = Number(built.trim().split("\n").pop());
+  embedTaskpane(src, DOC_SPECIAL);
+  const cdpBusy = () =>
+    psList(
+      `[int][bool](Get-NetTCPConnection -LocalPort ${Number(opt["cdp-port"])} -State Listen -ErrorAction SilentlyContinue)`,
+    )[0] === 1;
+  await until(() => !cdpBusy(), 60_000, "CDP port free");
+  paneTag = "special-";
+  record.word.launch_special = launchWord(DOC_SPECIAL, path.join(RUN, "webview2-special"));
+  save();
+  const snap = pane("snapshot");
+  record.word.special_snapshot = snap;
+  const j =
+    snap.ok === false ? { pass: false, got: snap.error } : trackedPlaced(snap.paragraphs, expected);
+  rows.push({
+    step: "special: tracked runs found in Word's paragraph text",
+    result: j.pass ? "PASS" : "FAIL",
+    got: j.got,
+  });
+  save();
+}
+
 // After the main run and its verify commands: close the Word of the main
-// run, then the mode-14 check, then the daemon.
+// run, then the mode-14 check, the special character check, then the daemon.
 async function cleanup() {
   const pid = record.word.launch?.pid;
   quitWord(pid, DOC);
@@ -539,10 +612,22 @@ async function cleanup() {
     }
     quitWord(record.word.launch_mode14?.pid, DOC14, "quit_mode14");
   }
+  if (!failed && !opt["skip-special"]) {
+    try {
+      if (record.cleanup.left_running?.length) throw new Error("a Word of this run is still up");
+      await special();
+    } catch (e) {
+      record.special_error = String(e?.stack ?? e);
+      rows.push({ step: "special: run", result: "FAIL", got: String(e?.message ?? e) });
+    }
+    quitWord(record.word.launch_special?.pid, DOC_SPECIAL, "quit_special");
+  }
   await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
   try {
     const left = wordPids();
-    const own = [pid, record.word.launch_mode14?.pid].filter(Boolean);
+    const own = [pid, record.word.launch_mode14?.pid, record.word.launch_special?.pid].filter(
+      Boolean,
+    );
     record.cleanup.word_after = left;
     record.cleanup.preexisting_alive = (record.word.preexisting ?? []).every((p) =>
       left.includes(p),

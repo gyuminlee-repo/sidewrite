@@ -106,8 +106,21 @@ const turnBusy = (page) =>
   });
 
 const steps = {
+  // The tab buttons get their click handlers when taskpane.js has run, which
+  // can be after the page is reachable over CDP: a click before that does
+  // nothing and every later step would wait on a hidden tab. Click until the
+  // Review tab is the one shown.
   async "open-review"(page) {
-    await page.click('button.tab[data-tab="review"]');
+    await page.waitForFunction(
+      () => {
+        const shown = () =>
+          document.querySelector('.tab-content[data-tab="review"]')?.hidden === false;
+        if (!shown()) document.querySelector('button.tab[data-tab="review"]')?.click();
+        return shown();
+      },
+      null,
+      { timeout: 60_000, polling: 500 },
+    );
     await page.waitForFunction(
       () => document.getElementById("review-file").textContent.startsWith("Review file:"),
       null,
@@ -275,6 +288,29 @@ const steps = {
     await page.click(btn);
     const message = await waitMessage(page, 120_000);
     return { offer, ...(await view(page)), message };
+  },
+
+  // The snapshot the Refresh sends, taken straight from the pane's own
+  // module: paragraph texts as Word reports them and the tracked runs read
+  // from the paragraph OOXML.
+  async snapshot(page) {
+    await page.waitForFunction(
+      () => document.getElementById("review-file").textContent.startsWith("Review file:"),
+      null,
+      { timeout: 60_000 },
+    );
+    const paragraphs = await page.evaluate(async (origin) => {
+      const m = await import(`${origin}/shared/tools-word.js`);
+      const s = await m.collectReviewSnapshot();
+      return s.paragraphs.map((p) => ({
+        index: p.index,
+        text: p.text,
+        w_ins: p.w_ins,
+        w_del: p.w_del,
+        tracked: p.tracked,
+      }));
+    }, ORIGIN);
+    return { paragraphs };
   },
 
   view,

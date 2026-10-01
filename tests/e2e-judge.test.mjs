@@ -38,7 +38,7 @@ test("buildComPlan: decisions per comment, first R1.3 change edited, comment tex
       "R1.3-1:accept_edit",
       "R1.3-2:accept",
       "R1.3-3:accept",
-      "R1.4-1:accept",
+      "R1.4-1:reject",
     ],
   );
   assert.deepEqual(skipped, ["R1.5-1"]);
@@ -363,4 +363,88 @@ test("judge refresh-mode14: counts, no mismatch, and the not-resolved note for e
     ),
     false,
   );
+});
+
+// Codex review 16: a change next to another tracked change in its paragraph.
+// The author rejects the R1.4 deletion while a tracked insertion of their own
+// is pending in the same paragraph; the change must read Rejected (not
+// Pending) and its rationale comment must be resolved.
+test("siblingMatch: the handled change shows its own state while a sibling revision is pending", async () => {
+  const { siblingMatch, DEFAULT_DECISIONS } = await import("../scripts/e2e/judge.mjs");
+  assert.equal(DEFAULT_DECISIONS["R1.4"], "reject");
+  const HAND = "Checked: ";
+  const ch = change("R1.4-1", { kind: "delete", state: "rejected", text: "" });
+  const revision = { comments: [{ ref: "R1.4", changes: [ch] }] };
+  const text = formatRationaleComment("R1.4", ch.rationale, { lost: [] });
+  const view = (badge) => ({ comments: [{ ref: "R1.4", changes: [{ badge }] }] });
+  const word = (done, revisions) => ({ comments: [{ text, done }], revisions });
+  const pending = [{ type: 1, text: HAND }];
+  const ok = siblingMatch(revision, view("Rejected"), word(true, pending), {
+    ref: "R1.4",
+    hand: HAND,
+  });
+  assert.equal(ok.pass, true, ok.got);
+  // The bug: the pane says Pending and the comment stays open.
+  const bug = siblingMatch(
+    { comments: [{ ref: "R1.4", changes: [{ ...ch, state: "pending" }] }] },
+    view("Pending"),
+    word(false, pending),
+    { ref: "R1.4", hand: HAND },
+  );
+  assert.equal(bug.pass, false);
+  assert.match(bug.got, /badge Pending/);
+  // Rejected in the file but the comment is still open.
+  assert.equal(
+    siblingMatch(revision, view("Rejected"), word(false, pending), { ref: "R1.4", hand: HAND })
+      .pass,
+    false,
+  );
+  // No sibling revision left in Word: the case was not shown.
+  assert.equal(
+    siblingMatch(revision, view("Rejected"), word(true, []), { ref: "R1.4", hand: HAND }).pass,
+    false,
+  );
+  // A replace is judged by its text anyway: the case was not shown either.
+  const replace = { comments: [{ ref: "R1.4", changes: [{ ...ch, kind: "replace" }] }] };
+  assert.equal(
+    siblingMatch(replace, view("Rejected"), word(true, pending), { ref: "R1.4", hand: HAND }).pass,
+    false,
+  );
+});
+
+// Follow-up review: every tracked run the pane reads from the OOXML must be
+// found in the paragraph text Word reports, special characters included.
+test("trackedPlaced: every tracked run of every paragraph is found in Word's paragraph text", async () => {
+  const { trackedPlaced } = await import("../scripts/e2e/judge.mjs");
+  const p = (index, text, tracked, counts = {}) => ({
+    index,
+    text,
+    w_ins: 0,
+    w_del: 0,
+    ...counts,
+    tracked,
+  });
+  const run = (kind, text, start) => ({ kind, text, start, marks: 1 });
+  const good = [
+    p(0, "Title", []),
+    p(1, "Case 0 before non\u001elinear after.", [run("ins", "non\u001elinear", 14)], { w_ins: 1 }),
+    p(2, "Case 1 before left\tright after.", [run("del", "left\tright", 14)], { w_del: 1 }),
+  ];
+  const ok = trackedPlaced(good, 2);
+  assert.equal(ok.pass, true, ok.got);
+  // The hyphen was lost in the extraction: the run is not in the text.
+  const lost = trackedPlaced(
+    [good[0], p(1, good[1].text, [run("ins", "nonlinear", 14)], { w_ins: 1 }), good[2]],
+    2,
+  );
+  assert.equal(lost.pass, false);
+  assert.match(lost.got, /paragraph 1/);
+  // A tracked mark with no run read from it.
+  assert.equal(
+    trackedPlaced([good[0], p(1, good[1].text, [], { w_ins: 1 }), good[2]], 2).pass,
+    false,
+  );
+  // Fewer tracked paragraphs than the document was built with.
+  assert.equal(trackedPlaced(good, 3).pass, false);
+  assert.equal(trackedPlaced([], 0).pass, false);
 });
