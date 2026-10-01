@@ -365,7 +365,7 @@ def main(argv=None):
         print("cannot read %s or %s: %s" % (a.before, a.after, e), file=sys.stderr)
         return 2
     if a.json:
-        print(json.dumps(rep, ensure_ascii=False, indent=1))
+        print(json.dumps(rep, ensure_ascii=False))
     else:
         for cid, c in rep["categories"].items():
             print("%-18s %-15s %3d  %s" % (cid, c["status"], c["count"], c["what"]))

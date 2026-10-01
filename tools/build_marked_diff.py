@@ -1253,6 +1253,7 @@ def main(argv=None):
     ap.add_argument('--author', default=AUTHOR, help='w:author for track_changes marks')
     ap.add_argument('--date', default=DATE, help='w:date for track_changes marks (xsd:dateTime)')
     ap.add_argument('--report', help='JSON report path')
+    ap.add_argument('--json', action='store_true', help='print one line of JSON with the counts as the last line')
     ap.add_argument('--merge-gap', type=int, default=MERGE_GAP_TOKENS)
     ap.add_argument('--min-ratio', type=float, default=PARA_MATCH_MIN_RATIO)
     ap.add_argument('--sample', type=int, default=SAMPLE_N, help='print N changed paragraphs side by side (prints document text)')
@@ -1310,7 +1311,7 @@ def run(a):
     os.close(fd)
     try:
         write_docx(a.clean, tmp, doc_xml)
-        failed = report(a, tmp, base_xml, clean_xml, st)
+        failed, summary = report(a, tmp, base_xml, clean_xml, st)
         if not failed:
             if same_file(a.clean, a.out) or same_file(a.baseline, a.out):
                 raise Refused('the output is the same file as an input: %s' % a.out)
@@ -1318,11 +1319,13 @@ def run(a):
     finally:
         if os.path.exists(tmp):  # anything but a completed move: leave no half-written file
             os.unlink(tmp)
+    if a.json:
+        print(json.dumps(dict(summary, written=not failed)))
     return 1 if failed else 0
 
 
 def report(a, out_path, base_xml, clean_xml, st):
-    """Run every check on the file at out_path, print the result; return the number of failed checks."""
+    """Run every check on the file at out_path, print the result; return (failed checks, summary of counts)."""
 
     total, failed = 0, 0
     lines = []
@@ -1391,7 +1394,9 @@ def report(a, out_path, base_xml, clean_xml, st):
                'checks': total, 'failures': failed}
         with open(a.report, 'w', encoding='utf-8') as f:
             json.dump(rep, f, ensure_ascii=False, indent=1)
-    return failed
+    return failed, {'checks': total, 'failures': failed, 'mode': MODE, 'insert_runs': v['insert_runs'],
+                    'delete_runs': v['delete_runs'],
+                    'paragraphs': {k: st[k] for k in ('n_eq', 'n_mod', 'n_ins', 'n_del', 'n_del_empty')}}
 
 
 if __name__ == '__main__':

@@ -141,8 +141,16 @@ class AnonymizeDocx(unittest.TestCase):
 
     def test_the_report_says_what_was_changed_and_removed(self):
         code, out, err = self.anonymize()
+        # One line: the daemon's Python runner reads the last line of stdout as JSON.
+        self.assertEqual(len(out.strip().splitlines()), 1)
         report = json.loads(out)
         self.assertEqual(report["output"], str(self.out))
+        verifier_cli = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "verify-anonymized.py"), "--before", str(self.src), "--after", str(self.out), "--json"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(len(verifier_cli.stdout.strip().splitlines()), 1)
+        self.assertEqual(json.loads(verifier_cli.stdout)["total"], 0)
         ch = report["changed"]
         self.assertEqual(ch["word/document.xml"], {"author": 3, "date": 3, "rsid": 4})
         self.assertEqual(ch["word/comments.xml"], {"author": 1, "initials": 1, "date": 1})

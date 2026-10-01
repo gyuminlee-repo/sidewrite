@@ -565,7 +565,7 @@ def main(argv=None):
     except (Refused, OSError, zipfile.BadZipFile) as e:
         print(str(e), file=sys.stderr)
         return 2
-    print(json.dumps(report, ensure_ascii=False, indent=1))
+    print(json.dumps(report, ensure_ascii=False))
     return 0
 
 

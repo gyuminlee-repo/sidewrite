@@ -7,6 +7,7 @@ python3 -m unittest tests/test_build_marked_diff.py
 """
 
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -164,6 +165,17 @@ class BuildMarkedDiff(unittest.TestCase):
             self.assertIn("same file", err)
         self.assertFalse(self.out.exists())
         self.assertEqual((sha(self.clean), sha(self.base)), before)
+
+    def test_json_puts_one_line_of_counts_last_on_stdout(self):
+        # The daemon's Python runner reads the last line of stdout as JSON.
+        code, out, err = self.run_tool("--json")
+        self.assertEqual(code, 0, out + err)
+        last = json.loads(out.strip().splitlines()[-1])
+        self.assertEqual([last["written"], last["failures"], last["mode"]], [True, 0, "color"])
+        self.assertGreater(last["checks"], 5)
+        self.assertEqual(last["paragraphs"]["n_mod"] + last["paragraphs"]["n_ins"] + last["paragraphs"]["n_del"] > 0, True)
+        for words in ("invented strain", ADDED_SENTENCE, REMOVED):
+            self.assertNotIn(words, out.strip().splitlines()[-1])
 
     def test_the_report_has_counts_and_no_document_text(self):
         report = self.dir / "report.json"

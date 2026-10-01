@@ -90,7 +90,7 @@ def run(a):
     if names is None:
         print(MISSING, file=sys.stderr)
         return 3
-    print(json.dumps({"entries": render(a.style, items, names)}, ensure_ascii=False, indent=1))
+    print(json.dumps({"entries": render(a.style, items, names)}, ensure_ascii=False))
     return 0
 
 
