@@ -38,7 +38,8 @@ import {
   deleteToolComments,
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
-import { createTurnState } from "./turn-state.js";
+import { initProvidersPane } from "./providers-pane.js";
+import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
 import {
   toolExcelGetSelectedRange,
@@ -66,6 +67,12 @@ import {
   toolExcelSetRowHeight,
 } from "./tools-excel.js";
 import { isInOrUnder, docDirFromActiveUrl } from "./paths.js";
+import {
+  modelMenuOptions,
+  isStoredModelValid,
+  effectiveModelNote,
+  modelDisplayName,
+} from "./model-menu.js";
 
 // Daemon endpoints. The HTTP server that loaded this taskpane is on
 // HTTP_PORT; the WebSocket bridge is on WS_PORT (one less by daemon convention).
@@ -122,6 +129,7 @@ let assistantTurnElem = null;
 let attachSelection = true;
 
 let reviewPane = null; // Review tab controller (Word), set in Office.onReady
+let providersPane = null; // Providers section of the Setup tab, set in Office.onReady
 
 function setComposerDisabled(disabled) {
   $send.disabled = disabled;
@@ -148,13 +156,10 @@ let connState = "idle";
 let connLabel = "Connecting…";
 let liveModel = null; // SDK-reported model id of the running loop
 let pendingModelShort = null; // target short name while a switch restarts
+let accountModels = null; // models_list of the daemon, once it answered
 
 function shortModelName(idOrAlias) {
-  const s = String(idOrAlias || "");
-  if (/opus/i.test(s)) return "Opus";
-  if (/sonnet/i.test(s)) return "Sonnet";
-  if (/haiku/i.test(s)) return "Haiku";
-  return s.replace(/^claude-/, "").split(/[-[]/)[0] || s;
+  return modelDisplayName(idOrAlias, accountModels);
 }
 
 function renderConnection() {
@@ -493,7 +498,7 @@ function defaultSettings() {
     trackChangesMode: "always", // "always" | "modifications" | "never"
     // Global, sticky. Cheaper models use less of your monthly Claude
     // programmatic credit. "default" defers to the Claude Code CLI config.
-    model: "sonnet", // "haiku" | "sonnet" | "opus" | "default"
+    model: "sonnet", // an alias or a model id the account lists (models_list)
   };
 }
 
@@ -502,9 +507,10 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return defaultSettings();
     const s = { ...defaultSettings(), ...JSON.parse(raw) };
-    // Migrate the retired "default" model choice (and any stale value) to
-    // the explicit Sonnet default so the dropdown/indicator stay valid.
-    if (!["haiku", "sonnet", "opus"].includes(s.model)) s.model = "sonnet";
+    // Migrate the retired "default" model choice (and any malformed value)
+    // to the explicit Sonnet default. Whether the account can use the model
+    // is the daemon's check (set_model), against its model list.
+    if (!isStoredModelValid(s.model)) s.model = "sonnet";
     return s;
   } catch {
     return defaultSettings();
@@ -528,14 +534,80 @@ function applySettings() {
   const $tcMode = document.getElementById("setting-track-changes-mode");
   if ($tcMode) $tcMode.value = settings.trackChangesMode || "always";
   const $model = document.getElementById("composer-model");
-  if ($model) $model.value = settings.model || "sonnet";
+  if ($model) {
+    // The static rows are the three aliases; a stored id outside them gets
+    // a row of its own until loadModelMenu brings the account's list.
+    const value = settings.model || "sonnet";
+    if (![...$model.options].some((o) => o.value === value)) {
+      $model.append(modelOption({ value, label: value, title: "" }));
+    }
+    $model.value = value;
+  }
+}
+
+function modelOption(o) {
+  const opt = document.createElement("option");
+  opt.value = o.value;
+  opt.textContent = o.label;
+  opt.title = o.title;
+  return opt;
+}
+
+// Fill the composer dropdown with the models the account can use (P13). On
+// any failure the rows already there stay and the tooltip says why.
+async function loadModelMenu() {
+  const $m = document.getElementById("composer-model");
+  if (!$m) return;
+  let r;
+  try {
+    r = await sendRequest("models_list", {}, { timeoutMs: 30_000 });
+  } catch (e) {
+    $m.title = `Model list unavailable (${e.message}); showing the built-in choices`;
+    return;
+  }
+  accountModels = r.models;
+  fillModelMenu();
+  renderConnection(); // the indicator can now use the account's display names
+  $m.title =
+    r.source === "sdk"
+      ? "Models your Claude account can use"
+      : `Model list unavailable (${r.error}); aliases only`;
+}
+
+function fillModelMenu() {
+  const $m = document.getElementById("composer-model");
+  if (!$m || !accountModels) return;
+  $m.replaceChildren(...modelMenuOptions(accountModels, settings.model).map(modelOption));
+  $m.value = settings.model;
 }
 
 // Push the chosen model to the daemon. The SDK model is fixed per agent
 // loop, so changing it mid-conversation triggers a resuming restart
 // (daemon side); on first connect it's just recorded for the lazy start.
 function sendModel() {
-  if (wsReady) wsSend({ type: "set_model", model: settings.model || "sonnet" });
+  if (!wsReady) return;
+  const asked = settings.model || "sonnet";
+  // The daemon waits for the account's model list before it answers.
+  sendRequest("set_model", { model: asked }, { timeoutMs: 30_000 }).then(
+    (r) => applyEffectiveModel(asked, r.model),
+    (e) => console.warn(`[model] set_model for ${asked} got no answer: ${e.message}`),
+  );
+}
+
+// The daemon answers with the model it will use. When that is not the one
+// asked for (not in the account's list), the pane takes the daemon's model:
+// the dropdown, the stored setting and the indicator show it, and one line
+// in the chat says so.
+function applyEffectiveModel(asked, effective) {
+  const note = effectiveModelNote(asked, effective);
+  if (!note || settings.model !== asked) return; // kept, or another choice was made meanwhile
+  settings.model = effective;
+  saveSettings(settings);
+  fillModelMenu(); // drops the "(not in list)" row of the refused choice
+  applySettings();
+  pendingModelShort = null;
+  renderConnection();
+  appendNotice(note);
 }
 
 document.getElementById("setting-show-diagnostics").addEventListener("change", (e) => {
@@ -579,6 +651,8 @@ function wsConnect() {
   ws.onopen = () => {
     wsReady = true;
     sendHello();
+    // The stored provider choices, before anything can ask for a judgment.
+    providersPane?.restoreStored();
     for (const r of unsentResults.drain()) ws.send(JSON.stringify(r));
     // Record the sticky model for this pane key right after the hello
     // binds it, so the lazy first-message session start uses it.
@@ -665,6 +739,8 @@ async function handleServerMessage(msg) {
       setAgentStatus("idle", "Ready");
       refreshWorkspaceFromDaemon();
       reviewPane?.reload();
+      loadModelMenu();
+      providersPane?.reload();
       break;
 
     case "transcript_replay":
@@ -678,6 +754,8 @@ async function handleServerMessage(msg) {
     case "assistant_event":
       // turn_complete, error and auth_error end the turn (turn-state.js).
       turn.onAssistantEvent(msg);
+      // The Review tab refreshes its status after any turn (auto-refresh.js).
+      if (TURN_END_EVENTS.has(msg.event)) reviewPane?.onAnyTurnEnded?.();
       if (msg.event === "tool_use_announce") {
         appendToolUse(msg.tool, msg.input);
         setAgentStatus("working", statusForTool(msg.tool));
@@ -1125,12 +1203,13 @@ Office.onReady((info) => {
     reviewPane = initReviewPane({
       sendRequest,
       isTurnInFlight: () => turn.inFlight,
+      providersReady: () => providersPane?.whenRestored() ?? null,
       // Called before review_propose is sent; the returned release ends
       // this turn if the request fails and no later turn has begun.
       onTurnStarted: (note) => {
         appendNotice(note);
         const id = beginTurn();
-        setAgentStatus("working", "Proposing changes…");
+        setAgentStatus("working", providersPane?.turnLabel() ?? "Proposing changes…");
         return () => {
           if (turn.endIf(id)) setAgentStatus("idle", "Ready");
         };
@@ -1147,6 +1226,12 @@ Office.onReady((info) => {
         resolveComment: (id) => toolResolveComment({ comment_id: id, resolved: true }),
       },
     });
+  }
+
+  // Providers section of the Setup tab (the Excel page has none).
+  // Filled on welcome, which comes after the connect below.
+  if (document.getElementById("providers-root")) {
+    providersPane = initProvidersPane({ sendRequest, settings, saveSettings });
   }
 
   // Show the welcome card on first launch (per browser-storage, so it

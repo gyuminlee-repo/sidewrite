@@ -652,6 +652,56 @@ export function removeLedgerItem(rev, id) {
   return next;
 }
 
+// ---- P15: the ledger as a JSON file -------------------------------------------
+// A file holds rules only ({ kind, text, scope, check }): ids and check
+// results belong to one manuscript. tests/fixtures/review_ledger.json has the
+// same item shape, so a hand-written list imports too.
+
+const RULE_KEYS = ["kind", "text", "scope", "check"];
+const ruleOf = (item) => Object.fromEntries(RULE_KEYS.map((k) => [k, item?.[k]]));
+const ruleKey = (item) => JSON.stringify(RULE_KEYS.map((k) => item[k]));
+
+export function ledgerExportDoc(rev, now = new Date()) {
+  return {
+    format: "manuscript-pane-ledger",
+    version: 1,
+    exported_at: now.toISOString(),
+    items: rev.ledger.map(ruleOf),
+  };
+}
+
+// mode "append": rules the ledger already holds are skipped. "replace": the
+// ledger is emptied first. Every row is checked before anything is added, so
+// a bad row adds nothing. Ids come from addLedgerItem.
+export function importLedgerItems(rev, items, { mode = "append" } = {}) {
+  if (!Array.isArray(items)) throw new Error("ledger file needs an items array");
+  if (mode !== "append" && mode !== "replace") throw new Error(`unknown import mode ${mode}`);
+  const rows = items.map((it, n) => {
+    const parsed = LedgerItemSchema.safeParse({ ...ruleOf(it), id: "L0" });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const where = issue?.path?.length ? `${issue.path.join(".")}: ` : "";
+      throw new Error(`item ${n + 1}: ${where}${issue?.message ?? "invalid"}`);
+    }
+    return ruleOf(parsed.data);
+  });
+  let next = mode === "replace" ? { ...clone(rev), ledger: [] } : rev;
+  const have = new Set(next.ledger.map(ruleKey));
+  const added = [];
+  const skipped = [];
+  for (const row of rows) {
+    if (have.has(ruleKey(row))) {
+      skipped.push(row);
+      continue;
+    }
+    const r = addLedgerItem(next, row);
+    next = r.revision;
+    have.add(ruleKey(row));
+    added.push(r.item);
+  }
+  return { revision: next, added, skipped };
+}
+
 // ---- L4: snapshot and outside changes ----------------------------------------
 
 export const EXTERNAL_KEEP = 100;

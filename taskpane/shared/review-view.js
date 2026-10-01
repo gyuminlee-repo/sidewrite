@@ -527,3 +527,65 @@ export function progressText({ ref, startedAt, now = Date.now(), comments = [] }
   const open = comments.filter((c) => c.status !== "done").length;
   return `${ref} running ${clock}. ${open} of ${comments.length} comments not done.`;
 }
+
+// P15. The comments "Propose all" runs, in list order: every one not done.
+export function queueRefs(revision) {
+  return (revision?.comments ?? []).filter((c) => c.status !== "done").map((c) => c.ref);
+}
+
+// ---- P15: review text from a file --------------------------------------------
+
+export const REVIEW_FILE_MAX_BYTES = 2 * 1024 * 1024;
+
+// A picked review file ({ name, size, text }) as text for the paste box:
+// .txt or .md only, at most 2 MB, BOM removed, line ends as \n.
+export function reviewTextFromFile({ name, size, text }) {
+  if (!/\.(txt|md)$/i.test(String(name ?? ""))) {
+    return { ok: false, error: `${name}: choose a .txt or .md file.` };
+  }
+  if (size > REVIEW_FILE_MAX_BYTES) {
+    return { ok: false, error: `${name} is larger than 2 MB.` };
+  }
+  const t = String(text ?? "")
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n?/g, "\n");
+  if (!t.trim()) return { ok: false, error: `${name} is empty.` };
+  return { ok: true, text: t };
+}
+
+// ---- P15: ledger file --------------------------------------------------------
+
+// The text of a picked ledger file as the ledger_import payload. Only the
+// outer shape is checked here ({ items: [...] }, an exported ledger or a
+// hand-written list); the daemon checks every rule.
+export function ledgerImportFromJson(text) {
+  let data;
+  try {
+    data = JSON.parse(String(text ?? "").replace(/^\uFEFF/, ""));
+  } catch (e) {
+    return { ok: false, error: `The ledger file is not JSON (${e.message}).` };
+  }
+  if (!Array.isArray(data?.items)) {
+    return { ok: false, error: 'The ledger file needs an "items" list.' };
+  }
+  if (!data.items.length) return { ok: false, error: "The ledger file has no items." };
+  return { ok: true, doc: { items: data.items }, count: data.items.length };
+}
+
+// ---- P15: ledger rule candidates from the review text ---------------------------
+
+// The rule fields of a candidate (ledger_suggest), as ledger_import takes them.
+export function candidateRule({ kind, text, scope, check }) {
+  return { kind, text, scope, check };
+}
+
+// "Forbidden, must not match /novel/i: <sentence>"
+export function candidateLabel(c) {
+  const kind = c.kind === "forbid" ? "Forbidden" : "Instruction";
+  const k = c.check ?? {};
+  const check =
+    k.type === "regex"
+      ? `${k.expect === "present" ? "must keep" : "must not match"} /${k.pattern}/${k.flags ?? ""}`
+      : "LLM check";
+  return `${kind}, ${check}: ${c.text}`;
+}
