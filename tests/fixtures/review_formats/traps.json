@@ -188,6 +188,22 @@
       "texts": {
         "R1.2": "Methods\uc5d0 \ubc30\uc591 \uc628\ub3c4(30 \u00b0C)\ub97c \uba85\uc2dc\ud574 \uc8fc\uc2ed\uc2dc\uc624."
       }
+    },
+    {
+      "name": "control: a sentence that ends with section, table or figure and a period does not hide the next number",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. The atmosphere is missing from the experimental section.\n2. Add units to the table.\n3. The scale bar is missing in the figure.\n4. State n.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.1": "The atmosphere is missing from the experimental section.",
+        "R1.4": "State n."
+      }
+    },
+    {
+      "name": "control: tabs after the numbers and a sentence ending with page and a period",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1.\tThe footnote is cut off at the end of the page.\n2.\tState n.",
+      "refs": ["R1.1", "R1.2"]
     }
   ]
 }
