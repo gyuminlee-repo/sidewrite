@@ -246,22 +246,28 @@ def table(head, rows):
 
 
 def said_instead(report):
-    """Per comment, what the tool said instead of changing the text: the
-    questions it put to the author and the requests it declared outside this
-    file, with the state of every request. So a reader can tell a request the
-    tool passed over in silence from one it asked about."""
+    """Per comment, what the tool said and did besides the changes placed
+    above: the questions it put to the author and the requests it declared
+    outside this file, with the state of every request; the terms the reviewer
+    named and where they still stand; the paragraphs it wrote anew; the
+    changes that hold words taken from the review; what the paragraph check
+    found on its changes. So a reader can tell a request the tool passed over
+    in silence from one it asked about."""
     out = ["", "## What the tool said instead of changing (by comment)"]
     any_row = False
     for c in report:
         questions, outside = c.get("questions") or [], c.get("outside") or []
         states = [(q.get("id"), q.get("state")) for q in c.get("requirements") or []]
-        if not questions and not outside and not any(s in ("open", "needs_author", "outside_this_file")
-                                                       for _, s in states):
+        named, said = c.get("named_terms") or [], c.get("same_term_at") or []
+        rewrites, findings = c.get("rewrites") or [], c.get("paragraph_findings") or []
+        sourced = [x for x in c.get("changes") or [] if x.get("from_review")]
+        if not (questions or outside or named or said or rewrites or findings or sourced
+                or any(st != "changed" for _, st in states)):
             continue
         any_row = True
         out += ["", "### %s" % c.get("ref"), ""]
         if states:
-            out.append("Requests: " + ", ".join("%s %s" % (i, s) for i, s in states))
+            out.append("Requests: " + ", ".join("%s %s" % (i, st) for i, st in states))
             out.append("")
         if questions:
             out.append(table(
@@ -276,6 +282,33 @@ def said_instead(report):
             out.append("")
         if not questions and not outside:
             out.append("No question and no outside note.")
+            out.append("")
+        if named:
+            out.append(table(
+                ["Term the reviewer named", "Still in"],
+                [[cell(t.get("term") or ""),
+                  ", ".join("%s (%s)" % (p.get("id"), p.get("kind")) for p in t.get("places") or [])
+                  or "(nowhere)"] for t in named]))
+            out.append("")
+        if said:
+            out.append("The turn says the same term is still at: %s" % ", ".join(str(x) for x in said))
+            out.append("")
+        if rewrites:
+            out.append(table(
+                ["Paragraph written anew", "Rewrite", "Changes"],
+                [[str(w.get("paragraph_index")), str(w.get("rewrite_id")),
+                  ", ".join(w.get("change_ids") or [])] for w in rewrites]))
+            out.append("")
+        if sourced:
+            out.append(table(
+                ["Change", "Words that come from the review"],
+                [[str(x.get("change_id")), cell("; ".join(x.get("from_review")))] for x in sourced]))
+            out.append("")
+        if findings:
+            out.append(table(
+                ["Paragraph check", "Paragraph", "Changes", "Found"],
+                [[str(g.get("kind")), str(g.get("paragraph_id") or g.get("paragraph_index")),
+                  ", ".join(g.get("change_ids") or []), cell(g.get("detail") or "")] for g in findings]))
             out.append("")
     if not any_row:
         out += ["", "No question, no outside note and no request left open."]
@@ -392,6 +425,8 @@ def main(argv=None):
         "tool_unplaced": len(unplaced),
         "tool_questions": sum(len(c.get("questions") or []) for c in report),
         "tool_outside": sum(len(c.get("outside") or []) for c in report),
+        "tool_named_terms": sum(len(c.get("named_terms") or []) for c in report),
+        "tool_rewrites": sum(len(c.get("rewrites") or []) for c in report),
         "both": len(set(placed) & {r["paragraph_index_before"] for r in reference}),
         "out": str(out),
     }))

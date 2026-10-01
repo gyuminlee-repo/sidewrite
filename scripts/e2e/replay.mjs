@@ -9,7 +9,7 @@
 //     --playwright-core '<Windows path of a playwright-core package>' \
 //     [--model opus] [--writing-model <alias>] [--judgment-model <alias>] \
 //     [--only R1.1,R2.3] [--instructions <txt>] [--forbid <txt>] \
-//     [--draft-responses] [--turn-minutes 10] [--repair]
+//     [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked]
 //
 // Before the run, a Word of its own is asked whether it opens the copy the
 // run will use (the add-in tagged on) as it is. A file Word wants to repair
@@ -18,7 +18,10 @@
 // folder, the run's copy is made from that one and asked about again
 // (summary.txt says so). The three models (Edits, Writing, Judgments) are chosen in Setup; the
 // pane's own line says what ran, and a model other than the one asked for
-// fails the run.
+// fails the run when the line gives no reason for it (a document that stays
+// on another model because the chosen one declines it is no failure).
+// With --rewrite-stacked, after the paragraph check every paragraph that
+// holds three or more changes gets its "Rewrite this paragraph" turn.
 //
 // The manuscript and the review are only read. Everything is written to a
 // new folder <base-dir>/replay-<UTC time>/:
@@ -26,10 +29,11 @@
 //                                and rationale comments
 //   manuscript.revision.json     the record of the tool
 //   manuscript.decisions.jsonl   the receipts of the model's judgments
-//   changes.json                 per comment: requirements, changes (before,
-//                                after, rationale, state), requirements no
-//                                change names, how the turn ended, its time
-//                                and model
+//   changes.json                 per comment: requests and their state,
+//                                changes (before, after, rationale, state,
+//                                rewrite, words from the review), questions,
+//                                outside notes, named terms and where they
+//                                stand, how the turn ended, its time and model
 //   paragraph_check.json         "Check revised paragraphs" at the end of
 //                                the run: paragraphs with two or more
 //                                changes and what the model found in them
@@ -43,8 +47,9 @@
 // (the same Windows scripts, the same rules: only the Word this run started
 // is closed, the resident daemon is stopped for the run and started again).
 // A turn that fails or runs out of time does not end the run.
-// Exit code: 0 when the flow ran to its end, the copy was saved and every
-// kind of work ran on the model asked for, else 1; 2 for bad arguments.
+// Exit code: 0 when the flow ran to its end, the copy was saved and the
+// pane's line names no other model than the one asked for without a reason,
+// else 1; 2 for bad arguments.
 
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -53,14 +58,17 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cleanupDecision } from "./judge.mjs";
 import { pauseResident } from "./resident-unit.mjs";
+import { consistencyLines } from "../../taskpane/shared/review-view.js";
 import {
   changesReport,
-  editsStayedOff,
+  extractBatchesFromLog,
   keepRefPattern,
   ledgerFromLines,
-  otherModels,
+  modelFailures,
   parseOnly,
   responsesReport,
+  restoredFromLog,
+  staysFromLog,
   summaryText,
   turnFromLog,
   turnResult,
@@ -91,6 +99,9 @@ const { values: opt } = parseArgs({
     instructions: { type: "string" },
     forbid: { type: "string" },
     "draft-responses": { type: "boolean", default: false },
+    // After the paragraph check: a rewrite turn for every paragraph that
+    // holds three or more changes ("Rewrite this paragraph").
+    "rewrite-stacked": { type: "boolean", default: false },
     // The longest one review turn may take.
     "turn-minutes": { type: "string", default: "10" },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
@@ -469,12 +480,30 @@ let saved = false;
 let drafted = null;
 // What the pane says each kind of work ran on, at the end of the run.
 let modelsLine = "";
-// A fallback after a refusal that is gone by the next turn is not a
-// failure; edits that stay on another model for more than one turn are, and
-// so is writing or a judgment on another model.
-const otherModel = () =>
-  otherModels(modelsLine).some((x) => !x.startsWith("edits: ")) ||
-  editsStayedOff(Object.values(turns));
+// The rewrite turns of --rewrite-stacked, and the last turn that ran.
+const rewriteTurns = [];
+let lastTurn = null;
+// A model other than the one asked for, with no reason in the pane's line
+// (replay-lib.mjs modelFailures).
+const otherModel = () => modelFailures(modelsLine, lastTurn).length > 0;
+
+// One review turn through the pane: the step, its part of the daemon log,
+// and what the pane says the edits ran on right after it.
+function runTurn(ref, label, step) {
+  const at = readLog().length;
+  const t0 = Date.now();
+  const done = note(label, step());
+  if (done.ok === false) note(`stop-turn ${ref}`, pane("stop-turn", { wait_ms: 120_000 }));
+  const log = readLog();
+  lastTurn = turnResult(ref, {
+    step: done,
+    log: log.slice(at),
+    seconds: done.seconds ?? Math.round((Date.now() - t0) / 1000),
+    model: turnFromLog(log, ref).model,
+    line: pane("models-line").line ?? null,
+  });
+  return lastTurn;
+}
 
 async function main() {
   must("open-review", pane("open-review"));
@@ -515,18 +544,9 @@ async function main() {
   // One turn per comment, in order. A turn that fails or runs out of time is
   // written down and the next comment goes on.
   for (const ref of refs) {
-    const at = readLog().length;
-    const t0 = Date.now();
-    const step = note(`propose ${ref}`, pane("propose", { ref }, TURN_MS + 3 * 60_000));
-    if (step.ok === false) note(`stop-turn ${ref}`, pane("stop-turn", { wait_ms: 120_000 }));
-    const log = readLog();
-    turns[ref] = turnResult(ref, {
-      step,
-      log: log.slice(at),
-      seconds: step.seconds ?? Math.round((Date.now() - t0) / 1000),
-      model: turnFromLog(log, ref).model,
-      line: pane("models-line").line ?? null,
-    });
+    turns[ref] = runTurn(ref, `propose ${ref}`, () =>
+      pane("propose", { ref }, TURN_MS + 3 * 60_000),
+    );
     record.turns = turns;
     save();
     console.log(`      ${ref}: ${turns[ref].outcome}, ${turns[ref].seconds} s`);
@@ -535,6 +555,25 @@ async function main() {
   // The paragraphs that now hold two or more changes, read once more by the
   // model of the edits. Its result is in revision.json (consistency).
   note("check-paragraphs", pane("check-paragraphs", {}, 25 * 60_000));
+  if (opt["rewrite-stacked"]) {
+    // The buttons stand in the order of these lines (review-pane.js draws
+    // them from the same list), and a rewrite does not change the list: the
+    // check is not run again.
+    const stacked = consistencyLines(readRevision()?.consistency).filter((l) => l.rewrite_ref);
+    for (const [nth, line] of stacked.entries()) {
+      const ref = line.rewrite_ref;
+      const turn = runTurn(ref, `rewrite ${ref} p${line.paragraph_index}`, () =>
+        pane("rewrite-paragraph", { nth }, TURN_MS + 3 * 60_000),
+      );
+      rewriteTurns.push({ ref, paragraph_index: line.paragraph_index, ...turn });
+      record.rewrite_turns = rewriteTurns;
+      save();
+      console.log(
+        `      rewrite ${ref} p${line.paragraph_index}: ${turn.outcome}, ${turn.seconds} s`,
+      );
+    }
+    if (stacked.length) note("refresh", pane("refresh"));
+  }
 
   if (opt["draft-responses"]) {
     const opened = note("open-response", pane("open-response"));
@@ -558,10 +597,14 @@ async function main() {
   writeReports(headings);
 }
 
+const readRevision = () =>
+  fs.existsSync(REVISION) ? JSON.parse(fs.readFileSync(REVISION, "utf8")) : null;
+
 function writeReports(headings = []) {
-  if (!fs.existsSync(REVISION)) return;
-  const revision = JSON.parse(fs.readFileSync(REVISION, "utf8"));
-  const report = changesReport(revision, headings, turns);
+  const revision = readRevision();
+  if (!revision) return;
+  const report = changesReport(revision, headings, turns, rewriteTurns);
+  const log = readLog();
   const out = (name, text) => fs.writeFileSync(path.join(RUN, name), text);
   out("changes.json", JSON.stringify(report, null, 2));
   out(
@@ -589,6 +632,10 @@ function writeReports(headings = []) {
       },
       source: record.source ?? null,
       paragraphCheck: revision.consistency ?? null,
+      extraction: extractBatchesFromLog(log),
+      stays: staysFromLog(log),
+      restored: restoredFromLog(log),
+      lastTurn,
       responses: opt["draft-responses"] ? (drafted ?? 0) : null,
     }),
   );

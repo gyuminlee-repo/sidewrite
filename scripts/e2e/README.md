@@ -420,7 +420,7 @@ node scripts/e2e/replay.mjs \
   --playwright-core 'D:\path\to\node_modules\playwright-core' \
   [--model opus] [--writing-model opus] [--judgment-model haiku] \
   [--only R1.1,R2.3] [--instructions rules.txt] [--forbid forbid.txt] \
-  [--draft-responses] [--turn-minutes 10] [--repair]
+  [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked]
 
 python3 scripts/e2e/replay-compare.py \
   --before /path/to/before.docx --after /path/to/submitted.docx \
@@ -433,9 +433,13 @@ changes and rationale comments), `manuscript.revision.json`,
 `manuscript.decisions.jsonl`, `changes.json` (per comment: the requests with
 their state `changed`, `needs_author`, `outside_this_file` or `open`, the
 questions for the author, the requests declared outside this file, the terms
-a change took out that other paragraphs still hold, the edits a guard refused
-by code, the changes with the paragraph before and after, rationale and
-state, how the turn ended, its time and model), `paragraph_check.json` (the
+a change took out that other paragraphs still hold, the terms the reviewer
+named with every paragraph that holds them now and where the turn itself
+said the same term is left, the paragraphs written anew with the changes of
+each rewrite, what the paragraph check found on its changes, the edits a
+guard refused by code, the changes with the paragraph before and after,
+rationale, state, the id of their rewrite and the words that come from the
+review, how the turn ended, its time and model), `paragraph_check.json` (the
 result of "Check revised paragraphs", run once after the last turn),
 `responses.json` with `--draft-responses`, `summary.txt`, `result.json` and
 `daemon.log`. The screen shows step names and counts, never text of the
@@ -452,17 +456,32 @@ file is copied once and never opened in Word itself.
 
 `--model`, `--writing-model` and `--judgment-model` are chosen in Setup
 (Providers: Edits, Writing, Judgments; Claude). `summary.txt` and each turn
-of `changes.json` hold what the pane's own line says the work ran on. A model
-replaced after a refusal that is back on the chosen one by the next turn is
-counted in `summary.txt` and is no failure; edits on another model for two
-turns in a row, or writing or a judgment on another model, are marked FAILED
-and the exit code is 1.
+of `changes.json` hold what the pane's own line says the work ran on. The
+run fails (FAILED in `summary.txt`, exit code 1) when that line, at the end,
+names another model than the one asked for and gives no reason. A document
+that stays on another model because the chosen one declines it says so in
+the line and is no failure; `summary.txt` then has a line "edits stayed on
+... because ... declines this manuscript (...)". Nor are the edits a failure
+when the last turn of the run was the one the model was replaced in after a
+refusal. Replacements and restorations are counted.
+
+With `--rewrite-stacked`, after the paragraph check every paragraph that holds
+three or more changes gets its "Rewrite this paragraph" turn (the buttons in
+the order of the check, each once), then the status is refreshed; the turns
+are in `changes.json` under `rewrite_turns` and the new changes carry a
+`rewrite_id`. Off by default.
+
+`summary.txt` lists the batches of the request extraction as the daemon
+logged them (labelled, unlabelled refs, or FAILED with the error).
 
 The refused edits are counted from the daemon log of each turn:
 `NumberNeedsAuthor` (a number changed without the author), `ForbidBlocked`
 (a forbid rule; the daemon gives this one no code), `ForbidRuleBroken`,
-`TaskPaneOutdated` and `Refused` (a refusal the replay does not know). One
-log line is one refused edit. When no
+`TaskPaneOutdated`, `RewriteBlocked`, `RewriteStopped` (a rewrite that
+stopped after one or more parts), the code of what stopped a rewrite before
+its first part (`ParagraphNotPlain` and others) and `Refused` (a refusal the
+replay does not know). One log line is one refused edit or rewrite.
+`RewriteNotExpressible` leaves no log line and is not counted. When no
 request was extracted in the whole run, `summary.txt` says "not measured" for
 the requirements no change names.
 
@@ -476,5 +495,8 @@ an added paragraph that share enough words) and `compare.md` (counts, then the
 paragraphs changed by both, by the authors only, by the tool only, and the
 tool changes it could not place on a paragraph, and per comment what the
 tool said instead of changing: its questions for the author and the requests
-it declared outside this file, so silence and a question can be told apart).
+it declared outside this file, so silence and a question can be told apart;
+the terms the reviewer named and where they still stand, the paragraphs
+written anew, the changes with words from the review, and the findings of
+the paragraph check).
 Without `--tool` it writes the authors' side only.

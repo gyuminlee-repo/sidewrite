@@ -221,6 +221,38 @@ class EndToEnd(unittest.TestCase):
             self.assertNotIn("### R1.3", tail)
             self.assertTrue(md.endswith("\n") and not md.endswith("\n\n"))
 
+    def test_named_terms_rewrites_review_words_and_paragraph_findings_are_listed(self):
+        report = [
+            {"ref": "R1.1", "requirements": [{"id": "q1", "text": "a", "state": "changed"}],
+             "questions": [], "outside": [],
+             "named_terms": [{"term": "placeholder", "places": [{"index": 0, "id": "a1", "kind": "caption"},
+                                                                {"index": 7, "id": "p7", "kind": "body"}]},
+                             {"term": "invented", "places": []}],
+             "same_term_at": ["a1"],
+             "rewrites": [{"rewrite_id": "R1.1-wabc", "paragraph_index": 4,
+                           "change_ids": ["R1.1-2", "R1.1-3"]}],
+             "paragraph_findings": [{"kind": "claim_left", "paragraph_index": 4, "paragraph_id": "a5",
+                                     "detail": "the claim is made once more", "change_ids": ["R1.1-2"]}],
+             "changes": [dict(change("R1.1-1", METHOD, METHOD.replace("six", "four")), from_review=[]),
+                         dict(change("R1.1-2", RESULT, RESULT.replace("one day", "two days")),
+                              from_review=["two days", "a plateau"], rewrite_id="R1.1-wabc")]},
+            # Every request changed and nothing else to say: not listed.
+            {"ref": "R1.2", "requirements": [{"id": "q1", "text": "b", "state": "changed"}],
+             "questions": [], "outside": [], "named_terms": [], "same_term_at": [], "rewrites": [],
+             "paragraph_findings": [], "changes": []},
+        ]
+        md = rc.compare_md(BEFORE, AFTER, rc.reference_changes(BEFORE, AFTER), {}, [], True, report)
+        tail = md.split("## What the tool said instead of changing (by comment)")[1]
+        self.assertIn("### R1.1", tail)
+        self.assertNotIn("### R1.2", tail)
+        self.assertIn("| placeholder | a1 (caption), p7 (body) |", tail)
+        self.assertIn("| invented | (nowhere) |", tail)
+        self.assertIn("The turn says the same term is still at: a1", tail)
+        self.assertIn("| 4 | R1.1-wabc | R1.1-2, R1.1-3 |", tail)
+        self.assertIn("| R1.1-2 | two days; a plateau |", tail)
+        self.assertNotIn("| R1.1-1 |", tail)
+        self.assertIn("| claim_left | a5 | R1.1-2 | the claim is made once more |", tail)
+
     def test_a_run_without_questions_says_so(self):
         md = rc.compare_md(BEFORE, AFTER, rc.reference_changes(BEFORE, AFTER), {}, [], True,
                            [{"ref": "R1.1", "changes": [], "requirements": [], "questions": [], "outside": []}])

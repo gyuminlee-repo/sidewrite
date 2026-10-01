@@ -6,8 +6,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   changesReport,
-  editsStayedOff,
+  extractBatchesFromLog,
   fallbacksFromLog,
+  modelFailures,
+  restoredFromLog,
+  rewritesFromLog,
+  staysFromLog,
   refusalsFromLog,
   keepRefPattern,
   ledgerFromLines,
@@ -111,7 +115,10 @@ test("how a turn ended: ok, failed, timeout, or no turn at all", () => {
     model: "m1",
     model_line: null,
     other_model: false,
+    declined: null,
     fallbacks: [],
+    stays: [],
+    rewrites: [],
     refused: {},
   });
   // The pane's line right after the turn says what the edits ran on.
@@ -157,7 +164,7 @@ test("how a turn ended: ok, failed, timeout, or no turn at all", () => {
   assert.equal(none.outcome, "no_turn");
 });
 
-test("what the guards refused and a model replaced after a refusal are read from the log of the turn", () => {
+test("what the guards refused, the rewrites and a model replaced after a refusal are read from the log of the turn", () => {
   const log = [
     "[review] number needs author R1.1 count=2",
     "[review] number needs author R1.1 count=1",
@@ -167,7 +174,16 @@ test("what the guards refused and a model replaced after a refusal are read from
     "[review] refused R1.1: forbid rule(s) L4 do not compile",
     "[review] refused R1.1: something new",
     "[review] blocked R2.1 by=L2,L3",
+    "[review] rewrite blocked R2.1 by=L2",
+    "[review] rewrite R2.1 paragraph=12 parts=4 applied=4",
+    "[review] rewrite R2.1 paragraph=14 parts=3 applied=0 stopped=ParagraphNotPlain",
+    "[review] rewrite R2.1 paragraph=15 parts=3 applied=0 stopped=refused",
+    "[review] rewrite R2.1 paragraph=16 parts=5 applied=2 stopped=StaleTarget",
+    "[review] rewrite R2.10 paragraph=1 parts=1 applied=1",
     "[agent] model refusal fallback original=claude-opus-9 fallback=claude-opus-8 scope=session category=cyber",
+    "[agent] model stays on claude-opus-8: claude-opus-9 declined 2 turns in a row (category=bio)",
+    "[agent] model stays on claude-opus-8: claude-opus-9 declined 3 turns in a row (category=-)",
+    "[agent] model restored to opus after the fallback to claude-opus-8",
   ].join("\n");
   assert.deepEqual(refusalsFromLog(log, "R1.1"), {
     NumberNeedsAuthor: 2,
@@ -176,50 +192,201 @@ test("what the guards refused and a model replaced after a refusal are read from
     TaskPaneOutdated: 1,
     Refused: 1,
   });
-  assert.deepEqual(refusalsFromLog(log, "R2.1"), { ForbidBlocked: 1 });
+  // A rewrite that stopped: before its first part with the code of what
+  // stopped it, after one or more parts as RewriteStopped.
+  assert.deepEqual(refusalsFromLog(log, "R2.1"), {
+    ForbidBlocked: 1,
+    RewriteBlocked: 1,
+    ParagraphNotPlain: 1,
+    RewriteStopped: 2,
+  });
   assert.deepEqual(refusalsFromLog(log, "R3.1"), {});
+  assert.deepEqual(rewritesFromLog(log, "R2.1"), [
+    { paragraph: 12, parts: 4, applied: 4, stopped: null },
+    { paragraph: 14, parts: 3, applied: 0, stopped: "ParagraphNotPlain" },
+    { paragraph: 15, parts: 3, applied: 0, stopped: "refused" },
+    { paragraph: 16, parts: 5, applied: 2, stopped: "StaleTarget" },
+  ]);
   assert.deepEqual(fallbacksFromLog(log), [
     { original: "claude-opus-9", fallback: "claude-opus-8" },
   ]);
   assert.deepEqual(fallbacksFromLog(""), []);
+  assert.deepEqual(staysFromLog(log), [
+    { fallback: "claude-opus-8", original: "claude-opus-9", count: 2, category: "bio" },
+    { fallback: "claude-opus-8", original: "claude-opus-9", count: 3, category: null },
+  ]);
+  assert.equal(restoredFromLog(log), 1);
+  assert.deepEqual([staysFromLog(""), restoredFromLog(undefined)], [[], 0]);
   const t = turnResult("R1.1", {
     step: { ok: true },
     log: `${log}\n[review] turn done R1.1`,
     seconds: 5,
   });
-  assert.deepEqual([t.outcome, t.refused.NumberNeedsAuthor, t.fallbacks.length], ["ok", 2, 1]);
+  assert.deepEqual(
+    [t.outcome, t.refused.NumberNeedsAuthor, t.fallbacks.length, t.stays.length, t.rewrites],
+    ["ok", 2, 1, 2, []],
+  );
+});
+
+test("the batches of the request extraction are read from the log: labelled, unlabelled, failed", () => {
+  const log = [
+    "[review] requirement extract batch 1/3 comments=7 sentences=38 labelled=7/7",
+    "[review] requirement extract batch 2/3 comments=6 sentences=40 labelled=4/6 unlabelled=R2.1,R2.4",
+    "[review] requirement extract batch 3/3 comments=2 sentences=9 failed: request timed out after 120 s",
+    "[review] requirement extract batch 9/9 comments=x",
+  ].join("\n");
+  assert.deepEqual(extractBatchesFromLog(log), [
+    {
+      batch: 1,
+      of: 3,
+      comments: 7,
+      sentences: 38,
+      ok: true,
+      error: null,
+      labelled: 7,
+      unlabelled: [],
+    },
+    {
+      batch: 2,
+      of: 3,
+      comments: 6,
+      sentences: 40,
+      ok: true,
+      error: null,
+      labelled: 4,
+      unlabelled: ["R2.1", "R2.4"],
+    },
+    {
+      batch: 3,
+      of: 3,
+      comments: 2,
+      sentences: 9,
+      ok: false,
+      error: "request timed out after 120 s",
+      labelled: null,
+      unlabelled: [],
+    },
+  ]);
+  assert.deepEqual(extractBatchesFromLog(""), []);
 });
 
 // The lines read above are the ones the daemon writes, and the codes are the
 // ones its tool results carry: a rename there fails here and does not turn
 // the counts of a replay into zeros.
-test("the log lines of the refusals and of the fallback are the ones the daemon writes", () => {
+test("the log lines read by the replay are the ones the daemon writes", () => {
   const tools = read("../daemon/review-tools.mjs");
   for (const line of [
     "`[review] number needs author ${turn.ref} count=${numbers.length}`",
     '`[review] blocked ${turn.ref} by=${open.join(",")}`',
     '`[review] refused ${turn.ref}: forbid rule(s) ${ids.join(",")} do not compile`',
+    '`[review] refused ${turn.ref}: forbid rule(s) ${bad.join(",")} do not compile`',
     "`[review] refused ${turn.ref}: task pane without ${TARGET_HASH_CAP}`",
+    '`[review] rewrite blocked ${turn.ref} by=${hits.join(",")}`',
+    "`[review] rewrite ${turn.ref} paragraph=${index} parts=${parts.length} applied=${applied}`",
+    '`${stopped ? ` stopped=${stopped.code ?? "refused"}` : ""}`',
   ])
     assert.ok(tools.includes(line), line);
-  assert.equal((tools.match(/`\[review\] refused /g) ?? []).length, 2);
-  for (const code of ["NumberNeedsAuthor", "ForbidRuleBroken", "TaskPaneOutdated"])
+  assert.equal((tools.match(/`\[review\] refused /g) ?? []).length, 3);
+  for (const code of [
+    "NumberNeedsAuthor",
+    "ForbidRuleBroken",
+    "TaskPaneOutdated",
+    "RewriteBlocked",
+    "RewriteStopped",
+    "RewriteNotExpressible",
+  ])
     assert.ok(tools.includes(`code: "${code}"`), code);
+  assert.ok(read("../taskpane/shared/tools-word.js").includes('code: "ParagraphNotPlain"'));
   assert.ok(
     read("../daemon/model-list.mjs").includes(
       "`[agent] model refusal fallback original=${msg.original_model} fallback=${msg.fallback_model} scope=",
     ),
   );
+  const daemon = read("../daemon/index.mjs");
+  for (const line of [
+    '`[agent] model stays on ${d.fallback}: ${d.original} declined ${d.count} turns in a row (category=${d.category ?? "-"})`',
+    "`[agent] model restored to ${modelArgFor(key)} after the fallback to ${live.fellBackTo}`",
+  ])
+    assert.ok(daemon.includes(line), line);
+  const split = read("../daemon/review-split.mjs");
+  for (const line of [
+    "`[review] requirement extract batch ${n + 1}/${batches.length} comments=${batch.length}`",
+    "` sentences=${batch.reduce((k, it) => k + it.sentences.length, 0)}`",
+    "`${head} failed: ${r.error}`",
+    "`${head} labelled=${batch.length - left.length}/${batch.length}`",
+    '`${left.length ? ` unlabelled=${left.map((it) => it.ref).join(",")}` : ""}`',
+  ])
+    assert.ok(split.includes(line), line);
   assert.match(read("../daemon/review-service.mjs"), /`\[review\] turn done \$\{turn\.ref\}/);
 });
 
-test("edits on another model: one turn after a fallback is not a failure, two in a row are", () => {
-  const on = { other_model: false };
-  const off = { other_model: true };
-  assert.equal(editsStayedOff([on, off, on, off, on]), false);
-  assert.equal(editsStayedOff([on, on, off]), false);
-  assert.equal(editsStayedOff([on, off, off, on]), true);
-  assert.equal(editsStayedOff([]), false);
+test("what fails the run: another model in the pane's line without a reason", () => {
+  assert.deepEqual(modelFailures(LINE), []);
+  assert.deepEqual(modelFailures(STAY), []);
+  assert.deepEqual(modelFailures(DRIFT), [
+    "edits: asked for Claude · Opus 9, ran on Claude · Sonnet 9",
+  ]);
+  // The last turn of the run was the one the model was replaced in: no turn
+  // came after it that could start on the chosen model again.
+  assert.deepEqual(modelFailures(DRIFT, { fallbacks: [{ original: "a", fallback: "b" }] }), []);
+  assert.deepEqual(modelFailures(DRIFT, { fallbacks: [] }).length, 1);
+  // Writing or a judgment on another model is not excused by that.
+  const writing =
+    "Edits: Claude · Opus 9   Writing: asked for Claude · Opus 9, ran on Claude · Sonnet 9   Judgments: Claude · Haiku 9";
+  assert.deepEqual(modelFailures(writing, { fallbacks: [{}] }), [
+    "writing: asked for Claude · Opus 9, ran on Claude · Sonnet 9",
+  ]);
+  assert.deepEqual(modelFailures(undefined), []);
+});
+
+// The chosen model declines the manuscript and the document stays on another.
+const STAY =
+  "Edits: Claude · Opus 5 (Opus 5.5 declines this manuscript: bio)   Writing: Claude · Opus 9   Judgments: Claude · Haiku 9";
+
+test("a document that stays on another model is read as that, not as another model without a reason", async () => {
+  const e = readModelLine(STAY).edits;
+  assert.deepEqual(e, {
+    text: "Claude · Opus 5 (Opus 5.5 declines this manuscript: bio)",
+    used: true,
+    other: false,
+    failed: false,
+    declined: { on: "Claude · Opus 5", original: "Opus 5.5", category: "bio" },
+  });
+  assert.deepEqual(readModelLine("Edits: A · B (C declines this manuscript)").edits.declined, {
+    on: "A · B",
+    original: "C",
+    category: null,
+  });
+  // The words are the ones the pane writes (model-line.js roleText).
+  const { modelLineText } = await import("../taskpane/shared/model-line.js");
+  const choice = { provider: "claude", model: "opus" };
+  const line = modelLineText(
+    {
+      turn: {
+        used: {
+          provider: "claude",
+          asked: "opus",
+          ran: "claude-sonnet-9",
+          declined: { stay: true, original: "opus", fallback: "sonnet", category: "bio" },
+        },
+        choice,
+      },
+      writing: { used: null, choice },
+      oneshot: { used: null, choice },
+    },
+    null,
+  );
+  const d = readModelLine(line).edits;
+  assert.equal(d.other, false);
+  assert.equal(d.declined?.category, "bio");
+  assert.deepEqual(modelFailures(line), []);
+  const t = turnResult("R1.1", {
+    step: { ok: true },
+    log: "[review] turn done R1.1",
+    seconds: 1,
+    line,
+  });
+  assert.deepEqual([t.other_model, t.declined?.category], [false, "bio"]);
 });
 
 const LINE =
@@ -229,9 +396,21 @@ const DRIFT =
 
 test("the pane's model line is read apart: used or not, another model, a failed request", () => {
   assert.deepEqual(readModelLine(LINE), {
-    edits: { text: "Claude · Opus 9", used: true, other: false, failed: false },
-    writing: { text: "Claude · Opus 9 (not used yet)", used: false, other: false, failed: false },
-    judgments: { text: "Claude · Haiku 9", used: true, other: false, failed: false },
+    edits: { text: "Claude · Opus 9", used: true, other: false, failed: false, declined: null },
+    writing: {
+      text: "Claude · Opus 9 (not used yet)",
+      used: false,
+      other: false,
+      failed: false,
+      declined: null,
+    },
+    judgments: {
+      text: "Claude · Haiku 9",
+      used: true,
+      other: false,
+      failed: false,
+      declined: null,
+    },
   });
   const d = readModelLine(DRIFT);
   assert.deepEqual(
@@ -355,6 +534,8 @@ test("changes.json: per comment its changes with heading and rationale, and the 
     addresses: "state the value",
     requirement_ids: ["q1"],
     state: "pending",
+    rewrite_id: null,
+    from_review: [],
   });
   assert.deepEqual([a.changes[1].heading, a.changes[1].state], [null, "unlocated"]);
   // Every request with its state: a change names it, a question holds it
@@ -394,6 +575,10 @@ test("changes.json: per comment its changes with heading and rationale, and the 
     ],
     [[], [], null, null, [], [], [], {}],
   );
+  assert.deepEqual(
+    [b.named_terms, b.same_term_at, b.rewrites, b.paragraph_findings, b.rewrite_turns],
+    [[], [], [], [], []],
+  );
   // What the guards refused in the turn of the comment.
   const guarded = changesReport(REVISION, HEADINGS, {
     "R1.1": { outcome: "ok", refused: { NumberNeedsAuthor: 2 } },
@@ -420,7 +605,20 @@ test("changes.json: a word a change took out that other paragraphs still hold", 
         reviewer: 1,
         text: "Do not call it convergent.",
         requirements: [],
-        changes: [change("R1.1-1", { find: "convergent", text: "shared", paragraph_index: 1 })],
+        // The comment and the reason of the change both name the word
+        // (residue.js claimTerms); a word only reworded away gives no row.
+        changes: [
+          change("R1.1-1", {
+            find: "convergent",
+            text: "shared",
+            paragraph_index: 1,
+            rationale: {
+              what: "reworded",
+              why: "convergent is not shown",
+              addresses: "the wording",
+            },
+          }),
+        ],
       },
     ],
   };
@@ -428,6 +626,95 @@ test("changes.json: a word a change took out that other paragraphs still hold", 
   assert.deepEqual(c.still_present, [
     { term: "convergent", change_ids: ["R1.1-1"], places: [0, 2] },
   ]);
+});
+
+// A comment that names a term, a paragraph written anew by a rewrite, a
+// change with a quantity from the review, and the paragraph check.
+const STACKED = {
+  snapshot: {
+    paragraphs: [
+      "Figure 2. A convergent pattern in the invented lines.",
+      "The effect was shared in every line of the invented set.",
+      "Nothing of it here.",
+    ],
+    ids: ["a1", "a2", "a3"],
+  },
+  consistency: {
+    checked_at: "2026-01-01T00:00:00Z",
+    model: "m1",
+    paragraphs: [{ index: 1, id: "a2", change_ids: ["R1.1-1", "R1.1-2", "R1.1-3"], many: true }],
+    findings: [
+      {
+        paragraph_index: 1,
+        paragraph_id: "a2",
+        kind: "claim_left",
+        detail: "the claim is made once more",
+        change_ids: ["R1.1-2"],
+      },
+      {
+        paragraph_index: 2,
+        paragraph_id: "a3",
+        kind: "open_question",
+        detail: "x",
+        change_ids: [],
+      },
+    ],
+    warnings: [],
+  },
+  comments: [
+    {
+      ref: "R1.1",
+      reviewer: 1,
+      text: 'The term "convergent" is not justified.',
+      requirements: [],
+      named_terms: [],
+      same_term_at: ["a1"],
+      changes: [
+        change("R1.1-1", { paragraph_index: 1 }),
+        change("R1.1-2", { paragraph_index: 1, rewrite_id: "R1.1-wabc", from_review: ["12 mM"] }),
+        change("R1.1-3", { paragraph_index: 1, rewrite_id: "R1.1-wabc" }),
+      ],
+    },
+  ],
+};
+const REWRITE_TURN = {
+  ref: "R1.1",
+  paragraph_index: 1,
+  outcome: "ok",
+  seconds: 20,
+  rewrites: [{ paragraph: 1, parts: 2, applied: 2, stopped: null }],
+  refused: { RewriteBlocked: 1 },
+};
+
+test("changes.json: named terms and where they stand, rewrites, words from the review, paragraph findings", () => {
+  const [c] = changesReport(STACKED, [], {}, [REWRITE_TURN, { ref: "R9.9" }]);
+  assert.deepEqual(c.named_terms, [
+    { term: "convergent", places: [{ index: 0, id: "a1", kind: "caption" }] },
+  ]);
+  assert.deepEqual(c.same_term_at, ["a1"]);
+  assert.deepEqual(c.rewrites, [
+    { rewrite_id: "R1.1-wabc", paragraph_index: 1, change_ids: ["R1.1-2", "R1.1-3"] },
+  ]);
+  assert.deepEqual(
+    c.changes.map((x) => [x.rewrite_id, x.from_review]),
+    [
+      [null, []],
+      ["R1.1-wabc", ["12 mM"]],
+      ["R1.1-wabc", []],
+    ],
+  );
+  // The findings on a change of this comment; the others are in
+  // paragraph_check.json only.
+  assert.deepEqual(c.paragraph_findings, [
+    {
+      kind: "claim_left",
+      paragraph_index: 1,
+      paragraph_id: "a2",
+      detail: "the claim is made once more",
+      change_ids: ["R1.1-2"],
+    },
+  ]);
+  assert.deepEqual(c.rewrite_turns, [REWRITE_TURN]);
 });
 
 test("responses.json: the answer and what it cites, for the comments that have one", () => {
@@ -460,19 +747,20 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
     refused: {},
     ...more,
   });
+  const last = turn({
+    outcome: "timeout",
+    reason: "x",
+    seconds: 600,
+    other_model: true,
+    fallbacks: [{ original: "o", fallback: "f" }],
+  });
   const report = changesReport(REVISION, HEADINGS, {
     "R1.1": turn({
       outcome: "ok",
       seconds: 41,
       refused: { NumberNeedsAuthor: 2, ForbidBlocked: 1 },
     }),
-    "R1.2": turn({
-      outcome: "timeout",
-      reason: "x",
-      seconds: 600,
-      other_model: true,
-      fallbacks: [{ original: "o", fallback: "f" }],
-    }),
+    "R1.2": last,
   });
   const text = summaryText(report, {
     seconds: 700,
@@ -480,7 +768,10 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
     models: { asked: { edits: "opus", writing: null, judgments: "haiku" }, line: LINE },
     source: "opened as it is",
     responses: 1,
-    paragraphCheck: { paragraphs: [{}, {}, {}], findings: [{}, {}] },
+    paragraphCheck: {
+      paragraphs: [{}, {}, {}],
+      findings: [{ kind: "conflict" }, { kind: "conflict" }],
+    },
   });
   assert.equal(
     text,
@@ -489,21 +780,26 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "turns run: 2",
       "changes: 2",
       "comments without a change: 1",
+      "request extraction: no batch in the log",
       "comments with extracted requests: 1; without: 1",
       "requests by state: changed 1, needs_author 1, outside_this_file 1, open 1",
       "requirements no change names: 3",
       "questions for the author: 1",
       "requests declared outside this file: 1",
       "terms still present elsewhere: 0",
+      "terms the reviewers named: 0 in 0 comments; still in the text: 0",
+      "changes with words from the review: 0",
+      "paragraphs written anew: 0 rewrites of 0 paragraphs, 0 parts recorded; stopped: 0",
+      "rewrite turns run: 0",
       "edits a guard refused: NumberNeedsAuthor 2, ForbidBlocked 1",
       "turns that did not end well: 1 (R1.2 timeout)",
       "models asked for: edits opus, writing (the pane's own), judgments haiku",
       `models that ran, as the pane says: ${LINE}`,
       "models that ran, from the daemon log: m1",
-      "model replaced after a refusal: 1 times in 1 turns (R1.2)",
+      "model replaced after a refusal: 1 times in 1 turns (R1.2); restored 0 times",
       "turns on another model than asked: 1 (R1.2)",
       "another model than asked: no",
-      "paragraph check: 2 findings in 3 paragraphs",
+      "paragraph check: 2 findings in 3 paragraphs (conflict 2)",
       "turn time: 641 s",
       "total time: 700 s",
       "copy saved with its tracked changes: yes",
@@ -514,28 +810,34 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
   );
   assert.ok(!text.includes("value"));
   assert.ok(!text.includes("unit"));
-  // One turn on another model is said and is no failure; two in a row are,
-  // and so is writing or a judgment on another model.
-  const both = changesReport(REVISION, HEADINGS, {
-    "R1.1": turn({ outcome: "ok", seconds: 1, other_model: true }),
-    "R1.2": turn({ outcome: "ok", seconds: 1, other_model: true }),
-  });
-  const models = { asked: { edits: "opus" }, line: LINE };
+  // Another model in the line at the end, without a reason, fails the run;
+  // not the edits when the last turn was the one the model was replaced in.
+  const models = (line) => ({ asked: { edits: "opus" }, line });
   assert.match(
-    summaryText(both, { seconds: 1, saved: true, models }),
-    /another model than asked: FAILED \(edits stayed on another model for more than one turn\)\n/,
+    summaryText(report, { seconds: 1, saved: true, models: models(DRIFT) }),
+    /another model than asked: FAILED \(edits: asked for Claude · Opus 9, ran on Claude · Sonnet 9\)\n/,
   );
-  const writing =
-    "Edits: Claude · Opus 9   Writing: asked for Claude · Opus 9, ran on Claude · Sonnet 9   Judgments: Claude · Haiku 9";
   assert.match(
-    summaryText(report, { seconds: 1, saved: true, models: { asked: {}, line: writing } }),
-    /another model than asked: FAILED \(writing: asked for Claude · Opus 9, ran on Claude · Sonnet 9\)\n/,
-  );
-  // The pane's line for the edits alone (the last turn ran on a fallback) is no failure.
-  assert.match(
-    summaryText(report, { seconds: 1, saved: true, models: { asked: {}, line: DRIFT } }),
+    summaryText(report, { seconds: 1, saved: true, models: models(DRIFT), lastTurn: last }),
     /another model than asked: no\n/,
   );
+  // A document that stays on another model: said, and no failure. The words
+  // come from the pane's line, or from the log when the line does not say it.
+  const stay = summaryText(report, { seconds: 1, saved: true, models: models(STAY), restored: 1 });
+  assert.match(
+    stay,
+    /; restored 1 times\nedits stayed on Claude · Opus 5 because Opus 5\.5 declines this manuscript \(bio\)\nturns on another model than asked: 1 \(R1\.2\)\nanother model than asked: no\n/,
+  );
+  assert.match(
+    summaryText(report, {
+      seconds: 1,
+      saved: true,
+      models: models(LINE),
+      stays: [{ fallback: "f1", original: "o1", count: 2, category: null }],
+    }),
+    /\nedits stayed on f1 because o1 declines this manuscript \(-\)\n/,
+  );
+  assert.doesNotMatch(text, /edits stayed on/);
   // A run in which no request was extracted does not claim that none is unmet.
   const none = changesReport(
     { comments: [{ ref: "R1.1", reviewer: 1, text: "x", requirements: [], changes: [] }] },
@@ -554,6 +856,69 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
   assert.match(bare, /models that ran, as the pane says: -\n/);
 });
 
+test("summary.txt: the batches of the extraction, named terms, rewrites and the kinds of the paragraph check", () => {
+  const report = changesReport(
+    STACKED,
+    [],
+    { "R1.1": { outcome: "ok", seconds: 30, rewrites: [], refused: { NumberNeedsAuthor: 1 } } },
+    [
+      REWRITE_TURN,
+      {
+        ref: "R1.1",
+        paragraph_index: 4,
+        outcome: "timeout",
+        seconds: 5,
+        rewrites: [{ paragraph: 4, parts: 3, applied: 1, stopped: "StaleTarget" }],
+        refused: { RewriteStopped: 1 },
+      },
+    ],
+  );
+  const text = summaryText(report, {
+    seconds: 60,
+    saved: true,
+    models: { asked: { edits: "opus" }, line: LINE },
+    paragraphCheck: STACKED.consistency,
+    extraction: [
+      {
+        batch: 1,
+        of: 2,
+        comments: 7,
+        sentences: 38,
+        ok: true,
+        error: null,
+        labelled: 6,
+        unlabelled: ["R2.1"],
+      },
+      {
+        batch: 2,
+        of: 2,
+        comments: 2,
+        sentences: 9,
+        ok: false,
+        error: "timed out",
+        labelled: null,
+        unlabelled: [],
+      },
+    ],
+  });
+  for (const line of [
+    "request extraction: 2 batches, ok 1, failed 1",
+    "  batch 1/2: 7 comments, 38 sentences, labelled 6/7, unlabelled R2.1",
+    "  batch 2/2: 2 comments, 9 sentences, FAILED: timed out",
+    "terms the reviewers named: 1 in 1 comments; still in the text: 1",
+    "changes with words from the review: 1",
+    "paragraphs written anew: 1 rewrites of 1 paragraphs, 2 parts recorded; stopped: 1",
+    "rewrite turns run: 2",
+    "edits a guard refused: NumberNeedsAuthor 1, RewriteBlocked 1, RewriteStopped 1",
+    "turns that did not end well: 1 (R1.1 rewrite p4 timeout)",
+    "paragraph check: 2 findings in 1 paragraphs (claim_left 1, open_question 1)",
+    "turn time: 55 s",
+  ])
+    assert.ok(text.includes(`\n${line}\n`), line);
+  // No term, no word of the review and no finding text is in it.
+  for (const word of ["convergent", "12 mM", "once more"]) assert.ok(!text.includes(word), word);
+});
+
 test("replay.mjs asks only for pane steps and Windows scripts that exist, and names no path of its own", () => {
   const runner = read("../scripts/e2e/replay.mjs");
   const base = read("../scripts/e2e/pane-driver.cjs");
@@ -567,6 +932,19 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // The paragraph check runs after the last turn and its refresh, and its
   // result is written out.
   assert.ok(steps.includes("check-paragraphs"));
+  // --rewrite-stacked: off unless asked for; the rewrite turns come after
+  // the paragraph check, each button once, and a refresh follows them.
+  assert.match(runner, /"rewrite-stacked": \{ type: "boolean", default: false \}/);
+  const stacked = runner.indexOf('if (opt["rewrite-stacked"]) {');
+  assert.ok(runner.indexOf('pane("check-paragraphs"') < stacked);
+  assert.ok(stacked < runner.indexOf('pane("rewrite-paragraph", { nth }'));
+  assert.ok(runner.indexOf('pane("rewrite-paragraph"') < runner.lastIndexOf('pane("refresh")'));
+  assert.equal((runner.match(/pane\("rewrite-paragraph"/g) ?? []).length, 1);
+  // The exit code follows the pane's line (modelFailures), nothing else.
+  assert.match(
+    runner,
+    /const otherModel = \(\) => modelFailures\(modelsLine, lastTurn\)\.length > 0;/,
+  );
   assert.ok(runner.lastIndexOf('pane("propose"') < runner.indexOf('pane("refresh")'));
   assert.ok(runner.indexOf('pane("refresh")') < runner.indexOf('pane("check-paragraphs"'));
   assert.match(runner, /"paragraph_check\.json"/);
