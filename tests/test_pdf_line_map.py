@@ -6,6 +6,7 @@ Run: python3 -m unittest tests/test_pdf_line_map.py
 """
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -111,6 +112,89 @@ class PdfLineMapTest(unittest.TestCase):
         miss = subprocess.run([sys.executable, str(SCRIPT), self.pdf, "--quote", "not in the pdf"],
                               capture_output=True, text=True)
         self.assertEqual(miss.returncode, 1)
+
+
+# The same phrase in two paragraphs: line 12, and lines 14-15 across a wrap.
+DUP = [
+    (12, "Here the spread was small in the first run."),
+    (13, "A second paragraph begins here and"),
+    (14, "says the spread was small in the first"),
+    (15, "run as well."),
+]
+SECOND_PARAGRAPH = "A second paragraph begins here and says the spread was small in the first run as well."
+
+
+class BatchTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.pdf = str(Path(cls.tmp.name) / "m.pdf")
+        make_pdf(cls.pdf, [PAGE1, PAGE2, DUP])
+        cls.lines = plm.extract_lines(cls.pdf)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def batch(self, spec_text, pdf=None):
+        spec = Path(self.tmp.name) / "q.json"
+        spec.write_text(spec_text, encoding="utf-8")
+        r = subprocess.run([sys.executable, str(SCRIPT), pdf or self.pdf, "--quotes-json", str(spec)],
+                           capture_output=True, text=True)
+        return r.returncode, json.loads(r.stdout.strip().splitlines()[-1])
+
+    def test_anchor_is_the_start_line_of_the_phrase(self):
+        m = plm.find_quote(self.lines, "The incubation temperature was held at 30 degrees.")
+        self.assertEqual((m["start"]["line_no"], m["end"]["line_no"], m["match_count"]), (8, 9, 1))
+
+    def test_within_narrows_a_repeated_phrase_to_its_paragraph(self):
+        q = "the spread was small in the first run"
+        whole = plm.find_quote(self.lines, q)
+        self.assertEqual((whole["match_count"], whole["start"]["line_no"]), (2, 12))
+        m = plm.find_quote(self.lines, q, within=SECOND_PARAGRAPH)
+        self.assertEqual((m["start"]["line_no"], m["end"]["line_no"], m["match_count"]), (14, 15, 1))
+        self.assertEqual(m["match_count_document"], 2)
+
+    def test_within_that_is_not_in_the_pdf_once_narrows_nothing(self):
+        q = "the spread was small in the first run"
+        for within in ("This paragraph is not in the PDF.", "the spread was small"):
+            m = plm.find_quote(self.lines, q, within=within)
+            self.assertEqual((m["match_count"], m["start"]["line_no"]), (2, 12), within)
+
+    def test_batch_cli(self):
+        code, out = self.batch(json.dumps([
+            {"id": "a", "quote": "Growth reached a plateau after four days."},
+            {"id": "b", "quote": "not in the document"},
+            {"id": "c", "quote": "the spread was small in the first run", "within": SECOND_PARAGRAPH},
+        ]))
+        self.assertEqual(code, 0)
+        self.assertEqual([r["id"] for r in out["results"]], ["a", "b", "c"])
+        self.assertEqual(out["results"][0]["match"]["start"]["line_no"], 10)
+        self.assertIsNone(out["results"][1]["match"])
+        self.assertEqual(out["results"][2]["match"]["range"], "14-15")
+        self.assertEqual(out["lines_indexed"], 15)
+        self.assertEqual((out["first_line"], out["last_line"], out["monotonic"]), (1, 15, True))
+
+    def test_line_numbers_that_restart_are_reported(self):
+        restart = str(Path(self.tmp.name) / "restart.pdf")
+        make_pdf(restart, [PAGE1, [(1, "Numbering starts again on this page.")]])
+        code, out = self.batch("[]", pdf=restart)
+        self.assertEqual((code, out["monotonic"], out["results"]), (0, False, []))
+
+    def test_pdf_without_margin_numbers_exits_2(self):
+        plain = str(Path(self.tmp.name) / "plain.pdf")
+        doc = fitz.open()
+        doc.new_page().insert_text((72, 100), "No line numbers here.")
+        doc.save(plain)
+        doc.close()
+        r = subprocess.run([sys.executable, str(SCRIPT), plain, "--quotes-json", "/dev/null"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(json.loads(r.stdout), {"error": "no_line_numbers"})
+
+    def test_quotes_file_that_is_not_a_list_exits_1(self):
+        code, out = self.batch('{"id": "a"}')
+        self.assertEqual((code, out["error"]), (1, "bad_quotes_file"))
 
 
 if __name__ == "__main__":
