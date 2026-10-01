@@ -4,6 +4,7 @@ import {
   modelMenuOptions,
   isStoredModelValid,
   effectiveModelNote,
+  modelDisplayName,
 } from "../taskpane/shared/model-menu.js";
 
 const M = [
@@ -43,4 +44,21 @@ test("set_model answer: no note when the choice is kept, one line when it was re
   );
   assert.equal(effectiveModelNote("", "sonnet"), null); // nothing was asked for
   assert.equal(effectiveModelNote("fable", undefined), null); // an answer without a model
+});
+
+// F3: the name next to the connection status. No family list in the code.
+test("display name: the SDK name when listed, else the family in title case", () => {
+  const L = [
+    { value: "opus", displayName: "Opus 5.5", resolvedModel: "claude-opus-5-5" },
+    { value: "claude-fable-5-1", displayName: "Fable 5.1", resolvedModel: "claude-fable-5-1" },
+  ];
+  assert.equal(modelDisplayName("opus", L), "Opus 5.5");
+  assert.equal(modelDisplayName("claude-opus-5-5", L), "Opus 5.5"); // by resolved id
+  assert.equal(modelDisplayName("claude-opus-5-5[1m]", L), "Opus 5.5"); // context suffix
+  assert.equal(modelDisplayName("claude-fable-5-1", L), "Fable 5.1");
+  assert.equal(modelDisplayName("claude-fable-5-1", []), "Fable");
+  assert.equal(modelDisplayName("claude-haiku-4-5-20251001", L), "Haiku");
+  assert.equal(modelDisplayName("sonnet", null), "Sonnet");
+  assert.equal(modelDisplayName("claude-zephyr-7", L), "Zephyr"); // a family not known today
+  assert.equal(modelDisplayName("", L), "");
 });

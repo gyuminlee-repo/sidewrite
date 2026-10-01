@@ -65,7 +65,12 @@ import {
   toolExcelSetRowHeight,
 } from "./tools-excel.js";
 import { isInOrUnder, docDirFromActiveUrl } from "./paths.js";
-import { modelMenuOptions, isStoredModelValid, effectiveModelNote } from "./model-menu.js";
+import {
+  modelMenuOptions,
+  isStoredModelValid,
+  effectiveModelNote,
+  modelDisplayName,
+} from "./model-menu.js";
 
 // Daemon endpoints. The HTTP server that loaded this taskpane is on
 // HTTP_PORT; the WebSocket bridge is on WS_PORT (one less by daemon convention).
@@ -151,11 +156,7 @@ let pendingModelShort = null; // target short name while a switch restarts
 let accountModels = null; // models_list of the daemon, once it answered
 
 function shortModelName(idOrAlias) {
-  const s = String(idOrAlias || "");
-  if (/opus/i.test(s)) return "Opus";
-  if (/sonnet/i.test(s)) return "Sonnet";
-  if (/haiku/i.test(s)) return "Haiku";
-  return s.replace(/^claude-/, "").split(/[-[]/)[0] || s;
+  return modelDisplayName(idOrAlias, accountModels);
 }
 
 function renderConnection() {
@@ -563,6 +564,7 @@ async function loadModelMenu() {
   }
   accountModels = r.models;
   fillModelMenu();
+  renderConnection(); // the indicator can now use the account's display names
   $m.title =
     r.source === "sdk"
       ? "Models your Claude account can use"

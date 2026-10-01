@@ -30,3 +30,18 @@ export function effectiveModelNote(requested, effective) {
   if (!requested || !effective || requested === effective) return null;
   return `Model "${requested}" is not available for this account. Using ${effective}.`;
 }
+
+// The short name shown next to the connection status. models: the daemon's
+// models_list, or null before it answered. The SDK's display name when the
+// alias or id is listed (a "[1m]" context suffix is ignored); else the
+// family of a claude-<family>-<version> id, or the alias, in title case.
+// No list of families is kept here: a new family needs no change.
+export function modelDisplayName(idOrAlias, models) {
+  const s = String(idOrAlias || "").trim();
+  if (!s) return "";
+  const id = s.replace(/\[[^\]]*\]$/, "");
+  const hit = (models ?? []).find((m) => m.value === id || m.resolvedModel === id);
+  if (hit?.displayName) return hit.displayName;
+  const family = id.replace(/^claude-/i, "").split("-")[0] || id;
+  return family.charAt(0).toUpperCase() + family.slice(1).toLowerCase();
+}
