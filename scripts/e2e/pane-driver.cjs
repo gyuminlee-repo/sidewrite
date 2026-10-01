@@ -48,6 +48,7 @@ const text = (page, sel) => page.$eval(sel, (n) => n.textContent.trim()).catch((
 async function clearMessage(page) {
   await page.evaluate(() => {
     const m = document.getElementById("review-message");
+    if (!m) return;
     m.textContent = "";
     m.hidden = true;
   });
@@ -62,7 +63,7 @@ async function waitMessage(page, timeout = 120_000, until = null) {
   await page.waitForFunction(
     (pattern) => {
       const m = document.getElementById("review-message");
-      const t = m.textContent.trim();
+      const t = m?.textContent.trim() ?? "";
       if (t === "") return false;
       return !pattern || m.classList.contains("form-error") || new RegExp(pattern).test(t);
     },
@@ -80,7 +81,8 @@ async function view(page) {
     const q = (s, root = document) => [...root.querySelectorAll(s)];
     return {
       message: t(document.getElementById("review-message")),
-      message_error: document.getElementById("review-message").classList.contains("form-error"),
+      message_error:
+        document.getElementById("review-message")?.classList.contains("form-error") ?? false,
       file: t(document.getElementById("review-file")),
       comments: q(".review-comment").map((c) => ({
         ref: t(c.querySelector(".review-comment-head strong")),
@@ -178,7 +180,7 @@ function card(page, ref) {
 const turnBusy = (page) =>
   page.evaluate(() => {
     const p = document.getElementById("review-progress");
-    return document.getElementById("input").disabled || !p.hidden;
+    return !!document.getElementById("input")?.disabled || p?.hidden === false;
   });
 
 // Providers section of the Setup tab (ids from taskpane/word/index.html,
@@ -189,7 +191,7 @@ async function openProviders(page) {
   await page.waitForFunction(
     () =>
       document.querySelectorAll("#providers-list .provider-row").length > 0 ||
-      document.getElementById("providers-message").textContent.trim() !== "",
+      (document.getElementById("providers-message")?.textContent.trim() ?? "") !== "",
     null,
     { timeout: 120_000, polling: 200 },
   );
@@ -205,7 +207,7 @@ function providersView(page) {
         enabled: !o.disabled,
         note: o.title,
       }));
-    const raw = document.getElementById("providers-root").getAttribute("data-selection");
+    const raw = document.getElementById("providers-root")?.getAttribute("data-selection");
     return {
       menus: { turn: menu("provider-turn"), oneshot: menu("provider-oneshot") },
       models: { turn: menu("provider-turn-model"), oneshot: menu("provider-oneshot-model") },
@@ -240,7 +242,7 @@ const steps = {
       { timeout: 60_000, polling: 500 },
     );
     await page.waitForFunction(
-      () => document.getElementById("review-file").textContent.startsWith("Review file:"),
+      () => document.getElementById("review-file")?.textContent.startsWith("Review file:"),
       null,
       { timeout: 60_000 },
     );
@@ -316,7 +318,7 @@ const steps = {
       await page.waitForFunction(
         (n) =>
           document.querySelectorAll("#review-ledger .review-ledger-item").length === n + 1 ||
-          document.getElementById("review-message").textContent.trim() !== "",
+          (document.getElementById("review-message")?.textContent.trim() ?? "") !== "",
         before,
         { timeout: 60_000 },
       );
@@ -330,8 +332,8 @@ const steps = {
     // Done when no ledger item waits for its first check, or an error shows.
     await page.waitForFunction(
       () =>
-        !document.getElementById("review-decisions").textContent.includes("not checked yet") ||
-        document.getElementById("review-message").textContent.trim() !== "",
+        document.getElementById("review-decisions")?.textContent.includes("not checked yet") ===
+          false || (document.getElementById("review-message")?.textContent.trim() ?? "") !== "",
       null,
       { timeout: 10 * 60_000, polling: 500 },
     );
@@ -341,9 +343,13 @@ const steps = {
 
   async preview(page, a) {
     await card(page, a.ref).locator("button", { hasText: "Preview prompt" }).click();
-    await page.waitForFunction(() => !document.getElementById("review-preview").hidden, null, {
-      timeout: 60_000,
-    });
+    await page.waitForFunction(
+      () => document.getElementById("review-preview")?.hidden === false,
+      null,
+      {
+        timeout: 60_000,
+      },
+    );
     return { prompt: await text(page, "#review-preview") };
   },
 
@@ -352,7 +358,7 @@ const steps = {
     if (await turnBusy(page)) throw new Error("a turn is already running");
     const btn = card(page, a.ref).locator("button", { hasText: "Propose changes" });
     await btn.click();
-    await page.waitForFunction(() => document.getElementById("input").disabled, null, {
+    await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
       timeout: 30_000,
     });
     const samples = [];
@@ -398,8 +404,10 @@ const steps = {
     await page.click(btn);
     await page.waitForFunction(
       () =>
-        document.getElementById("review-delete-all").textContent.startsWith("Back up and delete") ||
-        document.getElementById("review-message").textContent.trim() !== "",
+        document
+          .getElementById("review-delete-all")
+          ?.textContent.startsWith("Back up and delete") ||
+        (document.getElementById("review-message")?.textContent.trim() ?? "") !== "",
       null,
       { timeout: 60_000 },
     );
@@ -418,7 +426,7 @@ const steps = {
     await page.waitForFunction(
       () =>
         /^(Models your Claude account|Model list unavailable)/.test(
-          document.getElementById("composer-model").title,
+          document.getElementById("composer-model")?.title ?? "",
         ),
       null,
       { timeout: 90_000, polling: 200 },
@@ -435,7 +443,7 @@ const steps = {
   async "propose-stop"(page, a) {
     if (await turnBusy(page)) throw new Error("a turn is already running");
     await card(page, a.ref).locator("button", { hasText: "Propose changes" }).click();
-    await page.waitForFunction(() => document.getElementById("input").disabled, null, {
+    await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
       timeout: 30_000,
     });
     const started = Date.now();
@@ -486,15 +494,18 @@ const steps = {
     const settled = (want) =>
       page.waitForFunction(
         ([role, w]) => {
-          const m = document.getElementById("providers-message").textContent.trim();
-          const raw = document.getElementById("providers-root").getAttribute("data-selection");
+          const m = document.getElementById("providers-message")?.textContent.trim() ?? "";
+          const raw = document.getElementById("providers-root")?.getAttribute("data-selection");
           const s = raw ? JSON.parse(raw)[role] : null;
           return m !== "" || (s && s.id === w.id && (w.model == null || s.model === w.model));
         },
         [a.role, want],
         { timeout: 90_000, polling: 200 },
       );
-    await page.evaluate(() => (document.getElementById("providers-message").textContent = ""));
+    await page.evaluate(() => {
+      const m = document.getElementById("providers-message");
+      if (m) m.textContent = "";
+    });
     await page.selectOption(menu, a.id);
     await settled({ id: a.id });
     if (a.model && !(await text(page, "#providers-message"))) {
@@ -569,12 +580,12 @@ const steps = {
     const started = Date.now();
     const limit = TURN_TIMEOUT * Math.max(1, cards);
     const running = () =>
-      page.evaluate(() => !document.getElementById("review-propose-stop").hidden);
+      page.evaluate(() => document.getElementById("review-propose-stop")?.hidden === false);
     // The run starts (Stop shows) or ends at once with a message (nothing open).
     await page.waitForFunction(
       () =>
-        !document.getElementById("review-propose-stop").hidden ||
-        document.getElementById("review-message").textContent.trim() !== "",
+        document.getElementById("review-propose-stop")?.hidden === false ||
+        (document.getElementById("review-message")?.textContent.trim() ?? "") !== "",
       null,
       { timeout: 30_000, polling: 200 },
     );
@@ -589,7 +600,7 @@ const steps = {
     await page.waitForFunction(
       () =>
         /proposed\.$|^No open comment/.test(
-          document.getElementById("review-message").textContent.trim(),
+          document.getElementById("review-message")?.textContent.trim() ?? "",
         ),
       null,
       { timeout: 120_000, polling: 200 },
@@ -613,7 +624,7 @@ const steps = {
     const changed = await page
       .waitForFunction(
         (b) => {
-          const t = document.getElementById("review-auto").textContent.trim();
+          const t = document.getElementById("review-auto")?.textContent.trim() ?? "";
           return t !== "" && t !== b;
         },
         before,
@@ -631,7 +642,7 @@ const steps = {
   // from the paragraph OOXML.
   async snapshot(page) {
     await page.waitForFunction(
-      () => document.getElementById("review-file").textContent.startsWith("Review file:"),
+      () => document.getElementById("review-file")?.textContent.startsWith("Review file:"),
       null,
       { timeout: 60_000 },
     );

@@ -98,7 +98,8 @@ async function world() {
   };
   const events = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc }),
+    // A task pane of this build: it compares the paragraph before an edit.
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
     callTool: (name, args) => callTaskpaneTool(name, args),
     pushTurn: () => {},
     getModel: () => "model-under-test",
@@ -273,7 +274,9 @@ test("the same edit script leaves the same record through the Claude path and th
     assert.deepEqual(ra.override, { ok: true, applied: true });
     assert.equal(ra.blocked.length, 0);
     assert.ok(ra.changes[1].lost_facts.length >= 1, "L1 lost facts are recorded on the change");
-    assert.deepEqual(ra.counters, { ledger_seq: 1, requirement_seq: 1, blocked_seq: 1 });
+    // blocked_seq: the two edits sent to Word each spent an attempt id (they
+    // are on file before the call), and the blocked edit one.
+    assert.deepEqual(ra.counters, { ledger_seq: 1, requirement_seq: 1, blocked_seq: 3 });
     assert.ok(ra.decisions.length >= 3);
     assert.ok(ra.decisions.every((d) => d.kind === "requirement_link"));
     assert.deepEqual(

@@ -23,3 +23,14 @@ test("review-pane.js ids all exist in the Review section of word/index.html", as
   assert.deepEqual(missing, []);
   console.log(`checked ${wanted.size} ids`);
 });
+
+// An LLM check judges each paragraph on its own (daemon/ledger-check.mjs):
+// the ledger form says so, next to where the check type is chosen.
+test("the ledger form says that an LLM check reads paragraph by paragraph", async () => {
+  const html = await read("../taskpane/word/index.html");
+  const start = html.indexOf('id="ledger-check-type"');
+  const end = html.indexOf('id="review-ledger"');
+  assert.ok(start !== -1 && end > start);
+  const text = html.slice(start, end).replace(/\s+/g, " ");
+  assert.match(text, /An LLM check reads the manuscript one paragraph at a time/);
+});

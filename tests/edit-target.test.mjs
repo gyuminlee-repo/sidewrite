@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { editTarget } from "../daemon/review-tools.mjs";
+import { paragraphHash } from "../daemon/doc-diff.mjs";
 
 // A fake Word document of plain paragraphs. mode "uniqueLocalId": every
 // paragraph has one (U0, U1, ...); mode "index": none, so the task pane
@@ -29,6 +30,7 @@ function fakeDoc(texts, mode) {
     insertText: () => range(p),
     insertComment: () => ({ id: "C1", load() {} }),
     compareLocationWith: (other) => ({ value: other.owner === p ? "Equal" : "Before" }),
+    getReviewedText: () => ({ value: p.text }),
   });
   const paras = texts.map((text, k) => {
     const p = {
@@ -43,6 +45,7 @@ function fakeDoc(texts, mode) {
   });
   const document = {
     load() {},
+    getSelection: () => ({ select() {} }),
     changeTrackingMode: "Off",
     body: {
       paragraphs: coll(paras),
@@ -53,6 +56,7 @@ function fakeDoc(texts, mode) {
     run: async (fn) => fn({ document, sync: async () => {} }),
     InsertLocation: { replace: "Replace", after: "After" },
     ChangeTrackingMode: { trackAll: "TrackAll" },
+    ChangeTrackingVersion: { current: "Current" },
   };
 }
 
@@ -117,14 +121,18 @@ for (const [label, TEXTS, CASES] of [
         const hint = typeof h === "number" ? (mode === "uniqueLocalId" ? `U${h}` : `p${h}`) : h;
         const expected = want !== null && typeof want === "object" ? want[mode] : want;
         fakeDoc(TEXTS, mode);
+        const t = editTarget(TEXTS, ids, find, hint);
         const r = await toolTrackedEdit({
           find,
           replace: "x",
           ...(hint ? { paragraph_hint: hint } : {}),
           comment_text: "[R1.1] w / y / a",
+          // As applyTrackedEdit sends it: the hash of the paragraph the
+          // daemon picked, none when it could pick none. Word then edits
+          // only when it picked a paragraph with that text.
+          ...(t.index === null ? {} : { expected_before_hash: paragraphHash(TEXTS[t.index]) }),
         });
         const word = r.ok ? r.paragraph_index : r.code;
-        const t = editTarget(TEXTS, ids, find, hint);
         const daemon = t.code ?? t.index;
         const name = `${find} / ${hint}`;
         assert.equal(word, expected, `Word: ${name}`);

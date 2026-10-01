@@ -1682,6 +1682,73 @@ test("Preview prompt and Propose changes send the same paragraphs under the sele
   assert.equal(selectionReads, 2);
 });
 
+// H2: a tracked edit the task pane refused because its paragraph changed
+// (StaleTarget). The daemon has the document only from a status refresh, so
+// it asks for one. H1: an attempt that is still with Word is not listed.
+test("stale_target refreshes the status with the document as it is now; a running attempt is not shown", async () => {
+  const row = (id, state, blocked_by) => ({ id, args: { replace: "x" }, blocked_by, state });
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [],
+        blocked: [row("R1.1-b1", "applying", []), row("R1.1-b2", "outcome_unknown", [])],
+      },
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const now = { paragraphs: [{ index: 0, text: "A novel material." }], comments: [] };
+  const t = await setup({
+    revision,
+    respond: {
+      review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+    },
+    word: { collectReviewSnapshot: async () => now },
+  });
+  const rows = () =>
+    findAll(t.$("review-comments"), (n) => n.attributes.class === "review-blocked").length;
+  assert.equal(rows(), 1, "the unanswered edit only");
+  assert.equal(t.requests.filter((r) => r.type === "review_refresh").length, 0);
+  t.pane.onEvent({ type: "review_event", event: "stale_target", ref: "R1.1" });
+  await settle();
+  assert.deepEqual(
+    t.requests.filter((r) => r.type === "review_refresh").map((r) => r.payload),
+    [{ snapshot: now }],
+  );
+  // H1: Word applied an edit and the daemon could not save its record.
+  const loads = () => t.requests.filter((r) => r.type === "review_load").length;
+  const before = loads();
+  t.pane.onEvent({
+    type: "review_event",
+    event: "record_failed",
+    ref: "R1.1",
+    attempt_id: "R1.1-b2",
+  });
+  await settle();
+  const m = t.$("review-message");
+  assert.equal(
+    m.textContent,
+    "R1.1: the edit was applied in Word but saving its record failed; press Refresh status to match them again.",
+  );
+  assert.equal(m.hidden, false);
+  assert.equal(loads(), before + 1, "the list is loaded again");
+  // The load found the attempt gone: the daemon saved the change with it.
+  t.pane.onEvent({
+    type: "review_event",
+    event: "record_failed",
+    ref: "R1.1",
+    attempt_id: "R1.1-b3",
+  });
+  await settle();
+  assert.equal(m.textContent, "R1.1: the edit was applied in Word; its record is saved now.");
+  assert.equal(loads(), before + 2);
+});
+
 // Codex review of stage 2.5: right after a reconnect the daemon has not yet
 // confirmed the provider the pane stored. A Review action clicked then is
 // held, with a line that says why, and sent once the daemon answered.
@@ -1784,4 +1851,132 @@ test("Done with a confirmed ledger rule in violation asks once more; with nothin
   const clean = await setup({ revision: { comments, ledger: [] } });
   await chooseDone(clean);
   assert.equal(statusSent(clean).length, 1);
+});
+
+// The s25 acceptance run: a change Word applied without its rationale
+// comment ended a Propose all run as "the changes on record and the tool
+// comments in Word do not match (missing R1.1-1 ...)". It still ends the
+// run (every change needs its rationale comment), and says what happened.
+test("turn_done after a change applied without its rationale comment: the run ends and the line says so", async () => {
+  const change = {
+    id: "R1.1-1",
+    kind: "replace",
+    state: "pending",
+    find: "a",
+    text: "b",
+    word_comment_id: null,
+    comment_missing: "CommentInsertFailed",
+    rationale: { what: "w", why: "y", addresses: "a" },
+  };
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [change],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 1, unlocated: 0 };
+  const t = await setup({
+    revision,
+    respond: { review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }) },
+    word: { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) },
+  });
+  t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.1", ok: true });
+  await settle();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(
+    t.$("review-message").textContent,
+    "The turn for R1.1 ran and its record is saved, but R1.1-1 was applied in Word and its rationale comment could not be added; press Add rationale comment on that change, then Refresh status.",
+  );
+});
+
+test("Add rationale comment: the text comes from the daemon, Word gets the comment, the daemon gets its id", async () => {
+  const change = {
+    id: "R1.1-1",
+    kind: "replace",
+    state: "pending",
+    find: "degrees",
+    text: "degrees Celsius",
+    paragraph_id: "U9",
+    paragraph_index: 9,
+    word_comment_id: null,
+    comment_missing: "CommentInsertFailed",
+    rationale: { what: "w", why: "y", addresses: "a" },
+  };
+  const withComment = { ...change, word_comment_id: "3" };
+  const rev = (changes) => ({
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes,
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  });
+  const wordCalls = [];
+  let wordAnswer = { ok: true, word_comment_id: "77", existed: false };
+  const t = await setup({
+    revision: rev([change, withComment]),
+    respond: {
+      review_comment_text: (p) => ({
+        ok: true,
+        change_id: p.change_id,
+        comment_text: "[R1.1] w / y / a",
+        // Comment ids the daemon has on other changes: handed on to Word.
+        known_comment_ids: ["31"],
+        change: {
+          kind: "replace",
+          find: "degrees",
+          text: "degrees Celsius",
+          paragraph_id: "U9",
+          paragraph_index: 9,
+        },
+      }),
+      review_comment_set: () => ({
+        ok: true,
+        revision: rev([{ ...change, word_comment_id: "77", comment_missing: null }, withComment]),
+      }),
+    },
+    word: { addChangeComment: async (a) => (wordCalls.push(a), wordAnswer) },
+  });
+  const buttons = () =>
+    findAll(t.$("review-comments"), (n) => n.textContent === "Add rationale comment");
+  assert.equal(buttons().length, 1, "only on the change without a comment");
+  const sent = (type) => t.requests.filter((r) => r.type === type).map((r) => r.payload);
+
+  // Word has no place for it: said, and nothing is recorded.
+  wordAnswer = { ok: false, code: "CommentAnchorMissing", message: "no place for the comment" };
+  await buttons()[0].click();
+  assert.match(t.$("review-message").textContent, /no place for the comment/);
+  assert.deepEqual(sent("review_comment_set"), []);
+
+  wordAnswer = { ok: true, word_comment_id: "77", existed: false };
+  await buttons()[0].click();
+  assert.deepEqual(sent("review_comment_text").at(-1), { ref: "R1.1", change_id: "R1.1-1" });
+  assert.deepEqual(wordCalls.at(-1), {
+    kind: "replace",
+    find: "degrees",
+    text: "degrees Celsius",
+    paragraph_id: "U9",
+    paragraph_index: 9,
+    comment_text: "[R1.1] w / y / a",
+    known_comment_ids: ["31"],
+  });
+  assert.deepEqual(sent("review_comment_set"), [
+    { ref: "R1.1", change_id: "R1.1-1", word_comment_id: "77" },
+  ]);
+  assert.equal(t.$("review-message").textContent, "R1.1-1: rationale comment added.");
+  assert.equal(buttons().length, 0, "the change has its comment now");
 });
