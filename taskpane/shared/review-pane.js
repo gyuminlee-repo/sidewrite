@@ -37,6 +37,7 @@ import {
   queueRefs,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
+import { stillPresentLines } from "./residue.js";
 import { createAutoRefresh } from "./auto-refresh.js";
 
 const UNKNOWN_HINT =
@@ -567,6 +568,10 @@ export function initReviewPane({
         }
       }
       for (const ch of c.changes) card.append(changeRow(ch));
+      // Terms the changes took out that other paragraphs still hold (residue.js).
+      for (const line of stillPresentLines(c, state.revision?.snapshot)) {
+        card.append(el("div", { class: "review-residue", text: line }));
+      }
       for (const b of c.blocked) if (!inFlightEdit(b)) card.append(blockedRow(c.ref, b));
       box.append(card);
     }
