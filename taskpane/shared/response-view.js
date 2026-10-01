@@ -51,7 +51,14 @@ function renderFrame(frame, { section = "", lines = null } = {}) {
 export function citationText(cit, letter) {
   if (cit.problem) return { line: `Not located: ${cit.problem}`, quote: null };
   const removed = cit.kind === "removed";
-  const frame = removed ? letter.removed_line : letter.location_line;
+  // No section known: the section-less frame (daemon locationLine).
+  const frame = cit.section
+    ? removed
+      ? letter.removed_line
+      : letter.location_line
+    : removed
+      ? (letter.removed_line_no_section ?? "[Removed]")
+      : (letter.location_line_no_section ?? "[Revised, {lines}]");
   return {
     line: renderFrame(frame, { section: cit.section, lines: fmtLines(cit.lines, letter) }),
     quote: removed ? null : cit.quote,

@@ -71,6 +71,7 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
     (i) => inScope(i, "response") && i.check?.type === "regex",
   );
   const positionRes = [lineWordRe(L.line_one), lineWordRe(L.line_range)].filter(Boolean);
+  let noSection = 0; // citations (of comments that are not declined) without a section name
   let opening = null;
   let openingError = null;
   if (L.opening_regex) {
@@ -160,7 +161,10 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
         add("quote_exact", "fail", c.ref, cit.problem);
         continue;
       }
-      if (cit.section == null || !headSet.has(cit.section))
+      // No section is not a failure: the line is written without one
+      // (told once, below). A name no heading of the manuscript has is.
+      if (!cit.section) noSection += 1;
+      else if (!headSet.has(cit.section))
         add("section", "fail", c.ref, `section "${cit.section}" is not a manuscript heading`);
       if (cit.kind !== "revised") continue;
       const quote = String(cit.quote ?? "");
@@ -218,10 +222,20 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
       ? [...new Set(reviewersNamed(text).filter((n) => n !== c.reviewer))]
       : [];
     if (others.length) add("rule_xref", "fail", c.ref, `mentions Reviewer ${others.join(", ")}`);
-    const lost = r.previous ? lostFacts(r.previous, text) : [];
+    // An answer starts a sentence: its first capital is not a name.
+    const lost = r.previous ? lostFacts(r.previous, text, { sentenceStart: true }) : [];
     if (lost.length) add("lost_facts", "warn", c.ref, `not in the new draft: ${lost.join("; ")}`);
   }
 
+  if (noSection)
+    add(
+      "section",
+      "warn",
+      null,
+      headings.length
+        ? `${noSection} citation(s) stand before the first heading of the manuscript; their location lines give no section name`
+        : "the manuscript has no heading styles; location lines give line numbers without a section name",
+    );
   const pending = (snapshot.paragraphs ?? []).filter(
     (p) => (p.w_ins ?? 0) + (p.w_del ?? 0) > 0,
   ).length;

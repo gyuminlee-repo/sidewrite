@@ -39,6 +39,10 @@ export const LETTER_DEFAULTS = {
   section_head: "{section}",
   location_line: "[Revised in {section}, {lines}]",
   removed_line: "[Removed from {section}, {lines}]",
+  // The same two lines for a citation whose section is not known (a
+  // manuscript without heading styles, or text before its first heading).
+  location_line_no_section: "[Revised, {lines}]",
+  removed_line_no_section: "[Removed]",
   declined_line: "[No change made]",
   line_one: "line {a}",
   line_range: "lines {a}-{b}",

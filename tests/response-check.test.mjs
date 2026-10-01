@@ -222,7 +222,72 @@ test("a removal needs a section but no quote and no line range", () => {
       section: null,
     });
   });
-  assert.deepEqual(ids(checkResponses(nowhere)), ["section:R1.1"]);
+  // No section above it (text before the first heading): not a failure,
+  // one notice for the letter.
+  const rows = checkResponses(nowhere);
+  assert.deepEqual(ids(rows), []);
+  assert.deepEqual(ids(rows, "warn"), ["section:"]);
+  assert.equal(
+    rows[0].detail,
+    "1 citation(s) stand before the first heading of the manuscript; their location lines give no section name",
+  );
+});
+
+test("a manuscript without heading styles: one notice, no failure, and a wrong section name still fails", () => {
+  const bare = good((r, input) => {
+    input.headings.length = 0;
+    r.comments[0].response.citations[0].section = null;
+    r.comments.push({
+      ...structuredClone(r.comments[0]),
+      ref: "R1.2",
+      requirements: [],
+      changes: [{ ...r.comments[0].changes[0], id: "R1.2-1" }],
+    });
+    r.comments[1].response.citations[0].change_ids = ["R1.2-1"];
+  });
+  const rows = checkResponses(bare);
+  assert.deepEqual(ids(rows), []);
+  // Once for the letter, not once per citation.
+  assert.deepEqual(ids(rows, "warn"), ["section:"]);
+  assert.equal(
+    rows.find((x) => x.id === "section").detail,
+    "the manuscript has no heading styles; location lines give line numbers without a section name",
+  );
+  assert.deepEqual(summarize(rows), { fail: 0, warn: 1 });
+  // A section name that no heading of the manuscript has is a failure, with
+  // or without headings.
+  const wrong = good((r, input) => {
+    input.headings.length = 0;
+    r.comments[0].response.citations[0].section = "Methods";
+  });
+  assert.deepEqual(ids(checkResponses(wrong)), ["section:R1.1"]);
+});
+
+test("lost facts: the first word of an answer and a unit word are not facts that got lost", () => {
+  const prev = (previous, text) =>
+    good((r) => {
+      r.comments[0].response.previous = previous;
+      if (text) r.comments[0].response.text = text;
+    });
+  // An answer starts a sentence: its capital letter is not a name.
+  assert.deepEqual(
+    checkResponses(prev("Unfortunately, we now state the unit.", "We now state the unit.")),
+    [],
+  );
+  // "degrees Celsius" is kept: the unit is written the same way in both.
+  assert.deepEqual(
+    checkResponses(
+      prev(
+        "We now give the unit as degrees Celsius.",
+        'We changed "30 degrees" to "30 degrees Celsius" so that the unit is stated.',
+      ),
+    ),
+    [],
+  );
+  // A name in the middle of the earlier answer that is gone is still told.
+  const rows = checkResponses(prev("We now use the Monod model for the unit."));
+  assert.deepEqual(ids(rows, "warn"), ["lost_facts:R1.1"]);
+  assert.match(rows[0].detail, /Monod/);
 });
 
 test("profile rules: word cap, opening, cross-reviewer; counts come from code", () => {

@@ -32,6 +32,21 @@ export function renderFrame(frame, { section = "", lines = null, n = "" } = {}) 
   return f.replace("{section}", () => section ?? "").replace("{n}", () => n);
 }
 
+// The location line of a citation. Without a section name (no heading above
+// the sentence) the section-less frame of the profile is used, so the line
+// never reads "in ,".
+export function locationLine(cit, L) {
+  const removed = cit.kind === "removed";
+  const frame = cit.section
+    ? removed
+      ? L.removed_line
+      : L.location_line
+    : removed
+      ? L.removed_line_no_section
+      : L.location_line_no_section;
+  return renderFrame(frame, { section: cit.section, lines: fmtLines(cit.lines, L) });
+}
+
 // One request per quoted sentence, with the text of its paragraph so a phrase
 // that also occurs elsewhere is looked up inside that paragraph.
 // The id is "<ref>#<position of the citation>".

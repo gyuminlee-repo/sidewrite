@@ -8,11 +8,13 @@ import {
   lineRequests,
   applyLineResults,
   renderFrame,
+  locationLine,
   savePdf,
   locate,
   renderPdfPathFor,
 } from "../daemon/response-lines.mjs";
 import { runPy } from "../daemon/py-tool.mjs";
+import { withDefaults } from "../daemon/journal-profile.mjs";
 
 const L = { line_one: "line {a}", line_range: "lines {a}-{b}" };
 
@@ -198,4 +200,23 @@ test("runPy: a tool that runs too long is stopped", async () => {
   const slow = await runPy("-c", ["import time; time.sleep(30)"], { timeoutMs: 300 });
   assert.equal(slow.ok, false);
   assert.match(slow.error, /timed out after 300 ms/);
+});
+
+test("locationLine: the frame of the kind, and the one without a section when none is known", () => {
+  const P = withDefaults({}).response_letter;
+  const cit = (more) => ({
+    kind: "revised",
+    section: "3. Results",
+    lines: { start: 4, end: 6 },
+    ...more,
+  });
+  assert.equal(locationLine(cit({}), P), "[Revised in 3. Results, lines 4-6]");
+  assert.equal(locationLine(cit({ lines: null }), P), "[Revised in 3. Results]");
+  assert.equal(locationLine(cit({ section: null }), P), "[Revised, lines 4-6]");
+  assert.equal(locationLine(cit({ section: "", lines: null }), P), "[Revised]");
+  assert.equal(locationLine(cit({ kind: "removed", lines: null }), P), "[Removed from 3. Results]");
+  assert.equal(locationLine(cit({ kind: "removed", section: null, lines: null }), P), "[Removed]");
+  // The profile can word the section-less lines.
+  const mine = { ...P, location_line_no_section: "[Changed at {lines}]" };
+  assert.equal(locationLine(cit({ section: null }), mine), "[Changed at lines 4-6]");
 });

@@ -1980,3 +1980,13 @@ test("the stage 3 flow uses only pane steps, COM actions and judges that exist, 
   // No fixed wait in the stage 3 flow.
   assert.doesNotMatch(flow, /\bsleep\(/);
 });
+
+test("a check with warnings only passes the later steps of the stage 3 flow, not S3-34", () => {
+  const J = S3.JUDGES;
+  const warned = { summary: "All checks passed, 1 warning", checks: ["WARN R1.1 lost_facts: x"] };
+  assert.equal(J["response-check"](warned).pass, false);
+  assert.equal(J["response-check-no-fail"](warned).pass, true);
+  assert.equal(J["response-check-no-fail"]({ summary: "All checks passed" }).pass, true);
+  assert.equal(J["response-check-no-fail"]({ summary: "1 failed, 1 warning" }).pass, false);
+  assert.equal(J["response-check-no-fail"]({ summary: "" }).pass, false);
+});

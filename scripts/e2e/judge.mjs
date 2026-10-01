@@ -1107,6 +1107,13 @@ export const JUDGES = {
     expect: "All checks passed",
     got: `${r.summary} | ${(r.checks ?? []).join(" | ")}`,
   }),
+  // After S3-34: no failure. A warning does not fail the step (an answer
+  // that was edited or drafted again may differ from the one before it).
+  "response-check-no-fail": (r) => ({
+    pass: /^All checks passed/.test(r.summary ?? ""),
+    expect: "All checks passed (warnings allowed)",
+    got: `${r.summary} | ${(r.checks ?? []).join(" | ")}`,
+  }),
   "response-export": (r) => ({
     pass: !r.message_error && /^Exported/.test(r.output ?? ""),
     expect: "Exported: <path>",

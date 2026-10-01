@@ -905,3 +905,27 @@ test("with the real Python tools: the letter is written, verified, and read back
   assert.equal(Object.keys(proposal.previous).length, 5);
   await t.cleanup();
 });
+
+test("the headings a request brought are logged by number and level, never by text", async () => {
+  const t = await setup();
+  await t.ask("response_state", {
+    snapshot: ACCEPTED,
+    headings: [...HEADINGS, { index: 1, level: 2, text: "not what paragraph 1 says" }],
+  });
+  assert.ok(t.lines.includes("[response] headings n=1 levels=1:1 dropped=1"), t.lines.join("\n"));
+  await t.ask("response_state", { snapshot: ACCEPTED, headings: [] });
+  assert.ok(t.lines.includes("[response] headings n=0 levels=- dropped=0"));
+  assert.equal(
+    t.lines.some((l) => l.startsWith("[response] headings") && l.includes(SECTION)),
+    false,
+  );
+  // With no heading the citation has no section, and the letter is not held back for it.
+  await ready(t);
+  const r = await t.ask("response_check", { snapshot: ACCEPTED, headings: [] });
+  assert.deepEqual(r.summary, { fail: 0, warn: 1 });
+  assert.deepEqual(
+    r.checks.map((x) => [x.id, x.level, x.ref]),
+    [["section", "warn", null]],
+  );
+  await t.cleanup();
+});

@@ -184,16 +184,26 @@ export function createResponseService({
     if (!isObj(snapshot) || !Array.isArray(snapshot.paragraphs))
       throw new Error("The request holds no document snapshot.");
     const { headings, dropped } = usableHeadings(msg.headings, snapshot);
-    if (dropped) log(`[response] headings dropped=${dropped}`);
-    return { snapshot, headings };
+    return { snapshot, headings, dropped };
   }
 
   // The revision brought up to date with the document, saved, and its profile.
   async function current(d, msg) {
-    const { snapshot, headings } = docOf(msg);
+    const { snapshot, headings, dropped } = docOf(msg);
+    if (dropped) log(`[response] headings dropped=${dropped}`);
     const { profile } = await profileOf(d, await load(d));
     const revision = await update(d, (rev) => refreshed(rev, snapshot, headings, profile));
-    return { snapshot, headings, profile, revision };
+    return { snapshot, headings, dropped, profile, revision };
+  }
+  // What the pane found as headings, for a run that cites no section: how
+  // many, at which levels, how many the snapshot did not confirm. No text.
+  function logHeadings({ headings, dropped }) {
+    const levels = new Map();
+    for (const h of headings) levels.set(h.level, (levels.get(h.level) ?? 0) + 1);
+    const text = [...levels].sort((a, b) => a[0] - b[0]).map(([l, n]) => `${l}:${n}`);
+    log(
+      `[response] headings n=${headings.length} levels=${text.join(",") || "-"} dropped=${dropped}`,
+    );
   }
 
   // A tool that could not run (no interpreter, a crash) is an error with its
@@ -449,8 +459,9 @@ export function createResponseService({
 
     async response_state(msg, key) {
       const d = at(key);
-      const { revision } = await current(d, msg);
-      return { revision };
+      const state = await current(d, msg);
+      logHeadings(state);
+      return { revision: state.revision };
     },
 
     // The author's own text and decisions. text: the answer; declined:
@@ -567,7 +578,9 @@ export function createResponseService({
     // pdf_base64: the document as Word rendered it, margin line numbers on.
     async response_locate(msg, key) {
       const d = at(key);
-      const { snapshot, revision: before } = await current(d, msg);
+      const state = await current(d, msg);
+      logHeadings(state);
+      const { snapshot, revision: before } = state;
       const base64 = String(msg.pdf_base64 ?? "");
       if (base64.length > MAX_BASE64) throw new Error("The PDF is too large to read.");
       // <stem>.render.pdf is a file of the daemon, like revision.json: each

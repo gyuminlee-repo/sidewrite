@@ -997,6 +997,7 @@ async function mainS3() {
     });
     const passing = note("response-check", paneTry("response-check"), {
       label: "response-check after the answer was saved again",
+      judge: "response-check-no-fail",
     });
     marker("s3-stale", {
       ...staleEvidence(failing, passing, first.ref),
@@ -1047,6 +1048,7 @@ async function mainS3() {
   });
   const afterLedger = note("response-check", paneTry("response-check"), {
     label: "response-check after the word was removed",
+    judge: "response-check-no-fail",
   });
   marker("s3-ledger", {
     ...ledgerEvidence(held, exportedWhileFailing, afterLedger),

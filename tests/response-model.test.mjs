@@ -357,3 +357,26 @@ test("the translation paragraph is written only when asked for", () => {
     ["gloss", "[T] Erledigt.", "7F7F7F"],
   ]);
 });
+
+test("a citation without a section is written with the section-less frame", () => {
+  const rev = {
+    comments: [
+      base({
+        ref: "R1.1",
+        reviewer: 1,
+        text: "a",
+        response: {
+          text: "Done.",
+          citations: [
+            { kind: "revised", section: null, quote: "Q.", lines: { start: 4, end: 6 } },
+            { kind: "removed", section: null, quote: "", lines: null },
+          ],
+        },
+      }),
+    ],
+  };
+  const texts = buildLetterModel(rev, withDefaults({}))
+    .paragraphs.filter((p) => p.kind === "location")
+    .map((p) => p.text);
+  assert.deepEqual(texts, ["[Revised, lines 4-6]", "[Removed]"]);
+});

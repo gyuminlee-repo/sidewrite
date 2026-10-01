@@ -18,7 +18,10 @@ import {
   nextStep,
   exportMessage,
 } from "../taskpane/shared/response-view.js";
-import { fmtLines, renderFrame } from "../daemon/response-lines.mjs";
+import { locationLine } from "../daemon/response-lines.mjs";
+import { withDefaults } from "../daemon/journal-profile.mjs";
+
+const P = withDefaults({}).response_letter;
 
 const L = {
   location_line: "[Revised in {section}, {lines}]",
@@ -89,10 +92,16 @@ test("citationText fills a frame as the daemon does (response-lines.mjs), on fou
     { kind: "removed", section: null, quote: "", lines: { start: 12, end: 13 } },
   ];
   for (const c of cases) {
-    const frame = c.kind === "removed" ? L.removed_line : L.location_line;
-    const daemon = renderFrame(frame, { section: c.section, lines: fmtLines(c.lines, L) });
-    assert.equal(citationText(c, L).line, daemon, JSON.stringify(c));
+    // With the profile's own keys and without them (the pane has defaults).
+    assert.equal(citationText(c, P).line, locationLine(c, P), JSON.stringify(c));
+    assert.equal(citationText(c, L).line, locationLine(c, P), JSON.stringify(c));
   }
+  assert.equal(citationText(cases[3], L).line, "[Removed]");
+  assert.equal(
+    citationText({ kind: "revised", section: null, quote: "Q.", lines: { start: 4, end: 6 } }, L)
+      .line,
+    "[Revised, lines 4-6]",
+  );
 });
 
 test("checkLine", () => {

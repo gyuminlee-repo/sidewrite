@@ -10,7 +10,7 @@
 // Only the `response` and `gloss` text is prose a person or the model wrote.
 // Headings, location lines, quotes and line ranges are computed.
 
-import { fmtLines, renderFrame } from "./response-lines.mjs";
+import { locationLine, renderFrame } from "./response-lines.mjs";
 
 const linesOf = (s) =>
   String(s ?? "")
@@ -85,15 +85,7 @@ export function buildLetterModel(rev, profile, { gloss = false } = {}) {
     if (c.declined && !citations.length) add("declined", L.declined_line, body);
     for (const cit of citations) {
       const removed = cit.kind === "removed";
-      add(
-        "location",
-        renderFrame(removed ? L.removed_line : L.location_line, {
-          section: cit.section,
-          lines: fmtLines(cit.lines, L),
-        }),
-        revised,
-        { removed },
-      );
+      add("location", locationLine(cit, L), revised, { removed });
       if (!removed) add("quote", cit.quote, revised);
     }
   }
