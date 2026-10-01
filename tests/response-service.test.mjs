@@ -15,8 +15,15 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { ledgerReply } from "./fixtures/ledger-reply.mjs";
 import { createResponseService, RESPONSE_JOBS } from "../daemon/response-service.mjs";
-import { loadRevision, saveRevision, emptyRevision } from "../daemon/revision-store.mjs";
-import { snapshotHash, viewText } from "../daemon/response-quotes.mjs";
+import {
+  applyStates,
+  loadRevision,
+  saveRevision,
+  emptyRevision,
+  withRevision,
+} from "../daemon/revision-store.mjs";
+import { classifyRevision } from "../daemon/revision-classify.mjs";
+import { markStale, snapshotHash, viewText } from "../daemon/response-quotes.mjs";
 import { runPy as realRunPy } from "../daemon/py-tool.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0", CC_OFFICE_CONFIG_DIR: "/nonexistent-config" };
@@ -1023,6 +1030,28 @@ test("response_draft: a change decided while the model wrote marks the draft; a 
     false,
   );
   await t2.cleanup();
+});
+
+test("response_draft: a mark the Review tab's refresh set while the model wrote is kept", async () => {
+  // The Review refresh marks the saved answers and leaves their citations as
+  // they are (review-service.mjs afterRefresh), so the stored quote is the
+  // same before and after: the mark itself tells that the document moved.
+  const m = heldModel();
+  const t = await setup({ job: m.job });
+  await ready(t);
+  const drafting = t.ask("response_draft", { ref: "R1.1", ...WITH_DOC });
+  await m.asked();
+  const KEPT = snapshotOf({ text: AFTER.replace("was held at", "was kept at") });
+  const marked = await withRevision(t.revPath, t.doc, (rev) =>
+    markStale(applyStates(rev, classifyRevision(rev, KEPT)), KEPT),
+  );
+  assert.deepEqual(marked.comments[0].response.stale, ["quote_changed", "lines_old"]);
+  assert.equal(marked.comments[0].response.citations[0].quote, QUOTE);
+  m.release();
+  const r = await drafting;
+  assert.deepEqual(r.revision.comments[0].response.stale, ["quote_changed", "lines_old"]);
+  assert.match(r.warnings.join(" "), /manuscript changed while/);
+  await t.cleanup();
 });
 
 // The marks quote_changed and change_state on every way an answer is saved.

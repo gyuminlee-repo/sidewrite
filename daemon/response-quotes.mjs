@@ -289,8 +289,9 @@ export function staleReasons(comment, snapshot, render) {
 //   response_draft         cleared when what the draft was written from (the
 //                          quoted sentences, the changes and their states) is
 //                          still what is stored when it is saved; if another
-//                          request read a changed document in between, what
-//                          moved is marked instead
+//                          request read a changed document in between (the
+//                          citations changed, or the Review refresh set a
+//                          mark that was not there), what moved is marked
 //   response_save, text    with the document of the pane: cleared when the
 //                          citations the card showed still fit that document;
 //                          a shown sentence edited or a cited change taken

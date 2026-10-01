@@ -608,6 +608,7 @@ export function createResponseService({
       if (!comment) throw new Error(`No reviewer comment ${ref}`);
       const L = profile.response_letter;
       const written = draftInput(comment);
+      const marksThen = comment.response?.stale ?? [];
       const built = buildResponsePrompt({
         comment,
         profile,
@@ -631,7 +632,13 @@ export function createResponseService({
         const now = findComment(rev, ref);
         if (!now) throw new Error(`No reviewer comment ${ref}`);
         const input = draftInput(now);
-        moved = Object.keys(written).filter((k) => input[k] !== written[k]);
+        // The Review tab's refresh marks and leaves the citations as they
+        // are: a mark that was not there when the draft was asked for tells
+        // the same as a changed quote.
+        const marks = now.response?.stale ?? [];
+        moved = Object.keys(written).filter(
+          (k) => input[k] !== written[k] || (marks.includes(k) && !marksThen.includes(k)),
+        );
         const next = setResponse(rev, ref, { text: drafted.text, gloss, source: "model" });
         const r = findComment(next, ref).response;
         const stale = moved.length
