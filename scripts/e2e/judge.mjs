@@ -168,6 +168,42 @@ export function badgesMatch(view) {
   };
 }
 
+// word-com.ps1 Norm: how the script prints a comment text.
+export const norm = (s) =>
+  String(s ?? "")
+    .replace(/[\r\n\u000b\u0007]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// C1: after the author accepts or rejects a change and presses Refresh, its
+// rationale comment is resolved. revision: revision.json after that refresh;
+// word: word-com.ps1 state (comments with `done` = Comment.Done); message:
+// the pane's refresh message. Edited and pending changes keep an open comment.
+export function resolvedMatch(revision, word, message = "") {
+  const byText = new Map((word?.comments ?? []).map((c) => [norm(c.text), c]));
+  const seen = [];
+  for (const c of revision?.comments ?? []) {
+    for (const ch of c.changes ?? []) {
+      if (ch.state !== "accepted" && ch.state !== "rejected") continue;
+      if (!ch.word_comment_id || ch.comment_missing || ch.comment_cleaned_at) continue;
+      const text = formatRationaleComment(c.ref, ch.rationale, { lost: ch.lost_facts ?? [] });
+      const com = byText.get(norm(text));
+      seen.push({ id: ch.id, done: com ? com.done === true : null });
+    }
+  }
+  const refused = has(message, "not marked resolved");
+  return {
+    pass: seen.length > 0 && seen.every((x) => x.done === true) && !refused,
+    expect:
+      "every accepted or rejected change has its rationale comment Done in Word; no 'not marked resolved' note",
+    got:
+      (seen
+        .map((x) => `${x.id} ${x.done === null ? "no comment" : x.done ? "done" : "open"}`)
+        .join("; ") || "no accepted or rejected change with a comment") +
+      (refused ? "; pane: not marked resolved" : ""),
+  };
+}
+
 // Judgments of one pane step from the runner's record of it. Each returns
 // { pass, expect, got } where expect quotes the acceptance procedure.
 export const JUDGES = {
@@ -239,6 +275,29 @@ export const JUDGES = {
     return {
       pass: !!m && m[1] === m[2] && m[2] === m[3] && !has(r.message, "MISMATCH"),
       expect: "Changes N, expected tool comments N, found N. (no MISMATCH)",
+      got: r.message,
+    };
+  },
+  // A document in compatibility mode 14: Word refuses Comment.resolved. The
+  // refresh still shows its counts, and one note for the handled changes.
+  "refresh-mode14": (r) => {
+    const m =
+      /^Accepted (\d+), rejected (\d+), .*Changes (\d+), expected tool comments (\d+), found (\d+)/.exec(
+        r.message,
+      );
+    const n = /(\d+) rationale comment\(s\) not marked resolved \(Word: /.exec(r.message);
+    const handled = m ? Number(m[1]) + Number(m[2]) : 0;
+    return {
+      pass:
+        !!m &&
+        !!n &&
+        handled > 0 &&
+        Number(n[1]) === handled &&
+        m[3] === m[4] &&
+        m[4] === m[5] &&
+        !has(r.message, "MISMATCH"),
+      expect:
+        "Accepted a, rejected r ... Changes N, expected tool comments N, found N. (a+r) rationale comment(s) not marked resolved (Word: ...)",
       got: r.message,
     };
   },

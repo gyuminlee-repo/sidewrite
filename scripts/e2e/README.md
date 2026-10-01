@@ -53,8 +53,24 @@ folder, `cd <--plan-repo> ` becomes this checkout, `--plan-log` (default
 markers become `ok/s2-`. Files of earlier runs are never read.
 
 Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
-`--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--keep-on-fail`
-(leave Word and the daemon up after a failed step).
+`--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
+`--keep-on-fail` (leave Word and the daemon up after a failed step).
+
+## Resolved rationale comments
+
+- After the author's Word steps and the Refresh, the runner reads
+  `Comment.Done` of every comment over COM and requires that the rationale
+  comment of each accepted or rejected change is resolved (row
+  `word: rationale comments resolved`). The test manuscript is built in
+  compatibility mode 15 for this; in mode 14 Word refuses to resolve.
+- Mode-14 check (`mode-14:` rows, files under `mode14/` in the run folder,
+  daemon log `-mode14.log`): after the main Word is closed, the runner
+  builds a compatibility mode 14 copy with
+  `scripts/make-test-manuscript.py --compat 14`, opens it in a second Word
+  of its own, keeps comment R1.1, proposes its change, accepts it over COM
+  and refreshes. Expected: the refresh message carries the counts and
+  `n rationale comment(s) not marked resolved (Word: ...)`, and the comment
+  is still open in Word. It costs one more model turn.
 
 ## How Word is started
 

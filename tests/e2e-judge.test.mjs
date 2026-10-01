@@ -292,3 +292,75 @@ test("exitDecision: failed verify commands and features_error fail the run; a co
   assert.equal(run({ rows: [{ step: "split", result: "FAIL" }] }).code, 1);
   assert.equal(run({ failed: true }).code, 1);
 });
+
+// C1: after accept/reject and Refresh the rationale comment of the change is
+// resolved. Read from Word over COM (Comment.Done), not from the pane.
+test("resolvedMatch: comments of accepted and rejected changes are Done in Word, edited ones need not be", async () => {
+  const { resolvedMatch } = await import("../scripts/e2e/judge.mjs");
+  const text = (ref, id) =>
+    formatRationaleComment(ref, { ...rationale, what: `w ${id}` }, { lost: [] });
+  const ch = (ref, n, state, extra = {}) =>
+    change(`${ref}-${n}`, { state, rationale: { ...rationale, what: `w ${ref}-${n}` }, ...extra });
+  const revision = {
+    comments: [
+      { ref: "R1.1", changes: [ch("R1.1", 1, "accepted")] },
+      { ref: "R1.2", changes: [ch("R1.2", 1, "rejected")] },
+      { ref: "R1.3", changes: [ch("R1.3", 1, "user_edited"), ch("R1.3", 2, "pending")] },
+    ],
+  };
+  const word = (done) => ({
+    comments: [
+      { text: text("R1.1", "R1.1-1"), done: done[0] },
+      { text: text("R1.2", "R1.2-1"), done: done[1] },
+      { text: text("R1.3", "R1.3-1"), done: false },
+      { text: "Check the lag time against the raw data.", done: false },
+    ],
+  });
+  const msg = "Accepted 1, rejected 1, edited 1, pending 1, not found 0. Changes 4, ...";
+  const ok = resolvedMatch(revision, word([true, true]), msg);
+  assert.equal(ok.pass, true);
+  assert.match(ok.got, /R1\.1-1 done; R1\.2-1 done/);
+  // One still open in Word.
+  const open = resolvedMatch(revision, word([true, false]), msg);
+  assert.equal(open.pass, false);
+  assert.match(open.got, /R1\.2-1 open/);
+  // Done could not be read (null), or the comment is gone.
+  assert.equal(resolvedMatch(revision, word([true, null]), msg).pass, false);
+  const gone = word([true, true]);
+  gone.comments.splice(1, 1);
+  assert.match(resolvedMatch(revision, gone, msg).got, /R1\.2-1 no comment/);
+  // The pane said Word refused.
+  assert.equal(
+    resolvedMatch(
+      revision,
+      word([true, true]),
+      msg + " 2 rationale comment(s) not marked resolved (Word: GeneralException; ...).",
+    ).pass,
+    false,
+  );
+  // Nothing accepted or rejected: nothing was shown.
+  assert.equal(
+    resolvedMatch({ comments: [revision.comments[2]] }, word([true, true]), msg).pass,
+    false,
+  );
+});
+
+test("judge refresh-mode14: counts, no mismatch, and the not-resolved note for every accepted change", () => {
+  const head = (a) =>
+    `Accepted ${a}, rejected 0, edited 0, pending 0, not found 0. Changes 1, expected tool comments 1, found 1.`;
+  const note = (n) =>
+    ` ${n} rationale comment(s) not marked resolved (Word: GeneralException; one cause is a document in compatibility mode).`;
+  const j = (message) => judge("refresh-mode14", { message }).pass;
+  assert.equal(j(head(1) + note(1)), true);
+  assert.equal(j(head(1)), false); // no note: the resolve was not refused
+  assert.equal(j(head(1) + note(2)), false); // not one note per handled change
+  assert.equal(j(head(0) + note(1)), false); // nothing accepted
+  assert.equal(j("Refresh failed: GeneralException"), false); // counts lost
+  assert.equal(
+    j(
+      "Accepted 1, rejected 0, edited 0, pending 0, not found 0. Changes 1, expected tool comments 1, found 0 (MISMATCH: missing R1.1-1, unrecorded -)" +
+        note(1),
+    ),
+    false,
+  );
+});
