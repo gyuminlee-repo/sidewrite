@@ -7,8 +7,8 @@
 // Jobs (RESPONSE_JOBS; they call a model or a Python tool): accepted at once,
 // the result follows as { type: "response_event", event: "job_done", job_id,
 // result }.
-//   profile_propose, response_draft, response_locate, response_check,
-//   response_export
+//   profile_propose, response_draft, response_translate, response_locate,
+//   response_check, response_export
 //
 // Who writes what. The model writes the prose of an answer and nothing else.
 // States of the changes, citations, section names, line ranges, stale marks
@@ -69,6 +69,7 @@ import { freeOutputIndex, outputName, MAX_OUTPUT_NAMES } from "./output-name.mjs
 export const RESPONSE_JOBS = new Set([
   "profile_propose",
   "response_draft",
+  "response_translate",
   "response_locate",
   "response_check",
   "response_export",
@@ -495,7 +496,11 @@ export function createResponseService({
         if (!comment) throw new Error(`No reviewer comment ${ref}`);
         let next = rev;
         if ("text" in msg) {
-          next = setResponse(next, ref, { text: String(msg.text ?? ""), source: "author" });
+          const text = String(msg.text ?? "");
+          // The translation was made of the text it stood under: under another
+          // text it is dropped (the check then asks for a new one), never kept.
+          const gloss = text === (comment.response?.text ?? "") ? {} : { gloss: "" };
+          next = setResponse(next, ref, { text, source: "author", ...gloss });
           // Written again: what was stale about the old text is not any more.
           const r = findComment(next, ref).response;
           next = setCitations(
@@ -602,6 +607,45 @@ export function createResponseService({
         (row) => row.ref === ref,
       );
       return { revision, checks, warnings };
+    },
+
+    // The translation paragraph of the answer as it is saved (after the author
+    // wrote or changed it by hand; a draft translates its own text). Only the
+    // translation is written: the answer, its citations and marks stay.
+    async response_translate(msg, key) {
+      const d = at(key);
+      const ref = msg.ref;
+      const job = await oneshotJob(key, {
+        claudeModel: env.CC_OFFICE_RESPONSE_MODEL || DRAFT_CLAUDE_MODEL,
+      });
+      if (!job?.run)
+        throw new Error("No model is available for translating. Pick a provider in Setup.");
+      const before = await load(d);
+      const comment = findComment(before, ref);
+      if (!comment) throw new Error(`No reviewer comment ${ref}`);
+      const L = (await profileOf(d, before)).profile.response_letter;
+      if (!L.gloss_enabled || !L.gloss_lang)
+        throw new Error("The second language is off in the letter settings.");
+      const text = comment.response?.text ?? "";
+      if (!text.trim()) throw new Error(`There is no answer to translate for ${ref}.`);
+      const g = await job.run(buildGlossPrompt(text, L.gloss_lang));
+      const gloss = g.ok ? String(g.text ?? "").trim() : "";
+      if (!gloss) throw new Error(`translation failed: ${g.error ?? "empty answer"}`);
+      const revision = await update(d, (rev) => {
+        if ((findComment(rev, ref)?.response?.text ?? "") !== text)
+          throw new Error(`The answer to ${ref} changed while it was translated. Translate again.`);
+        return setResponse(rev, ref, { gloss });
+      });
+      await receipt(d, [
+        decisionRecord({
+          kind: "response_translate",
+          input: text,
+          model: job.model,
+          output: { ref, lang: L.gloss_lang, words: wordCount(gloss) },
+        }),
+      ]);
+      log(`[response] translate ${ref} lang=${L.gloss_lang} model=${job.model}`);
+      return { revision };
     },
 
     // pdf_base64: the document as Word rendered it, margin line numbers on.

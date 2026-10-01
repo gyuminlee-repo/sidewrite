@@ -191,6 +191,7 @@ test("jobs are the requests that call a model or Python; the others answer at on
     "response_draft",
     "response_export",
     "response_locate",
+    "response_translate",
   ]);
 });
 
@@ -1058,5 +1059,135 @@ test("response_check: an LLM rule reads the reasons for declining too, as the le
     r.checks.map((x) => [x.id, x.level, x.ref, x.detail]),
     [["ledger", "fail", "R1.1", "L1: sadly (not courteous)"]],
   );
+  await t.cleanup();
+});
+
+// ---- the translation paragraph follows the answer text --------------------------
+
+const GLOSS_ON = {
+  profile_overrides: { response_letter: { gloss_enabled: true, gloss_lang: "German" } },
+};
+// Translates by a table, so a translation can be told from its answer.
+const GERMAN = {
+  "We now state the unit.": "Wir nennen die Einheit.",
+  "We now state the unit and the supplier.": "Wir nennen die Einheit und den Hersteller.",
+};
+const translator = (held = null) =>
+  model(async (req) => {
+    if (req.expectJson !== false) return draftOk;
+    await held;
+    return { ok: true, text: GERMAN[req.prompt] ?? "" };
+  });
+const glossOf = (r) => r.revision.comments[0].response.gloss;
+const translationRows = (r) => r.checks.filter((x) => x.id === "translation");
+
+test("response_save: an answer changed by hand drops its translation, and the check says so", async () => {
+  const m = translator();
+  const t = await setup({ job: m.job, revision: GLOSS_ON });
+  let r = await t.ask("response_draft", { ref: "R1.1", ...WITH_DOC });
+  assert.equal(glossOf(r), "Wir nennen die Einheit.");
+  // Saved as it is: the translation still fits.
+  r = await t.ask("response_save", { ref: "R1.1", text: "We now state the unit.", ...WITH_DOC });
+  assert.equal(glossOf(r), "Wir nennen die Einheit.");
+  // A decision about a request is not a change of the text.
+  r = await t.ask("response_save", { ref: "R1.1", declined_requirements: [] });
+  assert.equal(glossOf(r), "Wir nennen die Einheit.");
+  // The author adds the supplier: the old translation no longer says what the answer says.
+  r = await t.ask("response_save", {
+    ref: "R1.1",
+    text: "We now state the unit and the supplier.",
+    ...WITH_DOC,
+  });
+  assert.equal(glossOf(r), "");
+  await t.ask("response_locate", { ...WITH_DOC, pdf_base64: PDF });
+  r = await t.ask("response_check", WITH_DOC);
+  assert.deepEqual(
+    r.checks.map((x) => [x.id, x.level, x.ref]),
+    [["translation", "warn", "R1.1"]],
+  );
+  assert.match(r.checks[0].detail, /no German translation/);
+  // The letter is written without a translation of another text.
+  r = await t.ask("response_export", WITH_DOC);
+  assert.equal(r.exported, true, r.error);
+  const letter = JSON.parse(await readFile(r.paths.model, "utf8"));
+  assert.deepEqual(
+    letter.paragraphs.filter((p) => p.kind === "gloss"),
+    [],
+  );
+  assert.equal(translationRows(r).length, 1);
+
+  // Translate: the answer as saved, nothing else rewritten.
+  r = await t.ask("response_translate", { ref: "R1.1" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(glossOf(r), "Wir nennen die Einheit und den Hersteller.");
+  assert.equal(r.revision.comments[0].response.text, "We now state the unit and the supplier.");
+  assert.equal(r.revision.comments[0].response.source, "author");
+  assert.match(m.requests.at(-1).system, /Translate into German/);
+  r = await t.ask("response_check", WITH_DOC);
+  assert.deepEqual(r.checks, []);
+  assert.ok(t.lines.some((l) => /\[response\] translate R1\.1 lang=German/.test(l)));
+  await t.cleanup();
+});
+
+test("no translation row without the second language; an answer never translated has one", async () => {
+  // Written by hand with the second language on: there never was a translation.
+  const on = await setup({ revision: GLOSS_ON });
+  await ready(on);
+  let r = await on.ask("response_check", WITH_DOC);
+  assert.deepEqual(
+    r.checks.map((x) => [x.id, x.level, x.ref]),
+    [["translation", "warn", "R1.1"]],
+  );
+  await on.cleanup();
+  // Off: nothing to tell, whatever the answer holds.
+  const off = await setup();
+  await ready(off);
+  r = await off.ask("response_check", WITH_DOC);
+  assert.deepEqual(r.checks, []);
+  await off.cleanup();
+});
+
+test("response_translate: what it needs, and an answer changed while it ran", async () => {
+  const none = await setup({ revision: GLOSS_ON });
+  await ready(none);
+  let r = await none.ask("response_translate", { ref: "R1.1" });
+  assert.deepEqual(
+    [r.ok, r.error],
+    [false, "No model is available for translating. Pick a provider in Setup."],
+  );
+  await none.cleanup();
+
+  const off = await setup({ job: translator().job });
+  await ready(off);
+  r = await off.ask("response_translate", { ref: "R1.1" });
+  assert.match(r.error, /second language is off/);
+  r = await off.ask("response_translate", { ref: "R9.9" });
+  assert.match(r.error, /No reviewer comment R9\.9/);
+  await off.cleanup();
+
+  const empty = await setup({ job: translator().job, revision: GLOSS_ON });
+  r = await empty.ask("response_translate", { ref: "R1.1" });
+  assert.match(r.error, /no answer to translate/i);
+  await empty.cleanup();
+
+  // The model returns nothing: an error, nothing saved.
+  const mute = await setup({ job: translator().job, revision: GLOSS_ON });
+  await mute.ask("response_save", { ref: "R1.1", text: "A text the table does not hold." });
+  r = await mute.ask("response_translate", { ref: "R1.1" });
+  assert.match(r.error, /translation failed/);
+  await mute.cleanup();
+
+  // The text is saved again while the model translates the old one.
+  let release;
+  const m = translator(new Promise((res) => (release = res)));
+  const t = await setup({ job: m.job, revision: GLOSS_ON });
+  await ready(t);
+  const translating = t.ask("response_translate", { ref: "R1.1" });
+  while (!m.requests.length) await new Promise((res) => setTimeout(res, 2));
+  await t.ask("response_save", { ref: "R1.1", text: "We now state the unit and the supplier." });
+  release();
+  r = await translating;
+  assert.match(r.error, /changed while it was translated/);
+  assert.equal((await t.rev()).comments[0].response.gloss, "");
   await t.cleanup();
 });

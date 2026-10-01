@@ -29,6 +29,16 @@ export const STALE_LABELS = {
 };
 export const staleText = (stale) => (stale ?? []).map((s) => STALE_LABELS[s] ?? s).join("; ");
 
+// The line of a card whose saved answer has no second-language paragraph
+// although the letter writes one (the `translation` row of
+// daemon/response-check.mjs), or "". letter: profile.response_letter.
+export function translationMissing(comment, letter) {
+  const r = comment?.response;
+  if (!letter?.gloss_enabled || !letter.gloss_lang) return "";
+  if (!r?.text?.trim() || r.gloss?.trim()) return "";
+  return `No ${letter.gloss_lang} translation of this answer; the letter prints the answer without one.`;
+}
+
 // The same rules as fmtLines and renderFrame of daemon/response-lines.mjs,
 // written again here because the pane cannot import a daemon module.
 // tests/response-view.test.mjs compares the two on the same inputs.

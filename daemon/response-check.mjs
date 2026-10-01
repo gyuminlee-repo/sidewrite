@@ -22,7 +22,8 @@
 //                   (these three read all the prose the letter prints for the
 //                   comment: the answer text and the reasons for declining)
 //   rule_*          profile rules of the answer text: word cap, opening
-//   warn only       lost_facts, pending_changes, rule_quote_words
+//   warn only       lost_facts, pending_changes, rule_quote_words, translation
+//                   (the second language is on and an answer has none)
 //
 // The profile must have its defaults filled (journal-profile.mjs).
 // LLM-checked ledger items are not run here; the service runs them.
@@ -228,6 +229,16 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
 
     // The rules below are about the answer text itself.
     if (!text) continue;
+    // The second-language paragraph is written only for the text it was made
+    // of (a draft translates its own text; response_save drops it when the
+    // text changes). Without one the letter prints the answer alone.
+    if (L.gloss_enabled && L.gloss_lang && blank(r.gloss))
+      add(
+        "translation",
+        "warn",
+        c.ref,
+        `no ${L.gloss_lang} translation of this answer (written or changed by hand, or the translation failed); the letter prints the answer without one. Use Translate on its card`,
+      );
     if (L.max_words && wordCount(text) > L.max_words)
       add("rule_words", "fail", c.ref, `${wordCount(text)} words, limit ${L.max_words}`);
     if (openingError) add("rule_opening", "warn", c.ref, `opening_regex: ${openingError}`);

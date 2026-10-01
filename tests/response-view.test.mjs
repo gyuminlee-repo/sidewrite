@@ -6,6 +6,7 @@ import {
   PDF_FRAME_LIMIT,
   STALE_LABELS,
   staleText,
+  translationMissing,
   citationText,
   checkLine,
   checksSummary,
@@ -60,6 +61,21 @@ test("staleText", () => {
   assert.equal(STALE_LABELS.lines_old, "Line numbers are older than the manuscript");
   // A reason this pane does not know is shown as it is, not dropped.
   assert.equal(staleText(["other"]), "other");
+});
+
+test("translationMissing: only with the second language on, an answer and no translation of it", () => {
+  const on = { gloss_enabled: true, gloss_lang: "German" };
+  const c = (response) => ({ ref: "R1.1", response });
+  const line = "No German translation of this answer; the letter prints the answer without one.";
+  assert.equal(translationMissing(c({ text: "We agree.", gloss: "" }), on), line);
+  assert.equal(translationMissing(c({ text: "We agree." }), on), line);
+  assert.equal(translationMissing(c({ text: "We agree.", gloss: " \n" }), on), line);
+  assert.equal(translationMissing(c({ text: "We agree.", gloss: "Einverstanden." }), on), "");
+  assert.equal(translationMissing(c({ text: "  ", gloss: "" }), on), "");
+  assert.equal(translationMissing(c(null), on), "");
+  // Off, no language named, or no profile read yet.
+  for (const off of [{ gloss_enabled: false, gloss_lang: "German" }, { gloss_enabled: true }, null])
+    assert.equal(translationMissing(c({ text: "We agree.", gloss: "" }), off), "");
 });
 
 test("citationText", () => {

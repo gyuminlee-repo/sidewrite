@@ -9,6 +9,7 @@ import {
   bytesToBase64,
   pdfTooLarge,
   staleText,
+  translationMissing,
   citationText,
   checkLine,
   checksSummary,
@@ -256,6 +257,10 @@ export function initResponsePane({
     box.append(text);
     if (c.response?.gloss)
       box.append(el("div", { class: "response-gloss", text: c.response.gloss }));
+    // The daemon drops the translation of an answer saved with another text.
+    const untranslated = translationMissing(c, letter());
+    if (untranslated)
+      box.append(el("div", { class: "response-gloss-missing", text: untranslated }));
     if (c.response?.previous && !c.response?.text)
       box.append(
         el("small", {
@@ -280,6 +285,14 @@ export function initResponsePane({
           changed();
           say(`Saved ${c.ref}.`);
         }),
+        // Of the answer as saved; the answer itself is not rewritten.
+        untranslated &&
+          action("Translate", async () => {
+            say(`Translating ${c.ref}...`);
+            await askJob("response_translate", { ref: c.ref });
+            changed();
+            say(`Translated ${c.ref}.`);
+          }),
       ),
     );
 

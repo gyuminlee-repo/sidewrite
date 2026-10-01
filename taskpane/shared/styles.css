@@ -1255,6 +1255,7 @@ body {
   color: var(--status-err);
 }
 .response-check-warn,
+.response-gloss-missing,
 .response-declined {
   color: var(--fg-muted);
 }

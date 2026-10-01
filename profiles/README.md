@@ -77,7 +77,7 @@ reports the ones it cannot compile.
 | `response_letter.rules`                                               | Writing rules given to the model when it drafts a response. Default `[]`                                                                              |
 | `response_letter.opening_regex`, `max_words`                          | Checks on each response. Default null                                                                                                                 |
 | `response_letter.max_quote_words`, `forbid_cross_reviewer`            | Checks on each response. Default null, false                                                                                                          |
-| `response_letter.gloss_enabled`, `gloss_lang`, `gloss_prefix`         | Translation paragraph after each response. Default false, null, `""`                                                                                  |
+| `response_letter.gloss_enabled`, `gloss_lang`, `gloss_prefix`         | Translation paragraph after each response. Default false, null, `""`. Saved with another text, an answer loses it: Translate on its card              |
 
 Keys the daemon does not know are passed through unchanged.
 

@@ -124,6 +124,7 @@ const HEADINGS = [{ index: 0, level: 1, text: SECTION }];
 const JOBS = new Set([
   "profile_propose",
   "response_draft",
+  "response_translate",
   "response_locate",
   "response_check",
   "response_export",
@@ -766,4 +767,46 @@ test("the strings of the Response tab are English", async () => {
     html.indexOf("<!-- Setup tab content -->"),
   );
   assert.doesNotMatch(section, /[ᄀ-ᇿ㄰-㆏가-힣]/);
+});
+
+test("an answer without its translation says so on the card; Translate asks for one", async () => {
+  const withGloss = (on) => ({
+    ...PROFILE,
+    profile: {
+      ...PROFILE.profile,
+      response_letter: { ...LETTER, gloss_enabled: on, gloss_lang: on ? "German" : null },
+    },
+  });
+  const answer = (gloss) =>
+    C1({ response: { text: "We now state the unit.", gloss, stale: [], citations: [CITATION] } });
+  const translated = revisionOf([answer("Wir nennen die Einheit."), C2()]);
+  const t = await setup({
+    revision: revisionOf([answer(""), C2()]),
+    respond: {
+      profile_get: () => withGloss(true),
+      response_translate: () => ({ ok: true, revision: translated }),
+    },
+  });
+  const card = t.card("R1.1");
+  assert.equal(
+    byClass(card, "response-gloss-missing")[0].textContent,
+    "No German translation of this answer; the letter prints the answer without one.",
+  );
+  assert.equal(byClass(card, "response-gloss").length, 0);
+  // A comment with no answer has nothing to translate.
+  assert.equal(byClass(t.card("R1.2"), "response-gloss-missing").length, 0);
+  assert.equal(button(t.card("R1.2"), "Translate"), undefined);
+
+  await button(card, "Translate").click();
+  assert.deepEqual(t.sent("response_translate")[0].payload, { ref: "R1.1" });
+  assert.deepEqual(t.wordCalls, [], "the document is not read for a translation");
+  assert.equal(byClass(t.card("R1.1"), "response-gloss")[0].textContent, "Wir nennen die Einheit.");
+  assert.equal(byClass(t.card("R1.1"), "response-gloss-missing").length, 0);
+  assert.equal(button(t.card("R1.1"), "Translate"), undefined);
+  assert.equal(t.message(), "Translated R1.1.");
+
+  // The second language off: no line, no button.
+  const off = await setup({ revision: revisionOf([answer(""), C2()]) });
+  assert.equal(byClass(off.card("R1.1"), "response-gloss-missing").length, 0);
+  assert.equal(button(off.card("R1.1"), "Translate"), undefined);
 });
