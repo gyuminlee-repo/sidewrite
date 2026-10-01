@@ -164,8 +164,8 @@ export function boundedMatches(text, form) {
 // placed where its text occurs nearest to the start it reports (Word's
 // paragraph text and the OOXML text can differ by a character or two).
 // short[kind] is true when the list cannot be trusted to hold every tracked
-// run of that kind: a run whose text is not in t (or that has no text) was
-// left out, or the paragraph has more revision marks of that kind (w_ins,
+// run of that kind: a run whose text is not in t (or that has no text), or
+// whose text is in t twice equally near its start, was left out, or the paragraph has more revision marks of that kind (w_ins,
 // w_del, counted on their own) than the placed runs stand for. A change of
 // that kind is then never read as "not tracked" (Codex review of the
 // follow-up: a run that lost a no-break hyphen was dropped and its pending
@@ -177,14 +177,26 @@ export function placedRuns(p, t) {
   const marks = { ins: 0, del: 0 };
   const short = { ins: false, del: false };
   for (const run of p.tracked) {
-    const text = collapse(run.text).trim();
+    const whole = collapse(run.text);
+    const text = whole.trim();
+    // run.start is the length of the collapsed, start-trimmed text before the
+    // run (review-view.js:109-113 place()), the coordinates of t. The space a
+    // run opens with is one character of t, unless the text before it ends
+    // with a space (the two are one) or the run opens the paragraph (trimmed).
+    const lead = whole.startsWith(" ") && run.start > 0 && t[run.start - 1] !== " " ? 1 : 0;
+    const want = run.start + lead;
     let best = -1;
+    let tie = false;
     if (text) {
       for (let i = t.indexOf(text); i !== -1; i = t.indexOf(text, i + 1)) {
-        if (best === -1 || Math.abs(i - run.start) < Math.abs(best - run.start)) best = i;
+        const d = Math.abs(i - want) - Math.abs(best - want);
+        if (best === -1 || d < 0) {
+          best = i;
+          tie = false;
+        } else if (d === 0) tie = true;
       }
     }
-    if (best === -1) {
+    if (best === -1 || tie) {
       if (run.kind in short) short[run.kind] = true;
       continue;
     }

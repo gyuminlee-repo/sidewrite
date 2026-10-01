@@ -900,3 +900,84 @@ test("a tracked run that cannot be placed is never read as 'not tracked'", () =>
   assert.deepEqual(multi([i2], T2, undefined, { w_ins: 1 }), ["pending"]);
   assert.deepEqual(multi([i2], T2, undefined, { w_ins: 0 }), ["accepted"]);
 });
+
+// Codex review (gpt-6.1-sol, P2): a tracked run is placed at the occurrence
+// of its trimmed text nearest to its start. The start is where the run's
+// untrimmed text begins, so a run that opens with a space was measured one
+// character early, and of two occurrences equally far the first one won.
+// "Groups A[ins:  A] and B." placed the run on the old "A" and read the
+// pending insertion accepted. The runs here are real trackedRuns() output.
+test("a tracked run that opens with a space is placed on its own text, and a tie is not placed", async () => {
+  const view = await import("../taskpane/shared/review-view.js");
+  const r = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const xIns = (t, id = 1) => `<w:ins w:id="${id}" w:author="A">${r(t)}</w:ins>`;
+  const xDel = (t, id = 2) =>
+    `<w:del w:id="${id}" w:author="A"><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:del>`;
+  const runsOf = (...xs) =>
+    view.trackedRuns(
+      `<pkg:package><pkg:part pkg:name="/word/document.xml"><pkg:xmlData><w:body><w:p>${xs.join("")}</w:p></w:body></pkg:xmlData></pkg:part></pkg:package>`,
+    );
+  const place = (text, tracked) => classify.placedRuns({ tracked }, text);
+  const T = "Groups A A and B.";
+
+  // The reproduction: the insertion is still tracked.
+  const repro = runsOf(r("Groups A"), xIns(" A"), r(" and B."));
+  assert.deepEqual(repro, [{ kind: "ins", text: " A", start: 8, marks: 1 }]);
+  const i1 = {
+    ...chg("insert", "A", " A", "", ""),
+    context: classify.changeContext("Groups A and B.", "A", { kind: "insert" }),
+  };
+  assert.deepEqual(i1.context, { left: "Groups A", right: " and B." });
+  assert.deepEqual(multi([i1], T, repro, { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([i1], T, undefined, { w_ins: 1 }), ["pending"]);
+  // The space the run opens with moves its text one character on: 9 is
+  // nearer than 7, where the uncorrected start (8) saw a tie.
+  assert.deepEqual(place(T, repro), {
+    runs: [{ kind: "ins", start: 9, end: 10 }],
+    short: { ins: false, del: false },
+  });
+  // The text before the run ends with a space: the two spaces are one in the
+  // paragraph text and the run's text is at its start.
+  const merged = runsOf(r("Groups A "), xIns(" A"), r(" and B."));
+  assert.deepEqual(merged, [{ kind: "ins", text: " A", start: 9, marks: 1 }]);
+  assert.deepEqual(place(T, merged).runs, [{ kind: "ins", start: 9, end: 10 }]);
+  assert.deepEqual(multi([i1], T, merged, { w_ins: 1 }), ["pending"]);
+  // A run that opens the paragraph: its leading spaces are trimmed away.
+  const first = runsOf(xIns("  A"), r(" and A."));
+  assert.deepEqual(first, [{ kind: "ins", text: "  A", start: 0, marks: 1 }]);
+  assert.deepEqual(place("A and A.", first).runs, [{ kind: "ins", start: 0, end: 1 }]);
+
+  // One occurrence only: placed, judged as before.
+  const one = runsOf(r("Cells grew"), xIns(" well"), r(" on glucose."));
+  const w1 = chg("insert", "grew", " well", "Cells grew", " on glucose.");
+  const T1 = "Cells grew well on glucose.";
+  assert.deepEqual(place(T1, one).runs, [{ kind: "ins", start: 11, end: 15 }]);
+  assert.deepEqual(multi([w1], T1, one, { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([w1], T1, [], {}), ["accepted"]);
+
+  // Two occurrences equally far from the start (the pane and Word disagree
+  // by a character): the run is not placed, and its kind is short.
+  assert.deepEqual(place(T, [ins("A", 8)]), { runs: [], short: { ins: true, del: false } });
+  assert.deepEqual(multi([i1], T, [ins("A", 8)], { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(place(T, [del("A", 8)]), { runs: [], short: { ins: false, del: true } });
+
+  // The same for a deletion: " A" deleted and still tracked (Word keeps the
+  // deleted text in the paragraph text) is pending, not rejected.
+  const gone = runsOf(r("Groups A"), xDel(" A"), r(" and B."));
+  assert.deepEqual(gone, [{ kind: "del", text: " A", start: 8, marks: 1 }]);
+  const d1 = chg("delete", " A", "", "Groups A", " and B.");
+  assert.deepEqual(place(T, gone).runs, [{ kind: "del", start: 9, end: 10 }]);
+  assert.deepEqual(multi([d1], T, gone, { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T, [del("A", 8)], { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T, [], {}), ["rejected"]);
+
+  // Not too much pending: the insertion was accepted and a sibling with the
+  // same text, later in the paragraph, is still tracked.
+  const T2 = "Groups A A and B. Then C A.";
+  const sib = runsOf(r("Groups A A and B. Then C"), xIns(" A", 3), r("."));
+  assert.deepEqual(sib, [{ kind: "ins", text: " A", start: 24, marks: 1 }]);
+  const i2 = chg("insert", "C", " A", "B. Then C", ".");
+  assert.deepEqual(place(T2, sib).runs, [{ kind: "ins", start: 25, end: 26 }]);
+  assert.deepEqual(multi([i1, i2], T2, sib, { w_ins: 1 }), ["accepted", "pending"]);
+  assert.deepEqual(multi([i1, i2], T2, [], {}), ["accepted", "accepted"]);
+});
