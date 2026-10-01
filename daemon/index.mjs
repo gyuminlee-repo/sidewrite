@@ -1373,7 +1373,7 @@ function handleAgentMessage(msg, session) {
         session.turnProducedOutput = false;
       }
       for (const ev of events) bridge.sendAssistantEvent(ev, session?.key);
-      if (session?.key) endTurnState(session.key, turnOutcome(events));
+      if (session?.key) endTurnState(session.key, turnOutcome(events, msg));
       break;
     }
     case "user": {

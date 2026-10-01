@@ -148,12 +148,36 @@ export function turnCompleteEvents(result, usageLimit, stats = null) {
 }
 
 // How a turn ended, from the events turnCompleteEvents made for it:
-// { ok: true }, or { ok: false, error, subtype } when they hold an error.
+// { ok: true }, or { ok: false, error, subtype }. Failed: the events hold an
+// error (limit, refusal, API error, empty turn), or the SDK result has an
+// error subtype (SDKResultError: error_max_turns, error_during_execution,
+// error_max_budget_usd, error_max_structured_output_retries, and any
+// error_* added later), which comes with no error event. `result` adds the
+// SDK's own error texts to the reason.
 // The review turn_done carries it (review-service.mjs turnEnded), so the
 // task pane does not have to pair turn_done with an error event by timing.
-export function turnOutcome(events) {
-  const err = (events ?? []).find((e) => e.event === "error");
-  if (!err) return { ok: true };
-  const done = (events ?? []).find((e) => e.event === "turn_complete");
-  return { ok: false, error: err.error, subtype: done?.subtype ?? null };
+const SUBTYPE_REASONS = {
+  error_max_turns: "The turn stopped at the maximum number of turns before it finished.",
+  error_max_budget_usd: "The turn stopped at the spending limit.",
+  error_max_structured_output_retries:
+    "The turn stopped: the model did not give the structured output it was asked for.",
+};
+
+export function turnOutcome(events, result = null) {
+  const list = events ?? [];
+  const done = list.find((e) => e.event === "turn_complete");
+  const err = list.find((e) => e.event === "error");
+  if (err) return { ok: false, error: err.error, subtype: done?.subtype ?? null };
+  const subtype = done?.subtype;
+  if (typeof subtype !== "string" || !subtype.startsWith("error")) return { ok: true };
+  const detail = (Array.isArray(result?.errors) ? result.errors : [])
+    .map((e) => String(e).trim())
+    .filter(Boolean)
+    .join("; ")
+    .slice(0, 500);
+  const error =
+    subtype === "error_during_execution"
+      ? `The turn ended on an error while it ran${detail ? `: ${detail}` : "."}`
+      : (SUBTYPE_REASONS[subtype] ?? `The turn ended with ${subtype}.`);
+  return { ok: false, error, subtype };
 }
