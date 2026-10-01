@@ -17,6 +17,8 @@ import {
   applyStates,
   addBlocked,
   takeBlocked,
+  claimBlocked,
+  markBlockedUnknown,
   addLedgerItem,
   updateLedgerItem,
   removeLedgerItem,
@@ -417,4 +419,44 @@ test("an unsure ledger check is stored with its paragraphs; a changed rule clear
   assert.equal(rev.ledger[0].unsure.length, 1);
   const edited = updateLedgerItem(rev, "L1", { text: "t2" }).ledger[0];
   assert.deepEqual([edited.status, edited.unsure], ["unchecked", []]);
+});
+
+// Codex review 9: a blocked edit that cites q2 may still be approved; if q2
+// were given to a new requirement, the approval would answer the wrong one.
+test("L5 requirement ids that blocked, applying and unanswered edits cite are never given out again", () => {
+  const cites = (ids) => ({
+    find: "a",
+    replace: "b",
+    rationale: { ...rationale, requirement_ids: ids },
+  });
+  let rev = setRequirements(base(), "R1.1", ["one", "two", "three", "four"]);
+  rev = addBlocked(rev, "R1.1", { args: cites(["q2"]), blocked_by: ["L1"] }).revision;
+  rev = addBlocked(rev, "R1.1", { args: cites(["q3"]), blocked_by: ["L1"] }).revision;
+  rev = addBlocked(rev, "R1.1", { args: cites([]), blocked_by: ["L1"] }).revision;
+  rev = claimBlocked(rev, "R1.1", "R1.1-b2").revision; // applying
+  rev = markBlockedUnknown(rev, "R1.1", "R1.1-b3", {
+    tool_call_id: null,
+    unknown_at: "2026-01-01T00:00:00Z",
+    comment_text: "x",
+    change: { rationale: { ...rationale, requirement_ids: ["q4"] } },
+  });
+  assert.deepEqual(
+    rev.comments[0].blocked.map((b) => b.state ?? "blocked"),
+    ["blocked", "applying", "outcome_unknown"],
+  );
+  rev = setRequirements(rev, "R1.1", ["one"]);
+  rev = setRequirements(rev, "R1.1", ["one", "new request"]);
+  assert.deepEqual(rev.comments[0].requirements, [
+    { id: "q1", text: "one" },
+    { id: "q5", text: "new request" },
+  ]);
+  // Same through the comment list (Save comments) path.
+  rev = setRequirements(rev, "R1.1", ["one"]);
+  rev = replaceComments(rev, [
+    { ref: "R1.1", reviewer: 1, text: "x", requirements: ["one", "other request"] },
+  ]);
+  assert.deepEqual(
+    rev.comments[0].requirements.map((r) => r.id),
+    ["q1", "q5"], // q5 was listed, cited by none, and removed: free again
+  );
 });

@@ -334,9 +334,19 @@ export function restoreComment(rev, ref, from = null) {
   return next;
 }
 
-// Requirement ids that recorded changes of this comment cite.
+// Requirement ids that recorded changes of this comment cite, and those that
+// blocked edits cite (blocked, applying or outcome_unknown, with the change
+// an unanswered attempt would record): an approval or a late answer records
+// them later, so their ids stay taken (Codex review 9).
 function citedIds(comment) {
-  return (comment?.changes ?? []).flatMap((ch) => ch.rationale?.requirement_ids ?? []);
+  const ids = (r) => (Array.isArray(r?.requirement_ids) ? r.requirement_ids : []);
+  return [
+    ...(comment?.changes ?? []).flatMap((ch) => ids(ch.rationale)),
+    ...(comment?.blocked ?? []).flatMap((b) => [
+      ...ids(b.args?.rationale),
+      ...ids(b.attempt?.change?.rationale),
+    ]),
+  ].filter((id) => typeof id === "string");
 }
 
 // L5. texts: strings or { text }. A text that was already listed keeps its
