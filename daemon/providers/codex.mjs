@@ -82,7 +82,7 @@
 // wall is the list of switches.
 
 import { parseJsonReply } from "../oneshot.mjs";
-import { runCli as defaultRunCli, emptyWorkDir, resolveCliBin } from "./cli-exec.mjs";
+import { runCli as defaultRunCli, childEnv, resolveCliBin, withRunDir } from "./cli-exec.mjs";
 
 const LIMIT_RE = /(usage limit|rate limit|quota|too many requests|out of credits|\b429\b)/i;
 const toml = (s) => JSON.stringify(String(s));
@@ -116,7 +116,60 @@ export function codexTurnArgs({ model, cwd, mcpUrl }) {
   ];
 }
 
-export const codexOneshotArgs = ({ model, cwd }) => [...baseArgs({ model, cwd }), "-"];
+// The switches of a judgment (see the measurements at the top): every
+// feature of Codex that gives the model a tool or runs something of the
+// user's, its exec rules, and the web search of the provider.
+const ISOLATION_OFF = [
+  "plugins", // the user's MCP servers come from plugins
+  "apps",
+  "hooks",
+  "shell_tool",
+  "unified_exec",
+  "browser_use",
+  "computer_use",
+  "multi_agent",
+  "image_generation",
+  "skill_search",
+  "tool_suggest",
+  "view_image",
+  "memories",
+  "goals",
+  "sleep_tool",
+  "shell_snapshot",
+];
+const ISOLATION = [
+  ...ISOLATION_OFF.flatMap((f) => ["--disable", f]),
+  "--ignore-rules",
+  "-c",
+  'web_search="disabled"',
+];
+
+export const codexOneshotArgs = ({ model, cwd }) => [
+  ...baseArgs({ model, cwd }),
+  ...ISOLATION,
+  "-",
+];
+
+// The item types a judgment may have: its answer and a notice. Anything
+// else is taken as a tool, also a type this code does not know.
+const ALLOWED_ITEMS = new Set(["agent_message", "error"]);
+
+// The name of the tool a stdout line shows, or null. Only names Codex
+// itself gives: no argument and no text of the run.
+export function toolEventOf(line) {
+  let o;
+  try {
+    o = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!o || typeof o !== "object" || !String(o.type ?? "").startsWith("item.")) return null;
+  const it = o.item ?? {};
+  if (ALLOWED_ITEMS.has(it.type)) return null;
+  if (it.type === "mcp_tool_call") return `mcp__${it.server}__${it.tool}`;
+  if (it.type === "command_execution") return "codex_shell";
+  return /^[a-z0-9_]{1,40}$/i.test(String(it.type ?? "")) ? String(it.type) : "unknown item";
+}
 
 // One stdout line as { kind: "session" | "text" | "tool" | "tool_done" |
 // "tool_error" | "notice" | "done" | "error", ... }, or null for a line that
@@ -171,30 +224,57 @@ export function parseCodexLine(line) {
 // The contract of oneshot.mjs runOneshot: { ok, text, json?, error?,
 // limited? }; never throws. System and prompt go as one stdin text (the CLI
 // has no separate system prompt).
+//
+// The run has a directory of its own, an environment without keys, and the
+// tools of Codex switched off. It is watched as it runs: the first item that
+// is a tool ends it, and the reply is discarded ({ ok: false, tool_event }).
+// signal ends it from outside ({ ok: false, aborted: true }).
 export async function codexOneshot(
-  { system, prompt, model, expectJson = true, timeoutMs = 120_000 },
+  { system, prompt, model, expectJson = true, timeoutMs = 120_000, signal = null },
   {
     runCli = defaultRunCli,
     bin = resolveCliBin("codex", { envVar: "CC_OFFICE_CODEX_BIN" }),
-    emptyDir = emptyWorkDir,
+    runDir = withRunDir,
+    env = process.env,
+    log = console.log,
   } = {},
 ) {
   let r;
+  let tool = null;
   try {
-    r = await runCli(bin, codexOneshotArgs({ model, cwd: await emptyDir() }), {
-      stdin: `${system}\n\n${prompt}`,
-      timeoutMs,
-    });
+    r = await runDir((cwd) =>
+      runCli(bin, codexOneshotArgs({ model, cwd }), {
+        stdin: `${system}\n\n${prompt}`,
+        timeoutMs,
+        cwd,
+        env: childEnv(env),
+        signal,
+        onLine(line, kill) {
+          tool ??= toolEventOf(line);
+          if (tool) kill();
+        },
+      }),
+    );
   } catch (e) {
     return { ok: false, error: `codex could not be run: ${String(e?.message ?? e)}` };
   }
   let text = null;
   let failed = null;
   for (const line of String(r.stdout ?? "").split("\n")) {
+    tool ??= toolEventOf(line); // a runner that did not hand the lines over
     const ev = parseCodexLine(line);
     if (ev?.kind === "text") text = ev.text;
     if (ev?.kind === "error") failed = ev;
   }
+  if (tool) {
+    log(`[providers] tool event provider=codex name=${tool}`);
+    return {
+      ok: false,
+      tool_event: tool,
+      error: `Codex CLI used a tool (${tool}) in a run that must not use any. Its reply was discarded.`,
+    };
+  }
+  if (r.aborted) return { ok: false, aborted: true, error: "stopped" };
   if (failed) {
     return {
       ok: false,
