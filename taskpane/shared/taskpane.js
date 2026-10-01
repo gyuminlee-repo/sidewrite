@@ -65,6 +65,7 @@ import {
   toolExcelSetRowHeight,
 } from "./tools-excel.js";
 import { isInOrUnder, docDirFromActiveUrl } from "./paths.js";
+import { modelMenuOptions, isStoredModelValid } from "./model-menu.js";
 
 // Daemon endpoints. The HTTP server that loaded this taskpane is on
 // HTTP_PORT; the WebSocket bridge is on WS_PORT (one less by daemon convention).
@@ -492,7 +493,7 @@ function defaultSettings() {
     trackChangesMode: "always", // "always" | "modifications" | "never"
     // Global, sticky. Cheaper models use less of your monthly Claude
     // programmatic credit. "default" defers to the Claude Code CLI config.
-    model: "sonnet", // "haiku" | "sonnet" | "opus" | "default"
+    model: "sonnet", // an alias or a model id the account lists (models_list)
   };
 }
 
@@ -501,9 +502,10 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return defaultSettings();
     const s = { ...defaultSettings(), ...JSON.parse(raw) };
-    // Migrate the retired "default" model choice (and any stale value) to
-    // the explicit Sonnet default so the dropdown/indicator stay valid.
-    if (!["haiku", "sonnet", "opus"].includes(s.model)) s.model = "sonnet";
+    // Migrate the retired "default" model choice (and any malformed value)
+    // to the explicit Sonnet default. Whether the account can use the model
+    // is the daemon's check (set_model), against its model list.
+    if (!isStoredModelValid(s.model)) s.model = "sonnet";
     return s;
   } catch {
     return defaultSettings();
@@ -527,7 +529,43 @@ function applySettings() {
   const $tcMode = document.getElementById("setting-track-changes-mode");
   if ($tcMode) $tcMode.value = settings.trackChangesMode || "always";
   const $model = document.getElementById("composer-model");
-  if ($model) $model.value = settings.model || "sonnet";
+  if ($model) {
+    // The static rows are the three aliases; a stored id outside them gets
+    // a row of its own until loadModelMenu brings the account's list.
+    const value = settings.model || "sonnet";
+    if (![...$model.options].some((o) => o.value === value)) {
+      $model.append(modelOption({ value, label: value, title: "" }));
+    }
+    $model.value = value;
+  }
+}
+
+function modelOption(o) {
+  const opt = document.createElement("option");
+  opt.value = o.value;
+  opt.textContent = o.label;
+  opt.title = o.title;
+  return opt;
+}
+
+// Fill the composer dropdown with the models the account can use (P13). On
+// any failure the rows already there stay and the tooltip says why.
+async function loadModelMenu() {
+  const $m = document.getElementById("composer-model");
+  if (!$m) return;
+  let r;
+  try {
+    r = await sendRequest("models_list", {}, { timeoutMs: 30_000 });
+  } catch (e) {
+    $m.title = `Model list unavailable (${e.message}); showing the built-in choices`;
+    return;
+  }
+  $m.replaceChildren(...modelMenuOptions(r.models, settings.model).map(modelOption));
+  $m.title =
+    r.source === "sdk"
+      ? "Models your Claude account can use"
+      : `Model list unavailable (${r.error}); aliases only`;
+  $m.value = settings.model;
 }
 
 // Push the chosen model to the daemon. The SDK model is fixed per agent
@@ -657,6 +695,7 @@ async function handleServerMessage(msg) {
       setAgentStatus("idle", "Ready");
       refreshWorkspaceFromDaemon();
       reviewPane?.reload();
+      loadModelMenu();
       break;
 
     case "transcript_replay":
