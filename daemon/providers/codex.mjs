@@ -71,8 +71,9 @@
 //   The environment PATH and HOME alone was enough (with that proxy
 //   already running; Windows was not measured).
 //   --output-schema <file> was accepted and the answer had the shape.
-//   No item of type "reasoning" came in any run: it is not on the list of
-//   item types a run may have (ALLOWED_ITEMS).
+//   An item of type "reasoning" comes when the model prints a summary of
+//   its thinking (seen with reasoning effort high); it is output, not a
+//   tool (ALLOWED_ITEMS).
 // The request body was read by pointing the provider's base_url (a -c
 // override on the command line) at a local server that answers 400: no
 // model call and no file of the user is touched. It was read for two models
@@ -151,9 +152,22 @@ export const codexOneshotArgs = ({ model, cwd }) => [
   "-",
 ];
 
-// The item types a judgment may have: its answer and a notice. Anything
-// else is taken as a tool, also a type this code does not know.
-const ALLOWED_ITEMS = new Set(["agent_message", "error"]);
+// The kinds of item `codex exec --json` has, read on 2026-10-01 from the
+// installed binary (codex-cli 0.159.3; the names stand together in its data,
+// after item.started, item.updated, item.completed):
+//   agent_message, reasoning, command_execution, file_change, mcp_tool_call,
+//   web_search, todo_list   (and "error", the notice seen in every run)
+// A judgment may have the ones that are output of the model itself:
+//   agent_message  the answer
+//   error          a notice (a config warning comes that way)
+//   reasoning      a summary of its thinking (fixture
+//                  codex_exec_reasoning.jsonl, a real run)
+//   todo_list      the list of steps it keeps for itself; nothing is run and
+//                  nothing leaves the process (not seen in a run)
+// Everything else ends the run: the tools (command_execution, file_change,
+// mcp_tool_call, web_search) and any kind this list does not name, such as
+// one a later version adds.
+const ALLOWED_ITEMS = new Set(["agent_message", "error", "reasoning", "todo_list"]);
 
 // The name of the tool a stdout line shows, or null. Only names Codex
 // itself gives: no argument and no text of the run.

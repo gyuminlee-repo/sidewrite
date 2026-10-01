@@ -178,6 +178,10 @@ export function parseAgyLine(line) {
 // this code does not know) and for a denied action; { error } for a
 // permission mode other than request-review. null otherwise. Names only: no
 // argument and no text of the run.
+// Thinking is not a step of its own in agy's stream: in the captured runs
+// it is counted inside agent_response (usage.thinking_tokens), so a run that
+// thinks is not ended here. "finish" (seen only with --json-schema) is one
+// of agy's tools by its own list and stays outside.
 const ALLOWED_STEPS = new Set(["user_input", "agent_response"]);
 const plainName = (v, fallback) =>
   /^[\w .:-]{1,80}$/.test(String(v ?? "")) ? String(v) : fallback;
