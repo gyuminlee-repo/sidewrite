@@ -46,8 +46,8 @@ async function getParagraphsWithIds(context) {
   // changeTrackingMode is a document-level scalar, not a paragraph property —
   // safe to piggyback on the same sync, no scalar-refresh issue.
   // styleBuiltIn and outlineLevel say what a heading is in a Word of any
-  // language (the style NAME is localized: "Heading 1" is "제목 1" in a Korean
-  // Word). Asked for first; a Word that cannot load them gets the load it
+  // language (the style NAME is localized: a Korean Word does not call the
+  // built-in style "Heading 1"). Asked for first; a Word that cannot load them gets the load it
   // always got, and headings are then found by name only (paragraphLevel).
   const WITH_IDS =
     "items/text, items/style, items/uniqueLocalId, items/listItemOrNullObject/listString";
