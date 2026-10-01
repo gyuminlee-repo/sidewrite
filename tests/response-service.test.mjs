@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { ledgerReply } from "./fixtures/ledger-reply.mjs";
 import { createResponseService, RESPONSE_JOBS } from "../daemon/response-service.mjs";
 import { loadRevision, saveRevision, emptyRevision } from "../daemon/revision-store.mjs";
 import { snapshotHash, viewText } from "../daemon/response-quotes.mjs";
@@ -558,13 +559,13 @@ test("response_check: rows and a summary; an LLM rule of the response scope is a
     },
     { id: "L2", kind: "instruction", text: "Manuscript rule.", check: { type: "llm" } },
   ];
-  const m = model({
-    ok: true,
-    json: {
+  // The model answers in the form the ledger check asks for: a verdict for
+  // every line it was given (the answers, one line each).
+  const m = model((req) =>
+    ledgerReply(req, [{ index: 0, text: "We now state the unit." }], {
       violations: [{ paragraph_index: 0, quote: "state the unit", reason: "curt" }],
-      unsure: [],
-    },
-  });
+    }),
+  );
   const u = await setup({ job: m.job, revision: { ledger } });
   await ready(u);
   r = await u.ask("response_check", WITH_DOC);

@@ -109,6 +109,7 @@ async function view(page) {
 async function clearResponse(page) {
   await page.evaluate(() => {
     const m = document.getElementById("response-message");
+    if (!m) return;
     m.textContent = "";
     m.hidden = true;
   });
@@ -121,7 +122,7 @@ async function waitResponse(page, timeout, until) {
   await page.waitForFunction(
     (pattern) => {
       const m = document.getElementById("response-message");
-      const t = m.textContent.trim();
+      const t = m?.textContent.trim() ?? "";
       if (t === "") return false;
       return m.classList.contains("form-error") || new RegExp(pattern).test(t);
     },
@@ -139,9 +140,9 @@ async function responseView(page) {
     const message = document.getElementById("response-message");
     return {
       message: t(message),
-      message_error: message.classList.contains("form-error") && t(message) !== "",
+      message_error: (message?.classList.contains("form-error") ?? false) && t(message) !== "",
       next: t(document.getElementById("response-next")),
-      profile: document.getElementById("response-profile").value,
+      profile: document.getElementById("response-profile")?.value ?? "",
       summary: t(document.getElementById("response-summary")),
       checks: q("#response-checks .response-check-row").map(t),
       export_label: t(document.getElementById("response-export")),
@@ -167,7 +168,10 @@ const responseCard = (page, ref) => page.locator(`.response-card[data-ref="${ref
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Profile, languages and the letter reader are folded away in the pane.
 const openProfileDetails = (page) =>
-  page.evaluate(() => (document.getElementById("response-profile-details").open = true));
+  page.evaluate(() => {
+    const d = document.getElementById("response-profile-details");
+    if (d) d.open = true;
+  });
 
 function card(page, ref) {
   return page.locator(".review-comment", {
