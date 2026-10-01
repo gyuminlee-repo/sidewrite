@@ -29,6 +29,9 @@ function repo(files, { local = null, allow = "" } = {}) {
   }
 }
 
+// The check is a bash script on git grep: these tests are not run on Windows.
+const BASH = { skip: process.platform === "win32" ? "needs bash" : false };
+
 const HOME = "/ho" + "me/";
 const WIN = "C:\\Us" + "ers\\";
 const SAMPLES = [
@@ -39,7 +42,7 @@ const SAMPLES = [
   "ABCD-D" + "-26-01234",
 ];
 
-test("generic shapes fail anywhere in the tracked tree", () => {
+test("generic shapes fail anywhere in the tracked tree", BASH, () => {
   for (const t of SAMPLES) {
     const r = repo({ "notes.md": t });
     assert.equal(r.status, 1, `${t}\n${r.stdout}${r.stderr}`);
@@ -47,7 +50,7 @@ test("generic shapes fail anywhere in the tracked tree", () => {
   }
 });
 
-test("placeholders pass", () => {
+test("placeholders pass", BASH, () => {
   const r = repo({
     "a.md":
       `${HOME}you/x user@` +
@@ -58,19 +61,19 @@ test("placeholders pass", () => {
   assert.match(r.stdout, /personal check: 0 hits/);
 });
 
-test("a user name of one or two letters is a placeholder, a longer one is not", () => {
+test("a user name of one or two letters is a placeholder, a longer one is not", BASH, () => {
   const ok = repo({ "a.md": `${HOME}a/x ${HOME}me/y ${WIN}u\\doc icon@` + "2x.png" });
   assert.equal(ok.status, 0, ok.stdout);
   for (const t of [`${HOME}bob/x`, `${WIN}bob\\doc`, "icon@" + "2x.org"])
     assert.equal(repo({ "a.md": t }).status, 1, t);
 });
 
-test("a hit on the same line as a placeholder is still a hit", () => {
+test("a hit on the same line as a placeholder is still a hit", BASH, () => {
   const r = repo({ "a.md": `${HOME}you/x and ${HOME}someone/y` });
   assert.equal(r.status, 1, r.stdout);
 });
 
-test("local patterns are added when the file exists; without it the script says so", () => {
+test("local patterns are added when the file exists; without it the script says so", BASH, () => {
   const without = repo({ "a.md": "the zebrafish paper" });
   assert.equal(without.status, 0, without.stdout + without.stderr);
   assert.match(without.stdout, /no \.personal-patterns\.local: generic shapes only/);
@@ -83,7 +86,7 @@ test("local patterns are added when the file exists; without it the script says 
   assert.doesNotMatch(withFile.stdout, /generic shapes only/);
 });
 
-test("an allow line lets one known line through, and only that line", () => {
+test("an allow line lets one known line through, and only that line", BASH, () => {
   const files = {
     LICENSE: `Copyright (c) someone <a@` + `b.com>\n`,
     "b.md": "mail a@" + "b.com\n",
