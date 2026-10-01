@@ -6,10 +6,13 @@
 //   review_load, review_split, review_save_comments, review_set_status,
 //   review_set_requirements, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
-//   ledger_add, ledger_update, ledger_remove, ledger_check, comments_backup
+//   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
+//   ledger_import, ledger_suggest, comments_backup
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
 //     | "late_result_recorded" | "job_done", ... }
+//   turn_done: { ref, ok, error? }. ok false: the turn ended on a usage limit,
+//   a refusal, an API error, an empty turn, a stop or a crash (error says which).
 // Jobs (JOB_TYPES): the reply is { ok: true, accepted: true, job_id } at once
 // and the result follows as { event: "job_done", job_id, result }, result
 // being what the reply would have held ({ ok: true, ... } or { ok: false,
@@ -39,6 +42,9 @@ import {
   addLedgerItem,
   updateLedgerItem,
   removeLedgerItem,
+  ledgerExportDoc,
+  importLedgerItems,
+  sidecarPath,
   findComment,
   writeJsonAtomic,
   setRequirements,
@@ -56,6 +62,7 @@ import {
 import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental } from "./ledger-check.mjs";
+import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
@@ -146,7 +153,7 @@ export const keptWarning = (refs) =>
 // Requests that may run model calls one after another (a split and its
 // requirement extraction; a ledger check of up to 20 batches per rule). The
 // regex-only path takes the same route: one reply shape per request type.
-const JOB_TYPES = new Set(["review_split", "ledger_check"]);
+const JOB_TYPES = new Set(["review_split", "ledger_check", "ledger_suggest"]);
 
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
 
@@ -158,6 +165,19 @@ export function createReviewService({
   // Model names for decision receipts: the one-shot model, and the model of
   // the drafting session of a pane (getModel(key)). null when unknown.
   oneshotModel = null,
+  // P14: the one-shot of ONE JOB of a pane, when judgments go to the
+  // provider chosen in that pane (providers/oneshot-router.mjs pin):
+  // async (key) => { run, model }. A job (a split with its requirement
+  // extraction, a ledger check with all its batches, a suggestion) asks for
+  // it once, when it starts; every request of the job goes through `run`
+  // and every receipt carries `model`, so a provider changed in the pane
+  // while the job runs applies to the next job. The default is the two
+  // arguments above, for every pane.
+  oneshotJob = async () => ({ run: oneshot, model: oneshotModel }),
+  // P14: asked before a review turn is built or queued; it resolves when
+  // the pane's provider for review turns is confirmed and throws otherwise
+  // (providers/selection.mjs ready). The request then fails with that text.
+  turnGate = async () => {},
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -311,7 +331,8 @@ export function createReviewService({
         const since = rev.snapshot?.taken_at;
         return {
           requirements: c?.requirements ?? [],
-          comment_text: c?.text ?? "",
+          // With its section label: the split took it off the comment text.
+          comment_text: [c?.section, c?.text ?? ""].filter((x) => x !== undefined).join("\n"),
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
           recent_changes: since
@@ -337,6 +358,7 @@ export function createReviewService({
             kind: "requirement_link",
             input: {
               comment: comment?.text ?? "",
+              ...(comment?.section && { section: comment.section }),
               requirements: comment?.requirements ?? [],
               find: saved.find,
               text: saved.text,
@@ -460,11 +482,22 @@ export function createReviewService({
     return out;
   }
 
-  function turnEnded(key, turn) {
+  // outcome: { ok: true } or { ok: false, error } (index.mjs endTurnState).
+  // It goes with turn_done itself: the daemon sends the error event of a
+  // usage limit after turn_done, so the pane cannot pair the two by order.
+  function turnEnded(key, turn, outcome = { ok: true }) {
     turnHolds.get(key)?.();
     turnHolds.delete(key);
-    log(`[review] turn done ${turn.ref}`);
-    sendEvent(key, { type: "review_event", event: "turn_done", ref: turn.ref });
+    const failed = outcome?.ok === false;
+    const error = failed ? String(outcome.error ?? "The turn ended with an error.") : null;
+    log(`[review] turn done ${turn.ref}${failed ? ` failed: ${error}` : ""}`);
+    sendEvent(key, {
+      type: "review_event",
+      event: "turn_done",
+      ref: turn.ref,
+      ok: !failed,
+      ...(failed ? { error } : {}),
+    });
   }
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";
@@ -492,12 +525,16 @@ export function createReviewService({
       const d = at(key);
       const text = String(msg.text ?? "");
       // A receipt only when the model was asked (a regex split is no LLM decision).
+      // Provider and model of this job, for the split and the extraction after it.
+      const job = await oneshotJob(key);
+      const shot = job.run;
+      const shotModel = job.model;
       let asked = false;
       const ask =
-        oneshot &&
+        shot &&
         ((req) => {
           asked = true;
-          return oneshot(req);
+          return shot(req);
         });
       const r = await splitReview(text, { patterns: msg.patterns, oneshot: ask });
       const records = [];
@@ -506,7 +543,7 @@ export function createReviewService({
           decisionRecord({
             kind: "comment_split",
             input: text,
-            model: oneshotModel,
+            model: shotModel,
             output: {
               method: r.method,
               refs: r.comments.map((c) => c.ref),
@@ -518,13 +555,13 @@ export function createReviewService({
       }
       // L5: once the comments are known, whichever split made them. A save of
       // the edited list does not come here, so it never runs again on it.
-      const x = await extractRequirements(r.comments, { oneshot });
+      const x = await extractRequirements(r.comments, { oneshot: shot });
       if (x.asked) {
         records.push(
           decisionRecord({
             kind: "requirement_extract",
             input: x.input,
-            model: oneshotModel,
+            model: shotModel,
             output: { requests: x.requests },
           }),
         );
@@ -565,6 +602,7 @@ export function createReviewService({
       return { prompt: built.text };
     },
     async review_propose(msg, key, host) {
+      await turnGate(key);
       const d = at(key);
       const { built, comment } = await buildFor(d, msg.ref, msg.paragraphs);
       pushTurn(key, host, built.text, { ref: msg.ref });
@@ -574,6 +612,7 @@ export function createReviewService({
         hold(d, msg.ref, {
           reviewer: comment.reviewer,
           text: comment.text,
+          section: comment.section,
           requirements: comment.requirements,
         }),
       );
@@ -747,6 +786,73 @@ export function createReviewService({
       const d = at(key);
       return { revision: await update(d, (rev) => removeLedgerItem(rev, msg.id)) };
     },
+    // P15: rules only (no ids, no check results) to <stem>.ledger.json next
+    // to the manuscript; an older export of the same name is replaced.
+    async ledger_export(msg, key) {
+      const d = at(key);
+      const out = ledgerExportDoc(await load(d));
+      const path = sidecarPath(d.doc, ".ledger.json");
+      await writeJsonAtomic(path, out);
+      log(`[review] ledger export path=${path} count=${out.items.length}`);
+      return { path, count: out.items.length };
+    },
+    // msg.doc: the parsed file ({ items: [{ kind, text, scope, check }] }).
+    // msg.mode: "append" (default; known rules are skipped) or "replace".
+    async ledger_import(msg, key) {
+      const d = at(key);
+      const mode = msg.mode ?? "append";
+      let added = [];
+      let skipped = [];
+      const revision = await update(d, (rev) => {
+        const r = importLedgerItems(rev, msg.doc?.items, { mode });
+        added = r.added;
+        skipped = r.skipped;
+        return r.revision;
+      });
+      log(`[review] ledger import added=${added.length} skipped=${skipped.length} mode=${mode}`);
+      return {
+        added: added.length,
+        skipped: skipped.length,
+        added_ids: added.map((i) => i.id),
+        revision,
+      };
+    },
+    // P15: rule candidates from the review text (ledger-suggest.mjs). Nothing
+    // is stored: the author picks candidates in the pane, which sends them
+    // back through ledger_import.
+    async ledger_suggest(msg, key) {
+      const text = String(msg.text ?? "");
+      if (!text.trim()) throw new Error("Paste or load the review text first.");
+      const d = at(key); // before the model call: the receipt goes next to this document
+      const job = await oneshotJob(key);
+      const shotModel = job.model;
+      const r = await suggestLedger(text, { oneshot: job.run });
+      log(
+        `[review] ledger suggest method=${r.method} candidates=${r.candidates.length} warnings=${r.warnings.length}`,
+      );
+      // A receipt only when the model was asked; sentence numbers, no text.
+      if (r.asked) {
+        await receipt(d, [
+          decisionRecord({
+            kind: "ledger_suggest",
+            input: r.input,
+            model: shotModel,
+            output: {
+              method: r.method,
+              candidates: r.candidates.length,
+              labels: r.candidates.map((c) => ({
+                i: c.sentence_index,
+                kind: c.kind,
+                check: c.check.type,
+                why: c.why,
+              })),
+              warnings: r.warnings.length,
+            },
+          }),
+        ]);
+      }
+      return { candidates: r.candidates, method: r.method, warnings: r.warnings };
+    },
     async ledger_check(msg, key) {
       const d = at(key);
       // Taken on arrival, before the file read: a check that reads the file
@@ -764,15 +870,18 @@ export function createReviewService({
       const paragraphs = msg.snapshot?.paragraphs ?? [];
       // L10: changed paragraphs only unless msg.full (the "Full check" button).
       const decisions = [];
+      // Every batch of this check runs on the provider and model of its start.
+      const job = await oneshotJob(key);
+      const shotModel = job.model;
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
-        oneshot,
+        oneshot: job.run,
         full: msg.full === true,
         onDecision: (x) =>
           decisions.push(
             decisionRecord({
               kind: "ledger_check",
               input: { instruction: x.instruction, paragraph: x.paragraph },
-              model: oneshotModel,
+              model: shotModel,
               output: {
                 item_id: x.item_id,
                 paragraph_index: x.paragraph_index,

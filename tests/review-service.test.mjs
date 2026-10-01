@@ -453,8 +453,24 @@ test("turnEnded pushes turn_done", async () => {
   const t = await setup();
   try {
     t.svc.turnEnded("k", { ref: "R1.1" });
-    assert.deepEqual(t.events.at(-1), { type: "review_event", event: "turn_done", ref: "R1.1" });
+    assert.deepEqual(t.events.at(-1), {
+      type: "review_event",
+      event: "turn_done",
+      ref: "R1.1",
+      ok: true,
+    });
     assert.equal(t.lines.at(-1), "[review] turn done R1.1");
+    // How the turn ended goes with turn_done itself: an error event sent
+    // before or after it is not what the pane's Propose all decides on.
+    t.svc.turnEnded("k", { ref: "R1.2" }, { ok: false, error: "Claude usage limit reached." });
+    assert.deepEqual(t.events.at(-1), {
+      type: "review_event",
+      event: "turn_done",
+      ref: "R1.2",
+      ok: false,
+      error: "Claude usage limit reached.",
+    });
+    assert.equal(t.lines.at(-1), "[review] turn done R1.2 failed: Claude usage limit reached.");
   } finally {
     await t.cleanup();
   }
@@ -1625,6 +1641,291 @@ test("tracked-edit context: changes recorded after the last refresh are given wi
   }
 });
 
+// P15: the ledger as a JSON file next to the manuscript.
+test("ledger_export writes <stem>.ledger.json; ledger_import adds its rules and skips known ones", async () => {
+  const t = await setup();
+  try {
+    await t.ask("ledger_add", { item: NOVEL });
+    await t.ask("ledger_add", { item: IN_VITRO });
+    const x = await t.ask("ledger_export");
+    assert.deepEqual([x.ok, x.count, x.path], [true, 2, join(t.dir, "paper.ledger.json")]);
+    const file = JSON.parse(await readFile(x.path, "utf8"));
+    assert.equal(file.format, "manuscript-pane-ledger");
+    assert.deepEqual(
+      file.items.map((i) => Object.keys(i).sort()),
+      [
+        ["check", "kind", "scope", "text"],
+        ["check", "kind", "scope", "text"],
+      ],
+    );
+    assert.ok(t.lines.includes(`[review] ledger export path=${x.path} count=2`));
+
+    // Same rules again: nothing added.
+    const same = await t.ask("ledger_import", { doc: file });
+    assert.deepEqual([same.ok, same.added, same.skipped], [true, 0, 2]);
+    assert.ok(t.lines.includes("[review] ledger import added=0 skipped=2 mode=append"));
+
+    await t.ask("ledger_remove", { id: "L1" });
+    const back = await t.ask("ledger_import", { doc: file, mode: "append" });
+    assert.deepEqual([back.added, back.skipped], [1, 1]);
+    assert.deepEqual(
+      back.revision.ledger.map((i) => i.text),
+      [IN_VITRO.text, NOVEL.text],
+    );
+
+    const bad = await t.ask("ledger_import", { doc: { items: [{ kind: "forbid" }] } });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /item 1/);
+    const none = await t.ask("ledger_import", { doc: null });
+    assert.match(none.error, /items array/);
+    assert.equal((await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).ledger.length, 2);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("ledger_suggest is a job: candidates from the review text, one receipt, nothing stored", async () => {
+  const { SUGGEST_SYSTEM } = await import("../daemon/ledger-suggest.mjs");
+  const systems = [];
+  const t = await setup({
+    oneshot: async (req) => {
+      systems.push(req.system);
+      return {
+        ok: true,
+        json: {
+          labels: [
+            { i: 0, type: "none" },
+            { i: 2, type: "instruction" },
+          ],
+        },
+      };
+    },
+    oneshotModel: "haiku",
+  });
+  try {
+    const text = 'Reviewer 1\nDo not use "novel".\nUse SI units throughout.';
+    let first = null;
+    await new Promise((resolve) =>
+      t.svc.handlers.ledger_suggest(
+        { type: "ledger_suggest", request_id: "q7", text },
+        (r) => ((first = r), resolve()),
+        "k",
+        "word",
+      ),
+    );
+    assert.deepEqual([first.accepted, typeof first.job_id], [true, "string"]);
+
+    const r = await t.ask("ledger_suggest", { text });
+    assert.deepEqual([r.ok, r.method], [true, "regex+llm"]);
+    assert.deepEqual(
+      r.candidates.map((c) => [c.kind, c.check.type, c.text]),
+      [
+        ["forbid", "regex", 'Do not use "novel".'],
+        ["instruction", "llm", "Use SI units throughout."],
+      ],
+    );
+    assert.deepEqual([...new Set(systems)], [SUGGEST_SYSTEM]);
+    assert.ok(t.lines.includes("[review] ledger suggest method=regex+llm candidates=2 warnings=0"));
+
+    await new Promise((res) => setTimeout(res, 20)); // the first job's receipt
+    const raw = await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8");
+    assert.equal(raw.includes("novel"), false, "no review text in the receipt");
+    const log = await readDecisions(t.dir);
+    assert.deepEqual(
+      log.map((x) => [x.kind, x.model, x.output.candidates]),
+      [
+        ["ledger_suggest", "haiku", 2],
+        ["ledger_suggest", "haiku", 2],
+      ],
+    );
+    assert.equal((await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).ledger.length, 0);
+
+    const empty = await t.ask("ledger_suggest", { text: "  " });
+    assert.deepEqual([empty.ok, /review text/.test(empty.error)], [false, true]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// P14: one-shot judgments go to the provider chosen in the pane (key "k").
+test("review_split uses the pane's one-shot and its model label", async () => {
+  const used = [];
+  const t = await setup({
+    oneshotJob: async (key) => ({
+      run: async () => (used.push(key), { ok: true, json: { lines: [] }, text: "{}" }),
+      model: `ollama:qwen3.5:9b@${key}`,
+    }),
+  });
+  try {
+    await t.ask("review_split", { text: "Reviewer 1\nOne comment only." });
+    assert.ok(used.includes("k"));
+    // The comment_split and requirement_extract receipts name the routed model.
+    const log = await readDecisions(t.dir);
+    assert.ok(log.length >= 1);
+    assert.ok(log.every((r) => r.model === "ollama:qwen3.5:9b@k"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("ledger_check and ledger_suggest use the pane's one-shot too; the default stays the constructor's", async () => {
+  const used = [];
+  const routed = async (req) => {
+    used.push(req.system.slice(0, 12));
+    return { ok: false, error: "routed provider is down" };
+  };
+  const t = await setup({
+    // The constructor's one-shot must not be asked once a route exists.
+    oneshot: async () => {
+      throw new Error("the default one-shot was used");
+    },
+    oneshotModel: "haiku",
+    oneshotJob: async (key) => ({
+      run: key === "k" ? routed : null,
+      model: `codex:gpt-6.1-sol@${key}`,
+    }),
+  });
+  try {
+    await t.ask("ledger_add", {
+      item: { kind: "instruction", text: "Use SI units", check: { type: "llm" } },
+    });
+    const check = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 1, text: "Ten feet.", reviewed_text: "Ten feet." }] },
+      full: true,
+    });
+    assert.equal(check.ok, true);
+    const suggest = await t.ask("ledger_suggest", { text: "Reviewer 1\nUse SI units throughout." });
+    assert.deepEqual([suggest.ok, suggest.method], [true, "regex"]);
+    assert.match(suggest.warnings.join(" "), /routed provider is down/);
+    assert.equal(used.length, 2, "one ledger check batch and one suggestion were routed");
+    const log = await readDecisions(t.dir);
+    assert.deepEqual([...new Set(log.map((r) => r.kind))].sort(), [
+      "ledger_check",
+      "ledger_suggest",
+    ]);
+    assert.ok(log.every((r) => r.model === "codex:gpt-6.1-sol@k"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Codex review of stage 2.5: the provider of a job is taken once, when the
+// job starts. A choice changed in the pane while the job runs applies to the
+// next job; every request and every receipt of this one is the first choice.
+test("a ledger check in several batches stays on the provider it started with, and its receipts say so", async () => {
+  let choice = "ollama:qwen3.5:9b";
+  const pins = [];
+  const calls = [];
+  const t = await setup({
+    oneshot: async () => {
+      throw new Error("the default one-shot was used");
+    },
+    // As oneshot-router.mjs pin(): the choice of this moment, kept by the handle.
+    oneshotJob: async () => {
+      const mine = choice;
+      pins.push(mine);
+      return {
+        model: mine,
+        run: async () => {
+          calls.push(mine);
+          choice = "codex:gpt-6.1-sol"; // the pane changes it while the job runs
+          return { ok: true, text: "{}", json: { violations: [] } };
+        },
+      };
+    },
+  });
+  try {
+    for (const text of ["Use SI units", "Write numbers below ten as words"]) {
+      await t.ask("ledger_add", { item: { kind: "instruction", text, check: { type: "llm" } } });
+    }
+    const paragraphs = Array.from({ length: 3 }, (_, i) => ({
+      index: i,
+      text: `Paragraph ${i} is ten feet long.`,
+      reviewed_text: `Paragraph ${i} is ten feet long.`,
+    }));
+    const check = await t.ask("ledger_check", { snapshot: { paragraphs }, full: true });
+    assert.equal(check.ok, true);
+    assert.equal(pins.length, 1, "the provider was resolved once for the whole job");
+    assert.ok(calls.length >= 2, `several requests in one job (${calls.length})`);
+    assert.deepEqual([...new Set(calls)], ["ollama:qwen3.5:9b"]);
+    const log = await readDecisions(t.dir);
+    assert.ok(log.length >= 2);
+    assert.deepEqual([...new Set(log.map((r) => r.model))], ["ollama:qwen3.5:9b"]);
+    // The next job starts with the choice as it is then.
+    await t.ask("ledger_check", { snapshot: { paragraphs }, full: true });
+    assert.deepEqual(pins, ["ollama:qwen3.5:9b", "codex:gpt-6.1-sol"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_split: the split and the requirement extraction after it run on one provider", async () => {
+  let choice = "ollama:qwen3.5:9b";
+  const pins = [];
+  const calls = [];
+  const t = await setup({
+    oneshotJob: async () => {
+      const mine = choice;
+      pins.push(mine);
+      return {
+        model: mine,
+        run: async (req) => {
+          calls.push(mine);
+          choice = "codex:gpt-6.1-sol";
+          // The split: both lines start a comment. The extraction then fails.
+          if (!req.prompt.includes("\nLines:\n")) return { ok: false, error: "the model is down" };
+          const lines = [1, 2].map((n) => ({ n, type: "comment_start" }));
+          return { ok: true, json: { lines }, text: "{}" };
+        },
+      };
+    },
+  });
+  try {
+    // No reviewer heading: the regex split fails and the model is asked, then
+    // the requirements of the comments are asked for.
+    await t.ask("review_split", { text: "The units are missing.\nThe figure is unclear." });
+    assert.equal(pins.length, 1);
+    assert.ok(calls.length >= 2, `split and extraction (${calls.length})`);
+    assert.deepEqual([...new Set(calls)], ["ollama:qwen3.5:9b"]);
+    const log = await readDecisions(t.dir);
+    assert.deepEqual([...new Set(log.map((r) => r.model))], ["ollama:qwen3.5:9b"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Codex review of stage 2.5: a review turn waits for the pane's confirmed
+// provider like a judgment does. Without one it fails before anything is
+// built or queued: no turn goes to a provider the pane did not confirm.
+test("review_propose asks the turn gate first; a refusal starts no turn and changes nothing", async () => {
+  let gate = async () => {
+    throw new Error(
+      "The stored provider for review turns cannot be used: Codex CLI is not available.",
+    );
+  };
+  const t = await setup({ turnGate: (key) => gate(key) });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const r = await t.ask("review_propose", { ref: "R1.1" });
+    assert.deepEqual(
+      [r.ok, r.error],
+      [false, "The stored provider for review turns cannot be used: Codex CLI is not available."],
+    );
+    assert.deepEqual(t.pushed, [], "no turn was queued");
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").status, "pending");
+    // Once the provider is confirmed the same request starts the turn.
+    const seen = [];
+    gate = async (key) => void seen.push(key);
+    const ok = await t.ask("review_propose", { ref: "R1.1" });
+    assert.equal(ok.started, true);
+    assert.deepEqual(seen, ["k"]);
+    assert.equal(t.pushed.length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // Codex review 14: a normal tracked edit Word applied while the connection
 // dropped left nothing in the file: the attempt was only in memory, no late
 // result came, and the refresh recovery read blocked exceptions only. The
@@ -1930,6 +2231,164 @@ test("no handler reads the pane's document again after its first await", async (
     assert.equal(ok.ok, true, ok.message);
     here();
     assert.equal((await t.ask("review_load")).revision.comments[0].changes.length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// The receipt of a requirement link holds no review text; the section of the
+// comment is part of what its fingerprint covers.
+test("receipts: the section of a comment is in the fingerprinted input of a requirement link", async () => {
+  const link = async (section) => {
+    const t = await setup({ getModel: () => "sonnet" });
+    try {
+      await t.ask("review_save_comments", {
+        comments: [
+          {
+            ref: "R1.1",
+            reviewer: 1,
+            text: "Use Celsius.",
+            ...(section && { section }),
+            requirements: ["use Celsius"],
+          },
+        ],
+      });
+      const deps = {
+        ...t.svc.trackedEditDeps("k"),
+        call: async () => ({
+          ok: true,
+          word_comment_id: 4,
+          paragraph_index: 1,
+          before: "b",
+          after: "a",
+        }),
+      };
+      await applyTrackedEdit(
+        deps,
+        {
+          comment_ref: "R1.1",
+          find: "30 degrees",
+          replace: "30 °C",
+          rationale: { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] },
+        },
+        { ref: "R1.1" },
+      );
+      const raw = await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8");
+      const rows = await readDecisions(t.dir);
+      return { raw, row: rows.find((r) => r.kind === "requirement_link") };
+    } finally {
+      await t.cleanup();
+    }
+  };
+  const plain = await link(null);
+  const abstract = await link("Abstract of the paper");
+  const methods = await link("Methods of the paper");
+  assert.match(plain.row.input_fingerprint, /^[0-9a-f]{64}$/);
+  assert.notEqual(abstract.row.input_fingerprint, plain.row.input_fingerprint);
+  assert.notEqual(abstract.row.input_fingerprint, methods.row.input_fingerprint);
+  assert.ok(!abstract.raw.includes("Abstract of the paper"));
+});
+
+test("review_split: the section of a comment reaches the requirement extraction and the result", async () => {
+  let prompt = "";
+  const t = await setup({
+    oneshotModel: "haiku",
+    oneshot: async (req) => {
+      prompt = req.prompt;
+      return {
+        ok: true,
+        json: {
+          sentences: [
+            { ref: "R1.1", s: 1, type: "request" },
+            { ref: "R1.2", s: 1, type: "request" },
+          ],
+        },
+      };
+    },
+  });
+  try {
+    const r = await t.ask("review_split", {
+      text: "Reviewer 1:\nAbstract:\n1. Shorten this section.\nMethods:\n1. Expand this section.\n",
+    });
+    assert.deepEqual(
+      r.comments.map((c) => [c.ref, c.section, c.text, c.requirements.map((q) => q.text)]),
+      [
+        ["R1.1", "Abstract", "Shorten this section.", ["Shorten this section."]],
+        ["R1.2", "Methods", "1. Expand this section.", ["Expand this section."]],
+      ],
+    );
+    assert.match(prompt, /\[R1\.1 section\] Abstract\n\[R1\.1 s1\] Shorten this section\./);
+    const saved = await t.ask("review_save_comments", { comments: r.comments });
+    assert.deepEqual(
+      saved.revision.comments.map((c) => [c.ref, c.section]),
+      [
+        ["R1.1", "Abstract"],
+        ["R1.2", "Methods"],
+      ],
+    );
+    const preview = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
+    assert.match(
+      preview.prompt,
+      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\n<<<\n1\. Expand this section\.\n>>>/,
+    );
+    assert.ok(
+      t.lines.some((l) => /^\[review\] prompt R1\.2 .* section="Methods"/.test(l)),
+      t.lines.join("\n"),
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// L2 reads the comment as a source of new words: the section label is part
+// of what the reviewer wrote, so a word of it is not flagged as unsourced.
+test("the review context of a tracked edit gives the comment text with its section", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", {
+      comments: [
+        { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "Abstract" },
+        { ref: "R1.2", reviewer: 1, text: "Add units." },
+      ],
+    });
+    const deps = t.svc.trackedEditDeps("k");
+    assert.equal(
+      (await deps.getReviewContext("R1.1")).comment_text,
+      "Abstract\nShorten this section.",
+    );
+    assert.equal((await deps.getReviewContext("R1.2")).comment_text, "Add units.");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// An empty section from the pane clears the stored label, so it is not in
+// the next prompt; a save without the key (an older pane) keeps it.
+test("review_save_comments: an empty section clears the label, a missing key keeps it", async () => {
+  const t = await setup();
+  try {
+    const first = [
+      { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "Abstract" },
+      { ref: "R1.2", reviewer: 1, text: "Expand this section.", section: "Methods" },
+    ];
+    await t.ask("review_save_comments", { comments: first });
+    const saved = await t.ask("review_save_comments", {
+      comments: [
+        { ref: "R1.1", reviewer: 1, text: "Shorten the abstract.", section: "" },
+        { ref: "R1.2", reviewer: 1, text: "Expand this section." },
+      ],
+    });
+    assert.deepEqual(
+      saved.revision.comments.map((c) => [c.ref, c.section]),
+      [
+        ["R1.1", undefined],
+        ["R1.2", "Methods"],
+      ],
+    );
+    const cleared = await t.ask("review_preview", { ref: "R1.1", paragraphs: [] });
+    assert.ok(!cleared.prompt.includes("Section of the review"), cleared.prompt);
+    const kept = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
+    assert.ok(kept.prompt.includes("Section of the review this comment is under: Methods"));
   } finally {
     await t.cleanup();
   }

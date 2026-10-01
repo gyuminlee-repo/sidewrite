@@ -114,6 +114,9 @@ const Comment = z.object({
   ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
   reviewer: z.number().int().nonnegative(),
   text: z.string(),
+  // Label of the part of the review the comment is in ("Minor comments"),
+  // from the split. Refs do not carry it: numbers go on across sections.
+  section: z.string().optional(),
   requirements: z.array(Requirement).default([]),
   status: z.enum(["pending", "in_progress", "done"]).default("pending"),
   changes: z.array(ChangeSchema).default([]),
@@ -314,10 +317,12 @@ export function replaceComments(rev, incoming, keep = new Set()) {
     if (seen.has(c.ref)) throw new Error(`Duplicate comment ref ${c.ref}`);
     seen.add(c.ref);
     const old = findComment(rev, c.ref);
+    const section = c.section ?? old?.section;
     list.push({
       ref: c.ref,
       reviewer: c.reviewer,
       text: c.text,
+      ...(section && { section }),
       requirements: Array.isArray(c.requirements)
         ? numberRequirements(old?.requirements ?? [], c.requirements, [`q${requirementSeq(old)}`])
         : clone(old?.requirements ?? []),
@@ -341,7 +346,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
 }
 
 // Put a comment back so a change or blocked edit can be recorded under it
-// when the comment was removed anyway. from: { reviewer, text, requirements }
+// when the comment was removed anyway. from: { reviewer, text, section, requirements }
 // the daemon still holds, or null for the ref alone.
 export function restoreComment(rev, ref, from = null) {
   const m = /^(?:R(\d+)|E)\.\d+$/.exec(ref);
@@ -352,6 +357,7 @@ export function restoreComment(rev, ref, from = null) {
       ref,
       reviewer: from?.reviewer ?? (m[1] ? Number(m[1]) : 0),
       text: from?.text ?? "",
+      ...(from?.section && { section: from.section }),
       requirements: clone(from?.requirements ?? []),
       status: "in_progress",
     }),
@@ -644,6 +650,56 @@ export function removeLedgerItem(rev, id) {
   next.ledger = next.ledger.filter((x) => x.id !== id);
   if (next.ledger.length === before) throw new Error(`No ledger item ${id}`);
   return next;
+}
+
+// ---- P15: the ledger as a JSON file -------------------------------------------
+// A file holds rules only ({ kind, text, scope, check }): ids and check
+// results belong to one manuscript. tests/fixtures/review_ledger.json has the
+// same item shape, so a hand-written list imports too.
+
+const RULE_KEYS = ["kind", "text", "scope", "check"];
+const ruleOf = (item) => Object.fromEntries(RULE_KEYS.map((k) => [k, item?.[k]]));
+const ruleKey = (item) => JSON.stringify(RULE_KEYS.map((k) => item[k]));
+
+export function ledgerExportDoc(rev, now = new Date()) {
+  return {
+    format: "manuscript-pane-ledger",
+    version: 1,
+    exported_at: now.toISOString(),
+    items: rev.ledger.map(ruleOf),
+  };
+}
+
+// mode "append": rules the ledger already holds are skipped. "replace": the
+// ledger is emptied first. Every row is checked before anything is added, so
+// a bad row adds nothing. Ids come from addLedgerItem.
+export function importLedgerItems(rev, items, { mode = "append" } = {}) {
+  if (!Array.isArray(items)) throw new Error("ledger file needs an items array");
+  if (mode !== "append" && mode !== "replace") throw new Error(`unknown import mode ${mode}`);
+  const rows = items.map((it, n) => {
+    const parsed = LedgerItemSchema.safeParse({ ...ruleOf(it), id: "L0" });
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const where = issue?.path?.length ? `${issue.path.join(".")}: ` : "";
+      throw new Error(`item ${n + 1}: ${where}${issue?.message ?? "invalid"}`);
+    }
+    return ruleOf(parsed.data);
+  });
+  let next = mode === "replace" ? { ...clone(rev), ledger: [] } : rev;
+  const have = new Set(next.ledger.map(ruleKey));
+  const added = [];
+  const skipped = [];
+  for (const row of rows) {
+    if (have.has(ruleKey(row))) {
+      skipped.push(row);
+      continue;
+    }
+    const r = addLedgerItem(next, row);
+    next = r.revision;
+    have.add(ruleKey(row));
+    added.push(r.item);
+  }
+  return { revision: next, added, skipped };
 }
 
 // ---- L4: snapshot and outside changes ----------------------------------------

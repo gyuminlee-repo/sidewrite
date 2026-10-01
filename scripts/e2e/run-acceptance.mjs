@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Stage-2 review acceptance run without hands: daemon, a separate Word
-// process with a CDP port on its add-in pane, the Review tab steps, the
-// author's Word steps over COM, the feature_list verify commands, cleanup.
+// Review acceptance run without hands: daemon, a separate Word process with
+// a CDP port on its add-in pane, the Review tab steps, the author's Word
+// steps over COM, the feature_list verify commands, cleanup. Two flows:
+// stage 2 (main) and stage 2.5 (mainS25), chosen by --stage or --features.
 // Runs from WSL; Word, its pane and COM are on Windows. See README.md.
 
 import { spawn, execFileSync } from "node:child_process";
@@ -13,12 +14,30 @@ import {
   badgesMatch,
   buildComPlan,
   cleanupDecision,
+  cleanupEvidence,
+  cliTurnEvidence,
+  defaultFeatures,
+  docStem,
   exitDecision,
+  featureIds,
+  focusEvidence,
+  guardEvidence,
   judge,
   minimalFind,
+  modelsEvidence,
   norm,
+  ollamaSplitEvidence,
+  proposeAllEvidence,
+  providersEvidence,
   resolvedMatch,
-  rewriteCommand,
+  restartSplitEvidence,
+  rewriteVerify,
+  siblingMatch,
+  stageOf,
+  staleMarkers,
+  stopEvidence,
+  suggestEvidence,
+  trackedPlaced,
   table,
 } from "./judge.mjs";
 
@@ -28,6 +47,8 @@ const WS_PORT = 47833;
 const HTTP_PORT = 47834;
 const OUTSIDE_SENTENCE =
   "Across the replicates the plateau optical density ranged from 0.82 to 0.91.";
+// The author's own tracked insertion next to the R1.4 change (siblingMatch).
+const HAND_INSERT = "Checked: ";
 const R13_REQUIREMENTS = [
   "say how growth was followed",
   "describe the synthetic carbon source as a novel substrate",
@@ -41,7 +62,8 @@ const { values: opt } = parseArgs({
     review: { type: "string", default: path.join(REPO, "tests/fixtures/fake_review.txt") },
     ledger: { type: "string", default: path.join(REPO, "tests/fixtures/review_ledger.json") },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
-    log: { type: "string", default: "/tmp/daemon-s2-e2e.log" },
+    // Default /tmp/daemon-<stage>-e2e.log.
+    log: { type: "string" },
     "cdp-port": { type: "string", default: process.env.E2E_CDP_PORT ?? "9333" },
     "win-node": {
       type: "string",
@@ -51,14 +73,31 @@ const { values: opt } = parseArgs({
     "feature-list": { type: "string", default: process.env.E2E_FEATURE_LIST },
     "plan-dir": { type: "string", default: process.env.E2E_PLAN_DIR },
     "plan-repo": { type: "string", default: process.env.E2E_PLAN_REPO },
-    "plan-log": { type: "string", default: "/tmp/daemon-s2.log" },
-    features: { type: "string", default: "S2-18..S2-34" },
+    // Default /tmp/daemon-<stage>.log; --plan-dir defaults to /tmp/<stage>-run.
+    "plan-log": { type: "string" },
+    // Default: the range of the stage (S2-18..S2-34, S25-30..S25-41).
+    features: { type: "string" },
+    // Stage 2.5: the provider of the judgments (split, ledger suggestions),
+    // and a review text with a rule the ledger suggestions must find.
+    "judgment-provider": { type: "string", default: "ollama" },
+    "rules-review": {
+      type: "string",
+      default: path.join(REPO, "tests/fixtures/fake_review_rules.txt"),
+    },
+    // Prefix of the feature ids and of the marker files (s2, s25, ...).
+    // Default: the stage of --features.
+    stage: { type: "string" },
+    // Provider for the review turns (claude, codex, antigravity), chosen in
+    // the pane's Providers section after the Review tab opened.
+    provider: { type: "string" },
     // Feature ids that depend on an event the run cannot force (judge.mjs
     // CONDITIONS). Repeat the flag or separate ids with commas.
     conditional: { type: "string", multiple: true, default: [] },
     "skip-knob": { type: "boolean", default: false },
     // Leave out the second Word run on a compatibility mode 14 copy.
     "skip-mode14": { type: "boolean", default: false },
+    // Leave out the Word run on the document of tracked special characters.
+    "skip-special": { type: "boolean", default: false },
     // Leave Word and the daemon running when a step fails, to look at them.
     "keep-on-fail": { type: "boolean", default: false },
   },
@@ -73,17 +112,36 @@ if (!opt["base-dir"] && !opt["run-dir"])
 if (!opt["playwright-core"])
   die("--playwright-core (Windows path of a playwright-core package) is required");
 
+let STAGE;
+try {
+  STAGE = (opt.stage ?? stageOf(opt.features ?? defaultFeatures("s2"))).toLowerCase();
+  if (!/^s\d+$/.test(STAGE)) throw new Error(`--stage takes s2 or s25, not ${opt.stage}`);
+  opt.features ??= defaultFeatures(STAGE);
+  featureIds(opt.features);
+} catch (e) {
+  die(e.message);
+}
+if (STAGE !== "s2" && STAGE !== "s25") die(`there is no flow for stage ${STAGE} (s2, s25)`);
+const PLAN_DIR = opt["plan-dir"] ?? `/tmp/${STAGE}-run`;
+const PLAN_LOG = opt["plan-log"] ?? `/tmp/daemon-${STAGE}.log`;
+
 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 const RUN = path.resolve(opt["run-dir"] ?? path.join(opt["base-dir"], `e2e-${stamp}`));
 const TOOLS = path.join(RUN, "tools");
 const OK_DIR = path.join(RUN, "ok");
-const DOC = path.join(RUN, "review_manuscript.docx");
-const REVISION = path.join(RUN, "review_manuscript.revision.json");
-const LOG = opt.log;
+// The copy of the manuscript: review_manuscript.docx (stage 2), paper.docx
+// (stage 2.5, whose feature list reads paper.decisions.jsonl and
+// paper.ledger.json next to it).
+const STEM = docStem(STAGE);
+const DOC = path.join(RUN, `${STEM}.docx`);
+const REVISION = path.join(RUN, `${STEM}.revision.json`);
+const LOG = opt.log ?? `/tmp/daemon-${STAGE}-e2e.log`;
 const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
 const MODE14_LOG = LOG.replace(/\.log$/, "") + "-mode14.log";
 const MODE14_DIR = path.join(RUN, "mode14");
 const DOC14 = path.join(MODE14_DIR, "review_manuscript.docx");
+const SPECIAL_DIR = path.join(RUN, "special");
+const DOC_SPECIAL = path.join(SPECIAL_DIR, "tracked_special.docx");
 const winPath = (p) => execFileSync("wslpath", ["-w", p], { encoding: "utf8" }).trim();
 const unixPath = (p) => execFileSync("wslpath", ["-u", p], { encoding: "utf8" }).trim();
 
@@ -194,8 +252,10 @@ const count = (f, re) => (readLog(f).match(re) ?? []).length;
 
 let daemon = null;
 let daemonLog = LOG;
-async function startDaemon(logFile, extraEnv = {}) {
-  const fd = fs.openSync(logFile, "w");
+// append: keep the log and write on (a restart in the middle of a run).
+async function startDaemon(logFile, extraEnv = {}, { append = false } = {}) {
+  const from = append ? readLog(logFile).length : 0;
+  const fd = fs.openSync(logFile, append ? "a" : "w");
   daemon = spawn(process.execPath, ["daemon/index.mjs"], {
     cwd: REPO,
     env: { ...process.env, CC_OFFICE_DEBUG: "1", ...extraEnv },
@@ -203,7 +263,7 @@ async function startDaemon(logFile, extraEnv = {}) {
   });
   daemonLog = logFile;
   await until(
-    () => readLog(logFile).includes("HTTP server listening") && listening(WS_PORT),
+    () => readLog(logFile).slice(from).includes("HTTP server listening") && listening(WS_PORT),
     30_000,
     "daemon",
   );
@@ -244,26 +304,23 @@ const embedTaskpane = (src, out) =>
   );
 
 // ---- verify commands -------------------------------------------------------
-function featureIds(spec) {
-  const [a, b] = spec.split("..").map((s) => Number(s.replace(/^S2-/, "")));
-  const out = [];
-  for (let i = a; i <= (b ?? a); i++) out.push(`S2-${String(i).padStart(2, "0")}`);
-  return out;
-}
 function runFeatures() {
   if (!opt["feature-list"]) return;
   const list = JSON.parse(fs.readFileSync(opt["feature-list"], "utf8"));
   const features = Array.isArray(list) ? list : list.features;
-  const map = {};
-  if (opt["plan-dir"]) map[opt["plan-dir"].replace(/\/$/, "")] = RUN;
-  if (opt["plan-repo"]) map[`cd ${opt["plan-repo"].replace(/\/$/, "")} `] = `cd ${REPO} `;
-  map[opt["plan-log"]] = LOG;
-  map[opt["plan-log"].replace(/\.log$/, "") + "-knob.log"] = KNOB_LOG;
-  map["/tmp/s2-"] = path.join(OK_DIR, "s2-");
   for (const id of featureIds(opt.features)) {
     const f = features.find((x) => x.id === id);
     if (!f?.verify_command) continue;
-    const cmd = rewriteCommand(f.verify_command, map);
+    const cmd = rewriteVerify(f.verify_command, {
+      runDir: RUN,
+      prefix: STAGE,
+      planDir: PLAN_DIR,
+      planRepo: opt["plan-repo"],
+      repo: REPO,
+      planLog: PLAN_LOG,
+      log: LOG,
+      knobLog: KNOB_LOG,
+    });
     let code = 0;
     try {
       execFileSync("bash", ["-c", cmd], { stdio: "ignore", timeout: 300_000 });
@@ -296,13 +353,20 @@ async function propose(ref, label) {
   return note("propose", r, { label: label ?? `propose ${ref}`, ctx: { ref, turnCompleted } });
 }
 
-async function main() {
+// Both flows: the run folder, the daemon, a Word of its own on the copy.
+async function setup() {
   fs.mkdirSync(TOOLS, { recursive: true });
   for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1"])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   if (listening(WS_PORT) || listening(HTTP_PORT))
     die(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
   fs.rmSync(KNOB_LOG, { force: true });
+  // A reused run folder (--run-dir): markers and evidence of an earlier run
+  // are removed, so only what this run judges can satisfy a verify command.
+  if (fs.existsSync(OK_DIR)) {
+    record.stale_markers_removed = staleMarkers(fs.readdirSync(OK_DIR), STAGE);
+    for (const n of record.stale_markers_removed) fs.unlinkSync(path.join(OK_DIR, n));
+  }
 
   record.word.preexisting = wordPids();
 
@@ -311,8 +375,20 @@ async function main() {
 
   record.word.launch = launchWord(DOC, path.join(RUN, "webview2"));
   save();
+}
 
+// Stage 2 (procedure of the stage-2 plan, S2-18..S2-34).
+async function main() {
   note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+  // A provider that cannot run review turns is refused here with its reason
+  // (the step fails); the turns below then run with Claude.
+  if (opt.provider) {
+    note("select-provider", pane("select-provider", { role: "turn", id: opt.provider }), {
+      label: `select-provider turn=${opt.provider}`,
+      ctx: { id: opt.provider },
+    });
+    pane("open-review");
+  }
   note("split", pane("split", { review_file: winPath(opt.review) }));
   note("edit-draft", pane("edit-draft", { requirements: { "R1.3": R13_REQUIREMENTS } }));
   note("ledger-add", pane("ledger-add", { ledger_file: winPath(opt.ledger) }));
@@ -339,6 +415,25 @@ async function main() {
   const planFile = path.join(RUN, "com-plan.json");
   fs.writeFileSync(planFile, JSON.stringify(plan, null, 2));
   record.word.state_before = com("state");
+  // A tracked insertion of the author in the paragraph of the R1.4 change,
+  // left pending: R1.4 must then show its own state, not the paragraph's.
+  const r14 = plan.ops.find((o) => o.ref === "R1.4");
+  const hand = r14
+    ? com("hand-insert", [
+        "-PlanJson",
+        winPath(planFile),
+        "-ChangeId",
+        r14.change_id,
+        "-Text",
+        HAND_INSERT,
+      ])
+    : { ok: false, error: "no R1.4 change with a rationale comment" };
+  record.word.hand_insert = hand;
+  rows.push({
+    step: "word: tracked insertion next to R1.4",
+    result: hand.ok ? "PASS" : "FAIL",
+    got: hand.ok ? `revisions in the paragraph: ${hand.revisions_in_paragraph}` : hand.error,
+  });
   const applied = com("apply", ["-PlanJson", winPath(planFile)]);
   record.word.apply = applied;
   rows.push({
@@ -378,6 +473,18 @@ async function main() {
     result: resolved.pass ? "PASS" : "FAIL",
     got: resolved.got,
   });
+  const sibling = siblingMatch(
+    JSON.parse(fs.readFileSync(REVISION, "utf8")),
+    after,
+    record.word.state_after_refresh,
+    { ref: "R1.4", hand: HAND_INSERT },
+  );
+  record.word.sibling = sibling;
+  rows.push({
+    step: "word: R1.4 next to a pending revision",
+    result: sibling.pass ? "PASS" : "FAIL",
+    got: sibling.got,
+  });
   save();
 
   note("clean-tool", pane("clean-tool"));
@@ -412,6 +519,211 @@ async function main() {
       minimal: minimalFind(c),
     })),
   });
+}
+
+// Stage 2.5 (S25-30..S25-41). Every feature gets its evidence file under
+// ok/, and its .ok marker only when the evidence passes; nothing here is a
+// person's judgment. A feature that needs a review turn of a CLI provider
+// (S25-33..36) gets evidence that says why no such turn ran when the pane
+// does not offer the provider for review turns; run with
+// --conditional S25-33,S25-34,S25-35,S25-36 to have those reported as
+// SKIPPED-CONDITION-NOT-MET (no `[cli-turn] start` in the log).
+async function mainS25() {
+  const revisionNow = () => JSON.parse(fs.readFileSync(REVISION, "utf8"));
+  const logAt = () => readLog(LOG).length;
+  const logFrom = (at) => readLog(LOG).slice(at);
+  const cliProcesses = (pattern) => {
+    try {
+      return Number(execFileSync("pgrep", ["-fc", pattern], { encoding: "utf8" }).trim());
+    } catch {
+      return 0; // pgrep exits 1 when nothing matches
+    }
+  };
+  // Try a provider for review turns. Not being offered is a SKIP row, not a
+  // failure: the features that need it are judged from their evidence.
+  const turnProvider = (id) => {
+    const r = pane("select-provider", { role: "turn", id });
+    const selected = r.ok !== false && r.selected?.id === id && !r.refused && !r.message;
+    rows.push({
+      step: `select-provider turn=${id}`,
+      result: selected ? "PASS" : "SKIP",
+      got: selected
+        ? `${id}${r.selected.model ? `:${r.selected.model}` : ""}`
+        : (r.refused ?? r.message ?? r.error),
+    });
+    record.steps.push({ step: `select-provider turn=${id}`, raw: r });
+    save();
+    pane("open-review");
+    return { select: r, selected };
+  };
+  const cliPropose = (ref, id) =>
+    note("propose", pane("propose", { ref }), { label: `propose ${ref} (${id})`, judge: "none" });
+
+  note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+
+  // S25-30: the model menu holds what the account lists.
+  const models = note("models", pane("models"));
+  marker("s25-models", modelsEvidence({ step: models, log: readLog(LOG) }));
+
+  // S25-31: which providers can be chosen, and why the others cannot.
+  marker("s25-providers", providersEvidence(note("providers", pane("providers"))));
+
+  // S25-32: judgments by Ollama, the review text from a file, then the split.
+  const judgeBy = opt["judgment-provider"];
+  const picked = note(
+    "select-provider",
+    pane("select-provider", { role: "oneshot", id: judgeBy }),
+    {
+      label: `select-provider oneshot=${judgeBy}`,
+      ctx: { id: judgeBy },
+    },
+  );
+  pane("open-review");
+  note("load-review-file", pane("load-review-file", { path: winPath(opt.review) }));
+  const split = note("split", pane("split"));
+  marker(
+    "s25-ollama-split",
+    ollamaSplitEvidence({
+      select: picked,
+      split,
+      decisions: readLog(path.join(RUN, `${STEM}.decisions.jsonl`)),
+    }),
+  );
+
+  // The stored judgment provider across a daemon restart: the daemon comes
+  // back with no choice for this pane, the pane reconnects and Split is
+  // clicked at once. Its judgments must run on the stored provider; a
+  // judgment by Claude here would be text sent where the user did not choose.
+  await stopDaemon();
+  const restartAt = logAt();
+  const decisionsFile = path.join(RUN, `${STEM}.decisions.jsonl`);
+  const receiptsAt = readLog(decisionsFile).length;
+  await startDaemon(LOG, {}, { append: true });
+  await until(
+    () => logFrom(restartAt).includes(`active doc: ${winPath(DOC)}`),
+    120_000,
+    "pane reconnect",
+  );
+  const again = note("split", pane("split"), { label: "split right after a daemon restart" });
+  const restart = restartSplitEvidence({
+    provider: judgeBy,
+    split: again,
+    log: logFrom(restartAt),
+    decisions: readLog(decisionsFile).slice(receiptsAt),
+  });
+  marker("s25-restart-split", restart);
+  rows.push({
+    step: "no judgment by another provider after the restart",
+    result: restart.pass ? "PASS" : "FAIL",
+    got: `restored=${restart.restored} judgments=${JSON.stringify(restart.judgments)} receipts=${restart.receipt_models.join(",")}`,
+  });
+  note("edit-draft", pane("edit-draft", { requirements: { "R1.3": R13_REQUIREMENTS } }));
+
+  // S25-39: the ledger from a file, out to <stem>.ledger.json, and in again.
+  note("import-ledger", pane("import-ledger", { path: winPath(opt.ledger) }), {
+    label: "import-ledger (fixture)",
+    ctx: { added: 3, skipped: 0 },
+  });
+  note("export-ledger", pane("export-ledger"), { ctx: { count: 3 } });
+  const exported = path.join(RUN, `${STEM}.ledger.json`);
+  if (fs.existsSync(exported)) {
+    note("import-ledger", pane("import-ledger", { path: winPath(exported) }), {
+      label: "import-ledger (the exported file again)",
+      ctx: { added: 0, skipped: 3 },
+    });
+  } else {
+    rows.push({
+      step: "import-ledger (the exported file again)",
+      result: "FAIL",
+      got: `no ${exported}`,
+    });
+  }
+
+  // S25-40: a rule the review text asks for, found and added on a tick.
+  const rule = "cell-free extract";
+  const suggested = note(
+    "suggest-ledger",
+    pane("suggest-ledger", { review_file: winPath(opt["rules-review"]), pick: [rule] }),
+  );
+  marker("s25-ledger-suggest", suggestEvidence({ step: suggested, pick: rule, before: 3 }));
+
+  // S25-33, 34, 36: review turns by Codex, when the pane offers it for them.
+  const codex = turnProvider("codex");
+  let at = logAt();
+  if (codex.selected) cliPropose("R1.1", "codex");
+  marker(
+    "s25-codex-turn",
+    cliTurnEvidence({
+      provider: "codex",
+      ref: "R1.1",
+      select: codex.select,
+      log: logFrom(at),
+      revision: revisionNow(),
+    }),
+  );
+  // R1.3 asks for "novel", which ledger rule L2 forbids.
+  at = logAt();
+  if (codex.selected) cliPropose("R1.3", "codex");
+  marker(
+    "s25-codex-guard",
+    guardEvidence({
+      provider: "codex",
+      ref: "R1.3",
+      forbidden: "\\bnovel",
+      select: codex.select,
+      log: logFrom(at),
+      revision: revisionNow(),
+    }),
+  );
+  at = logAt();
+  const stop = codex.selected ? note("propose-stop", pane("propose-stop", { ref: "R1.4" })) : null;
+  marker(
+    "s25-cli-stop",
+    stopEvidence({
+      select: codex.select,
+      step: stop,
+      log: logFrom(at),
+      processes: codex.selected ? cliProcesses("codex exec --json") : 0,
+    }),
+  );
+
+  // S25-35: a review turn by Antigravity, when the pane offers it.
+  const agy = turnProvider("antigravity");
+  at = logAt();
+  if (agy.selected) cliPropose("R1.2", "antigravity");
+  marker(
+    "s25-agy-turn",
+    cliTurnEvidence({
+      provider: "antigravity",
+      ref: "R1.2",
+      select: agy.select,
+      log: logFrom(at),
+      revision: revisionNow(),
+    }),
+  );
+  if (codex.selected || agy.selected) {
+    note("select-provider", pane("select-provider", { role: "turn", id: "claude" }), {
+      label: "select-provider turn=claude",
+      ctx: { id: "claude" },
+    });
+    pane("open-review");
+  }
+
+  // S25-37: every comment that is not done, one turn after another.
+  at = logAt();
+  const all = pane("propose-all");
+  note("propose-all", all, { ctx: { log: logFrom(at) } });
+  marker("s25-propose-all", proposeAllEvidence({ message: all.message, log: logFrom(at) }));
+
+  // S25-38: a hand edit in Word, then the pane gets the focus back.
+  const del = com("delete-text", ["-Text", OUTSIDE_SENTENCE]);
+  record.word.delete_text = del;
+  rows.push({
+    step: "word: delete outside sentence",
+    result: del.ok ? "PASS" : "FAIL",
+    got: del.removed ?? del.error,
+  });
+  marker("s25-focus-refresh", focusEvidence(note("focus-refresh", pane("focus-refresh"))));
 }
 
 // Close the Word this run started (pid, with `doc` open in it). It is stopped
@@ -523,12 +835,46 @@ async function mode14() {
   save();
 }
 
+// A document whose tracked insertions and deletions hold the run elements
+// that are text without being w:t (no-break hyphen, soft hyphen, tab, line
+// break, symbol). Opened in a Word of its own; the pane's snapshot must find
+// every tracked run in the paragraph text Word reports. No model turn.
+async function special() {
+  const src = path.join(SPECIAL_DIR, "source.docx");
+  fs.mkdirSync(SPECIAL_DIR, { recursive: true });
+  const built = execFileSync(
+    "python3",
+    [path.join(HERE, "make_tracked_special.py"), src, "--count"],
+    { encoding: "utf8" },
+  );
+  const expected = Number(built.trim().split("\n").pop());
+  embedTaskpane(src, DOC_SPECIAL);
+  const cdpBusy = () =>
+    psList(
+      `[int][bool](Get-NetTCPConnection -LocalPort ${Number(opt["cdp-port"])} -State Listen -ErrorAction SilentlyContinue)`,
+    )[0] === 1;
+  await until(() => !cdpBusy(), 60_000, "CDP port free");
+  paneTag = "special-";
+  record.word.launch_special = launchWord(DOC_SPECIAL, path.join(RUN, "webview2-special"));
+  save();
+  const snap = pane("snapshot");
+  record.word.special_snapshot = snap;
+  const j =
+    snap.ok === false ? { pass: false, got: snap.error } : trackedPlaced(snap.paragraphs, expected);
+  rows.push({
+    step: "special: tracked runs found in Word's paragraph text",
+    result: j.pass ? "PASS" : "FAIL",
+    got: j.got,
+  });
+  save();
+}
+
 // After the main run and its verify commands: close the Word of the main
-// run, then the mode-14 check, then the daemon.
+// run, then the mode-14 check, the special character check, then the daemon.
 async function cleanup() {
   const pid = record.word.launch?.pid;
   quitWord(pid, DOC);
-  if (!failed && !opt["skip-mode14"]) {
+  if (!failed && STAGE === "s2" && !opt["skip-mode14"]) {
     try {
       if (record.cleanup.left_running?.length || wordPids().includes(pid))
         throw new Error("the Word of the main run is still up");
@@ -539,10 +885,22 @@ async function cleanup() {
     }
     quitWord(record.word.launch_mode14?.pid, DOC14, "quit_mode14");
   }
+  if (!failed && !opt["skip-special"]) {
+    try {
+      if (record.cleanup.left_running?.length) throw new Error("a Word of this run is still up");
+      await special();
+    } catch (e) {
+      record.special_error = String(e?.stack ?? e);
+      rows.push({ step: "special: run", result: "FAIL", got: String(e?.message ?? e) });
+    }
+    quitWord(record.word.launch_special?.pid, DOC_SPECIAL, "quit_special");
+  }
   await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
   try {
     const left = wordPids();
-    const own = [pid, record.word.launch_mode14?.pid].filter(Boolean);
+    const own = [pid, record.word.launch_mode14?.pid, record.word.launch_special?.pid].filter(
+      Boolean,
+    );
     record.cleanup.word_after = left;
     record.cleanup.preexisting_alive = (record.word.preexisting ?? []).every((p) =>
       left.includes(p),
@@ -555,7 +913,8 @@ async function cleanup() {
 
 let failed = null;
 try {
-  await main();
+  await setup();
+  await (STAGE === "s2" ? main() : mainS25());
 } catch (e) {
   failed = e;
   record.error = String(e?.stack ?? e);
@@ -577,20 +936,39 @@ function isolationCheck() {
   });
 }
 
-// Verify commands first: S2-18 checks that the daemon still listens.
 isolationCheck();
-try {
-  runFeatures();
-} catch (e) {
-  record.features_error = String(e?.message ?? e);
-}
 // Before the mode-14 check starts a daemon with a log of its own.
 const mainLogs = runLogs();
-if (failed && opt["keep-on-fail"]) {
-  record.cleanup.kept = { word_pid: record.word.launch?.pid, daemon_pid: daemon?.pid };
-  daemon?.unref();
+function verify() {
+  try {
+    runFeatures();
+  } catch (e) {
+    record.features_error = String(e?.message ?? e);
+  }
+}
+async function tidy() {
+  if (failed && opt["keep-on-fail"]) {
+    record.cleanup.kept = { word_pid: record.word.launch?.pid, daemon_pid: daemon?.pid };
+    daemon?.unref();
+  } else {
+    await cleanup();
+  }
+}
+if (STAGE === "s2") {
+  // Verify commands first: S2-18 checks that the daemon still listens.
+  verify();
+  await tidy();
 } else {
-  await cleanup();
+  // Cleanup first: S25-41 checks that Word and the daemon are gone.
+  await tidy();
+  marker(
+    `${STAGE}-cleanup`,
+    cleanupEvidence({
+      cleanup: record.cleanup,
+      listening: [WS_PORT, HTTP_PORT].filter(listening).length,
+    }),
+  );
+  verify();
 }
 const decision = exitDecision({
   failed: !!failed,

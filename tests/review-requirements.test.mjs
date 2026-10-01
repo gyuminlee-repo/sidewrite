@@ -419,3 +419,67 @@ for (const [name, label] of Object.entries(BAD_CUTS)) {
     assert.deepEqual(r.warnings, [WARN]);
   });
 }
+
+// ---- section of a comment ----------------------------------------------------
+
+test("the requirement prompt gives the section of a comment as context, not as a sentence", () => {
+  const p = requirementPrompt([
+    { ref: "R1.1", section: "Abstract", sentences: ["Shorten this section."] },
+    { ref: "R1.2", sentences: ["Add n."] },
+  ]);
+  assert.match(
+    p,
+    /\n\[R1\.1 section\] Abstract\n\[R1\.1 s1\] Shorten this section\.\n\[R1\.2 s1\] Add n\.$/,
+  );
+  assert.match(p, /"\[ref section\]" line names the part of the review/);
+  assert.ok(!p.includes("[R1.2 section]"));
+  // Without any section the prompt is as it was.
+  const plain = requirementPrompt([{ ref: "R2.1", sentences: ["Add n."] }]);
+  assert.ok(!plain.includes("section]"));
+});
+
+test("a request under a section is extracted verbatim, with the section in the model input", async () => {
+  const comments = [
+    {
+      ref: "R1.1",
+      reviewer: 1,
+      text: "Shorten this section.",
+      section: "Abstract",
+      requirements: [],
+    },
+    {
+      ref: "R1.2",
+      reviewer: 1,
+      text: "Expand this section.",
+      section: "Methods",
+      requirements: [],
+    },
+  ];
+  let prompt = "";
+  const r = await extractRequirements(comments, {
+    oneshot: async (req) => {
+      prompt = req.prompt;
+      return {
+        ok: true,
+        json: {
+          sentences: [
+            { ref: "R1.1", s: 1, type: "request" },
+            { ref: "R1.2", s: 1, type: "request" },
+          ],
+        },
+      };
+    },
+  });
+  assert.match(prompt, /\[R1\.1 section\] Abstract\n\[R1\.1 s1\] Shorten this section\./);
+  assert.match(prompt, /\[R1\.2 section\] Methods\n\[R1\.2 s1\] Expand this section\./);
+  assert.equal(r.input, prompt);
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.section, c.requirements]),
+    [
+      ["R1.1", "Abstract", [{ id: "q1", text: "Shorten this section." }]],
+      ["R1.2", "Methods", [{ id: "q1", text: "Expand this section." }]],
+    ],
+  );
+  // The requirement is text of the comment, not of the section label.
+  for (const c of r.comments) assert.ok(c.text.includes(c.requirements[0].text));
+});

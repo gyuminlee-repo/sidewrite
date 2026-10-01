@@ -1083,6 +1083,33 @@ body {
   flex: 1 1 100%;
 }
 
+/* ---- Providers (Setup tab) ----------------------------------------------- */
+.providers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+.provider-row {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.provider-name {
+  font-weight: 600;
+}
+.provider-off,
+.provider-policy,
+.provider-key-note {
+  color: var(--fg-muted);
+}
+.provider-policy,
+.provider-key-note {
+  display: block;
+}
+.provider-key {
+  margin-top: 4px;
+}
+
 /* ---- Review tab ---------------------------------------------------------- */
 .review-draft-row,
 .review-comment,
@@ -1101,6 +1128,15 @@ body {
 }
 .review-ref {
   width: 5em;
+}
+.review-section {
+  flex: 1 1 8em;
+  min-width: 0;
+}
+.review-comment-section {
+  flex: 1 1 100%;
+  font-size: 0.85em;
+  opacity: 0.75;
 }
 .review-comment {
   border-top: 1px solid var(--border, #ddd);

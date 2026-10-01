@@ -12,7 +12,7 @@
 // assistant messages, is_error result messages), never on a normal model answer,
 // so a manuscript sentence about a "rate limit" cannot trip it.
 //
-// L8 (earlier revision sessions): a refusal and a turn that
+// L8 (a common failure mode of LLM-assisted revisions): a refusal and a turn that
 // ends with no answer at all are errors too. Refusal fields, SDK 0.3.285
 // sdk.d.ts: SDKModelRefusalNoFallbackMessage (system/model_refusal_no_fallback,
 // 5392), result stop_reason (5618, 5713). model_refusal_fallback (5355) retries
@@ -145,4 +145,39 @@ export function turnCompleteEvents(result, usageLimit, stats = null) {
     ];
   }
   return [{ event: "turn_complete", subtype: result?.subtype }];
+}
+
+// How a turn ended, from the events turnCompleteEvents made for it:
+// { ok: true }, or { ok: false, error, subtype }. Failed: the events hold an
+// error (limit, refusal, API error, empty turn), or the SDK result has an
+// error subtype (SDKResultError: error_max_turns, error_during_execution,
+// error_max_budget_usd, error_max_structured_output_retries, and any
+// error_* added later), which comes with no error event. `result` adds the
+// SDK's own error texts to the reason.
+// The review turn_done carries it (review-service.mjs turnEnded), so the
+// task pane does not have to pair turn_done with an error event by timing.
+const SUBTYPE_REASONS = {
+  error_max_turns: "The turn stopped at the maximum number of turns before it finished.",
+  error_max_budget_usd: "The turn stopped at the spending limit.",
+  error_max_structured_output_retries:
+    "The turn stopped: the model did not give the structured output it was asked for.",
+};
+
+export function turnOutcome(events, result = null) {
+  const list = events ?? [];
+  const done = list.find((e) => e.event === "turn_complete");
+  const err = list.find((e) => e.event === "error");
+  if (err) return { ok: false, error: err.error, subtype: done?.subtype ?? null };
+  const subtype = done?.subtype;
+  if (typeof subtype !== "string" || !subtype.startsWith("error")) return { ok: true };
+  const detail = (Array.isArray(result?.errors) ? result.errors : [])
+    .map((e) => String(e).trim())
+    .filter(Boolean)
+    .join("; ")
+    .slice(0, 500);
+  const error =
+    subtype === "error_during_execution"
+      ? `The turn ended on an error while it ran${detail ? `: ${detail}` : "."}`
+      : (SUBTYPE_REASONS[subtype] ?? `The turn ended with ${subtype}.`);
+  return { ok: false, error, subtype };
 }

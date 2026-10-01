@@ -4,14 +4,18 @@
 // feature_list verify_command against this run's files.
 
 import { formatRationaleComment } from "../../daemon/review-tools.mjs";
+import { normalizeParaText, placedRuns } from "../../daemon/revision-classify.mjs";
 
 // The author's handling of the proposed changes in the acceptance procedure:
 // R1.1 accepted, R1.2 rejected, R1.3 first change accepted then one inserted
-// word edited, everything else accepted.
+// word edited, everything else accepted. R1.4 (the deletion of the flask
+// sentence) is rejected, with a tracked insertion of the author pending in
+// the same paragraph (siblingMatch).
 export const DEFAULT_DECISIONS = {
   "R1.1": "accept",
   "R1.2": "reject",
   "R1.3": ["accept_edit", "accept"],
+  "R1.4": "reject",
 };
 
 // One inserted word the author edits by hand, and what it becomes.
@@ -83,6 +87,59 @@ export function rewriteCommand(cmd, map) {
   return out;
 }
 
+// "S25-30..S25-41" or "S2-18": the feature ids of one stage, in order, with
+// the number padded to two digits as the feature lists write it.
+export function featureIds(spec) {
+  const ends = String(spec)
+    .split("..")
+    .map((s) => /^(S\d+)-(\d+)$/.exec(s.trim()));
+  if (ends.length > 2 || ends.some((m) => !m)) {
+    throw new Error(`--features takes S<stage>-<n> or S<stage>-<n>..S<stage>-<m>, not ${spec}`);
+  }
+  const [a, b = a] = ends;
+  if (a[1] !== b[1]) throw new Error(`--features must stay in one stage, not ${spec}`);
+  if (Number(b[2]) < Number(a[2])) throw new Error(`--features ${spec} ends before it starts`);
+  const out = [];
+  for (let i = Number(a[2]); i <= Number(b[2]); i++) {
+    out.push(`${a[1]}-${String(i).padStart(2, "0")}`);
+  }
+  return out;
+}
+
+// The marker prefix of a feature spec: "S25-30..S25-41" -> "s25".
+export const stageOf = (spec) => featureIds(spec)[0].split("-")[0].toLowerCase();
+
+const noSlash = (p) => String(p).replace(/\/+$/, "");
+
+// A verify command of a feature list as this run must run it:
+//   /tmp/<prefix>-*   markers and evidence   -> <runDir>/ok/<prefix>-*
+//   planDir           the folder the list names -> runDir
+//   cd <planRepo>     the checkout the list names -> cd <repo>
+//   planLog, and its -knob.log               -> log, knobLog
+// After this no path of the command is a marker in /tmp, so a file left
+// there by an earlier run or by hand cannot make it pass.
+export function rewriteVerify(
+  cmd,
+  { runDir, prefix, planDir, planRepo, repo, planLog, log, knobLog } = {},
+) {
+  if (!runDir) throw new Error("rewriteVerify needs runDir");
+  if (!/^s\d+$/.test(String(prefix))) {
+    throw new Error(`rewriteVerify needs a stage prefix like s25, not ${prefix}`);
+  }
+  const map = { [`/tmp/${prefix}-`]: `${noSlash(runDir)}/ok/${prefix}-` };
+  if (planDir) map[noSlash(planDir)] = noSlash(runDir);
+  if (planRepo && repo) map[`cd ${noSlash(planRepo)} `] = `cd ${repo} `;
+  if (planLog && log) map[planLog] = log;
+  if (planLog && knobLog) map[planLog.replace(/\.log$/, "") + "-knob.log"] = knobLog;
+  return rewriteCommand(cmd, map);
+}
+
+// File names of an ok folder that are markers or evidence of the stage. The
+// runner removes them before a run, so a reused run folder starts empty.
+export function staleMarkers(names, prefix) {
+  return names.filter((n) => n.startsWith(`${prefix}-`) && /\.(ok|evidence\.json)$/.test(n));
+}
+
 // What to do with the Word process the runner started, from the answer of
 // word-com.ps1 quit. action: "none" | "kill" | "leave"; fail: the run fails.
 //   kill   only when quit ran (so every open document was in the run folder
@@ -122,6 +179,12 @@ export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = t
 export const CONDITIONS = {
   // A turn that ended on a Claude usage limit.
   "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
+  // A review turn run by a CLI provider. None starts when the provider is
+  // "judgments only" (the CLI will not call the office tools unattended).
+  "S25-33": { trigger: /^\[cli-turn\] start provider=codex /m },
+  "S25-34": { trigger: /^\[cli-turn\] start provider=codex /m },
+  "S25-35": { trigger: /^\[cli-turn\] start provider=antigravity /m },
+  "S25-36": { trigger: /^\[cli-turn\] start provider=/m },
 };
 const TURN_LOGGED = /^\[agent\] turn complete \(/m;
 
@@ -201,6 +264,343 @@ export function resolvedMatch(revision, word, message = "") {
         .map((x) => `${x.id} ${x.done === null ? "no comment" : x.done ? "done" : "open"}`)
         .join("; ") || "no accepted or rejected change with a comment") +
       (refused ? "; pane: not marked resolved" : ""),
+  };
+}
+
+// Evidence of the `providers` pane step, one entry per provider id at the
+// top level: enabled and note are those of the Judgments menu, turn_enabled
+// and turn_note those of the Review turns menu. pass: the list loaded and
+// Claude can be chosen for both.
+export function providersEvidence(step) {
+  const out = {};
+  const turn = new Map((step?.menus?.turn ?? []).map((o) => [o.id, o]));
+  const state = new Map((step?.rows ?? []).map((r) => [r.id, r.state]));
+  for (const o of step?.menus?.oneshot ?? []) {
+    out[o.id] = {
+      enabled: !!o.enabled,
+      note: o.note ?? "",
+      turn_enabled: !!turn.get(o.id)?.enabled,
+      turn_note: turn.get(o.id)?.note ?? "",
+      state: state.get(o.id) ?? null,
+    };
+  }
+  const pass = step?.ok !== false && !!out.claude?.enabled && !!out.claude?.turn_enabled;
+  return { pass, ...out };
+}
+
+// Review turns in a daemon log: `[review] prompt <ref> ...` starts one (a
+// preview does not), `[review] turn done <ref>` ends it. overlaps: starts
+// that came while another turn was open.
+export function turnOverlaps(log) {
+  const started = [];
+  const open = new Set();
+  let overlaps = 0;
+  for (const line of String(log ?? "").split("\n")) {
+    const s = /^\[review\] prompt (\S+) /.exec(line);
+    if (s && !line.endsWith("(preview)")) {
+      if (open.size) overlaps++;
+      open.add(s[1]);
+      started.push(s[1]);
+      continue;
+    }
+    const e = /^\[review\] turn done (\S+)/.exec(line);
+    if (e) open.delete(e[1]);
+  }
+  return { started, overlaps };
+}
+
+// Evidence of a Propose all run. message: the pane's summary line; log: the
+// daemon log lines written during the run.
+export function proposeAllEvidence({ message, log }) {
+  const m = /(\d+) of (\d+) proposed\./.exec(String(message ?? ""));
+  const { started, overlaps } = turnOverlaps(log);
+  const proposed = m ? Number(m[1]) : 0;
+  const open_before = m ? Number(m[2]) : null;
+  return {
+    pass: !!m && open_before > 0 && proposed === open_before && overlaps === 0,
+    overlaps,
+    proposed,
+    open_before,
+    started,
+    message: String(message ?? ""),
+  };
+}
+
+// ---- Stage 2.5 (run-acceptance.mjs mainS25) ----
+// Each builder below returns the evidence the runner writes next to a marker
+// (`ok/s25-<name>.evidence.json`; the `.ok` file only when pass is true).
+
+// What a run uses when --features is not given.
+export function defaultFeatures(stage) {
+  const known = { s2: "S2-18..S2-34", s25: "S25-30..S25-41" };
+  if (!known[stage])
+    throw new Error(`no default feature range for stage ${stage}: give --features`);
+  return known[stage];
+}
+
+// The name of the manuscript copy in the run folder. The stage 2.5 feature
+// list reads paper.decisions.jsonl and paper.ledger.json next to it.
+export const docStem = (stage) => (stage === "s2" ? "review_manuscript" : "paper");
+
+const ALIASES = new Set(["sonnet", "opus", "haiku", "default"]);
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const refusal = (select) =>
+  select?.refused ?? select?.message ?? select?.error ?? "the provider was not selected";
+
+// S25-30. step: the `models` pane step; log: the daemon log of the run.
+export function modelsEvidence({ step, log }) {
+  const options = (step?.options ?? []).map((o) => o.value);
+  const outside_aliases = options.filter((v) => v && !ALIASES.has(v));
+  const source_sdk = /^\[models\] source=sdk /m.test(String(log ?? ""));
+  return {
+    pass: step?.ok !== false && outside_aliases.length > 0 && source_sdk,
+    options,
+    outside_aliases,
+    source_sdk,
+  };
+}
+
+// S25-32. select: `select-provider` for judgments with Ollama; split: the
+// `split` step; decisions: the text of <stem>.decisions.jsonl.
+export function ollamaSplitEvidence({ select, split, decisions }) {
+  const models = [];
+  for (const line of String(decisions ?? "").split("\n")) {
+    const m = /"model":"([^"]*)"/.exec(line);
+    if (m && !models.includes(m[1])) models.push(m[1]);
+  }
+  const selected = select?.selected?.id === "ollama" && !select?.refused;
+  return {
+    pass:
+      selected &&
+      /^Split by /.test(String(split?.message ?? "")) &&
+      models.some((m) => m.startsWith("ollama:")),
+    selected: select?.selected ?? null,
+    split_message: split?.message ?? null,
+    models,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// The stored judgment provider across a daemon restart (Codex review of
+// stage 2.5). split: the `split` step clicked as soon as the pane was back;
+// log: the daemon log from the restart on; decisions: the receipts written
+// after it. pass: the stored choice was restored, the split's judgments ran
+// on that provider, and neither the log nor a receipt shows another one
+// (Claude is the default it must not fall back to).
+export function restartSplitEvidence({ provider, split, log, decisions }) {
+  const text = String(log ?? "");
+  const judgments = {};
+  for (const m of text.matchAll(/^\[providers\] judgment provider=(\S+) /gm)) {
+    judgments[m[1]] = (judgments[m[1]] ?? 0) + 1;
+  }
+  const receipt_models = [];
+  for (const line of String(decisions ?? "").split("\n")) {
+    const m = /"model":"([^"]*)"/.exec(line);
+    if (m && !receipt_models.includes(m[1])) receipt_models.push(m[1]);
+  }
+  const restored = new RegExp(
+    `^\\[providers\\] restore .*oneshot=ready provider=${escapeRe(provider)}$`,
+    "m",
+  ).test(text);
+  return {
+    pass:
+      /^Split by /.test(String(split?.message ?? "")) &&
+      restored &&
+      judgments[provider] > 0 &&
+      Object.keys(judgments).every((id) => id === provider) &&
+      receipt_models.length > 0 &&
+      receipt_models.every((m) => m.startsWith(`${provider}:`)),
+    restored,
+    judgments,
+    receipt_models,
+    split_message: split?.message ?? null,
+  };
+}
+
+// What the log says about the review turns of one CLI provider.
+function cliTurnLog(provider, log) {
+  const text = String(log ?? "");
+  const p = escapeRe(provider);
+  return {
+    started: new RegExp(`^\\[cli-turn\\] start provider=${p} `, "m").test(text),
+    done: new RegExp(`^\\[cli-turn\\] done provider=${p} code=0 `, "m").test(text),
+    endpoint_calls: (text.match(/^\[mcp-http\] POST route=/gm) ?? []).length,
+  };
+}
+const selectedFor = (select, provider) => select?.selected?.id === provider && !select?.refused;
+const changesOf = (revision, ref) =>
+  (revision?.comments ?? []).find((c) => c.ref === ref)?.changes ?? [];
+
+// S25-33 (Codex) and S25-35 (Antigravity): one review turn of the provider on
+// `ref`. log: the daemon log lines of that turn; revision: the file after it.
+export function cliTurnEvidence({ provider, ref, select, log, revision }) {
+  const selected = selectedFor(select, provider);
+  const l = cliTurnLog(provider, selected ? log : "");
+  const changes = changesOf(revision, ref);
+  return {
+    pass:
+      selected &&
+      l.started &&
+      l.done &&
+      l.endpoint_calls > 0 &&
+      changes.length > 0 &&
+      changes.every((c) => c.word_comment_id != null),
+    provider,
+    ref,
+    ...l,
+    changes: selected ? changes.length : 0,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// S25-34: a CLI turn on a comment whose request asks for a forbidden word.
+// document_changes: recorded changes of that comment whose new text holds the
+// word (must be 0: the edit is blocked, as in a Claude turn). The tool filter
+// of a CLI turn (no writer but office_tracked_edit) is tested in
+// tests/mcp-http.test.mjs and tests/review-turn-parity.test.mjs.
+export function guardEvidence({ provider, ref, forbidden, select, log, revision }) {
+  const selected = selectedFor(select, provider);
+  const l = cliTurnLog(provider, selected ? log : "");
+  const re = new RegExp(forbidden, "i");
+  const leaked = changesOf(revision, ref).filter((c) => re.test(String(c.text ?? "")));
+  const document_changes = selected && l.done ? leaked.length : null;
+  return {
+    pass: document_changes === 0,
+    document_changes,
+    blocked: new RegExp(`^\\[review\\] blocked ${escapeRe(ref)} by=`, "m").test(String(log ?? "")),
+    provider,
+    ref,
+    ...l,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// S25-36. step: the `propose-stop` pane step; processes: CLI processes of
+// the provider still running after it.
+export function stopEvidence({ select, step, log, processes }) {
+  const provider = select?.selected?.id;
+  const selected = !!provider && provider !== "claude" && !select?.refused;
+  const started = selected && cliTurnLog(provider, log).started;
+  return {
+    pass:
+      selected &&
+      started &&
+      step?.stopped === true &&
+      step?.agent_status === "Ready" &&
+      processes === 0,
+    stopped: step?.stopped === true,
+    agent_status: step?.agent_status ?? null,
+    started,
+    processes,
+    ...(selected ? {} : { reason: refusal(select) }),
+  };
+}
+
+// S25-38. step: the `focus-refresh` pane step after a hand edit in Word.
+export function focusEvidence(step) {
+  const external = step?.external ?? [];
+  return {
+    pass:
+      step?.changed === true && /^Auto-refreshed /.test(step?.after ?? "") && external.length > 0,
+    auto_line: step?.after ?? null,
+    external,
+  };
+}
+
+// S25-40. step: the `suggest-ledger` pane step; pick: the text the ticked
+// candidate holds; before: ledger rules before the step.
+export function suggestEvidence({ step, pick, before }) {
+  const ticked = (step?.candidates ?? []).filter((c) => c.checked);
+  const ledger = step?.ledger ?? [];
+  return {
+    pass:
+      ticked.some((c) => c.label.includes(pick)) &&
+      /^Added [1-9]\d* ledger rule\(s\)/.test(step?.message ?? "") &&
+      ledger.length > before &&
+      ledger.some((l) => l.includes(pick)),
+    candidates: step?.candidates ?? [],
+    message: step?.message ?? null,
+    ledger_before: before,
+    ledger_after: ledger.length,
+  };
+}
+
+// S25-41. cleanup: record.cleanup of the runner; listening: daemon ports
+// still open after it.
+export function cleanupEvidence({ cleanup, listening }) {
+  return {
+    pass:
+      cleanup?.own_word_gone === true &&
+      cleanup?.preexisting_alive === true &&
+      !cleanup?.left_running?.length &&
+      !cleanup?.daemon_error &&
+      !cleanup?.kept &&
+      listening === 0,
+    own_word_gone: cleanup?.own_word_gone ?? null,
+    preexisting_alive: cleanup?.preexisting_alive ?? null,
+    left_running: cleanup?.left_running ?? [],
+    daemon_error: cleanup?.daemon_error ?? null,
+    listening,
+  };
+}
+
+// A change handled by the author while ANOTHER tracked change is pending in
+// its paragraph: it must show its own state, not Pending (the paragraph's
+// revision mark total used to decide), and its rationale comment must be
+// resolved. Shown on the first change of `ref`, a pure deletion that was
+// rejected or a pure insertion that was accepted; `hand` is the text of the
+// author's own tracked insertion in that paragraph, still pending in Word.
+// revision: revision.json after the refresh; view: the pane; word:
+// word-com.ps1 state.
+export function siblingMatch(revision, view, word, { ref, hand }) {
+  const ch = revision?.comments?.find((c) => c.ref === ref)?.changes?.[0];
+  const badge = view?.comments?.find((c) => c.ref === ref)?.changes?.[0]?.badge;
+  const want =
+    ch?.kind === "delete"
+      ? ["rejected", "Rejected"]
+      : ch?.kind === "insert"
+        ? ["accepted", "Accepted"]
+        : null;
+  const sibling = (word?.revisions ?? []).some((r) => r.type === 1 && has(r.text, hand.trim()));
+  const text = ch
+    ? norm(formatRationaleComment(ref, ch.rationale, { lost: ch.lost_facts ?? [] }))
+    : "";
+  const com = (word?.comments ?? []).find((c) => norm(c.text) === text);
+  return {
+    pass: !!want && sibling && ch.state === want[0] && badge === want[1] && com?.done === true,
+    expect: `${ref} first change (a pure deletion rejected, or a pure insertion accepted) reads its own state with the author's tracked "${hand.trim()}" pending in the paragraph, and its rationale comment is resolved`,
+    got: `kind ${ch?.kind ?? "-"}; state ${ch?.state ?? "-"}; badge ${badge ?? "-"}; sibling revision pending ${sibling}; comment ${com ? (com.done ? "done" : "open") : "not found"}`,
+  };
+}
+
+// The document of make_tracked_special.py as the pane's snapshot shows it in
+// Word: every tracked run read from the paragraph OOXML (trackedRuns) must be
+// found in the paragraph text Word reports, with no revision mark left over
+// (placedRuns of the daemon, the function the classifier uses). paragraphs:
+// snapshot paragraphs; expected: how many paragraphs hold a tracked run.
+export function trackedPlaced(paragraphs, expected) {
+  const tracked = (paragraphs ?? []).filter(
+    (p) => (p.tracked?.length ?? 0) > 0 || (p.w_ins ?? 0) + (p.w_del ?? 0) > 0,
+  );
+  const bad = [];
+  for (const p of tracked) {
+    const placed = placedRuns(p, normalizeParaText(p.text));
+    if (
+      !placed ||
+      placed.short.ins ||
+      placed.short.del ||
+      placed.runs.length !== p.tracked.length
+    ) {
+      const codes = (s) => [...String(s)].map((c) => c.codePointAt(0).toString(16)).join(" ");
+      bad.push(
+        `paragraph ${p.index}: text [${codes(p.text)}] runs ${JSON.stringify((p.tracked ?? []).map((r) => [r.kind, codes(r.text)]))}`,
+      );
+    }
+  }
+  return {
+    pass: tracked.length > 0 && tracked.length === expected && bad.length === 0,
+    expect: `${expected} paragraphs with a tracked run, each run found in the paragraph text Word reports`,
+    got: bad.length ? bad.join("; ") : `${tracked.length} paragraphs with tracked runs, all placed`,
   };
 }
 
@@ -325,6 +725,81 @@ export const JUDGES = {
       !has(r.message, "MISMATCH"),
     expect: "Back up and delete 2 comments (tool 0, yours 2) then Backed up 2, deleted 2 of 2",
     got: `${r.offer} | ${r.message}`,
+  }),
+  // ---- stage 2.5 steps ----
+  models: (r) => ({
+    pass: /^Models your Claude account can use/.test(r.title ?? "") && r.options?.length > 0,
+    expect: "the model menu filled from the account (tooltip: Models your Claude account can use)",
+    got: `${r.title} | ${(r.options ?? []).map((o) => o.value).join(",")}`,
+  }),
+  "propose-stop": (r) => ({
+    pass: r.stopped === true && r.agent_status === "Ready",
+    expect: "Stop pressed while the turn ran; the pane is Ready again",
+    got: r.stopped ? `stopped after ${r.seconds} s, status ${r.agent_status}` : String(r.reason),
+  }),
+  providers: (r) => {
+    const e = providersEvidence(r);
+    const ids = (k) =>
+      Object.keys(e)
+        .filter((id) => id !== "pass" && e[id][k])
+        .join(",");
+    return {
+      pass: e.pass,
+      expect: "the list loaded; Claude selectable for review turns and judgments",
+      got: `judgments: ${ids("enabled")}; review turns: ${ids("turn_enabled")}`,
+    };
+  },
+  "select-provider": (r, ctx) => ({
+    pass: r.selected?.id === ctx.id && !r.refused && !r.message,
+    expect: `${ctx.id} selected, no message`,
+    got: `${r.selected?.id}${r.selected?.model ? `:${r.selected.model}` : ""}${r.refused ? ` | not selectable: ${r.refused}` : ""}${r.message ? ` | ${r.message}` : ""}`,
+  }),
+  "load-review-file": (r) => ({
+    pass: /^Loaded .+\. Split into comments next\.$/.test(r.message) && r.chars > 0,
+    expect: "Loaded <file>. Split into comments next. (text in the paste box)",
+    got: `${r.message} chars=${r.chars}`,
+  }),
+  "export-ledger": (r, ctx) => {
+    const m = /^Exported (\d+) ledger rule\(s\) to (.+)$/.exec(r.message ?? "");
+    return {
+      pass: !!m && (ctx.count == null || Number(m[1]) === ctx.count),
+      expect: `Exported ${ctx.count ?? "n"} ledger rule(s) to <stem>.ledger.json`,
+      got: r.message,
+    };
+  },
+  "import-ledger": (r, ctx) => {
+    const m = /^Added (\d+) ledger rule\(s\), skipped (\d+) already in the ledger\.$/.exec(
+      r.message ?? "",
+    );
+    return {
+      pass:
+        !!m &&
+        (ctx.added == null || Number(m[1]) === ctx.added) &&
+        (ctx.skipped == null || Number(m[2]) === ctx.skipped),
+      expect: `Added ${ctx.added ?? "a"} ledger rule(s), skipped ${ctx.skipped ?? "s"} already in the ledger.`,
+      got: r.message,
+    };
+  },
+  "suggest-ledger": (r) => {
+    const picked = (r.candidates ?? []).filter((c) => c.checked).length;
+    return {
+      pass: picked > 0 && /^Added [1-9]\d* ledger rule\(s\)/.test(r.message ?? ""),
+      expect: "candidates listed, the ticked ones added to the ledger",
+      got: `${(r.candidates ?? []).length} candidate(s), ${picked} ticked | ${r.message}`,
+    };
+  },
+  "propose-all": (r, ctx) => {
+    const e = proposeAllEvidence({ message: r.message, log: ctx.log });
+    return {
+      pass: e.pass && !r.message_error,
+      expect: "Propose all: n of n proposed. One review turn at a time.",
+      got: `${r.message} | started ${e.started.join(",")} overlaps=${e.overlaps}`,
+    };
+  },
+  "focus-refresh": (r) => ({
+    pass: r.changed === true && /^Auto-refreshed /.test(r.after ?? ""),
+    expect: "Auto-refreshed <time>: ... (no Refresh click)",
+    got: r.after || "(the auto-refresh line did not change)",
   }),
 };
 
