@@ -93,7 +93,9 @@ test("an editor comment E.1 is introduced as the editor, not reviewer 0", () => 
   assert.ok(!text.includes("Reviewer 0"));
 });
 
-test("L5 prompt lets the model leave requirement_ids empty when not sure", () => {
+// S2-30: the 2026-10-01 acceptance run left requirement_ids empty on a change
+// that answered part of R1.3. Partial counts; empty only when unrelated.
+test("L5 prompt: cite every request a change handles, even in part; empty only when unrelated", () => {
   const comment = {
     ref: "R1.3",
     reviewer: 1,
@@ -101,5 +103,9 @@ test("L5 prompt lets the model leave requirement_ids empty when not sure", () =>
     requirements: [{ id: "q1", text: "say how growth was followed" }],
   };
   const { text } = buildReviewPrompt({ comment });
-  assert.match(text, /not sure[^\n]*leave rationale\.requirement_ids empty/);
+  assert.match(text, /- \[q1\] say how growth was followed\n/);
+  assert.match(text, /rationale\.requirement_ids/);
+  assert.match(text, /part of a request[^\n]*still put its id/i);
+  assert.match(text, /empty only when the change answers none of them/i);
+  assert.doesNotMatch(text, /not sure/);
 });

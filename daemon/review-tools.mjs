@@ -114,7 +114,7 @@ export const trackedEditShape = {
         .array(z.string())
         .optional()
         .describe(
-          "Ids of the listed comment requirements this change answers (q1, q2). Use only ids from the prompt. If you are not sure which one it answers, leave it empty: an unlinked requirement is shown to the author to decide, which is better than a guessed link.",
+          "Ids of the listed comment requirements this change handles (q1, q2). Use only ids from the prompt. If the change handles only part of a request, still put its id. Leave it empty only when the change answers none of them.",
         ),
     })
     .describe(
