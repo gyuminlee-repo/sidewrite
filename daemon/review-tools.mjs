@@ -148,7 +148,8 @@ function fail(message, extra = {}) {
 //         holdRef(ref) -> release, log }
 // holdRef (optional): marks the comment as in use while Word is called, so a
 // comment-list save does not drop it; the returned function ends that.
-// onOutcomeUnknown: the task pane did not answer. `id` is the bridge call id
+// onOutcomeUnknown: the task pane did not answer. `args` is the edit as it
+// would be stored for a blocked one; `id` is the bridge call id
 // a late tool_result will carry; `record(result)` records that result the
 // same way as an answer in time (review-service.mjs lateToolResult);
 // `attempt` is the change as it would read in the document (unknownAttempt).
@@ -281,7 +282,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
         tool_call_id: id,
         unknown_at: new Date().toISOString(),
         comment_text: commentText,
-        change: unknownAttempt(current, target, {
+        change: unknownAttempt(current, target, ctx.paragraph_ids, {
           kind,
           find: args.find,
           text: newText,
@@ -291,7 +292,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
           unsourced_terms: unsourced,
         }),
       };
-      await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt });
+      await deps.onOutcomeUnknown?.({ id, ref: turn.ref, record, attempt, args: edit });
       return fail(
         `The task pane did not answer (${e.message}). The edit may already be in the document but was not recorded. Do not repeat it: read the paragraph first, and tell the author to check it.`,
         { code: "OutcomeUnknown", tool_call_id: id },
@@ -369,7 +370,7 @@ export function currentTexts(texts, changes) {
 // (editTarget) or null. Without a target that holds `find` once, before and
 // after stay empty and context null: a refresh then cannot tell whether the
 // edit is in the document (review-service.mjs resolveUnknownOverrides).
-export function unknownAttempt(texts, target, change) {
+export function unknownAttempt(texts, target, ids, change) {
   const t = target === null ? null : texts[target];
   const ctx = t == null ? null : changeContext(t, change.find, { kind: change.kind });
   const one = ctx ? { index: target, t, ctx } : null;
@@ -386,7 +387,7 @@ export function unknownAttempt(texts, target, change) {
     ...change,
     word_comment_id: null,
     paragraph_index: one ? one.index : null,
-    paragraph_id: null,
+    paragraph_id: one ? (ids?.[one.index] ?? null) : null,
     before: one ? one.t : "",
     after,
     narrowed_from: null,

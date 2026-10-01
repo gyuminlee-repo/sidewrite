@@ -396,7 +396,8 @@ export function pendingDecisions(revision) {
       blocked.push({
         ref: c.ref,
         id: b.id,
-        text: `${c.ref} blocked by ${b.blocked_by.join(", ")}: "${b.args?.replace ?? b.args?.insert_after ?? ""}"`,
+        // No forbid rule: a normal edit Word did not answer (outcome unknown).
+        text: `${c.ref} ${b.blocked_by.length ? `blocked by ${b.blocked_by.join(", ")}` : "edit with no answer from Word"}: "${b.args?.replace ?? b.args?.insert_after ?? ""}"`,
       });
     }
     for (const r of unaddressedRequirements(c)) {
