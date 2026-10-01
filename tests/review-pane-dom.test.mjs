@@ -1234,7 +1234,7 @@ async function proposeAllSetup({ providersReady, usedLabel } = {}) {
       ...(error ? { error } : {}),
     });
   };
-  return { pane, turn, proposals, sent, fail, doc, $, wait, endTurn };
+  return { pane, turn, proposals, sent, fail, doc, revision, $, wait, endTurn };
 }
 
 test("Propose all sends the next review_propose only after turn_done; an error stops the queue", async () => {
@@ -2202,6 +2202,70 @@ test("Propose all says what the turns ran on, when the pane knows it", async () 
       "Propose all with Claude · Opus 5.5: 3 of 3 proposed.",
     );
     assert.deepEqual([...new Set(roles)], ["turn"]);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// The author pressed Propose changes on one comment: when its turn is over
+// the tab says what came of it and what it ran on, in front of the status.
+test("a single Propose changes ends with a line: how many changes, for which comment, with what", async () => {
+  const t = await proposeAllSetup({
+    usedLabel: (role) => (role === "turn" ? "Claude · Opus 5.5" : null),
+  });
+  const buttons = () => findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+  try {
+    // No change came of the turn.
+    await buttons()[0].click();
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1"],
+    );
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^No change was proposed for R1\.1 with Claude · Opus 5\.5: the reason is in the Chat tab\. Accepted 0, /,
+    );
+    // Two changes on record after the turn, each with its comment in Word.
+    await buttons()[0].click();
+    await t.wait();
+    const c = t.revision.comments[0];
+    c.changes.push(
+      { id: "R1.1-1", word_comment_id: "w1", state: "pending" },
+      { id: "R1.1-2", word_comment_id: "w2", state: "pending" },
+    );
+    t.doc.comments.push(
+      { id: "w1", text: "[R1.1] a / b / c" },
+      { id: "w2", text: "[R1.1] d / e / f" },
+    );
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^Proposed 2 changes for R1\.1 with Claude · Opus 5\.5\. Accepted 0, /,
+    );
+    // An edit the forbid list blocked is said, also when nothing else came.
+    await buttons()[0].click();
+    await t.wait();
+    c.blocked.push({ id: "B1", blocked_by: ["L2"] });
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^No change was proposed for R1\.1 with Claude · Opus 5\.5: 1 edit was blocked \(see the blocked list of the comment\)\. Accepted 0, /,
+    );
+    // A turn that failed gets no such line.
+    await buttons()[0].click();
+    await t.wait();
+    t.endTurn("R1.1", "Claude usage limit reached.");
+    await t.wait();
+    await t.wait();
+    assert.equal(/Proposed|No change was proposed/.test(t.$("review-message").textContent), false);
   } finally {
     await t.pane.reload();
   }

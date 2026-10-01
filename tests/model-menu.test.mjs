@@ -77,3 +77,25 @@ test("editsModelValue: the stored choice, else the daemon's default, else opus",
     ["haiku", "sonnet", "opus"],
   );
 });
+
+// Until this build every saved setting carried model: "sonnet", the default
+// of the time, whether the user had picked a model or not. A stored model
+// counts as a choice only with the mark that the menus set (modelChosen);
+// without it the stored value is the old default and the new one applies.
+test("storedEditsModel: a stored model is a choice only when the user made it", async () => {
+  const { storedEditsModel } = await import("../taskpane/shared/model-menu.js");
+  assert.equal(storedEditsModel({ model: "sonnet" }), null, "the old default, saved unasked");
+  assert.equal(storedEditsModel({ model: "opus", modelChosen: false }), null);
+  assert.equal(storedEditsModel({ model: "sonnet", modelChosen: true }), "sonnet");
+  assert.equal(storedEditsModel({ model: "claude-fable-5", modelChosen: true }), "claude-fable-5");
+  // A malformed or retired value is no choice, marked or not.
+  assert.equal(storedEditsModel({ model: "default", modelChosen: true }), null);
+  assert.equal(storedEditsModel({ model: null, modelChosen: true }), null);
+  assert.equal(storedEditsModel({}), null);
+  // The pane reads its settings through it and marks a choice made in a menu.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../taskpane/shared/taskpane.js", import.meta.url), "utf8");
+  assert.match(src, /s\.model = storedEditsModel\(s\);/);
+  const choose = src.slice(src.indexOf("function chooseEditsModel(value) {"));
+  assert.match(choose.slice(0, 200), /settings\.model = value;\s*settings\.modelChosen = true;/);
+});
