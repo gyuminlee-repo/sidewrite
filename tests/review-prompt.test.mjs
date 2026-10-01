@@ -497,3 +497,25 @@ test("formatPromptLog says how the manuscript went into the prompt", () => {
     false,
   );
 });
+
+// The last line a turn is asked for: "Same term still at: <ids or none>".
+test("sameTermReport: the paragraph ids of the last such line that the manuscript has", async () => {
+  const { sameTermReport } = await import("../daemon/review-prompt.mjs");
+  const snap = { paragraphs: ["a", "b", "c", "d", "e"], ids: null };
+  assert.deepEqual(sameTermReport("Done.\n\nSame term still at: p1, p4", snap), ["p1", "p4"]);
+  assert.deepEqual(sameTermReport("**Same term still at:** p2 and p3 (legend).", snap), [
+    "p2",
+    "p3",
+  ]);
+  // Not a paragraph of the manuscript: left out. None, or no line: nothing.
+  assert.deepEqual(sameTermReport("Same term still at: p1, p9, the abstract", snap), ["p1"]);
+  assert.deepEqual(sameTermReport("Same term still at: none", snap), []);
+  assert.deepEqual(sameTermReport("No such line.", snap), []);
+  assert.deepEqual(sameTermReport(null, snap), []);
+  // The last line counts; task pane ids are taken as they are.
+  const ids = { paragraphs: ["a", "b"], ids: ["4A1B", "77C0"] };
+  assert.deepEqual(
+    sameTermReport("Same term still at: 4A1B\nmore\nSame term still at: 77C0, 4A1B, 77C0", ids),
+    ["77C0", "4A1B"],
+  );
+});

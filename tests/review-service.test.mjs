@@ -2744,3 +2744,49 @@ test("the turn carries the manuscript of the last refresh; a later turn of the s
   );
   await t.cleanup();
 });
+
+// The answer of a review turn ends with "Same term still at: ...": the
+// paragraphs it names are saved under the comment before turn_done goes out,
+// so the pane that loads on turn_done has them.
+test("turnEnded saves the paragraphs the turn named as still holding the term, then sends turn_done", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const para = (text, index) => ({
+      index,
+      id: `p${index}`,
+      text,
+      reviewed_text: text,
+      w_ins: 0,
+      w_del: 0,
+    });
+    await t.ask("review_refresh", {
+      snapshot: { paragraphs: ["Title", "One.", "Two."].map(para), comments: [] },
+    });
+    const done = () => t.events.filter((e) => e.event === "turn_done").length;
+    const before = done();
+    t.svc.turnEnded(
+      "k",
+      { ref: "R1.1" },
+      { ok: true, text: "Changed it.\n\nSame term still at: p2, p9" },
+    );
+    assert.equal(done(), before, "not before the save");
+    for (let i = 0; i < 50 && done() === before; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(done(), before + 1);
+    let rev = await loadRevision(join(t.dir, "paper.revision.json"));
+    assert.deepEqual(rev.comments[0].same_term_at, ["p2"]);
+    // The next turn of the comment names none: the list is cleared.
+    t.svc.turnEnded("k", { ref: "R1.1" }, { ok: true, text: "Same term still at: none" });
+    for (let i = 0; i < 50 && done() === before + 1; i++)
+      await new Promise((r) => setTimeout(r, 5));
+    rev = await loadRevision(join(t.dir, "paper.revision.json"));
+    assert.deepEqual(rev.comments[0].same_term_at, []);
+    // A comment-list save keeps it; no text of the answer is in the log.
+    assert.equal(
+      t.lines.some((l) => l.includes("Changed it")),
+      false,
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
