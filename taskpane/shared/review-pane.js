@@ -572,7 +572,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           : ` (MISMATCH: missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"})`) +
         outside +
         (unresolved.length
-          ? ` ${unresolved.length} rationale comment(s) not marked resolved (Word: ${unresolved[0]}; a document in compatibility mode cannot resolve comments).`
+          ? ` ${unresolved.length} rationale comment(s) not marked resolved (Word: ${unresolved[0]}; one cause is a document in compatibility mode).`
           : ""),
       !inv.ok,
     );
