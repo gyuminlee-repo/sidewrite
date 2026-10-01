@@ -69,21 +69,29 @@ export function turnFromLog(log, ref) {
 }
 
 // The edits a guard of the daemon refused while a turn ran, by code, read
-// from the lines review-tools.mjs logs (they hold counts and ids, no text):
-//   [review] number needs author <ref> count=<n>   NumberNeedsAuthor
-//   [review] blocked <ref> by=<ledger ids>         ForbidBlocked
-//   [review] refused <ref>: <reason>               Refused
+// from the lines review-tools.mjs logs (they hold counts and ids, no text).
+// The code is the one the tool result of that refusal carries; the block by
+// a forbid rule has none there and is named ForbidBlocked here. One line is
+// one refused edit (the count= of a number line is not added up).
+//   [review] number needs author <ref> count=<n>          NumberNeedsAuthor
+//   [review] blocked <ref> by=<ledger ids>                ForbidBlocked
+//   [review] refused <ref>: forbid rule(s) ...            ForbidRuleBroken
+//   [review] refused <ref>: task pane without ...         TaskPaneOutdated
+//   [review] refused <ref>: anything else                 Refused
 const REFUSALS = [
-  ["NumberNeedsAuthor", "number needs author"],
-  ["ForbidBlocked", "blocked"],
-  ["Refused", "refused"],
+  ["NumberNeedsAuthor", "number needs author", " count="],
+  ["ForbidBlocked", "blocked", " by="],
+  ["ForbidRuleBroken", "refused", ": forbid rule"],
+  ["TaskPaneOutdated", "refused", ": task pane without "],
+  ["Refused", "refused", ": (?!forbid rule|task pane without )"],
 ];
 export function refusalsFromLog(log, ref) {
   const at = ref.replace(".", "\\.");
   const out = {};
-  for (const [code, words] of REFUSALS) {
-    const n = (String(log ?? "").match(new RegExp(`^\\[review\\] ${words} ${at}[ :]`, "gm")) ?? [])
-      .length;
+  for (const [code, words, next] of REFUSALS) {
+    const n = (
+      String(log ?? "").match(new RegExp(`^\\[review\\] ${words} ${at}${next}`, "gm")) ?? []
+    ).length;
     if (n) out[code] = n;
   }
   return out;

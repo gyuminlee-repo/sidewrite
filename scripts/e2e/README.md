@@ -460,7 +460,9 @@ and the exit code is 1.
 
 The refused edits are counted from the daemon log of each turn:
 `NumberNeedsAuthor` (a number changed without the author), `ForbidBlocked`
-(a forbid rule) and `Refused` (any other refusal of the pane's edit). When no
+(a forbid rule; the daemon gives this one no code), `ForbidRuleBroken`,
+`TaskPaneOutdated` and `Refused` (a refusal the replay does not know). One
+log line is one refused edit. When no
 request was extracted in the whole run, `summary.txt` says "not measured" for
 the requirements no change names.
 

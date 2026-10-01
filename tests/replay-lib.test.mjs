@@ -164,12 +164,16 @@ test("what the guards refused and a model replaced after a refusal are read from
     "[review] number needs author R1.10 count=1",
     "[review] blocked R1.1 by=L2",
     "[review] refused R1.1: task pane without a cap",
+    "[review] refused R1.1: forbid rule(s) L4 do not compile",
+    "[review] refused R1.1: something new",
     "[review] blocked R2.1 by=L2,L3",
     "[agent] model refusal fallback original=claude-opus-9 fallback=claude-opus-8 scope=session category=cyber",
   ].join("\n");
   assert.deepEqual(refusalsFromLog(log, "R1.1"), {
     NumberNeedsAuthor: 2,
     ForbidBlocked: 1,
+    ForbidRuleBroken: 1,
+    TaskPaneOutdated: 1,
     Refused: 1,
   });
   assert.deepEqual(refusalsFromLog(log, "R2.1"), { ForbidBlocked: 1 });
@@ -184,6 +188,29 @@ test("what the guards refused and a model replaced after a refusal are read from
     seconds: 5,
   });
   assert.deepEqual([t.outcome, t.refused.NumberNeedsAuthor, t.fallbacks.length], ["ok", 2, 1]);
+});
+
+// The lines read above are the ones the daemon writes, and the codes are the
+// ones its tool results carry: a rename there fails here and does not turn
+// the counts of a replay into zeros.
+test("the log lines of the refusals and of the fallback are the ones the daemon writes", () => {
+  const tools = read("../daemon/review-tools.mjs");
+  for (const line of [
+    "`[review] number needs author ${turn.ref} count=${numbers.length}`",
+    '`[review] blocked ${turn.ref} by=${open.join(",")}`',
+    '`[review] refused ${turn.ref}: forbid rule(s) ${ids.join(",")} do not compile`',
+    "`[review] refused ${turn.ref}: task pane without ${TARGET_HASH_CAP}`",
+  ])
+    assert.ok(tools.includes(line), line);
+  assert.equal((tools.match(/`\[review\] refused /g) ?? []).length, 2);
+  for (const code of ["NumberNeedsAuthor", "ForbidRuleBroken", "TaskPaneOutdated"])
+    assert.ok(tools.includes(`code: "${code}"`), code);
+  assert.ok(
+    read("../daemon/model-list.mjs").includes(
+      "`[agent] model refusal fallback original=${msg.original_model} fallback=${msg.fallback_model} scope=",
+    ),
+  );
+  assert.match(read("../daemon/review-service.mjs"), /`\[review\] turn done \$\{turn\.ref\}/);
 });
 
 test("edits on another model: one turn after a fallback is not a failure, two in a row are", () => {
