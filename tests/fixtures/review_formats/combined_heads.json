@@ -155,6 +155,83 @@
       "texts": {
         "R1.1": "Add units.\nReviewer 1 Comment 2's wording is unclear to me."
       }
+    },
+    {
+      "name": "combined heads start again at 1 in a second section: the head as written stays",
+      "kind": "positive",
+      "text": "Reviewer 1:\nMajor comments\nReviewer 1 Comment 1: Add units.\nReviewer 1 Comment 2: State n.\nMinor comments\nReviewer 1 Comment 1: Fix the typo.\nReviewer 1 Comment 2: Fix the label.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R1.3": "Reviewer 1 Comment 1: Fix the typo.",
+        "R1.4": "Reviewer 1 Comment 2: Fix the label."
+      },
+      "sections": {
+        "R1.1": "Major comments",
+        "R1.2": "Major comments",
+        "R1.3": "Minor comments",
+        "R1.4": "Minor comments"
+      }
+    },
+    {
+      "name": "combined head after the text of a section: the head as written stays",
+      "kind": "positive",
+      "text": "Major\nThe topic is timely.\nReviewer 1 Comment 1: Add units.\nMinor\nSome typos remain.\nReviewer 1 Comment 1: State n.",
+      "refs": ["E.1", "R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "E.1": "Major\nThe topic is timely.",
+        "R1.1": "Add units.",
+        "R1.2": "Some typos remain.",
+        "R1.3": "Reviewer 1 Comment 1: State n."
+      },
+      "sections": {
+        "R1.2": "Minor",
+        "R1.3": "Minor"
+      }
+    },
+    {
+      "name": "combined head on its own line, number shifted: the head line stays above the text",
+      "kind": "positive",
+      "text": "Reviewer #2 - Comment 1\nAdd units.\nMinor comments\nSome typos remain.\nReviewer #2 - Comment 1\nState n.",
+      "refs": ["R2.1", "R2.2", "R2.3"],
+      "texts": {
+        "R2.1": "Add units.",
+        "R2.2": "Some typos remain.",
+        "R2.3": "Reviewer #2 - Comment 1\nState n."
+      },
+      "sections": {
+        "R2.2": "Minor comments",
+        "R2.3": "Minor comments"
+      }
+    },
+    {
+      "name": "R C heads start again at 1 in a second section: the head as written stays",
+      "kind": "positive",
+      "text": "R1C1: Add units.\nR1C2: State n.\nMinor comments\nR1C1: Fix the typo.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R1.3": "R1C1: Fix the typo."
+      },
+      "sections": {
+        "R1.3": "Minor comments"
+      }
+    },
+    {
+      "name": "combined heads go on counting in a second section: no head in the text",
+      "kind": "positive",
+      "text": "Reviewer 1 Comment 1: Add units.\nReviewer 1 Comment 2: State n.\nMinor comments\nReviewer 1 Comment 3: Fix the typo.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R1.3": "Fix the typo."
+      },
+      "sections": {
+        "R1.3": "Minor comments"
+      }
     }
   ]
 }

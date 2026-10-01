@@ -2314,7 +2314,7 @@ test("review_split: the section of a comment reaches the requirement extraction 
       r.comments.map((c) => [c.ref, c.section, c.text, c.requirements.map((q) => q.text)]),
       [
         ["R1.1", "Abstract", "Shorten this section.", ["Shorten this section."]],
-        ["R1.2", "Methods", "Expand this section.", ["Expand this section."]],
+        ["R1.2", "Methods", "1. Expand this section.", ["Expand this section."]],
       ],
     );
     assert.match(prompt, /\[R1\.1 section\] Abstract\n\[R1\.1 s1\] Shorten this section\./);
@@ -2329,7 +2329,7 @@ test("review_split: the section of a comment reaches the requirement extraction 
     const preview = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
     assert.match(
       preview.prompt,
-      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\n<<<\nExpand this section\.\n>>>/,
+      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\n<<<\n1\. Expand this section\.\n>>>/,
     );
     assert.ok(
       t.lines.some((l) => /^\[review\] prompt R1\.2 .* section="Methods"/.test(l)),

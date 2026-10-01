@@ -692,3 +692,292 @@ test("an untouched twin of the changed paragraph is not taken for it", () => {
     method: "text",
   });
 });
+
+// Codex review 16: several changes in one paragraph. Accepting one insertion
+// (or rejecting one deletion) read "pending" as long as any other tracked
+// change was left in the paragraph, because the paragraph's totals of
+// revision marks decided. With the tracked runs of the paragraph in the
+// snapshot (`tracked`), a change is pending only while ITS text is tracked.
+const multi = (changes, text, tracked, extra = {}) => {
+  const snapshot = {
+    paragraphs: [{ index: 3, id: "P3", text, w_ins: 0, w_del: 0, ...extra, tracked }],
+    comments: [],
+  };
+  return changes.map((ch) => classifyChange(ch, snapshot).state);
+};
+const chg = (kind, find, text, left, right) => ({
+  kind,
+  find,
+  text,
+  word_comment_id: null,
+  paragraph_index: 3,
+  paragraph_id: "P3",
+  before: "",
+  after: "",
+  context: { left, right },
+});
+const ins = (text, start) => ({ kind: "ins", text, start });
+const del = (text, start) => ({ kind: "del", text, start });
+
+test("several changes in one paragraph: each is judged by its own tracked text", () => {
+  // Two insertions after their anchors; the first was accepted.
+  const i1 = chg("insert", "at 30 °C", " in the dark", "held at 30 °C", " and shaken");
+  const i2 = chg("insert", "shaken", " at 200 rpm", "dark and shaken", ". Growth was");
+  const T1 = "Cells were held at 30 °C in the dark and shaken at 200 rpm. Growth was followed.";
+  const cases = [
+    [
+      "accept one of two inserts",
+      [i1, i2],
+      T1,
+      [ins(" at 200 rpm", 47)],
+      { w_ins: 1 },
+      ["accepted", "pending"],
+    ],
+    [
+      "both inserts pending",
+      [i1, i2],
+      T1,
+      [ins(" in the dark", 24), ins(" at 200 rpm", 47)],
+      { w_ins: 2 },
+      ["pending", "pending"],
+    ],
+    ["both inserts accepted", [i1, i2], T1, [], {}, ["accepted", "accepted"]],
+  ];
+  // Two deletions; the first was rejected (its text is back, untracked).
+  const d1 = chg("delete", " carefully", "", "Cells were", " held at 30");
+  const d2 = chg("delete", " for a long time", "", "and shaken", ". Growth was");
+  const T2 = "Cells were carefully held at 30 °C and shaken for a long time. Growth was followed.";
+  cases.push(
+    [
+      "reject one of two deletions",
+      [d1, d2],
+      T2,
+      [del(" for a long time", 45)],
+      { w_del: 1 },
+      ["rejected", "pending"],
+    ],
+    [
+      "both deletions pending",
+      [d1, d2],
+      T2,
+      [del(" carefully", 10), del(" for a long time", 45)],
+      { w_del: 2 },
+      ["pending", "pending"],
+    ],
+  );
+  // An accepted insertion right before a pending deletion.
+  const i3 = chg("insert", "at 30 °C", " in the dark", "held at 30 °C", " for a long");
+  const d3 = chg("delete", " for a long time", "", "at 30 °C", ". Growth was");
+  const T3 = "Cells were held at 30 °C in the dark for a long time. Growth was followed.";
+  cases.push(
+    [
+      "accept an insert next to a pending delete",
+      [i3, d3],
+      T3,
+      [del(" for a long time", 36)],
+      { w_del: 1 },
+      ["accepted", "pending"],
+    ],
+    [
+      "pending insert next to a rejected delete",
+      [i3, d3],
+      T3,
+      [ins(" in the dark", 24)],
+      { w_ins: 1 },
+      ["pending", "rejected"],
+    ],
+  );
+  // The same inserted text twice in the paragraph; only the second is pending.
+  const s1 = chg("insert", "replicates", " (n = 3)", "Three replicates", " were grown");
+  const s2 = chg("insert", "controls", " (n = 3)", "and controls", " were kept");
+  const T4 = "Three replicates (n = 3) were grown and controls (n = 3) were kept.";
+  cases.push(
+    [
+      "identical inserted text twice, second pending",
+      [s1, s2],
+      T4,
+      [ins(" (n = 3)", 48)],
+      { w_ins: 1 },
+      ["accepted", "pending"],
+    ],
+    [
+      "identical inserted text twice, first pending",
+      [s1, s2],
+      T4,
+      [ins(" (n = 3)", 16)],
+      { w_ins: 1 },
+      ["pending", "accepted"],
+    ],
+  );
+  // The Codex flip: the same final text, an unrelated tracked insertion of
+  // the author elsewhere in the paragraph.
+  cases.push(
+    [
+      "unrelated tracked insertion in the paragraph",
+      [i1],
+      "Note: cells were held at 30 °C in the dark and shaken.",
+      [ins("Note: ", 0)],
+      { w_ins: 1 },
+      ["accepted"],
+    ],
+    // A run whose reported place is a little off is still found by its text.
+    [
+      "run offset off by a few characters",
+      [i1, i2],
+      T1,
+      [ins(" at 200 rpm", 44)],
+      { w_ins: 1 },
+      ["accepted", "pending"],
+    ],
+  );
+  for (const [name, changes, text, tracked, counts, want] of cases) {
+    assert.deepEqual(multi(changes, text, tracked, counts), want, name);
+  }
+  console.log(`multi-change paragraph corpus: ${cases.length} cases`);
+
+  // A snapshot of an older task pane has no `tracked`: the paragraph totals
+  // decide, as before (one pending sibling makes the accepted one pending).
+  assert.deepEqual(multi([i1, i2], T1, undefined, { w_ins: 1 }), ["pending", "pending"]);
+  assert.deepEqual(multi([i1, i2], T1, undefined, { w_ins: 0 }), ["accepted", "accepted"]);
+  assert.deepEqual(multi([d1, d2], T2, undefined, { w_del: 1 }), ["pending", "pending"]);
+});
+
+// Codex review of the follow-up: "its text is not tracked" must never rest
+// on a tracked run that was lost. A run that cannot be placed in the
+// paragraph text, a run with no text, or more revision marks in the
+// paragraph than the placed runs stand for: the change stays pending, as the
+// paragraph totals said before.
+test("a tracked run that cannot be placed is never read as 'not tracked'", () => {
+  const i1 = chg("insert", "fit", " non\u001elinear", "used a fit", " to the");
+  const TEXT = "We used a fit non\u001elinear to the data and a second model.";
+  // The Codex reproduction: the pane dropped the no-break hyphen, so the run
+  // text is not in the paragraph. The insertion is still pending.
+  assert.deepEqual(multi([i1], TEXT, [ins(" nonlinear", 13)], { w_ins: 1 }), ["pending"]);
+  // With the hyphen kept it is placed: pending while tracked, accepted after.
+  assert.deepEqual(multi([i1], TEXT, [ins(" non\u001elinear", 13)], { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([i1], TEXT, [], { w_ins: 0 }), ["accepted"]);
+
+  // An accepted insertion next to a tracked insertion that cannot be placed:
+  // pending. This is the conservative side: the unplaced run may be the
+  // change's own text, so "accepted" would be a guess. It turns accepted when
+  // the other run is settled or can be placed.
+  const i2 = chg("insert", "model", " (linear)", "a second model", ".");
+  const T2 = "We used a fit to the data and a second model (linear).";
+  const cases = [
+    ["unplaceable run of the same kind", [ins("somewhere else", 3)], { w_ins: 1 }, "pending"],
+    [
+      "run with no text read",
+      [{ kind: "ins", text: "", start: 3, marks: 1 }],
+      { w_ins: 1 },
+      "pending",
+    ],
+    ["more insertion marks than placed runs", [], { w_ins: 1 }, "pending"],
+    ["two marks, one entry that stands for one", [ins("We", 0)], { w_ins: 2 }, "pending"],
+    [
+      "two marks, one entry that stands for both",
+      [{ ...ins("We", 0), marks: 2 }],
+      { w_ins: 2 },
+      "accepted",
+    ],
+    [
+      "an unplaceable deletion does not concern an insertion",
+      [del("nowhere", 3)],
+      { w_del: 1 },
+      "accepted",
+    ],
+    ["every run placed elsewhere", [ins("We", 0)], { w_ins: 1 }, "accepted"],
+  ];
+  for (const [name, tracked, counts, want] of cases) {
+    assert.deepEqual(multi([i2], T2, tracked, counts), [want], name);
+  }
+  // The same for a deletion that was rejected (its text is back).
+  const d1 = chg("delete", " carefully", "", "Cells were", " held at 30");
+  const T3 = "Cells were carefully held at 30 °C.";
+  assert.deepEqual(multi([d1], T3, [del("not in the text", 3)], { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T3, [], { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T3, [ins("Cells", 0)], { w_ins: 1 }), ["rejected"]);
+  // A snapshot without the list: the paragraph totals, unchanged.
+  assert.deepEqual(multi([i2], T2, undefined, { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([i2], T2, undefined, { w_ins: 0 }), ["accepted"]);
+});
+
+// Codex review (gpt-6.1-sol, P2): a tracked run is placed at the occurrence
+// of its trimmed text nearest to its start. The start is where the run's
+// untrimmed text begins, so a run that opens with a space was measured one
+// character early, and of two occurrences equally far the first one won.
+// "Groups A[ins:  A] and B." placed the run on the old "A" and read the
+// pending insertion accepted. The runs here are real trackedRuns() output.
+test("a tracked run that opens with a space is placed on its own text, and a tie is not placed", async () => {
+  const view = await import("../taskpane/shared/review-view.js");
+  const r = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const xIns = (t, id = 1) => `<w:ins w:id="${id}" w:author="A">${r(t)}</w:ins>`;
+  const xDel = (t, id = 2) =>
+    `<w:del w:id="${id}" w:author="A"><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:del>`;
+  const runsOf = (...xs) =>
+    view.trackedRuns(
+      `<pkg:package><pkg:part pkg:name="/word/document.xml"><pkg:xmlData><w:body><w:p>${xs.join("")}</w:p></w:body></pkg:xmlData></pkg:part></pkg:package>`,
+    );
+  const place = (text, tracked) => classify.placedRuns({ tracked }, text);
+  const T = "Groups A A and B.";
+
+  // The reproduction: the insertion is still tracked.
+  const repro = runsOf(r("Groups A"), xIns(" A"), r(" and B."));
+  assert.deepEqual(repro, [{ kind: "ins", text: " A", start: 8, marks: 1 }]);
+  const i1 = {
+    ...chg("insert", "A", " A", "", ""),
+    context: classify.changeContext("Groups A and B.", "A", { kind: "insert" }),
+  };
+  assert.deepEqual(i1.context, { left: "Groups A", right: " and B." });
+  assert.deepEqual(multi([i1], T, repro, { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([i1], T, undefined, { w_ins: 1 }), ["pending"]);
+  // The space the run opens with moves its text one character on: 9 is
+  // nearer than 7, where the uncorrected start (8) saw a tie.
+  assert.deepEqual(place(T, repro), {
+    runs: [{ kind: "ins", start: 9, end: 10 }],
+    short: { ins: false, del: false },
+  });
+  // The text before the run ends with a space: the two spaces are one in the
+  // paragraph text and the run's text is at its start.
+  const merged = runsOf(r("Groups A "), xIns(" A"), r(" and B."));
+  assert.deepEqual(merged, [{ kind: "ins", text: " A", start: 9, marks: 1 }]);
+  assert.deepEqual(place(T, merged).runs, [{ kind: "ins", start: 9, end: 10 }]);
+  assert.deepEqual(multi([i1], T, merged, { w_ins: 1 }), ["pending"]);
+  // A run that opens the paragraph: its leading spaces are trimmed away.
+  const first = runsOf(xIns("  A"), r(" and A."));
+  assert.deepEqual(first, [{ kind: "ins", text: "  A", start: 0, marks: 1 }]);
+  assert.deepEqual(place("A and A.", first).runs, [{ kind: "ins", start: 0, end: 1 }]);
+
+  // One occurrence only: placed, judged as before.
+  const one = runsOf(r("Cells grew"), xIns(" well"), r(" on glucose."));
+  const w1 = chg("insert", "grew", " well", "Cells grew", " on glucose.");
+  const T1 = "Cells grew well on glucose.";
+  assert.deepEqual(place(T1, one).runs, [{ kind: "ins", start: 11, end: 15 }]);
+  assert.deepEqual(multi([w1], T1, one, { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([w1], T1, [], {}), ["accepted"]);
+
+  // Two occurrences equally far from the start (the pane and Word disagree
+  // by a character): the run is not placed, and its kind is short.
+  assert.deepEqual(place(T, [ins("A", 8)]), { runs: [], short: { ins: true, del: false } });
+  assert.deepEqual(multi([i1], T, [ins("A", 8)], { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(place(T, [del("A", 8)]), { runs: [], short: { ins: false, del: true } });
+
+  // The same for a deletion: " A" deleted and still tracked (Word keeps the
+  // deleted text in the paragraph text) is pending, not rejected.
+  const gone = runsOf(r("Groups A"), xDel(" A"), r(" and B."));
+  assert.deepEqual(gone, [{ kind: "del", text: " A", start: 8, marks: 1 }]);
+  const d1 = chg("delete", " A", "", "Groups A", " and B.");
+  assert.deepEqual(place(T, gone).runs, [{ kind: "del", start: 9, end: 10 }]);
+  assert.deepEqual(multi([d1], T, gone, { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T, [del("A", 8)], { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T, [], {}), ["rejected"]);
+
+  // Not too much pending: the insertion was accepted and a sibling with the
+  // same text, later in the paragraph, is still tracked.
+  const T2 = "Groups A A and B. Then C A.";
+  const sib = runsOf(r("Groups A A and B. Then C"), xIns(" A", 3), r("."));
+  assert.deepEqual(sib, [{ kind: "ins", text: " A", start: 24, marks: 1 }]);
+  const i2 = chg("insert", "C", " A", "B. Then C", ".");
+  assert.deepEqual(place(T2, sib).runs, [{ kind: "ins", start: 25, end: 26 }]);
+  assert.deepEqual(multi([i1, i2], T2, sib, { w_ins: 1 }), ["accepted", "pending"]);
+  assert.deepEqual(multi([i1, i2], T2, [], {}), ["accepted", "accepted"]);
+});

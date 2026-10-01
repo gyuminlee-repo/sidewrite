@@ -4,14 +4,18 @@
 // feature_list verify_command against this run's files.
 
 import { formatRationaleComment } from "../../daemon/review-tools.mjs";
+import { normalizeParaText, placedRuns } from "../../daemon/revision-classify.mjs";
 
 // The author's handling of the proposed changes in the acceptance procedure:
 // R1.1 accepted, R1.2 rejected, R1.3 first change accepted then one inserted
-// word edited, everything else accepted.
+// word edited, everything else accepted. R1.4 (the deletion of the flask
+// sentence) is rejected, with a tracked insertion of the author pending in
+// the same paragraph (siblingMatch).
 export const DEFAULT_DECISIONS = {
   "R1.1": "accept",
   "R1.2": "reject",
   "R1.3": ["accept_edit", "accept"],
+  "R1.4": "reject",
 };
 
 // One inserted word the author edits by hand, and what it becomes.
@@ -537,6 +541,66 @@ export function cleanupEvidence({ cleanup, listening }) {
     left_running: cleanup?.left_running ?? [],
     daemon_error: cleanup?.daemon_error ?? null,
     listening,
+  };
+}
+
+// A change handled by the author while ANOTHER tracked change is pending in
+// its paragraph: it must show its own state, not Pending (the paragraph's
+// revision mark total used to decide), and its rationale comment must be
+// resolved. Shown on the first change of `ref`, a pure deletion that was
+// rejected or a pure insertion that was accepted; `hand` is the text of the
+// author's own tracked insertion in that paragraph, still pending in Word.
+// revision: revision.json after the refresh; view: the pane; word:
+// word-com.ps1 state.
+export function siblingMatch(revision, view, word, { ref, hand }) {
+  const ch = revision?.comments?.find((c) => c.ref === ref)?.changes?.[0];
+  const badge = view?.comments?.find((c) => c.ref === ref)?.changes?.[0]?.badge;
+  const want =
+    ch?.kind === "delete"
+      ? ["rejected", "Rejected"]
+      : ch?.kind === "insert"
+        ? ["accepted", "Accepted"]
+        : null;
+  const sibling = (word?.revisions ?? []).some((r) => r.type === 1 && has(r.text, hand.trim()));
+  const text = ch
+    ? norm(formatRationaleComment(ref, ch.rationale, { lost: ch.lost_facts ?? [] }))
+    : "";
+  const com = (word?.comments ?? []).find((c) => norm(c.text) === text);
+  return {
+    pass: !!want && sibling && ch.state === want[0] && badge === want[1] && com?.done === true,
+    expect: `${ref} first change (a pure deletion rejected, or a pure insertion accepted) reads its own state with the author's tracked "${hand.trim()}" pending in the paragraph, and its rationale comment is resolved`,
+    got: `kind ${ch?.kind ?? "-"}; state ${ch?.state ?? "-"}; badge ${badge ?? "-"}; sibling revision pending ${sibling}; comment ${com ? (com.done ? "done" : "open") : "not found"}`,
+  };
+}
+
+// The document of make_tracked_special.py as the pane's snapshot shows it in
+// Word: every tracked run read from the paragraph OOXML (trackedRuns) must be
+// found in the paragraph text Word reports, with no revision mark left over
+// (placedRuns of the daemon, the function the classifier uses). paragraphs:
+// snapshot paragraphs; expected: how many paragraphs hold a tracked run.
+export function trackedPlaced(paragraphs, expected) {
+  const tracked = (paragraphs ?? []).filter(
+    (p) => (p.tracked?.length ?? 0) > 0 || (p.w_ins ?? 0) + (p.w_del ?? 0) > 0,
+  );
+  const bad = [];
+  for (const p of tracked) {
+    const placed = placedRuns(p, normalizeParaText(p.text));
+    if (
+      !placed ||
+      placed.short.ins ||
+      placed.short.del ||
+      placed.runs.length !== p.tracked.length
+    ) {
+      const codes = (s) => [...String(s)].map((c) => c.codePointAt(0).toString(16)).join(" ");
+      bad.push(
+        `paragraph ${p.index}: text [${codes(p.text)}] runs ${JSON.stringify((p.tracked ?? []).map((r) => [r.kind, codes(r.text)]))}`,
+      );
+    }
+  }
+  return {
+    pass: tracked.length > 0 && tracked.length === expected && bad.length === 0,
+    expect: `${expected} paragraphs with a tracked run, each run found in the paragraph text Word reports`,
+    got: bad.length ? bad.join("; ") : `${tracked.length} paragraphs with tracked runs, all placed`,
   };
 }
 

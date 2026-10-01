@@ -62,7 +62,10 @@ async function check(text, want) {
     assert.deepEqual(c.requirements, []);
   }
   assert.deepEqual(uncoveredText(text, comments), want.uncovered ?? []);
-  assert.deepEqual(lostLines(text, comments), []);
+  // `lost`: lines of a review with no reviewer head that the split drops by
+  // rule (the text before the first comment); the check above names them.
+  assert.deepEqual(lostLines(text, comments), want.lost ?? []);
+  for (const l of want.lost ?? []) assert.ok(want.uncovered.includes(l), l);
   if (want.strong !== undefined) {
     let called = 0;
     const r = await splitReview(text, {
