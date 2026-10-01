@@ -479,3 +479,230 @@ test("requirement_ids: cite a request handled in part; empty only when unrelated
   assert.match(desc, /empty only when the change answers none of them/i);
   assert.doesNotMatch(desc, /not sure/);
 });
+
+// Codex review 12: forbid "novel substrate"; "This is a novel material.";
+// replacing "material" with "substrate" was applied with ok:true.
+const PHRASE = {
+  id: "L4",
+  kind: "forbid",
+  text: "novel substrate 금지",
+  check: { type: "regex", pattern: "novel substrate", flags: "i", expect: "absent" },
+};
+const crossDeps = (ctx) => {
+  const d = deps();
+  d.getLedger = async () => [PHRASE];
+  d.getReviewContext = async () => ({ requirements: [], comment_text: "", ...ctx });
+  return d;
+};
+
+test("forbid hit across the edit boundary: blocked through the same flow, and an override applies it", async () => {
+  const d = crossDeps({ paragraphs: ["This is a novel material.", "It grew slowly."] });
+  const args = { comment_ref: "R1.3", find: "material", replace: "substrate", rationale: R };
+  const r = await applyTrackedEdit(d, args, { ref: "R1.3" });
+  assert.deepEqual([r.ok, r.blocked_by, r.blocked_id], [false, ["L4"], "R1.3-b1"]);
+  assert.match(r.message, /Rephrase/);
+  assert.equal(d.calls.length, 0);
+  assert.equal(d.edits.length, 0);
+  assert.deepEqual(d.blocked[0].blocked_by, ["L4"]);
+  assert.equal(d.blocked[0].args.replace, "substrate");
+  assert.equal(d.lines[0], "[review] blocked R1.3 by=L4");
+  // The author approves the exception: the stored edit goes through.
+  const ok = await applyTrackedEdit(
+    d,
+    d.blocked[0].args,
+    { ref: "R1.3" },
+    {
+      override: { blocked_by: ["L4"] },
+    },
+  );
+  assert.equal(ok.ok, true);
+  assert.deepEqual(d.edits[0][1].override_of, ["L4"]);
+  // Insertion and deletion forms.
+  const ins = await applyTrackedEdit(
+    crossDeps({ paragraphs: ["This is a novel."] }),
+    { comment_ref: "R1.3", find: "novel", insert_after: " substrate", rationale: R },
+    { ref: "R1.3" },
+  );
+  assert.deepEqual(ins.blocked_by, ["L4"]);
+  const del = await applyTrackedEdit(
+    crossDeps({ paragraphs: ["It used a novel bright substrate."] }),
+    { comment_ref: "R1.3", find: "bright ", replace: "", rationale: R },
+    { ref: "R1.3" },
+  );
+  assert.deepEqual(del.blocked_by, ["L4"]);
+});
+
+test("an edit next to or away from an existing forbidden phrase, or one that removes it, is applied", async () => {
+  const paragraphs = ["A novel substrate grows. The medium was warm material."];
+  for (const [find, replace] of [
+    ["warm", "hot"], // elsewhere in the paragraph
+    ["novel substrate", "new substrate"], // removes it
+    [" grows", " grew"], // right after it
+  ]) {
+    const d = crossDeps({ paragraphs });
+    const r = await applyTrackedEdit(
+      d,
+      { comment_ref: "R1.3", find, replace, rationale: R },
+      { ref: "R1.3" },
+    );
+    assert.equal(r.ok, true, `${find} -> ${replace}`);
+    assert.equal(d.blocked.length, 0);
+  }
+});
+
+// The paragraph texts are those of the last refresh. A change recorded since
+// then is put into them first, so two edits in a row cannot form the phrase
+// (new -> novel, then material -> substrate).
+test("forbid hit across the boundary of an earlier change of the same turn", async () => {
+  const recent = (find, text, extra = {}) => ({
+    kind: "replace",
+    find,
+    text,
+    narrowed_from: null,
+    created_at: "2026-01-01T00:00:01.000Z",
+    ...extra,
+  });
+  const d = crossDeps({
+    paragraphs: ["This is a new material."],
+    recent_changes: [recent("new", "novel")],
+  });
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.3", find: "material", replace: "substrate", rationale: R },
+    { ref: "R1.3" },
+  );
+  assert.deepEqual([r.ok, r.blocked_by], [false, ["L4"]]);
+  // A narrowed change is put in by the find/replace the model asked for.
+  const { currentTexts } = await import("../daemon/review-tools.mjs");
+  assert.deepEqual(
+    currentTexts(
+      ["Held at 30 degrees all day.", "Other."],
+      [
+        recent("degrees", "°C", { narrowed_from: { find: "30 degrees", text: "30 °C" } }),
+        recent("all day", " long", { kind: "insert" }),
+        recent("Other.", "", { kind: "delete" }),
+        recent("not in the text", "x"),
+      ],
+    ),
+    ["Held at 30 °C all day long.", ""],
+  );
+});
+
+// Codex review 13: the forbid check tried every occurrence of `find`, so an
+// edit in one paragraph was blocked by a phrase it would only form in another
+// ("a novel material" / "a conventional material", the hint picks the second).
+const TWO_PARAS = ["This is a novel material.", "This is a conventional material."];
+
+test("forbid check reads the paragraph the hint picks, as Word does", async () => {
+  const edit = (hint) => ({
+    comment_ref: "R1.3",
+    find: "material",
+    replace: "substrate",
+    ...(hint ? { paragraph_hint: hint } : {}),
+    rationale: R,
+  });
+  for (const [ids, clean, dirty] of [
+    [["U0", "U1"], "U1", "U0"], // uniqueLocalId ids
+    [null, "p1", "p0"], // index ids
+  ]) {
+    // The hinted paragraph forms no forbidden phrase: applied, with the hint.
+    let d = crossDeps({ paragraphs: TWO_PARAS, paragraph_ids: ids });
+    let r = await applyTrackedEdit(d, edit(clean), { ref: "R1.3" });
+    assert.equal(r.ok, true, `hint ${clean}`);
+    assert.equal(d.blocked.length, 0);
+    assert.equal(d.calls[0][1].paragraph_hint, clean);
+    // The hinted paragraph does: blocked, and the stored edit keeps the hint.
+    d = crossDeps({ paragraphs: TWO_PARAS, paragraph_ids: ids });
+    r = await applyTrackedEdit(d, edit(dirty), { ref: "R1.3" });
+    assert.deepEqual([r.ok, r.blocked_by], [false, ["L4"]], `hint ${dirty}`);
+    assert.equal(d.blocked[0].args.paragraph_hint, dirty);
+  }
+  // The target cannot be told (no hint with two hits, a hint that names no
+  // paragraph): every occurrence is tried, so the phrase in the first blocks.
+  for (const hint of [null, "U9"]) {
+    const d = crossDeps({ paragraphs: TWO_PARAS, paragraph_ids: ["U0", "U1"] });
+    const r = await applyTrackedEdit(d, edit(hint), { ref: "R1.3" });
+    assert.deepEqual([r.ok, r.blocked_by], [false, ["L4"]], `hint ${hint}`);
+  }
+});
+
+// Class audit (Codex review 13): what else the daemon reads from "the"
+// paragraph of the edit before Word answers.
+test("lost facts read the sentence position in the hinted paragraph", async () => {
+  // "Methods" starts a sentence in the first paragraph (not a name there)
+  // and is inside one in the second (a name candidate, so a lost fact).
+  const paragraphs = [
+    "Methods were chosen first. Details follow.",
+    "Here Methods were chosen again.",
+  ];
+  const lost = async (hint) => {
+    const d = crossDeps({ paragraphs, paragraph_ids: ["U0", "U1"] });
+    d.getLedger = async () => [];
+    await applyTrackedEdit(
+      d,
+      {
+        comment_ref: "R1.3",
+        find: "Methods were chosen",
+        replace: "they were chosen",
+        paragraph_hint: hint,
+        rationale: R,
+      },
+      { ref: "R1.3" },
+    );
+    return d.edits[0][1].lost_facts;
+  };
+  assert.deepEqual(await lost("U0"), []);
+  assert.deepEqual(await lost("U1"), ["Methods"]);
+});
+
+test("an unanswered edit with a hint records the form of the hinted paragraph", async () => {
+  const run = async (ctx, args) => {
+    const d = crossDeps(ctx);
+    let attempt = null;
+    d.onOutcomeUnknown = async (x) => (attempt = x.attempt);
+    d.call = async () => {
+      throw Object.assign(new Error("lost"), { code: "ToolTimeout" });
+    };
+    await applyTrackedEdit(d, { comment_ref: "R1.3", rationale: R, ...args }, { ref: "R1.3" });
+    return attempt.change;
+  };
+  const ctx = { paragraphs: TWO_PARAS, paragraph_ids: ["U0", "U1"] };
+  const hinted = await run(ctx, { find: "material", replace: "medium", paragraph_hint: "U1" });
+  assert.deepEqual(
+    [hinted.paragraph_index, hinted.before, hinted.after],
+    [1, "This is a conventional material.", "This is a conventional medium."],
+  );
+  assert.deepEqual(hinted.context, { left: "is a conventional ", right: "." });
+  // No hint and two hits: Word refuses such an edit; nothing is guessed.
+  const none = await run(ctx, { find: "material", replace: "medium" });
+  assert.deepEqual(
+    [none.paragraph_index, none.before, none.after, none.context],
+    [null, "", "", null],
+  );
+  // One hit in the document: that paragraph, with or without a hint.
+  const one = await run(ctx, { find: "conventional", replace: "common", paragraph_hint: "U0" });
+  assert.deepEqual([one.paragraph_index, one.after], [1, "This is a common material."]);
+});
+
+test("currentTexts puts a recorded change into the paragraph Word reported", async () => {
+  const { currentTexts } = await import("../daemon/review-tools.mjs");
+  const ch = (extra) => ({
+    kind: "replace",
+    find: "material",
+    text: "substrate",
+    narrowed_from: null,
+    ...extra,
+  });
+  // `find` is in both paragraphs; the change was made in the second.
+  assert.deepEqual(currentTexts(TWO_PARAS, [ch({ paragraph_index: 1 })]), [
+    TWO_PARAS[0],
+    "This is a conventional substrate.",
+  ]);
+  // No usable index: only a find that is in one paragraph is put in.
+  assert.deepEqual(currentTexts(TWO_PARAS, [ch({ paragraph_index: null })]), TWO_PARAS);
+  assert.deepEqual(currentTexts(TWO_PARAS, [ch({ paragraph_index: 7 })]), TWO_PARAS);
+  assert.deepEqual(
+    currentTexts(TWO_PARAS, [ch({ find: "novel", text: "new", paragraph_index: null })]),
+    ["This is a new material.", TWO_PARAS[1]],
+  );
+});

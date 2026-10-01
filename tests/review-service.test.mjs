@@ -1590,6 +1590,54 @@ test("an exception approved for a deleted forbid rule does not cover a rule adde
   }
 });
 
+test("tracked-edit context: changes recorded after the last refresh are given with the snapshot", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("review_refresh", {
+      snapshot: {
+        paragraphs: [{ index: 0, id: "U0", text: "This is a new material.", reviewed_text: null }],
+        comments: [],
+      },
+    });
+    const deps = {
+      ...t.svc.trackedEditDeps("k"),
+      call: async () => ({ ok: true, word_comment_id: 7, paragraph_index: 0 }),
+    };
+    const R = { what: "w", why: "y", addresses: "a" };
+    assert.deepEqual((await deps.getReviewContext("R1.1")).recent_changes, []);
+    await new Promise((r) => setTimeout(r, 5));
+    await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.1", find: "new", replace: "novel", rationale: R },
+      { ref: "R1.1" },
+    );
+    const ctx = await deps.getReviewContext("R1.3");
+    assert.deepEqual(ctx.paragraphs, ["This is a new material."]);
+    assert.deepEqual(ctx.paragraph_ids, ["U0"]); // for paragraph_hint
+    assert.deepEqual(
+      ctx.recent_changes.map((c) => [c.id, c.find, c.text]),
+      [["R1.1-1", "new", "novel"]],
+    );
+    // End to end: the second edit forms the forbidden phrase with the first.
+    await t.ask("ledger_add", {
+      item: {
+        kind: "forbid",
+        text: "novel substrate 금지",
+        check: { type: "regex", pattern: "novel substrate", flags: "" },
+      },
+    });
+    const r = await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.3", find: "material", replace: "substrate", rationale: R },
+      { ref: "R1.3" },
+    );
+    assert.deepEqual([r.ok, r.blocked_by, r.blocked_id], [false, ["L1"], "R1.3-b1"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // P15: the ledger as a JSON file next to the manuscript.
 test("ledger_export writes <stem>.ledger.json; ledger_import adds its rules and skips known ones", async () => {
   const t = await setup();

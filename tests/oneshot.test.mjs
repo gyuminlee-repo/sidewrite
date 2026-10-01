@@ -114,3 +114,29 @@ test("runOneshot: timeout aborts and reports", async () => {
   const r = await runOneshot({ system: "s", prompt: "p", timeoutMs: 20 }, { queryFn: hang });
   assert.deepEqual([r.ok, r.error], [false, "timed out after 20 ms"]);
 });
+
+// Class audit (Codex review 13): replies that must never read as an answer.
+test("runOneshot: a refusal, an empty reply and cut-off JSON are errors", async () => {
+  const run = (messages) =>
+    runOneshot({ system: "s", prompt: "p" }, { queryFn: fakeQuery(messages) });
+  const refused = await run([
+    { type: "system", subtype: "model_refusal_no_fallback", api_refusal_category: "x" },
+    ok('{"violations":[]}'),
+  ]);
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /declined/);
+  assert.doesNotMatch(refused.error, /usage limit/);
+  const stopped = await run([{ ...ok('{"violations":[]}'), stop_reason: "refusal" }]);
+  assert.equal(stopped.ok, false);
+  for (const text of [
+    "",
+    "   ",
+    '{"violations":[{"paragraph_index":3,"quote":"a","reason":"r"}',
+    '{"violations":[],"unsure":[{"paragraph_index":5,"reason":"x"}',
+    '```json\n{"violations":[\n```',
+    'Note {see below}: {"violations":[]}',
+  ]) {
+    const r = await run([ok(text)]);
+    assert.deepEqual([r.ok, r.error], [false, "reply was not JSON"], JSON.stringify(text));
+  }
+});
