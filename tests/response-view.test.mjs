@@ -272,6 +272,15 @@ test("nextStep: the one thing to do next", () => {
     id: "export",
     text: "Next: export the letter.",
   });
+  // The manuscript changed under an answer: read it again before anything else.
+  assert.deepEqual(step([answered, cited({ start: 1, end: 2 }, ["quote_changed", "lines_old"])]), {
+    id: "reread",
+    text: "Next: read the 1 response marked out of date, then save or draft it again.",
+  });
+  assert.equal(
+    step([cited(null, ["change_state"]), cited(null, ["quote_changed"])]).text,
+    "Next: read the 2 responses marked out of date, then save or draft them again.",
+  );
   // Missing answers come before a stale summary of an earlier check.
   assert.equal(step([{ ref: "R1.2" }], { fail: 0, warn: 0 }).id, "draft");
 });

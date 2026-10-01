@@ -119,8 +119,30 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
       );
 
     // quote_changed is the quote_exact axis and lines_old the lines axis below.
-    if (staleReasons(c, snapshot, render).includes("change_state"))
+    const staleNow = staleReasons(c, snapshot, render).includes("change_state");
+    if (staleNow)
       add("stale", "fail", c.ref, "the cited changes are not the accepted changes; refresh");
+    // The marks kept from an earlier refresh (response-quotes.mjs markStale):
+    // the citations may be fresh again, but the answer was written for the
+    // old sentence or the old set of changes. Saving or drafting it again
+    // clears the mark.
+    if (!c.declined) {
+      const kept = r?.stale ?? [];
+      if (kept.includes("quote_changed"))
+        add(
+          "stale",
+          "fail",
+          c.ref,
+          "quote_changed: a quoted sentence changed after this answer was written; read the answer, then save or draft it again",
+        );
+      if (kept.includes("change_state") && !staleNow)
+        add(
+          "stale",
+          "fail",
+          c.ref,
+          "change_state: the accepted changes are not the ones this answer was written for; read the answer, then save or draft it again",
+        );
+    }
 
     for (const cit of r?.citations ?? []) {
       if (cit.problem) {

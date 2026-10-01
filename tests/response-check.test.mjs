@@ -451,3 +451,39 @@ test("changes that still wait for a decision in Word are a warning on their comm
   declined.revision.comments[0].declined = { reason: "Out of scope." };
   assert.deepEqual(ids(checkResponses(declined), "warn"), ["undecided_changes:R1.1"]);
 });
+
+test("an answer marked stale fails until it is written again, even when its citations are fresh", () => {
+  // The quoted sentence was edited in Word; the citations were then computed
+  // anew and located, so every other axis passes. The answer itself was
+  // written for the old sentence.
+  const marked = (stale, mutate = () => {}) =>
+    good((r) => {
+      r.comments[0].response.stale = stale;
+      mutate(r);
+    });
+  const rows = checkResponses(marked(["quote_changed"]));
+  assert.deepEqual(ids(rows), ["stale:R1.1"]);
+  assert.match(
+    rows[0].detail,
+    /^quote_changed: a quoted sentence changed after this answer was written/,
+  );
+  const state = checkResponses(marked(["change_state"]));
+  assert.deepEqual(ids(state), ["stale:R1.1"]);
+  assert.match(state[0].detail, /^change_state: /);
+  // Both marks: one row each. lines_old alone is the lines axis, not this one.
+  assert.deepEqual(ids(checkResponses(marked(["quote_changed", "change_state"]))), [
+    "stale:R1.1",
+    "stale:R1.1",
+  ]);
+  assert.deepEqual(ids(checkResponses(marked(["lines_old"]))), []);
+  // The cited changes differ right now: that row is told once, not twice.
+  const now = checkResponses(
+    marked(["change_state"], (r) => (r.comments[0].changes[0].state = "rejected")),
+  );
+  assert.deepEqual(ids(now), ["requirements:R1.1", "stale:R1.1"]);
+  // A declined comment prints its reason, not the answer.
+  const declined = marked(["quote_changed"], (r) => {
+    r.comments[0].declined = { reason: "Out of scope." };
+  });
+  assert.deepEqual(ids(checkResponses(declined)), []);
+});

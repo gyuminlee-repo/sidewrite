@@ -162,6 +162,17 @@ export function nextStep(revision, summary) {
       id: "draft",
       text: `Next: write or draft the ${count(missing, "missing response")} (or decline the comment).`,
     };
+  // Written for a sentence or a set of changes that is not there any more.
+  const outdated = comments.filter(
+    (c) =>
+      !c.declined &&
+      (c.response?.stale ?? []).some((x) => x === "quote_changed" || x === "change_state"),
+  ).length;
+  if (outdated)
+    return {
+      id: "reread",
+      text: `Next: read the ${count(outdated, "response")} marked out of date, then save or draft ${outdated === 1 ? "it" : "them"} again.`,
+    };
   const noLines = comments.some(
     (c) =>
       (c.response?.stale ?? []).includes("lines_old") ||
