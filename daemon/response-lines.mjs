@@ -2,9 +2,9 @@
 // the PDF that Word rendered from the manuscript (scripts/pdf-line-map.py).
 // The numbers are never typed by a person or written by the model.
 
-import { createHash } from "node:crypto";
-import { writeFile, rename } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { writeFile, rename, rm } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sidecarPath } from "./revision-store.mjs";
 import { viewText } from "./response-quotes.mjs";
@@ -85,8 +85,17 @@ export async function savePdf(doc, base64) {
   if (buf.length < 5 || buf.subarray(0, 5).toString("latin1") !== "%PDF-")
     throw new Error("Word did not return a PDF");
   const path = renderPdfPathFor(doc);
-  await writeFile(`${path}.tmp`, buf);
-  await rename(`${path}.tmp`, path);
+  // A temp file of this call's own, created exclusively (the naming of
+  // revision-store.mjs writeJsonAtomic): two saves never share one, and a
+  // file that was already there is never touched.
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  await writeFile(tmp, buf, { flag: "wx" });
+  try {
+    await rename(tmp, path);
+  } catch (e) {
+    await rm(tmp, { force: true });
+    throw e;
+  }
   return { path, sha: createHash("sha256").update(buf).digest("hex"), bytes: buf.length };
 }
 

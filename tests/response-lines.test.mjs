@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -119,6 +119,23 @@ test("savePdf keeps the PDF next to the manuscript and refuses anything else", a
   assert.deepEqual(await readFile(saved.path), bytes);
   await assert.rejects(savePdf(doc, Buffer.from("PK\u0003\u0004 docx").toString("base64")), /PDF/);
   await assert.rejects(savePdf(doc, undefined), /PDF/);
+});
+
+test("savePdf: two saves at once both succeed, and a .tmp file already there is left alone", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "lines-"));
+  const doc = join(dir, "paper.docx");
+  const other = `${renderPdfPathFor(doc)}.tmp`;
+  await writeFile(other, "not ours");
+  const pdfs = ["one", "two"].map((t) => Buffer.from(`%PDF-1.7\n${t.repeat(2000)}\n`));
+  const saved = await Promise.all(pdfs.map((b) => savePdf(doc, b.toString("base64"))));
+  assert.deepEqual(
+    saved.map((s) => s.bytes),
+    pdfs.map((b) => b.length),
+  );
+  const onDisk = await readFile(renderPdfPathFor(doc));
+  assert.ok(pdfs.some((b) => b.equals(onDisk)));
+  assert.equal(await readFile(other, "utf8"), "not ours");
+  assert.deepEqual((await readdir(dir)).sort(), ["paper.render.pdf", "paper.render.pdf.tmp"]);
 });
 
 test("locate passes the requests to the line map and names what is wrong with the PDF", async () => {
