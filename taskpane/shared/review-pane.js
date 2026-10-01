@@ -555,8 +555,16 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   async function refresh() {
     const snapshot = await word.collectReviewSnapshot();
     const r = await ask("review_refresh", { snapshot });
+    // Word refuses Comment.resolved in a document in compatibility mode
+    // (GeneralException on every comment). The refresh itself has succeeded,
+    // so its counts are still shown and the refusal is added to them.
+    const unresolved = [];
     for (const id of commentsToResolve(r.rows, state.revision, snapshot.comments)) {
-      await word.resolveComment(id);
+      try {
+        await word.resolveComment(id);
+      } catch (e) {
+        unresolved.push(e?.message ?? String(e));
+      }
     }
     const inv = invariantReport(state.revision, snapshot.comments);
     const c = r.counts;
@@ -569,7 +577,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         (inv.ok
           ? "."
           : ` (MISMATCH: missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"})`) +
-        outside,
+        outside +
+        (unresolved.length
+          ? ` ${unresolved.length} rationale comment(s) not marked resolved (Word: ${unresolved[0]}; one cause is a document in compatibility mode).`
+          : ""),
       !inv.ok,
     );
   }

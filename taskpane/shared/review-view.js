@@ -38,8 +38,19 @@ export function computeAfterText(before, find, { replace, insert_after } = {}) {
 const W_INS = /<w:ins[\s>/]/g;
 const W_DEL = /<w:del[\s>/]/g;
 
+// getOoxml() of a paragraph is a pkg:package. Only the document part holds the
+// paragraph's own revision marks: a rationale comment inserted while tracking
+// was on carries a w:ins in /word/comments.xml that accepting the change in
+// Word does not remove, and it made an accepted insertion read as pending.
+const DOC_PART = '<pkg:part pkg:name="/word/document.xml"';
+
 export function countRevisionMarks(xml) {
-  const s = String(xml ?? "");
+  let s = String(xml ?? "");
+  const at = s.indexOf(DOC_PART);
+  if (at !== -1) {
+    const end = s.indexOf("</pkg:part>", at);
+    s = s.slice(at, end === -1 ? undefined : end);
+  }
   return { w_ins: (s.match(W_INS) || []).length, w_del: (s.match(W_DEL) || []).length };
 }
 

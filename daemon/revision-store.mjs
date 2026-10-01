@@ -110,6 +110,10 @@ const Comment = z.object({
   status: z.enum(["pending", "in_progress", "done"]).default("pending"),
   changes: z.array(ChangeSchema).default([]),
   blocked: z.array(Blocked).default([]),
+  // Highest q-number and blocked-edit number ever given out under this
+  // comment (see "id counters" below). null: a file from before the counters.
+  requirement_seq: z.number().int().nonnegative().nullable().default(null),
+  blocked_seq: z.number().int().nonnegative().nullable().default(null),
 });
 
 // A paragraph the LLM check could not judge (abstain). Not a violation; it
@@ -166,6 +170,8 @@ export const RevisionSchema = z.object({
   updated_at: z.string(),
   comments: z.array(Comment).default([]),
   ledger: z.array(LedgerItemSchema).default([]),
+  // Highest L-number ever given out. null: a file from before the counter.
+  ledger_seq: z.number().int().nonnegative().nullable().default(null),
   // L4: paragraph texts (reviewed view) at the last status refresh, and the
   // changes found since then that no review change explains.
   snapshot: z
@@ -228,7 +234,7 @@ export async function loadRevision(path, manuscript) {
     if (e.code === "ENOENT") return emptyRevision(manuscript);
     throw e;
   }
-  return RevisionSchema.parse(JSON.parse(raw));
+  return withCounters(RevisionSchema.parse(JSON.parse(raw)));
 }
 
 export async function writeJsonAtomic(path, data) {
@@ -297,12 +303,15 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       reviewer: c.reviewer,
       text: c.text,
       requirements: Array.isArray(c.requirements)
-        ? numberRequirements(old?.requirements ?? [], c.requirements, citedIds(old))
+        ? numberRequirements(old?.requirements ?? [], c.requirements, [`q${requirementSeq(old)}`])
         : clone(old?.requirements ?? []),
       status: c.status ?? old?.status ?? "pending",
       changes: old ? clone(old.changes) : [],
       blocked: old ? clone(old.blocked) : [],
+      blocked_seq: old ? blockedSeq(old) : 0,
     });
+    const row = list[list.length - 1];
+    row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });
   }
   for (const old of rev.comments) {
     if (seen.has(old.ref)) continue;
@@ -349,11 +358,62 @@ function citedIds(comment) {
   ].filter((id) => typeof id === "string");
 }
 
+// ---- id counters -------------------------------------------------------------
+// Ledger ids (L<n>), requirement ids (q<n>, per comment) and blocked-edit ids
+// (<ref>-b<n>, per comment) are never given out twice: a stale reference to a
+// removed item (blocked_by of an older blocked edit, an Allow exception
+// button in a pane that was not redrawn, a running turn that was told q2)
+// would otherwise mean the item that took its id (Codex review, P2: delete
+// L1, add a forbid rule, it became L1 and the old exception approved it).
+// The highest number given out is stored; a file without it gets the highest
+// number among the ids it still names.
+
+function idNumber(id, prefix) {
+  if (typeof id !== "string" || !id.startsWith(prefix)) return 0;
+  const rest = id.slice(prefix.length);
+  return /^\d+$/.test(rest) ? Number(rest) : 0;
+}
+
+// Every string anywhere in the file: blocked_by, override_of, the change an
+// unanswered attempt would record, and fields added later.
+function maxIdAnywhere(value, prefix) {
+  let max = 0;
+  const walk = (v) => {
+    if (typeof v === "string") max = Math.max(max, idNumber(v, prefix));
+    else if (v && typeof v === "object") Object.values(v).forEach(walk);
+  };
+  walk(value);
+  return max;
+}
+
+const ledgerSeq = (rev) => Math.max(rev.ledger_seq ?? 0, maxIdAnywhere(rev, "L"));
+
+function requirementSeq(comment) {
+  const ids = [...(comment?.requirements ?? []).map((r) => r.id), ...citedIds(comment)];
+  return Math.max(comment?.requirement_seq ?? 0, ...ids.map((id) => idNumber(id, "q")));
+}
+
+function blockedSeq(comment) {
+  const ids = (comment?.blocked ?? []).map((b) => b.id);
+  return Math.max(comment?.blocked_seq ?? 0, ...ids.map((id) => idNumber(id, `${comment.ref}-b`)));
+}
+
+// On load: write the counters down, so they hold after the ids they were
+// read from are gone.
+function withCounters(rev) {
+  rev.ledger_seq = ledgerSeq(rev);
+  for (const c of rev.comments) {
+    c.requirement_seq = requirementSeq(c);
+    c.blocked_seq = blockedSeq(c);
+  }
+  return rev;
+}
+
 // L5. texts: strings or { text }. A text that was already listed keeps its
 // id, so changes that point at it stay linked; new texts get the next q-id.
-// The next q-id is above every listed id and every id in `used` (the ids
-// recorded changes cite), so a removed requirement's id is never given to a
-// new one that no change answers.
+// The next q-id is above every listed id and every id in `used` (the
+// comment's counter as q<n>), so a removed requirement's id is never given
+// to a new one.
 export function numberRequirements(old, texts, used = []) {
   const byText = new Map(old.map((r) => [r.text, r.id]));
   let n = nextNumber([...old.map((r) => r.id), ...used], "q");
@@ -371,7 +431,9 @@ export function numberRequirements(old, texts, used = []) {
 export function setRequirements(rev, ref, texts) {
   const next = clone(rev);
   const c = requireComment(next, ref);
-  c.requirements = numberRequirements(c.requirements, texts, citedIds(c));
+  const seq = requirementSeq(c);
+  c.requirements = numberRequirements(c.requirements, texts, [`q${seq}`]);
+  c.requirement_seq = requirementSeq({ ...c, requirement_seq: seq });
   return next;
 }
 
@@ -439,10 +501,8 @@ export function applyStates(rev, rows, now = new Date()) {
 export function addBlocked(rev, ref, { args, blocked_by }, now = new Date()) {
   const next = clone(rev);
   const c = requireComment(next, ref);
-  const id = `${ref}-b${nextNumber(
-    c.blocked.map((x) => x.id),
-    `${ref}-b`,
-  )}`;
+  c.blocked_seq = blockedSeq(c) + 1;
+  const id = `${ref}-b${c.blocked_seq}`;
   const row = { id, args: clone(args), blocked_by: [...blocked_by], created_at: now.toISOString() };
   c.blocked.push(row);
   return { revision: next, blocked: row };
@@ -513,10 +573,8 @@ export function takeBlocked(rev, ref, blockedId) {
 
 export function addLedgerItem(rev, item) {
   const next = clone(rev);
-  const id = `L${nextNumber(
-    next.ledger.map((x) => x.id),
-    "L",
-  )}`;
+  next.ledger_seq = ledgerSeq(next) + 1;
+  const id = `L${next.ledger_seq}`;
   const row = LedgerItemSchema.parse({ ...item, id });
   next.ledger.push(row);
   return { revision: next, item: row };
