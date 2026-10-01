@@ -57,7 +57,7 @@ function findAll(node, pred, out = []) {
   return out;
 }
 
-const NO_LOOP = "Judgments only: no tool loop for this provider in this stage.";
+const NO_LOOP = "Judgments only: review turns are not offered for this provider.";
 const rows = () => [
   {
     id: "claude",
@@ -75,10 +75,10 @@ const rows = () => [
     id: "codex",
     tier: "subscription",
     label: "Codex CLI",
-    roles: ["turn", "oneshot"],
+    roles: ["oneshot"], // judgments only, as the daemon's rows have it (registry.mjs)
     available: true,
     turn_ready: false,
-    turn_note: "Judgments only. Codex CLI will not call the office tools without an approval.",
+    turn_note: NO_LOOP,
     reason: null,
     policy: "OpenAI terms.",
     models: [{ value: "gpt-6.1-sol", displayName: "GPT 6.1 Sol" }],
@@ -161,13 +161,11 @@ const textsOf = (node) => findAll(node, (n) => !!n.textContent).map((n) => n.tex
 
 test("the menus list what passed; a provider that cannot be chosen is disabled and says why", async () => {
   const t = await setup();
-  assert.deepEqual(optionTexts(t.$("provider-turn")), [
-    "Claude (Agent SDK)",
-    "Codex CLI (judgments only)",
-  ]);
+  // Review turns: Claude only. Codex is for judgments, like Ollama.
+  assert.deepEqual(optionTexts(t.$("provider-turn")), ["Claude (Agent SDK)"]);
   assert.deepEqual(
     t.$("provider-turn").children.map((o) => o.disabled),
-    [false, true],
+    [false],
   );
   assert.deepEqual(optionTexts(t.$("provider-oneshot")), [
     "Claude (Agent SDK)",
@@ -183,7 +181,7 @@ test("the menus list what passed; a provider that cannot be chosen is disabled a
   // The list under the menus: status, the reason, the data policy.
   const codex = textsOf(rowOf(t, "codex"));
   assert.ok(codex.includes("Codex CLI"));
-  assert.ok(codex.some((x) => /^Available for judgments\. Judgments only\. Codex CLI/.test(x)));
+  assert.ok(codex.includes("Available for judgments."));
   assert.ok(codex.includes("OpenAI terms."));
   const groq = textsOf(rowOf(t, "groq"));
   assert.ok(groq.includes("Not available: No API key"));
@@ -309,7 +307,7 @@ test("a stored choice the daemon refuses is shown and kept: no fallback to Claud
           oneshot: null,
           state: { turn: "refused", oneshot: "refused" },
           error: {
-            turn: "Codex CLI cannot run review turns. Judgments only. Codex CLI will not call the office tools.",
+            turn: "Codex CLI cannot run review turns. Judgments only: review turns are not offered for this provider.",
             oneshot: "Groq is not available: No API key",
           },
         }),
@@ -317,7 +315,7 @@ test("a stored choice the daemon refuses is shown and kept: no fallback to Claud
   });
   assert.equal(
     t.$("providers-message").textContent,
-    "The stored provider for review turns cannot be used: Codex CLI cannot run review turns. Judgments only. Codex CLI will not call the office tools. Review turns are stopped until you choose a provider here. " +
+    "The stored provider for review turns cannot be used: Codex CLI cannot run review turns. Judgments only: review turns are not offered for this provider. Review turns are stopped until you choose a provider here. " +
       "The stored provider for judgments cannot be used: Groq is not available: No API key. Judgments are stopped until you choose a provider here.",
   );
   assert.equal(t.$("providers-message").hidden, false);
