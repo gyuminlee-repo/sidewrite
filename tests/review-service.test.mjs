@@ -1934,3 +1934,107 @@ test("no handler reads the pane's document again after its first await", async (
     await t.cleanup();
   }
 });
+
+// The receipt of a requirement link holds no review text; the section of the
+// comment is part of what its fingerprint covers.
+test("receipts: the section of a comment is in the fingerprinted input of a requirement link", async () => {
+  const link = async (section) => {
+    const t = await setup({ getModel: () => "sonnet" });
+    try {
+      await t.ask("review_save_comments", {
+        comments: [
+          {
+            ref: "R1.1",
+            reviewer: 1,
+            text: "Use Celsius.",
+            ...(section && { section }),
+            requirements: ["use Celsius"],
+          },
+        ],
+      });
+      const deps = {
+        ...t.svc.trackedEditDeps("k"),
+        call: async () => ({
+          ok: true,
+          word_comment_id: 4,
+          paragraph_index: 1,
+          before: "b",
+          after: "a",
+        }),
+      };
+      await applyTrackedEdit(
+        deps,
+        {
+          comment_ref: "R1.1",
+          find: "30 degrees",
+          replace: "30 °C",
+          rationale: { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] },
+        },
+        { ref: "R1.1" },
+      );
+      const raw = await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8");
+      const rows = await readDecisions(t.dir);
+      return { raw, row: rows.find((r) => r.kind === "requirement_link") };
+    } finally {
+      await t.cleanup();
+    }
+  };
+  const plain = await link(null);
+  const abstract = await link("Abstract of the paper");
+  const methods = await link("Methods of the paper");
+  assert.match(plain.row.input_fingerprint, /^[0-9a-f]{64}$/);
+  assert.notEqual(abstract.row.input_fingerprint, plain.row.input_fingerprint);
+  assert.notEqual(abstract.row.input_fingerprint, methods.row.input_fingerprint);
+  assert.ok(!abstract.raw.includes("Abstract of the paper"));
+});
+
+test("review_split: the section of a comment reaches the requirement extraction and the result", async () => {
+  let prompt = "";
+  const t = await setup({
+    oneshotModel: "haiku",
+    oneshot: async (req) => {
+      prompt = req.prompt;
+      return {
+        ok: true,
+        json: {
+          sentences: [
+            { ref: "R1.1", s: 1, type: "request" },
+            { ref: "R1.2", s: 1, type: "request" },
+          ],
+        },
+      };
+    },
+  });
+  try {
+    const r = await t.ask("review_split", {
+      text: "Reviewer 1:\nAbstract:\n1. Shorten this section.\nMethods:\n1. Expand this section.\n",
+    });
+    assert.deepEqual(
+      r.comments.map((c) => [c.ref, c.section, c.text, c.requirements.map((q) => q.text)]),
+      [
+        ["R1.1", "Abstract", "Shorten this section.", ["Shorten this section."]],
+        ["R1.2", "Methods", "Expand this section.", ["Expand this section."]],
+      ],
+    );
+    assert.match(prompt, /\[R1\.1 section\] Abstract\n\[R1\.1 s1\] Shorten this section\./);
+    const saved = await t.ask("review_save_comments", { comments: r.comments });
+    assert.deepEqual(
+      saved.revision.comments.map((c) => [c.ref, c.section]),
+      [
+        ["R1.1", "Abstract"],
+        ["R1.2", "Methods"],
+      ],
+    );
+    const preview = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
+    assert.match(
+      preview.prompt,
+      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\n<<<\nExpand this section\.\n>>>/,
+    );
+    assert.ok(
+      t.lines.some((l) => /^\[review\] prompt R1\.2 .* section="Methods"/.test(l)),
+      t.lines.join("\n"),
+    );
+  } finally {
+    await t.cleanup();
+  }
+});

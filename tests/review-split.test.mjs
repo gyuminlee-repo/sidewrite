@@ -760,3 +760,16 @@ test("a round line that no block follows is named by the check", async () => {
     r.warnings.join(" | "),
   );
 });
+
+test("a save with an empty section clears the stored label; a save without the key keeps it", () => {
+  let rev = replaceComments(emptyRevision("/m/paper.docx"), [
+    { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "Abstract" },
+    { ref: "R1.2", reviewer: 1, text: "Expand this section.", section: "Methods" },
+  ]);
+  rev = replaceComments(rev, [
+    { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "" },
+    { ref: "R1.2", reviewer: 1, text: "Expand this section." },
+  ]);
+  assert.equal("section" in rev.comments[0], false);
+  assert.equal(rev.comments[1].section, "Methods");
+});
