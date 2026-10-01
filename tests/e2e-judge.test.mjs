@@ -1969,3 +1969,13 @@ test("judges take a result line with or without the model that ran", () => {
   assert.equal(one("Drafted R1.10."), false);
   assert.equal(one("Drafting R1.1..."), false);
 });
+
+test("judge check-paragraphs: the check ran to its message, with or without problems", () => {
+  const j = (message, message_error = false) =>
+    judge("check-paragraphs", { message, message_error, consistency: [] }).pass;
+  assert.equal(j("Checked 3 revised paragraphs with Claude · Opus 5.5: 2 problems."), true);
+  assert.equal(j("Checked 1 revised paragraph: no problem found."), true);
+  assert.equal(j("No paragraph holds two or more changes: nothing to check."), true);
+  assert.equal(j("review_check_paragraphs failed", true), false);
+  assert.equal(j("Accepted 0, rejected 0"), false);
+});

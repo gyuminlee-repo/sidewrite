@@ -2463,3 +2463,62 @@ test("a comment card names the places where a term its changes took out is still
     '"essential" (taken out by R1.1-1) is still present in 2 other places: p0, p2.',
   ]);
 });
+
+// "Check revised paragraphs": a status refresh first (the check reads the
+// document as it is), then the job; its findings stay under the button.
+test("Check revised paragraphs refreshes the status, runs the check and lists what it found", async () => {
+  const revision = { comments: [], ledger: [] };
+  const consistency = {
+    checked_at: "2026-01-02T03:04:05.000Z",
+    model: "claude-opus-9",
+    paragraphs: [{ index: 2, id: "p2", change_ids: ["R1.1-1", "R2.3-1"], many: false }],
+    findings: [
+      {
+        paragraph_index: 2,
+        paragraph_id: "p2",
+        kind: "contradiction",
+        detail: "It says fast and slow.",
+        change_ids: ["R1.1-1"],
+      },
+    ],
+    warnings: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const selected = [];
+  let t = null;
+  t = await setup({
+    revision,
+    word: {
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }),
+      selectParagraphByIndex: async (i) => selected.push(i),
+    },
+    respond: {
+      review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+      review_check_paragraphs: () => {
+        queueMicrotask(() =>
+          t.pane.onEvent({
+            type: "review_event",
+            event: "job_done",
+            job_id: "j7",
+            result: { ok: true, consistency, revision: { ...revision, consistency } },
+          }),
+        );
+        return { ok: true, accepted: true, job_id: "j7" };
+      },
+    },
+  });
+  assert.deepEqual(t.$("review-consistency").children, []);
+  await t.$("review-check-paragraphs").click();
+  assert.deepEqual(
+    t.requests.map((r) => r.type).filter((x) => x !== "review_load"),
+    ["review_refresh", "review_check_paragraphs"],
+  );
+  assert.equal(t.$("review-message").textContent, "Checked 1 revised paragraph: 1 problem.");
+  const rows = t.$("review-consistency").children;
+  assert.deepEqual(
+    rows.map((n) => n.textContent),
+    ["p2: the paragraph contradicts itself. It says fast and slow. (R1.1-1)"],
+  );
+  await rows[0].click();
+  assert.deepEqual(selected, [2]);
+});
