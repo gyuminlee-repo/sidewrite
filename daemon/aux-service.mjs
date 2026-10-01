@@ -2,14 +2,21 @@
 //
 // Requests (bridge.mjs extraHandlers): { type, request_id, ...payload } and the
 // reply { type: "<type>_result", request_id, ok, ... }.
-//   tools_state
+//   tools_state, profile_rules_apply
 // Jobs (AUX_JOBS; they call a model or a Python tool): accepted at once, the
 // result follows as { type: "tools_event", event: "job_done", job_id, result }.
-//   selection_translate, selection_ask
+//   selection_translate, selection_ask, profile_rules_extract
 //
 // The selection requests get the selected text from the pane and answer with
 // text for the pane. They read no file and no revision, and nothing of the
 // answer is stored: the document stays as it is.
+//
+// Journal guideline. profile_rules_extract turns the pasted guideline into
+// rule candidates, each with the sentence it was taken from, and stores
+// nothing. profile_rules_apply takes the candidates the author picked: the
+// rules go into the ledger with their sentence, a format setting goes into
+// the overrides of the paper's profile. A picked rule must cite a sentence
+// of the guideline text that is sent with it.
 //
 // Nothing here writes to the open document. A copy (marked, anonymized) is a
 // new file next to the manuscript, made from the file as it was last saved.
@@ -19,13 +26,24 @@
 // default.
 
 import { basename, dirname } from "node:path";
-import { localDocPath, revisionPathFor, loadRevision } from "./revision-store.mjs";
+import {
+  localDocPath,
+  revisionPathFor,
+  decisionsPathFor,
+  loadRevision,
+  withRevision,
+  importLedgerItems,
+  setProfile,
+} from "./revision-store.mjs";
 import { wrapHandlers } from "./handler-wrap.mjs";
-import { effectiveProfile } from "./journal-profile.mjs";
+import { effectiveProfile, mergeProfile, regexProblems } from "./journal-profile.mjs";
+import { extractGuidelineRules } from "./guideline-extract.mjs";
+import { splitSentences } from "./review-split.mjs";
+import { appendDecisions, decisionRecord } from "./decision-log.mjs";
 import { SAVE_FIRST } from "./doc-bytes.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
 
-export const AUX_JOBS = new Set(["selection_translate", "selection_ask"]);
+export const AUX_JOBS = new Set(["selection_translate", "selection_ask", "profile_rules_extract"]);
 
 // A translation or an answer is prose: the model of a response draft
 // (response-service.mjs DRAFT_CLAUDE_MODEL), unless the pane chose another.
@@ -82,6 +100,7 @@ export function createAuxService({
     };
   }
   const load = (d) => loadRevision(d.path, d.doc);
+  const update = (d, fn) => withRevision(d.path, d.doc, fn);
   const profileOf = (d, rev) =>
     effectiveProfile(rev, {
       docDir: dirname(d.doc),
@@ -124,6 +143,75 @@ export function createAuxService({
       const out = await prose(job, buildAskPrompt(text, question), "the answer");
       log(`[tools] selection_ask chars=${text.length} model=${job.model}`);
       return { text: out, model: job.model };
+    },
+
+    // Rule candidates from the guideline of a journal. Nothing is stored.
+    async profile_rules_extract(msg, key) {
+      const text = String(msg.text ?? "").trim();
+      if (!text) throw new Error("Paste the guideline text first.");
+      // Before the model call: the receipt goes next to this document.
+      const receipts = decisionsPathFor(at(key).doc);
+      const job = await modelFor(key, "reading the guideline");
+      const r = await extractGuidelineRules(text, { oneshot: job.run, splitSentences });
+      const kinds = r.candidates.map((c) => (c.profile ? "format" : c.check.type));
+      log(
+        `[tools] guideline rules candidates=${r.candidates.length} warnings=${r.warnings.length} model=${job.model}`,
+      );
+      try {
+        await appendDecisions(receipts, [
+          decisionRecord({
+            kind: "guideline_rules",
+            input: text,
+            model: job.model,
+            output: { candidates: r.candidates.length, kinds, warnings: r.warnings.length },
+          }),
+        ]);
+      } catch (e) {
+        log(`[tools] decision log failed: ${e?.message ?? e}`);
+      }
+      return { candidates: r.candidates, warnings: r.warnings, model: job.model };
+    },
+
+    // The candidates the author picked: rules into the ledger, format
+    // settings into the profile of this paper. A rule already in the ledger
+    // is skipped.
+    async profile_rules_apply(msg, key) {
+      const d = at(key);
+      const picks = Array.isArray(msg.candidates) ? msg.candidates : [];
+      if (!picks.length) throw new Error("Pick at least one rule.");
+      const sentences = new Set(splitSentences(String(msg.text ?? "")));
+      for (const c of picks) {
+        if (!sentences.has(c?.source?.sentence))
+          throw new Error(
+            "A picked rule cites a sentence that is not in the guideline text. Extract the rules again.",
+          );
+      }
+      const overrides = picks.reduce(
+        (all, c) => (c.profile ? mergeProfile(all, c.profile) : all),
+        {},
+      );
+      let added = [];
+      let skipped = [];
+      await update(d, (rev) => {
+        const r = importLedgerItems(rev, picks);
+        ({ added, skipped } = r);
+        if (!Object.keys(overrides).length) return r.revision;
+        const next = setProfile(r.revision, { overrides });
+        const problems = regexProblems(next.profile_overrides);
+        if (problems.length) throw new Error(`Not saved: ${problems.join("; ")}`);
+        return next;
+      });
+      log(
+        `[tools] guideline rules added=${added.length} skipped=${skipped.length} profile=${Object.keys(overrides).join(",") || "-"}`,
+      );
+      // The Review tab shows the ledger: it loads the saved state again.
+      sendEvent(key, { type: "review_event", event: "ledger_changed" });
+      return {
+        added: added.length,
+        skipped: skipped.length,
+        added_ids: added.map((i) => i.id),
+        profile_keys: Object.keys(overrides),
+      };
     },
 
     // Which saved file the copies are made from, and the profile in force.

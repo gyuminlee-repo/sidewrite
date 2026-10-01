@@ -222,6 +222,97 @@ test("a new connection ends a job that was waiting, with an error, and the butto
   assert.equal(t.$("tools-translate").disabled, false);
 });
 
+// ---- journal guideline -------------------------------------------------------
+
+const CANDIDATES = [
+  {
+    kind: "instruction",
+    text: "Provide 4 to 6 keywords.",
+    scope: "manuscript",
+    check: { type: "count", target: "keywords", min: 4, max: 6 },
+    source: { kind: "guideline", sentence: "Provide 4 to 6 keywords." },
+  },
+  {
+    kind: "instruction",
+    text: "Avoid jargon.",
+    scope: "manuscript",
+    check: { type: "llm" },
+    source: { kind: "guideline", sentence: "Avoid jargon." },
+  },
+];
+
+test("guideline: candidates are listed with their sentence; only the ticked ones are added", async () => {
+  const t = await setup({
+    respond: {
+      profile_rules_extract: () => ({ ok: true, candidates: CANDIDATES, warnings: ["s3: kept"] }),
+      profile_rules_apply: () => ({ ok: true, added: 1, skipped: 0, profile_keys: [] }),
+    },
+  });
+  assert.equal(t.$("tools-rules-add").hidden, true);
+  t.$("tools-guideline").value = " Provide 4 to 6 keywords. Avoid jargon. ";
+  await t.$("tools-rules-extract").click();
+  await tick();
+  assert.deepEqual(t.of("profile_rules_extract")[0].payload, {
+    text: "Provide 4 to 6 keywords. Avoid jargon.",
+  });
+  assert.deepEqual(texts(t.$("tools-rules")), [
+    "Count rule: at least 4 and at most 6 keywords",
+    'Guideline: "Provide 4 to 6 keywords."',
+    "Rule the model checks",
+    'Guideline: "Avoid jargon."',
+    "s3: kept",
+  ]);
+  assert.equal(t.$("tools-rules-add").hidden, false);
+  const boxes = findAll(t.$("tools-rules"), (n) => n.tagName === "INPUT");
+  assert.deepEqual(
+    boxes.map((b) => b.checked),
+    [true, true],
+  );
+  boxes[1].checked = false;
+  // The text box changed after the extraction: the text that was read is sent.
+  t.$("tools-guideline").value = "something else";
+  await t.$("tools-rules-add").click();
+  assert.deepEqual(t.of("profile_rules_apply")[0].payload, {
+    text: "Provide 4 to 6 keywords. Avoid jargon.",
+    candidates: [CANDIDATES[0]],
+  });
+  assert.equal(t.message(), "1 rule added to the ledger.");
+  assert.deepEqual(texts(t.$("tools-rules")), []);
+  assert.equal(t.$("tools-rules-add").hidden, true);
+});
+
+test("guideline: nothing pasted or nothing ticked is said in the tab", async () => {
+  const t = await setup({
+    respond: { profile_rules_extract: () => ({ ok: true, candidates: CANDIDATES, warnings: [] }) },
+  });
+  await t.$("tools-rules-extract").click();
+  assert.equal(t.message(), "Paste the guideline text first.");
+  t.$("tools-guideline").value = "Avoid jargon.";
+  await t.$("tools-rules-extract").click();
+  await tick();
+  for (const b of findAll(t.$("tools-rules"), (n) => n.tagName === "INPUT")) b.checked = false;
+  await t.$("tools-rules-add").click();
+  assert.equal(t.message(), "Pick at least one rule.");
+  assert.equal(t.of("profile_rules_apply").length, 0);
+});
+
+test("the policy pack box shows the profile and saves an override of this paper", async () => {
+  const t = await setup({
+    respond: {
+      profile_set: (p) => ({ ok: true, profile: { policy_packs: p.overrides.policy_packs } }),
+    },
+  });
+  const box = t.$("tools-policy-scope");
+  assert.equal(box.checked, true);
+  box.checked = false;
+  await box.fire("change");
+  assert.deepEqual(t.of("profile_set")[0].payload, {
+    overrides: { policy_packs: { review_scope: false } },
+  });
+  assert.equal(box.checked, false);
+  assert.equal(t.message(), "Review turns no longer carry rules 2 to 4 for this paper.");
+});
+
 test("a page without the Tools tab (Excel) gets a pane that does nothing", async () => {
   const t = await setup({ missing: ["tools-root"] });
   assert.equal(t.requests.length, 0);

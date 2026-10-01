@@ -1192,6 +1192,11 @@ export function initReviewPane({
             render();
             endWait(msg.ref, result);
           });
+      } else if (msg.event === "ledger_changed") {
+        // The Tools tab added rules to the ledger (journal guideline).
+        load()
+          .catch((e) => say(e.message, true))
+          .finally(render);
       } else if (msg.event === "late_result_recorded") {
         // A tracked edit that timed out was applied after all and is now recorded.
         say(`${msg.ref}: an edit that timed out was applied; recorded as ${msg.change_id}.`);

@@ -832,7 +832,7 @@ export function removeLedgerItem(rev, id) {
 // results belong to one manuscript. tests/fixtures/review_ledger.json has the
 // same item shape, so a hand-written list imports too.
 
-const RULE_KEYS = ["kind", "text", "scope", "check"];
+const RULE_KEYS = ["kind", "text", "scope", "check", "source"];
 const ruleOf = (item) => Object.fromEntries(RULE_KEYS.map((k) => [k, item?.[k]]));
 const ruleKey = (item) => JSON.stringify(RULE_KEYS.map((k) => item[k]));
 

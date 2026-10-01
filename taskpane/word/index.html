@@ -311,6 +311,30 @@
           </button>
           <div id="tools-selection"></div>
         </div>
+
+        <div class="setup-section">
+          <h3>Journal guideline</h3>
+          <p class="setup-help">
+            Paste the author guideline of the journal. Every rule candidate cites the sentence it
+            was taken from. The ones you pick go into the instruction ledger (Review tab) and the
+            profile of this paper.
+          </p>
+          <textarea id="tools-guideline" rows="6" placeholder="Guideline text"></textarea>
+          <button type="button" class="btn-secondary btn-small" id="tools-rules-extract">
+            Extract rules
+          </button>
+          <div id="tools-rules"></div>
+          <button type="button" class="btn-primary btn-small" id="tools-rules-add" hidden>
+            Add selected
+          </button>
+          <label class="setting-row">
+            <input type="checkbox" id="tools-policy-scope" />
+            <div class="setting-text">
+              Review turns keep to what the reviewer asked (rules 2 to 4: nothing unrequested, no
+              revision history in the text, facts only)
+            </div>
+          </label>
+        </div>
       </div>
     </section>
 

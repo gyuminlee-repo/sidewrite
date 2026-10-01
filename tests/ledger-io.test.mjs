@@ -51,7 +51,7 @@ test("export keeps rules, drops ids and check results, re-imports", () => {
   const doc = ledgerExportDoc(rev);
   assert.equal(doc.format, "manuscript-pane-ledger");
   assert.equal(doc.version, 1);
-  assert.deepEqual(Object.keys(doc.items[0]).sort(), ["check", "kind", "scope", "text"]);
+  assert.deepEqual(Object.keys(doc.items[0]).sort(), ["check", "kind", "scope", "source", "text"]);
   assert.equal(importLedgerItems(emptyRevision("/y.docx"), doc.items).added.length, 1);
   // Importing an export into the revision it came from adds nothing.
   assert.equal(importLedgerItems(rev, doc.items).skipped.length, 1);

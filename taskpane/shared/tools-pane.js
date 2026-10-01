@@ -5,7 +5,7 @@
 // own, made by the daemon from the saved file.
 // Text from the daemon or the document is inserted with textContent only.
 
-import { docLine, selectionHead } from "./tools-view.js";
+import { docLine, selectionHead, candidateKind, candidateCite, rulesAdded } from "./tools-view.js";
 
 const CONNECTION_LOST =
   "The connection to the daemon was lost before the result came. Run it again.";
@@ -25,6 +25,7 @@ export function initToolsPane({
   const $ = (id) => document.getElementById(id);
   const state = {
     doc: null, // the tools_state answer, or null when the document is not saved
+    rules: null, // { text, candidates, warnings, boxes } of the last guideline read
     busy: false,
     asking: 0, // job requests sent whose { accepted, job_id } has not come yet
     jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
@@ -117,6 +118,7 @@ export function initToolsPane({
 
   function renderDoc() {
     $("tools-doc").textContent = docLine(state.doc);
+    $("tools-policy-scope").checked = state.doc?.policy_packs?.review_scope !== false;
   }
 
   // ---- sections -------------------------------------------------------------
@@ -150,6 +152,71 @@ export function initToolsPane({
   $("tools-lang").value = settings.toolsLang ?? "";
   onClick("tools-translate", () => selection("translate"));
   onClick("tools-ask", () => selection("ask"));
+
+  // Journal guideline: candidates with the sentence they cite; the picked
+  // ones are added to the ledger and the profile by the daemon.
+  function renderRules() {
+    const box = $("tools-rules");
+    box.replaceChildren();
+    const r = state.rules;
+    $("tools-rules-add").hidden = !r?.candidates.length;
+    if (!r) return;
+    r.boxes = r.candidates.map((c) => {
+      const pick = el("input", { type: "checkbox" });
+      pick.checked = true;
+      box.append(
+        el(
+          "label",
+          { class: "review-ledger-item" },
+          pick,
+          el("div", { class: "review-reqs-line", text: candidateKind(c) }),
+          el("div", { class: "review-preview", text: candidateCite(c) }),
+        ),
+      );
+      return pick;
+    });
+    for (const w of r.warnings) box.append(el("div", { class: "response-check-warn", text: w }));
+  }
+  async function extractRules() {
+    const text = $("tools-guideline").value.trim();
+    if (!text) throw new Error("Paste the guideline text first.");
+    say("Reading the guideline...");
+    const r = await askJob("profile_rules_extract", { text });
+    if (!r.ok) throw new Error(r.error || "The guideline could not be read.");
+    state.rules = { text, candidates: r.candidates, warnings: r.warnings, boxes: [] };
+    renderRules();
+    say(
+      r.candidates.length
+        ? `${r.candidates.length} rule candidates. Untick the ones you do not want, then press Add selected.`
+        : "No rule was found in the guideline text.",
+    );
+  }
+  async function addRules() {
+    const r = state.rules;
+    const candidates = r.candidates.filter((_, i) => r.boxes[i].checked);
+    if (!candidates.length) throw new Error("Pick at least one rule.");
+    const done = await ask("profile_rules_apply", { text: r.text, candidates });
+    state.rules = null;
+    renderRules();
+    say(rulesAdded(done));
+  }
+  // The review_scope policy pack of this paper's profile (rules 2 to 4 of a
+  // review turn), saved as an override of the profile.
+  async function savePolicy() {
+    const on = $("tools-policy-scope").checked;
+    const r = await ask("profile_set", { overrides: { policy_packs: { review_scope: on } } });
+    state.doc = { ...state.doc, policy_packs: r.profile.policy_packs };
+    renderDoc();
+    say(
+      on
+        ? "Review turns keep to what the reviewer asked."
+        : "Review turns no longer carry rules 2 to 4 for this paper.",
+    );
+  }
+  onClick("tools-rules-extract", extractRules);
+  onClick("tools-rules-add", addRules);
+  $("tools-policy-scope").addEventListener("change", guard(savePolicy));
+  renderRules();
 
   renderDoc(); // loaded on "welcome" (taskpane.js calls reload once connected)
 
