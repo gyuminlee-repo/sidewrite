@@ -121,6 +121,7 @@ function fakeDeps(over = {}) {
     },
     onNotApplied: async (x) => d.order.push(["not_applied", x]),
     onOutcomeUnknown: async (x) => d.order.push(["unknown", x]),
+    onRecordFailed: async (x) => d.order.push(["record_failed", x]),
     ...over,
   };
   return d;
@@ -176,8 +177,10 @@ test("applied, then the record fails: told apart from a plain error, and the att
   assert.deepEqual([r.before, r.after, r.word_comment_id], [BEFORE, AFTER, "12"]);
   assert.match(r.message, /do not repeat/i);
   assert.match(r.message, /Refresh/);
-  // Not thrown, and the attempt is not taken back.
-  assert.deepEqual(steps(d), ["attempt", "call", "edit", "end"]);
+  // Not thrown, and the attempt is not taken back. The task pane is told
+  // once the call is over, so its reload finds the attempt unowned.
+  assert.deepEqual(steps(d), ["attempt", "call", "edit", "end", "record_failed", "end"]);
+  assert.deepEqual([d.order[4][1].ref, d.order[4][1].attempt_id], ["R1.1", "R1.1-b1"]);
 });
 
 test("not applied: the attempt is taken back (an answer of Word, or an error it sent); no answer keeps it with the call id", async () => {
@@ -285,6 +288,11 @@ test("service: Word applied, the record cannot be saved: the attempt stays and t
     );
     let c = await w.file();
     assert.deepEqual([c.changes.length, c.blocked.map((b) => b.state)], [0, ["applying"]]);
+    // The task pane is told, for its status line.
+    assert.deepEqual(
+      w.events.map((e) => [e.event, e.ref, e.attempt_id]),
+      [["record_failed", "R1.1", "R1.1-b1"]],
+    );
     // Nothing runs it any more: on load it reads like an unanswered edit.
     c = (await w.ask("review_load")).revision.comments[0];
     assert.deepEqual(

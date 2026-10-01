@@ -1197,4 +1197,21 @@ test("stale_target refreshes the status with the document as it is now; a runnin
     t.requests.filter((r) => r.type === "review_refresh").map((r) => r.payload),
     [{ snapshot: now }],
   );
+  // H1: Word applied an edit and the daemon could not save its record.
+  const loads = () => t.requests.filter((r) => r.type === "review_load").length;
+  const before = loads();
+  t.pane.onEvent({
+    type: "review_event",
+    event: "record_failed",
+    ref: "R1.1",
+    attempt_id: "R1.1-b3",
+  });
+  await settle();
+  const m = t.$("review-message");
+  assert.equal(
+    m.textContent,
+    "R1.1: the edit was applied in Word but saving its record failed; press Refresh status to match them again.",
+  );
+  assert.equal(m.hidden, false);
+  assert.equal(loads(), before + 1, "the list is loaded again");
 });
