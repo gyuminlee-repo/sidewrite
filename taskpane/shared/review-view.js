@@ -527,6 +527,43 @@ export function openRequestsText(comment) {
   return `${open.length} request${open.length === 1 ? "" : "s"} of ${comment.ref} ${open.length === 1 ? "is" : "are"} still open (${open.map((r) => r.id).join(", ")}).`;
 }
 
+// ---- "Check revised paragraphs" (daemon/paragraph-check.mjs) ---------------
+const CONSISTENCY_KIND = {
+  contradiction: "the paragraph contradicts itself.",
+  conflict: "changes of different comments work against each other.",
+  review_as_source: "a sentence takes the review as its source.",
+};
+
+// The message line after a check. model: the label of what it ran on, or null.
+export function consistencyMessage(c, model) {
+  const n = c.paragraphs.length;
+  const more = (c.warnings ?? []).length ? ` ${c.warnings.join(" ")}` : "";
+  if (!n) return `No paragraph holds two or more changes: nothing to check.${more}`;
+  const k = c.findings.length;
+  return (
+    `Checked ${n} revised paragraph${n === 1 ? "" : "s"}${model ? ` with ${model}` : ""}: ` +
+    `${k ? `${k} problem${k === 1 ? "" : "s"}` : "no problem found"}.${more}`
+  );
+}
+
+// The lines under the button: what was found, then the paragraphs that hold
+// three or more changes. [{ paragraph_index, text }]
+export function consistencyLines(c) {
+  if (!c) return [];
+  return [
+    ...c.findings.map((f) => ({
+      paragraph_index: f.paragraph_index,
+      text: `${f.paragraph_id ?? `p${f.paragraph_index}`}: ${CONSISTENCY_KIND[f.kind] ?? f.kind} ${f.detail}${f.change_ids.length ? ` (${f.change_ids.join(", ")})` : ""}`,
+    })),
+    ...c.paragraphs
+      .filter((p) => p.many)
+      .map((p) => ({
+        paragraph_index: p.index,
+        text: `${p.id ?? `p${p.index}`} holds ${p.change_ids.length} changes (${p.change_ids.join(", ")}): read it as a whole and rewrite it if it no longer reads as one paragraph.`,
+      })),
+  ];
+}
+
 // What is still open when a comment is marked Done; the tab asks once more
 // when the list is not empty. ledger: revision.ledger (the confirmed rules,
 // with the status of their last check).

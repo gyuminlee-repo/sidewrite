@@ -18,6 +18,8 @@ import {
   changeFlags,
   requirementsFromText,
   requirementsLine,
+  consistencyMessage,
+  consistencyLines,
   openRequestsText,
   doneBlockers,
   ledgerDraftFromChange,
@@ -724,9 +726,25 @@ export function initReviewPane({
     showProgress();
   }
 
+  // The findings of the last "Check revised paragraphs"; a click selects
+  // the paragraph in Word.
+  function renderConsistency() {
+    const box = $("review-consistency");
+    box.replaceChildren();
+    for (const line of consistencyLines(state.revision?.consistency)) {
+      const b = el("button", { type: "button", class: "review-violation", text: line.text });
+      b.addEventListener(
+        "click",
+        guard(() => word.selectParagraphByIndex(line.paragraph_index)),
+      );
+      box.append(b);
+    }
+  }
+
   function render() {
     renderDraft();
     renderComments();
+    renderConsistency();
     renderLedger();
     renderCandidates();
     renderDecisions();
@@ -1004,6 +1022,20 @@ export function initReviewPane({
   $("review-refresh").addEventListener(
     "click",
     once("refresh", guard(refresh), () => $("review-refresh")),
+  );
+  // The check reads the document as it is: a status refresh first.
+  $("review-check-paragraphs").addEventListener(
+    "click",
+    once(
+      "check-paragraphs",
+      guard(async () => {
+        await refresh();
+        say("Checking the revised paragraphs...");
+        const r = await askJob("review_check_paragraphs", {});
+        say(consistencyMessage(r.consistency, usedLabel("turn")));
+      }),
+      () => $("review-check-paragraphs"),
+    ),
   );
   $("review-check-all").addEventListener(
     "click",

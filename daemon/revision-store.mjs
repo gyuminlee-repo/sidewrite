@@ -322,6 +322,38 @@ export const RevisionSchema = z.object({
     .nullable()
     .default(null),
   external: z.array(External).default([]),
+  // The last "Check revised paragraphs" (paragraph-check.mjs): which
+  // paragraphs were read (those with two or more changes; many: three or
+  // more) and what was found in them.
+  consistency: z
+    .object({
+      checked_at: z.string(),
+      model: z.string().nullable().default(null),
+      paragraphs: z
+        .array(
+          z.object({
+            index: z.number().int(),
+            id: z.string().nullable().default(null),
+            change_ids: z.array(z.string()).default([]),
+            many: z.boolean().default(false),
+          }),
+        )
+        .default([]),
+      findings: z
+        .array(
+          z.object({
+            paragraph_index: z.number().int(),
+            paragraph_id: z.string().nullable().default(null),
+            kind: z.enum(["contradiction", "conflict", "review_as_source"]),
+            detail: z.string(),
+            change_ids: z.array(z.string()).default([]),
+          }),
+        )
+        .default([]),
+      warnings: z.array(z.string()).default([]),
+    })
+    .nullable()
+    .default(null),
   // Journal profile of this paper and its own values on top of it
   // (journal-profile.mjs effectiveProfile).
   journal_profile: z.string().nullable().default(null),

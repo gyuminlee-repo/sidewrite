@@ -635,7 +635,8 @@ const review = createReviewService({
   oneshotModel: ONESHOT_MODEL,
   // Judgments go to the provider the pane chose (default: Claude, haiku),
   // fixed for each job when it starts.
-  oneshotJob: (key) => oneshotRouter.pin(key),
+  // (options: the paragraph check asks for the role and model of the edits.)
+  oneshotJob: (key, options) => oneshotRouter.pin(key, options),
   // A review turn starts only with a confirmed provider for review turns.
   turnGate: (key) => selection.ready(key, "turn"),
   getModel: (key) => modelArgFor(key),

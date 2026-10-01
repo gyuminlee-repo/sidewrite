@@ -4,7 +4,7 @@
 // Messages (task pane -> daemon, reply type is `<type>_result` with the same
 // request_id, the existing sendRequest pattern in taskpane.js):
 //   review_load, review_split, review_save_comments, review_set_status,
-//   review_set_requirements, review_question_answer, review_preview, review_propose, review_refresh,
+//   review_set_requirements, review_question_answer, review_check_paragraphs, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
 //   review_comment_text, review_comment_set,
 //   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
@@ -72,6 +72,7 @@ import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
+import { checkParagraphs } from "./paragraph-check.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
@@ -191,7 +192,15 @@ export const keptWarning = (refs) =>
 // Requests that may run model calls one after another (a split and its
 // requirement extraction; a ledger check of up to 20 batches per rule). The
 // regex-only path takes the same route: one reply shape per request type.
-const JOB_TYPES = new Set(["review_split", "ledger_check", "ledger_suggest"]);
+// One request of the paragraph check may hold several paragraphs and goes
+// to the model of the edits, which thinks before it answers.
+const PARAGRAPH_CHECK_TIMEOUT_MS = 300_000;
+const JOB_TYPES = new Set([
+  "review_split",
+  "ledger_check",
+  "ledger_suggest",
+  "review_check_paragraphs",
+]);
 
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
 
@@ -826,6 +835,60 @@ export function createReviewService({
       return {
         revision: await update(d, (rev) => answerQuestion(rev, msg.ref, msg.id, msg.answer)),
       };
+    },
+    // "Check revised paragraphs" (paragraph-check.mjs): the paragraphs that
+    // hold two or more changes, read by the model that writes the edits
+    // (the router's role "turn" with the model of the pane). The pane
+    // refreshes the status first. The result replaces the last one in the
+    // review file; the log and the receipt hold counts and ids, no text.
+    async review_check_paragraphs(msg, key) {
+      const d = at(key);
+      const rev = await load(d);
+      let job = null;
+      const r = await checkParagraphs(rev, {
+        oneshot: async (req) => {
+          job ??= await oneshotJob(key, { role: "turn", claudeModel: getModel(key) ?? undefined });
+          if (!job.run) return { ok: false, error: "no model is available" };
+          return job.run({ ...req, timeoutMs: PARAGRAPH_CHECK_TIMEOUT_MS });
+        },
+      });
+      const model = job?.model ?? null;
+      log(
+        `[review] paragraph check paragraphs=${r.paragraphs.length} findings=${r.findings.length}` +
+          `${r.warnings.length ? ` warnings=${r.warnings.length}` : ""} model=${model ?? "-"}`,
+      );
+      if (r.asked) {
+        await receipt(d, [
+          decisionRecord({
+            kind: "paragraph_check",
+            input: r.input,
+            model,
+            output: {
+              paragraphs: r.paragraphs.map((p) => p.index),
+              findings: r.findings.map((f) => ({
+                p: f.paragraph_index,
+                kind: f.kind,
+                change_ids: f.change_ids,
+              })),
+              warnings: r.warnings.length,
+            },
+          }),
+        ]);
+      }
+      const consistency = {
+        checked_at: new Date().toISOString(),
+        model,
+        paragraphs: r.paragraphs.map((p) => ({
+          index: p.index,
+          id: p.id,
+          change_ids: p.changes.map((ch) => ch.id),
+          many: p.many,
+        })),
+        findings: r.findings,
+        warnings: r.warnings,
+      };
+      const revision = await update(d, (cur) => ({ ...cur, consistency }));
+      return { revision, consistency };
     },
     async review_preview(msg, key) {
       const d = at(key);

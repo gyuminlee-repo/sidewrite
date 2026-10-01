@@ -17,7 +17,12 @@ test("the HTTP server listens on loopback only", () => {
 
 test("judgments go through the router", () => {
   // One handle per job: provider and model are fixed when the job starts.
-  assert.match(code, /oneshotJob: \(key\) => oneshotRouter\.pin\(key\)/);
+  // (options: a job may name its role and Claude model; the paragraph check
+  // of the Review tab asks for those of the edits.)
+  assert.equal(
+    code.match(/oneshotJob: \(key, options\) => oneshotRouter\.pin\(key, options\)/g).length,
+    2,
+  );
   assert.match(code, /process\.on\("SIGTERM", shutdown\)/);
 });
 
