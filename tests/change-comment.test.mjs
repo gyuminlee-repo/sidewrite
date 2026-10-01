@@ -38,13 +38,24 @@ function fakeDoc(paras, { mode = "uniqueLocalId", failComment = () => false } = 
       end: start + q.length,
       load() {},
       compareLocationWith(other) {
-        const inside = start >= other.start && start + q.length <= other.end;
-        return { value: inside ? "Inside" : start < other.start ? "Before" : "After" };
+        const end = start + q.length;
+        if (start === other.start && end === other.end) return { value: "Equal" };
+        if (start >= other.start && end <= other.end) return { value: "Inside" };
+        if (end <= other.start) return { value: "Before" };
+        if (start >= other.end) return { value: "After" };
+        return { value: "OverlapsBefore" };
       },
       insertComment(content) {
         state.inserts += 1;
         if (failComment(state.inserts)) throw new Error("GeneralException: insertComment");
-        const c = { id: `C${state.comments.length + 1}`, content, paragraph: k, start, load() {} };
+        const c = {
+          id: `C${state.comments.length + 1}`,
+          content,
+          paragraph: k,
+          start,
+          load() {},
+          getRange: () => hit(start, q),
+        };
         state.comments.push(c);
         return c;
       },
@@ -269,4 +280,52 @@ test("service: the comment text of a change is the one its edit would have carri
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// Codex review of the recovery path (P2): the comment to reuse was looked for
+// by its text alone. Two changes of one comment in one paragraph can carry
+// the same rationale text; the second one then got the comment of the first,
+// which the daemon refuses ("belongs to another change"), and could not be
+// given a comment at all.
+test("task pane: a comment with the same text on another change of the paragraph is not taken for this one", async () => {
+  // "hot" -> "warm" (has its comment) and "cold" -> "cool" (has none), same rationale.
+  const two = para(
+    ["A "],
+    ["warm", "ins"],
+    ["hot", "del"],
+    [" day and a "],
+    ["cool", "ins"],
+    ["cold", "del"],
+    [" night."],
+  );
+  const first = change({ find: "hot", text: "warm" });
+  const second = change({ find: "cold", text: "cool" });
+  const s = fakeDoc([para(["Title"]), two]);
+  const a = await addChangeComment(first);
+  assert.deepEqual([a.word_comment_id, a.existed], ["C1", false]);
+  // By its place: the comment of the first change does not lie on the second.
+  const b = await addChangeComment(second);
+  assert.deepEqual([b.ok, b.word_comment_id, b.existed], [true, "C2", false]);
+  assert.deepEqual(
+    s.comments.map((c) => c.start),
+    [6, 22],
+  );
+  // Each finds its own on a second press.
+  assert.deepEqual(
+    [
+      (await addChangeComment(first)).word_comment_id,
+      (await addChangeComment(second)).word_comment_id,
+    ],
+    ["C1", "C2"],
+  );
+  assert.equal(s.comments.length, 2);
+});
+
+test("task pane: a comment the daemon already has on another change is never reused, wherever it lies", async () => {
+  const s = fakeDoc([para(["Title"]), REPLACE_PENDING]);
+  const a = await addChangeComment(change());
+  // The same place, but the daemon says C1 is recorded on another change.
+  const b = await addChangeComment(change({ known_comment_ids: [a.word_comment_id] }));
+  assert.deepEqual([b.ok, b.word_comment_id, b.existed], [true, "C2", false]);
+  assert.equal(s.comments.length, 2);
 });

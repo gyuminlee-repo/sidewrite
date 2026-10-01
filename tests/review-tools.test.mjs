@@ -789,3 +789,22 @@ test("comment errors of the task pane are logged: a failed comment, and one adde
   assert.ok(d.lines.includes("[review] comment added on try 2 R1.1-1"));
   assert.equal(d.lines.filter((l) => l.startsWith("[review] comment error")).length, 1);
 });
+
+test("the comment ids on record go out with a tracked edit, so the task pane reuses none of them", async () => {
+  const d = deps({ target_checked: true });
+  d.getReviewContext = async () => ({ comment_ids: ["11", "12"] });
+  await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.deepEqual(d.calls[0][1].known_comment_ids, ["11", "12"]);
+  // None on record: the argument is left out.
+  const e = deps({ target_checked: true });
+  await applyTrackedEdit(
+    e,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.equal("known_comment_ids" in e.calls[0][1], false);
+});

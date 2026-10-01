@@ -17,8 +17,16 @@ function fakeWord({
   failAfter = () => false,
   throwOnInsertComment = false,
   error = () => new Error("GeneralException: sync"),
+  // Comments already in the paragraph, on other words than this edit.
+  comments = [],
 } = {}) {
-  const state = { applied: false, comments: [], mode: "Off", pending: [], syncs: 0 };
+  const state = {
+    applied: false,
+    comments: comments.map((c) => ({ ...c, foreign: true })),
+    mode: "Off",
+    pending: [],
+    syncs: 0,
+  };
   const coll = (items) => ({ items, load() {} });
   const occurrences = (text, q) => {
     const out = [];
@@ -45,7 +53,16 @@ function fakeWord({
       });
       return c;
     },
-    getComments: () => coll(state.comments.map((c) => ({ ...c }))),
+    // A comment this edit added lies on its words; another one does not.
+    getComments: () =>
+      coll(
+        state.comments.map((c) => ({
+          ...c,
+          getRange: () => ({
+            compareLocationWith: () => ({ value: c.foreign ? "Before" : "Inside" }),
+          }),
+        })),
+      ),
     compareLocationWith: () => ({ value: "Before" }),
     // The paragraph is compared before the edit (expected_before_hash).
     getRange() {
@@ -234,4 +251,29 @@ test("the edit sync itself fails: nothing applied, the error propagates", async 
   const s = fakeWord({ fail: ({ kinds }) => kinds.includes("edit") });
   await assert.rejects(toolTrackedEdit(REPLACE), /sync/);
   assert.equal(s.applied, false);
+});
+
+// Codex review (P2): the second try took any comment of the paragraph with
+// the same text for its own, also the rationale comment of an earlier change
+// with the same wording. Two changes then shared one comment id.
+test("the second try does not take the comment of another change for its own", async () => {
+  let n = 0;
+  const other = { id: "K9", content: REPLACE.comment_text };
+  let s = fakeWord({
+    comments: [other],
+    fail: ({ kinds }) => kinds.includes("comment") && ++n === 1,
+  });
+  let r = await toolTrackedEdit(REPLACE);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.notEqual(r.word_comment_id, "K9");
+  assert.deepEqual(
+    s.comments.map((c) => c.id),
+    ["K9", r.word_comment_id],
+  );
+  // The comment went in although its sync threw, and the daemon knows it as
+  // the comment of another change: not reused either.
+  n = 0;
+  s = fakeWord({ failAfter: ({ kinds }) => kinds.includes("comment") && ++n === 1 });
+  r = await toolTrackedEdit({ ...REPLACE, known_comment_ids: ["C1"] });
+  assert.deepEqual([r.ok, r.word_comment_id, s.comments.length], [true, "C2", 2]);
 });
