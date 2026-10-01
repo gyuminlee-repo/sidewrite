@@ -188,3 +188,49 @@ test("a model that declines the manuscript: the notice once, then a state in the
   assert.equal(declinedNote(once, models), "");
   assert.equal(declinedNote(null, models), "");
 });
+
+// A replayed revision: after the document stayed on the other model, the
+// line went back to "asked for X, ran on Y". The CLI sends an init message
+// at the start of every turn (model claude-opus-5, asked opus), and each one
+// wrote what edits ran on anew, without the state. The same after a
+// paragraph check, whose request reports under the kind "turn".
+test("the state of a declining model survives the init of every turn and a check that ran in between", async () => {
+  const { turnUsed, roleText } = await import("../taskpane/shared/model-line.js");
+  const models = [
+    ...MODELS,
+    { value: "claude-opus-5", displayName: "Opus 5", resolvedModel: "claude-opus-5" },
+  ];
+  const choice = { provider: "claude", model: "opus" };
+  const line = (used) => roleText("turn", { used, choice }, models);
+  const declined = { original: "claude-opus-5-5", fallback: "claude-opus-5", category: "bio" };
+  const fallback = (stay) => ({ event: "model_fallback", ...declined, scope: "session", stay });
+  const init = (model, d = null) => ({ event: "session_init", model, asked: "opus", declined: d });
+  // The order of events of that run.
+  let used = turnUsed(null, init("claude-opus-5-5"), "opus");
+  assert.equal(line(used), "Edits: Claude · Opus 5.5");
+  used = turnUsed(used, fallback(false), "opus");
+  assert.equal(line(used), "Edits: asked for Claude · Opus 5.5, ran on Claude · Opus 5");
+  used = turnUsed(used, init("claude-opus-5-5"), "opus"); // the next turn: the chosen model once more
+  assert.equal(line(used), "Edits: Claude · Opus 5.5");
+  used = turnUsed(used, fallback(true), "opus");
+  const STAYS = "Edits: Claude · Opus 5 (Opus 5.5 declines this manuscript: bio)";
+  assert.equal(line(used), STAYS);
+  // Every later turn starts with an init on the other model; the daemon says the state with it.
+  used = turnUsed(used, init("claude-opus-5", { ...declined, stay: true }), "opus");
+  assert.equal(line(used), STAYS);
+  // A paragraph check (a request of the kind "turn") ran in between.
+  used = turnUsed(
+    used,
+    { event: "model_used", provider: "claude", asked: "opus", ran: "claude-opus-5-5", ok: true },
+    "opus",
+  );
+  assert.equal(line(used), STAYS);
+  used = turnUsed(used, init("claude-opus-5", { ...declined, stay: true }), "opus");
+  assert.equal(line(used), STAYS);
+  // An init without the state (the user chose another model, the session was restarted): it is gone.
+  used = turnUsed(used, init("claude-sonnet-5-5"), "sonnet");
+  assert.equal(used.declined, undefined);
+  // A local fallback (one answer only) changes nothing of what edits run on.
+  const before = turnUsed(null, init("claude-opus-5-5"), "opus");
+  assert.deepEqual(turnUsed(before, { ...fallback(false), scope: "local" }, "opus"), before);
+});
