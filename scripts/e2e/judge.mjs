@@ -615,11 +615,17 @@ const squeeze = (s) =>
     .replace(/[\s\-­‐‑]/g, "");
 
 // S3-33. A second reader of the rendered PDF. layout: `pdftotext -layout`
-// text; a numbered line is "<up to 3 spaces><n><spaces><text>". citations:
-// [{ id, quote, start, match_count }] with the line range the daemon read
-// (PyMuPDF). The cited start line must hold the start of the quote: the
-// whole quote, or an end piece of the line (8 characters or more, or the
-// whole line) that the quote begins with.
+// text; a numbered line is "<up to 3 spaces><n><spaces><text>", and a line
+// without a number (a page number, a running head, a blank line, a form
+// feed) is not manuscript text. citations: [{ id, quote, start, end?,
+// match_count }] with the line range the daemon read (PyMuPDF).
+//
+// The lines from `start` on are joined, as long as their numbers go on
+// without a gap. A citation agrees when the whole quote is in that text and
+// begins inside the start line: at its end, however short the piece (the
+// last word of the line), or anywhere in it. A quote that begins on the next
+// line does not agree, and neither does one whose text is not all there.
+// With `end`, the last character of the quote must be on that line.
 export function secondReader(layout, citations) {
   const lines = new Map();
   for (const raw of String(layout ?? "").split(/\n|\f/)) {
@@ -628,13 +634,24 @@ export function secondReader(layout, citations) {
   }
   const rows = (citations ?? []).map((c) => {
     const line_text = lines.get(c.start) ?? "";
-    const head = squeeze(line_text);
     const quote = squeeze(c.quote);
-    let agrees = head.length > 0 && quote.length > 0 && head.includes(quote);
-    for (let i = 0; !agrees && i < head.length; i++) {
-      const tail = head.slice(i);
-      if (i > 0 && tail.length < 8) break;
-      agrees = quote.startsWith(tail);
+    const head = squeeze(line_text).length;
+    // The joined text and where each line ends in it.
+    let text = "";
+    const ends = [];
+    for (let n = c.start; lines.has(n) && text.length < head + quote.length; n++) {
+      text += squeeze(lines.get(n));
+      ends.push([n, text.length]);
+    }
+    let agrees = false;
+    for (
+      let at = text.indexOf(quote);
+      quote && at !== -1 && at < head;
+      at = text.indexOf(quote, at + 1)
+    ) {
+      const last = at + quote.length - 1;
+      const endLine = ends.find(([, upTo]) => last < upTo)?.[0];
+      if (c.end == null || endLine === c.end) agrees = true;
     }
     return { id: c.id, start: c.start, line_text, agrees };
   });

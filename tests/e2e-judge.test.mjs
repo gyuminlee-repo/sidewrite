@@ -1498,12 +1498,14 @@ test("second reader: the margin number of the cited start line sits on the line 
   // a word hyphenated at the line end, and a ligature of the PDF font.
   const mid =
     " 11   drawn daily. The plateau was reached on\n 12   day four in all flasks.\n 13   It was low. Growth was conﬁrmed by micro-\n 14   scopy at 600 nm.\n";
-  const agree = (quote, start) =>
-    S3.secondReader(mid, [{ id: "x", quote, start, end: start, match_count: 1 }]).rows[0].agrees;
-  assert.equal(agree("The plateau was reached on day four in all flasks.", 11), true);
+  const agree = (quote, start, end = start) =>
+    S3.secondReader(mid, [{ id: "x", quote, start, end, match_count: 1 }]).rows[0].agrees;
+  assert.equal(agree("The plateau was reached on day four in all flasks.", 11, 12), true);
   assert.equal(agree("It was low.", 13), true);
-  assert.equal(agree("Growth was confirmed by microscopy at 600 nm.", 13), true);
-  assert.equal(agree("The plateau was reached on day four in all flasks.", 12), false);
+  assert.equal(agree("Growth was confirmed by microscopy at 600 nm.", 13, 14), true);
+  assert.equal(agree("The plateau was reached on day four in all flasks.", 12, 12), false);
+  // The end line is judged too.
+  assert.equal(agree("The plateau was reached on day four in all flasks.", 11, 11), false);
   // A line that is not in the layout at all.
   assert.equal(agree("It was low.", 99), false);
 });
@@ -1989,4 +1991,88 @@ test("a check with warnings only passes the later steps of the stage 3 flow, not
   assert.equal(J["response-check-no-fail"]({ summary: "All checks passed" }).pass, true);
   assert.equal(J["response-check-no-fail"]({ summary: "1 failed, 1 warning" }).pass, false);
   assert.equal(J["response-check-no-fail"]({ summary: "" }).pass, false);
+});
+
+// The second Word run: the quote began with the last word of its start line
+// ("For", three letters), and the judge gave up on a piece under 8 letters.
+test("second reader: a quote that starts with a short piece at the end of its line", () => {
+  const layout = [
+    " 26   The medium was sterilised by filtration before use.",
+    " 27   Cultures were grown in a defined mineral medium in sealed flasks with shaking. For",
+    " 28   every run indeed the incubation temperature was held at 30 degrees Celsius and the",
+    " 29   headspace was refreshed once per day. Optical density was read at 600 nm in a plate",
+    " 30   reader.",
+  ].join("\n");
+  const quote =
+    "For every run indeed the incubation temperature was held at 30 degrees Celsius and the headspace was refreshed once per day.";
+  const read = (start, end, text = layout, q = quote) =>
+    S3.secondReader(text, [{ id: "x", quote: q, start, end, match_count: 1 }]).rows[0].agrees;
+  assert.equal(read(27, 29), true);
+  // The line numbers the judge must refuse: the quote does not start on 28
+  // (its first word is on 27), nor on 26, and it does not end on 28 or 30.
+  assert.equal(read(28, 29), false);
+  assert.equal(read(26, 29), false);
+  assert.equal(read(27, 28), false);
+  assert.equal(read(27, 30), false);
+  // Without an end line only the start is judged.
+  assert.equal(read(27, undefined), true);
+  assert.equal(read(28, undefined), false);
+  // A quote that really starts on 28: 27 is wrong although 27 ends in a word
+  // the next sentence could begin with.
+  const later = "every run indeed the incubation temperature was held at 30 degrees Celsius";
+  assert.equal(read(28, 28, layout, later), true);
+  assert.equal(read(27, 28, layout, later), false);
+  // The short piece alone proves nothing: the lines after it must go on with the quote.
+  assert.equal(read(27, 29, layout, "For each of the runs the temperature was logged."), false);
+});
+
+test("second reader: one line, a hyphen at the line end, a page break and lines without a number", () => {
+  const read = (layout, quote, start, end) =>
+    S3.secondReader(layout, [{ id: "x", quote, start, end, match_count: 1 }]).rows[0].agrees;
+  // The whole quote inside one line, not at its start.
+  const one =
+    "  4   It was low. Growth was slow in all flasks. It rose later.\n  5   Then it fell.\n";
+  assert.equal(read(one, "Growth was slow in all flasks.", 4, 4), true);
+  assert.equal(read(one, "Growth was slow in all flasks.", 5, 5), false);
+  assert.equal(read(one, "Growth was slow in all flasks.", 4, 5), false);
+  // A word broken at the line end, and a compound that keeps its hyphen.
+  const broken =
+    "  8   The incubation tem-\n  9   perature was held at 30 degrees in a cell-\n 10   free extract.\n";
+  assert.equal(
+    read(
+      broken,
+      "The incubation temperature was held at 30 degrees in a cell-free extract.",
+      8,
+      10,
+    ),
+    true,
+  );
+  assert.equal(
+    read(
+      broken,
+      "The incubation temperature was held at 30 degrees in a cell-free extract.",
+      9,
+      10,
+    ),
+    false,
+  );
+  // Across a page: a footer, a form feed and a running head, none with a line number.
+  const pages =
+    " 40   Growth reached a plateau after\n\n                         7\n\f   Running head of the manuscript\n\n 41   four days in every flask. The spread\n 42   was small.\n";
+  assert.equal(
+    read(pages, "Growth reached a plateau after four days in every flask.", 40, 41),
+    true,
+  );
+  assert.equal(
+    read(pages, "Growth reached a plateau after four days in every flask.", 41, 41),
+    false,
+  );
+  assert.equal(read(pages, "The spread was small.", 41, 42), true);
+  // A line number that is missing between the two (the layout lost a line):
+  // the judge does not join over the gap.
+  const gap = " 40   Growth reached a plateau after\n 42   four days in every flask.\n";
+  assert.equal(
+    read(gap, "Growth reached a plateau after four days in every flask.", 40, 42),
+    false,
+  );
 });

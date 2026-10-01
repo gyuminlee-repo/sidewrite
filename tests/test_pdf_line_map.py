@@ -84,6 +84,15 @@ class PdfLineMapTest(unittest.TestCase):
         hit = plm.find_quote(self.lines, "study was to describe the growth")
         self.assertEqual(hit["range"], "3-4")
 
+    def test_quote_that_starts_with_the_last_word_of_a_line(self):
+        # Line 3 ends in "to", line 4 goes on: the range starts at line 3,
+        # however short the piece on it is.
+        hit = plm.find_quote(self.lines, "to describe the growth curve in detail.")
+        self.assertEqual(hit["range"], "3-4")
+        self.assertEqual(hit["start"]["line_no"], 3)
+        # The same words from the next line on start there.
+        self.assertEqual(plm.find_quote(self.lines, "describe the growth curve")["range"], "4")
+
     def test_real_compound_broken_at_hyphen(self):
         self.assertEqual(plm.find_quote(self.lines, "A cell-free extract")["range"], "6-7")
 
