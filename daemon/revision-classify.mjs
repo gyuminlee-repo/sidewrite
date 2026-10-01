@@ -159,31 +159,49 @@ export function boundedMatches(text, form) {
 }
 
 // The tracked runs of a snapshot paragraph (p.tracked, from the task pane:
-// [{ kind: "ins" | "del", text, start }]) as ranges of its normalized text t:
-// [{ kind, start, end }]. A run is placed where its text occurs nearest to
-// the start it reports (Word's paragraph text and the OOXML text can differ
-// by a character or two); a run whose text is not in t is left out.
+// [{ kind: "ins" | "del", text, start, marks }]) as ranges of its normalized
+// text t: { runs: [{ kind, start, end }], short: { ins, del } }. A run is
+// placed where its text occurs nearest to the start it reports (Word's
+// paragraph text and the OOXML text can differ by a character or two).
+// short[kind] is true when the list cannot be trusted to hold every tracked
+// run of that kind: a run whose text is not in t (or that has no text) was
+// left out, or the paragraph has more revision marks of that kind (w_ins,
+// w_del, counted on their own) than the placed runs stand for. A change of
+// that kind is then never read as "not tracked" (Codex review of the
+// follow-up: a run that lost a no-break hyphen was dropped and its pending
+// insertion read accepted).
 // null: the snapshot has no per-run list (an older task pane).
 export function placedRuns(p, t) {
   if (!Array.isArray(p?.tracked)) return null;
-  const out = [];
+  const runs = [];
+  const marks = { ins: 0, del: 0 };
+  const short = { ins: false, del: false };
   for (const run of p.tracked) {
     const text = collapse(run.text).trim();
-    if (!text) continue;
     let best = -1;
-    for (let i = t.indexOf(text); i !== -1; i = t.indexOf(text, i + 1)) {
-      if (best === -1 || Math.abs(i - run.start) < Math.abs(best - run.start)) best = i;
+    if (text) {
+      for (let i = t.indexOf(text); i !== -1; i = t.indexOf(text, i + 1)) {
+        if (best === -1 || Math.abs(i - run.start) < Math.abs(best - run.start)) best = i;
+      }
     }
-    if (best !== -1) out.push({ kind: run.kind, start: best, end: best + text.length });
+    if (best === -1) {
+      if (run.kind in short) short[run.kind] = true;
+      continue;
+    }
+    runs.push({ kind: run.kind, start: best, end: best + text.length });
+    marks[run.kind] += run.marks ?? 1;
   }
-  return out;
+  if ((p.w_ins ?? 0) > marks.ins) short.ins = true;
+  if ((p.w_del ?? 0) > marks.del) short.del = true;
+  return { runs, short };
 }
 
-// runs: placedRuns of the paragraph, or null. With runs, a pure insertion or
-// deletion is pending only while its OWN text is tracked; without them the
+// placed: placedRuns of the paragraph, or null. With it, a pure insertion or
+// deletion is pending while its OWN text is tracked, or while the list is
+// short for its kind (then nothing proves it is not); without it the
 // paragraph's revision mark total decides (revisions), which reads an
 // accepted change pending while any sibling is (Codex review 16).
-function classifyByContext(change, t, revisions, runs = null) {
+function classifyByContext(change, t, revisions, placed = null) {
   const { left, right } = change.context;
   const I = collapse(change.text);
   const D = collapse(change.find);
@@ -192,12 +210,13 @@ function classifyByContext(change, t, revisions, runs = null) {
   const has = (form) => boundedMatches(t, normalizeParaText(form)).length === 1;
   // Is the middle part of the form L + own + R (found once) still tracked?
   const ownTracked = (kind, L, own, R) => {
-    if (!runs) return revisions > 0;
+    if (!placed) return revisions > 0;
+    if (placed.short[kind]) return true;
     const form = normalizeParaText(L + own + R);
     const at = boundedMatches(t, form)[0];
     const a = at + collapse(L).trimStart().length;
     const b = at + form.length - collapse(R).trimEnd().length;
-    return runs.some((r) => r.kind === kind && r.start < b && r.end > a);
+    return placed.runs.some((r) => r.kind === kind && r.start < b && r.end > a);
   };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);

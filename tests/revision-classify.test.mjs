@@ -841,3 +841,62 @@ test("several changes in one paragraph: each is judged by its own tracked text",
   assert.deepEqual(multi([i1, i2], T1, undefined, { w_ins: 0 }), ["accepted", "accepted"]);
   assert.deepEqual(multi([d1, d2], T2, undefined, { w_del: 1 }), ["pending", "pending"]);
 });
+
+// Codex review of the follow-up: "its text is not tracked" must never rest
+// on a tracked run that was lost. A run that cannot be placed in the
+// paragraph text, a run with no text, or more revision marks in the
+// paragraph than the placed runs stand for: the change stays pending, as the
+// paragraph totals said before.
+test("a tracked run that cannot be placed is never read as 'not tracked'", () => {
+  const i1 = chg("insert", "fit", " non\u001elinear", "used a fit", " to the");
+  const TEXT = "We used a fit non\u001elinear to the data and a second model.";
+  // The Codex reproduction: the pane dropped the no-break hyphen, so the run
+  // text is not in the paragraph. The insertion is still pending.
+  assert.deepEqual(multi([i1], TEXT, [ins(" nonlinear", 13)], { w_ins: 1 }), ["pending"]);
+  // With the hyphen kept it is placed: pending while tracked, accepted after.
+  assert.deepEqual(multi([i1], TEXT, [ins(" non\u001elinear", 13)], { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([i1], TEXT, [], { w_ins: 0 }), ["accepted"]);
+
+  // An accepted insertion next to a tracked insertion that cannot be placed:
+  // pending. This is the conservative side: the unplaced run may be the
+  // change's own text, so "accepted" would be a guess. It turns accepted when
+  // the other run is settled or can be placed.
+  const i2 = chg("insert", "model", " (linear)", "a second model", ".");
+  const T2 = "We used a fit to the data and a second model (linear).";
+  const cases = [
+    ["unplaceable run of the same kind", [ins("somewhere else", 3)], { w_ins: 1 }, "pending"],
+    [
+      "run with no text read",
+      [{ kind: "ins", text: "", start: 3, marks: 1 }],
+      { w_ins: 1 },
+      "pending",
+    ],
+    ["more insertion marks than placed runs", [], { w_ins: 1 }, "pending"],
+    ["two marks, one entry that stands for one", [ins("We", 0)], { w_ins: 2 }, "pending"],
+    [
+      "two marks, one entry that stands for both",
+      [{ ...ins("We", 0), marks: 2 }],
+      { w_ins: 2 },
+      "accepted",
+    ],
+    [
+      "an unplaceable deletion does not concern an insertion",
+      [del("nowhere", 3)],
+      { w_del: 1 },
+      "accepted",
+    ],
+    ["every run placed elsewhere", [ins("We", 0)], { w_ins: 1 }, "accepted"],
+  ];
+  for (const [name, tracked, counts, want] of cases) {
+    assert.deepEqual(multi([i2], T2, tracked, counts), [want], name);
+  }
+  // The same for a deletion that was rejected (its text is back).
+  const d1 = chg("delete", " carefully", "", "Cells were", " held at 30");
+  const T3 = "Cells were carefully held at 30 °C.";
+  assert.deepEqual(multi([d1], T3, [del("not in the text", 3)], { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T3, [], { w_del: 1 }), ["pending"]);
+  assert.deepEqual(multi([d1], T3, [ins("Cells", 0)], { w_ins: 1 }), ["rejected"]);
+  // A snapshot without the list: the paragraph totals, unchanged.
+  assert.deepEqual(multi([i2], T2, undefined, { w_ins: 1 }), ["pending"]);
+  assert.deepEqual(multi([i2], T2, undefined, { w_ins: 0 }), ["accepted"]);
+});

@@ -616,8 +616,8 @@ test("trackedRuns lists the tracked insertions and deletions of the document par
   assert.deepEqual(
     view.trackedRuns(doc(r("Cells grew "), ins("well "), del("slowly "), r("on glucose."))),
     [
-      { kind: "ins", text: "well ", start: 11 },
-      { kind: "del", text: "slowly ", start: 16 },
+      { kind: "ins", text: "well ", start: 11, marks: 1 },
+      { kind: "del", text: "slowly ", start: 16, marks: 1 },
     ],
   );
   // Word splits one insertion into several runs: one entry.
@@ -625,14 +625,14 @@ test("trackedRuns lists the tracked insertions and deletions of the document par
     view.trackedRuns(
       doc(r("A "), `<w:ins w:id="1">${r("new")}${r(" word")}</w:ins>`, ins(" here", 3), r(".")),
     ),
-    [{ kind: "ins", text: "new word here", start: 2 }],
+    [{ kind: "ins", text: "new word here", start: 2, marks: 2 }],
   );
   // The same inserted text twice: two entries, by place.
   assert.deepEqual(
     view.trackedRuns(doc(r("One "), ins("(n = 3) "), r("and two "), ins("(n = 3) ", 5), r("."))),
     [
-      { kind: "ins", text: "(n = 3) ", start: 4 },
-      { kind: "ins", text: "(n = 3) ", start: 20 },
+      { kind: "ins", text: "(n = 3) ", start: 4, marks: 1 },
+      { kind: "ins", text: "(n = 3) ", start: 20, marks: 1 },
     ],
   );
   // Only the document part: the tracked body of a rationale comment, a
@@ -655,14 +655,16 @@ test("trackedRuns lists the tracked insertions and deletions of the document par
       ),
     ),
     [
-      { kind: "del", text: "gone", start: 10 },
-      { kind: "ins", text: " <x>", start: 14 },
+      { kind: "del", text: "gone", start: 10, marks: 1 },
+      // The w:ins around the deletion gave no inserted text of its own.
+      { kind: "ins", text: "", start: 14, marks: 1 },
+      { kind: "ins", text: " <x>", start: 14, marks: 1 },
     ],
   );
   // Whitespace before a run is counted as the daemon reads the paragraph:
   // collapsed, and without the comment anchor character.
   assert.deepEqual(view.trackedRuns(doc(r("\u0005 A   B\t"), ins("C"))), [
-    { kind: "ins", text: "C", start: 4 },
+    { kind: "ins", text: "C", start: 4, marks: 1 },
   ]);
   assert.deepEqual(view.trackedRuns(null), []);
   assert.deepEqual(view.trackedRuns("<w:p><w:r><w:t>bare</w:t></w:r></w:p>"), []);
@@ -694,4 +696,77 @@ test("an open requirement of a comment under a section names the section", () =>
       "R1.2 q1 has no change: Add units.",
     ],
   );
+});
+
+// Codex review of the follow-up: a tracked run with <w:noBreakHyphen/> lost
+// that character ("non-linear" read "nonlinear"), could not be found in the
+// paragraph text and was dropped, so a pending insertion read accepted.
+// Expected texts are what Word returned for Paragraph.text on 2026-10-01
+// (Word 16, document of scripts/e2e/make_tracked_special.py, read through
+// collectReviewSnapshot): no-break hyphen U+001E, soft hyphen U+001F, tab
+// U+0009, line break U+000B, carriage return U+000D, a w:sym of any font "(".
+test("trackedRuns keeps the run elements that are text without being w:t, as Word's paragraph text has them", () => {
+  const doc = (kind, content) => {
+    const tag = kind === "ins" ? "w:t" : "w:delText";
+    const body = content
+      .replaceAll("<T>", `<${tag} xml:space="preserve">`)
+      .replaceAll("</T>", `</${tag}>`);
+    return (
+      '<pkg:package><pkg:part pkg:name="/word/document.xml"><pkg:xmlData><w:body><w:p>' +
+      '<w:r><w:t xml:space="preserve">Before </w:t></w:r>' +
+      `<w:${kind} w:id="1"><w:r><w:rPr><w:b/></w:rPr>${body}</w:r></w:${kind}>` +
+      '<w:r><w:t xml:space="preserve"> after.</w:t></w:r>' +
+      "</w:p></w:body></pkg:xmlData></pkg:part></pkg:package>"
+    );
+  };
+  const SYM = '<w:sym w:font="Symbol" w:char="F061"/>';
+  const cases = [
+    ["ins", "<T>plain words</T>", "plain words"],
+    ["ins", "<T>non</T><w:noBreakHyphen/><T>linear </T>", "non\u001elinear "],
+    ["ins", "<T>micro</T><w:softHyphen/><T>scope</T>", "micro\u001fscope"],
+    ["ins", "<T>left</T><w:tab/><T>right</T>", "left\tright"],
+    [
+      "ins",
+      '<T>left</T><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/><T>right</T>',
+      "left\tright",
+    ],
+    ["ins", "<T>first</T><w:br/><T>second</T>", "first\u000bsecond"],
+    ["ins", '<T>first</T><w:br w:type="textWrapping"/><T>second</T>', "first\u000bsecond"],
+    ["ins", "<T>one</T><w:cr/><T>two</T>", "one\rtwo"],
+    ["ins", `<T>alpha </T>${SYM}<T> end</T>`, "alpha ( end"],
+    ["ins", '<T>mark </T><w:sym w:font="Wingdings" w:char="F0FC"/>', "mark ("],
+    ["ins", "<T>a &amp; b  &lt;c&gt; </T>", "a & b  <c> "],
+    ["ins", "<w:noBreakHyphen/>", "\u001e"],
+    ["ins", "<w:instrText>PAGE</w:instrText><T>kept</T>", "kept"],
+    ["del", "<T>non</T><w:noBreakHyphen/><T>linear</T>", "non\u001elinear"],
+    ["del", "<T>micro</T><w:softHyphen/><T>scope</T>", "micro\u001fscope"],
+    ["del", "<T>left</T><w:tab/><T>right</T>", "left\tright"],
+    ["del", `<T>alpha </T>${SYM}<T> end</T>`, "alpha ( end"],
+    ["del", "<w:delInstrText>PAGE</w:delInstrText><T>gone</T>", "gone"],
+  ];
+  for (const [kind, content, text] of cases) {
+    assert.deepEqual(
+      view.trackedRuns(doc(kind, content)),
+      [{ kind, text, start: 7, marks: 1 }],
+      content,
+    );
+  }
+  console.log(`tracked run element corpus: ${cases.length} snippets`);
+
+  // marks: how many w:ins / w:del elements an entry stands for. Two
+  // neighbouring insertions are one entry of two marks; a tracked element
+  // from which no text was read is an entry with empty text, so the daemon
+  // knows something tracked is there that it cannot place.
+  const two =
+    '<pkg:package><pkg:part pkg:name="/word/document.xml"><pkg:xmlData><w:p>' +
+    '<w:ins w:id="1"><w:r><w:t>one</w:t></w:r></w:ins><w:ins w:id="2"><w:r><w:t> two</w:t></w:r></w:ins>' +
+    "<w:r><w:t> plain </w:t></w:r>" +
+    '<w:ins w:id="3"><w:r><w:drawing/></w:r></w:ins>' +
+    '<w:del w:id="4"><w:r><w:delText>gone</w:delText></w:r></w:del>' +
+    "</w:p></pkg:xmlData></pkg:part></pkg:package>";
+  assert.deepEqual(view.trackedRuns(two), [
+    { kind: "ins", text: "one two", start: 0, marks: 2 },
+    { kind: "ins", text: "", start: 14, marks: 1 },
+    { kind: "del", text: "gone", start: 14, marks: 1 },
+  ]);
 });
