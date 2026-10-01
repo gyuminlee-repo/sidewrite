@@ -224,6 +224,7 @@ class Para:
         self.text = ''
         self.fmt = []
         self.special = collections.Counter()
+        self.marks = []     # bookmark markers: (element, text offset it sits at, enclosing hyperlink or None)
 
 
 def read_para(p, skip_rpr=is_struck, side='accept'):
@@ -289,6 +290,8 @@ def read_para(p, skip_rpr=is_struck, side='accept'):
                 continue
             else:
                 para.special[t] += 1
+                if t in ('bookmarkStart', 'bookmarkEnd'):
+                    para.marks.append((ch, len(para.fmt), link))
 
     walk(p, None)
     para.text = ''.join(parts)
@@ -443,7 +446,8 @@ def build_children(segs, styles):
     """Run/hyperlink elements for segments; consecutive segments sharing a clean hyperlink are re-wrapped."""
     out, cur, cur_link = [], None, None
     for kind, text, key, rpr, link in segs:
-        r = make_run(kind, text, rpr, styles)
+        # a bookmark marker from place_marks is the element itself, and stays in its hyperlink like a run
+        r = text if kind == 'mark' else make_run(kind, text, rpr, styles)
         if link is not None:
             if cur is None or cur_link is not link:
                 cur = copy.deepcopy(link)
@@ -479,26 +483,84 @@ def colorize_in_place(p, rgb=None):
 
 
 # ---------------------------------------------------------------- paragraph-level operations
+def place_marks(segs, marks):
+    """Segments with the clean paragraph's bookmark markers put back where they were in the clean text.
+
+    A marker sits at an offset of the clean text; unchanged and inserted segments are cut there. Deleted text has no
+    place in the clean text: it is shown at an offset too, and at that offset a bookmark end goes before it and a
+    bookmark start after it, so deleted text next to a bookmark stays outside it. A bookmark that is empty in the
+    clean text (start and end at one offset, in this order) stays empty and goes before the deleted text. What this
+    cannot do is keep out text that was deleted between the two ends: bookmarks_holding_deletions reports that."""
+    if not marks:
+        return segs
+    pre, post = collections.defaultdict(list), collections.defaultdict(list)
+    for off in sorted({o for _, o, _ in marks}):
+        here = [(e, link) for e, o, link in marks if o == off]
+        seen, empty = set(), set()
+        for e, _ in here:
+            if ln(e) == 'bookmarkStart':
+                seen.add(e.get(q('id')))
+            elif e.get(q('id')) in seen:
+                empty.add(e.get(q('id')))
+        for e, link in here:
+            first = ln(e) == 'bookmarkEnd' or e.get(q('id')) in empty
+            (pre if first else post)[off].append(['mark', e, None, None, link])
+    out, pos = [], 0
+
+    def emit(off, starts=True):
+        out.extend(pre.pop(off, []))
+        if starts:
+            out.extend(post.pop(off, []))
+
+    for seg in segs:
+        kind, text = seg[0], seg[1]
+        if kind == 'del':
+            emit(pos, starts=False)
+            out.append(seg)
+            continue
+        emit(pos)
+        done = 0
+        for off in sorted(o for o in set(pre) | set(post) if pos < o < pos + len(text)):
+            out.append([kind, text[done:off - pos]] + list(seg[2:]))
+            emit(off)
+            done = off - pos
+        out.append([kind, text[done:]] + list(seg[2:]))
+        pos += len(text)
+    for off in sorted(set(pre) | set(post)):
+        emit(off)
+    return out
+
+
+def bookmarks_holding_deletions(root):
+    """{bookmark name: characters of deleted text shown between its start and its end}, in document order.
+
+    Only colour mode needs this: there deleted text is ordinary struck text, so a bookmark around it holds more
+    than it did (a cross-reference to the bookmark would show the struck words). In track_changes mode a w:del
+    inside a bookmark is what Word writes itself, and accepting the changes gives the clean range back."""
+    opened, held = {}, collections.OrderedDict()
+    for e in root.iter(q('bookmarkStart'), q('bookmarkEnd'), q('r')):
+        if ln(e) == 'bookmarkStart':
+            opened[e.get(q('id'))] = e.get(q('name')) or ''
+        elif ln(e) == 'bookmarkEnd':
+            opened.pop(e.get(q('id')), None)
+        elif opened and run_kind(e) == 'del':
+            n = sum(len(t.text or '') for t in e.iter(q('t'), q('delText')))
+            for name in opened.values():
+                held[name] = held.get(name, 0) + n
+    return {k: v for k, v in held.items() if v}
+
+
 def rebuild_para(p, b, c, styles, stats, segs=None):
     """Rewrite a clean paragraph as a word-level diff against its baseline counterpart (or prebuilt segments)."""
     bad = {k: v for k, v in c.special.items() if k not in SAFE_CLEAN_TAGS and k != 'lastRenderedPageBreak'}
     assert not bad, 'unsupported element in changed clean paragraph %r: %s' % (c.text[:60], bad)
     if segs is None:
         segs = segments(diff_ops(b.text, c.text), b, c)
-    bms = [e for e in p.iter(q('bookmarkStart'), q('bookmarkEnd'))]
-    for e in bms:
-        e.getparent().remove(e)
     for ch in list(p):
         if ln(ch) != 'pPr':
             p.remove(ch)
-    for e in bms:
-        if ln(e) == 'bookmarkStart':
-            p.append(e)
-    for e in build_children(segs, styles):
+    for e in build_children(place_marks(segs, c.marks), styles):
         p.append(e)
-    for e in bms:
-        if ln(e) == 'bookmarkEnd':
-            p.append(e)
     stats['marked'].append((b if isinstance(b, str) else b.text, c.text, marked_string(segs)))
     stats['exp_ins'].append(''.join(t for k, t, *_ in segs if k == 'ins'))
     stats['exp_del'].append(''.join(t for k, t, *_ in segs if k == 'del'))
@@ -1049,6 +1111,10 @@ def build_document(base_xml, clean_xml, styles, numids):
         assert cts, 'baseline has tables but clean has none: no anchor'
         cts[-1].addnext(deleted_table(bts[k], styles, numids, stats))
         stats['tables'].append('baseline table %d: deleted, placed after last clean table' % (k + 1))
+    stats['warnings'] = []
+    if MODE == 'color':
+        stats['warnings'] = ['bookmark "%s" now also holds %d character(s) of deleted text (struck); a cross-reference '
+                             'to it shows that text too' % (name, n) for name, n in bookmarks_holding_deletions(croot).items()]
     return etree.tostring(croot, xml_declaration=True, encoding='UTF-8', standalone=True), stats
 
 
@@ -1500,6 +1566,8 @@ def report(a, out_path, base_xml, clean_xml, st):
           (st['n_eq'], st['n_mod'], st['n_ins'], st['n_del'], st['n_del_empty'], st['tables']))
     print('dropped: pStyle %d, numPr %d, baseline non-text elements in deleted paras %s' %
           (st['dropped_pstyle'], st['dropped_numpr'], dict(st['dropped_baseline_special'])))
+    for w in st['warnings']:
+        print('WARNING ' + w)
     if any(st['accepted_revisions'].values()):
         print('pending tracked changes read as accepted: baseline %(baseline)d, clean %(clean)d' % st['accepted_revisions'])
     print('METRICS:', {k: v for k, v in m_after.items() if k != 'over90_detail'})
@@ -1514,6 +1582,7 @@ def report(a, out_path, base_xml, clean_xml, st):
                              'RESCUE_MIN_RATIO': RESCUE_MIN_RATIO},
                'paragraphs': {k: st[k] for k in ('n_eq', 'n_mod', 'n_ins', 'n_del', 'n_del_empty')},
                'tables': st['tables'], 'accepted_revisions': st['accepted_revisions'],
+               'warnings': st['warnings'],
                'dropped': {'pStyle': st['dropped_pstyle'], 'numPr': st['dropped_numpr'],
                            'baseline_special': dict(st['dropped_baseline_special'])},
                'metrics': {k: v for k, v in m_after.items() if k != 'over90_detail'}, 'verify_lines': lines,
@@ -1522,6 +1591,7 @@ def report(a, out_path, base_xml, clean_xml, st):
             json.dump(rep, f, ensure_ascii=False, indent=1)
     return failed, {'checks': total, 'failures': failed, 'mode': MODE, 'insert_runs': v['insert_runs'],
                     'delete_runs': v['delete_runs'], 'accepted_revisions': st['accepted_revisions'],
+                    'warnings': st['warnings'],
                     'paragraphs': {k: st[k] for k in ('n_eq', 'n_mod', 'n_ins', 'n_del', 'n_del_empty')}}
 
 

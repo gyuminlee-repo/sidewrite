@@ -367,5 +367,157 @@ class PendingRevisions(Case):
         self.assertIn("pending tracked changes read as accepted: baseline 0, clean 1", log)
 
 
+def START(name, n):
+    return el("w:bookmarkStart", id=str(n), name=name)
+
+
+def END(n):
+    return el("w:bookmarkEnd", id=str(n))
+
+
+def pieces(index, *parts):
+    """edit(document): rewrite paragraph `index` as the given parts: a string is a run, anything else an element."""
+
+    def edit(d):
+        p = d.paragraphs[index]
+        for r in p.runs:
+            p._p.remove(r._r)
+        for part in parts:
+            if isinstance(part, str):
+                p.add_run(part)
+            else:
+                p._p.append(part)
+
+    return edit
+
+
+def is_deleted(run):
+    rpr = run.find(qn("w:rPr"))
+    strike = rpr.find(qn("w:strike")) if rpr is not None else None
+    return strike is not None or any(a.tag == qn("w:del") for a in run.iterancestors())
+
+
+def bookmark_text(path, name, accepted=False):
+    """Text between the start and the end of a bookmark; with `accepted`, without the text shown as deleted."""
+    body = Document(path).element.body
+    text, wanted, inside = "", None, False
+    for e in body.iter(qn("w:bookmarkStart"), qn("w:bookmarkEnd"), qn("w:r")):
+        if e.tag == qn("w:bookmarkStart") and e.get(qn("w:name")) == name:
+            wanted, inside = e.get(qn("w:id")), True
+        elif e.tag == qn("w:bookmarkEnd") and inside and e.get(qn("w:id")) == wanted:
+            return text
+        elif e.tag == qn("w:r") and inside and not (accepted and is_deleted(e)):
+            text += "".join(x.text or "" for x in e if x.tag in (qn("w:t"), qn("w:delText")))
+    raise AssertionError("bookmark %s has no start and end in this order" % name)
+
+
+class Bookmarks(Case):
+    """A bookmark in a changed paragraph keeps the text it had: its ends stay at their places in the new text."""
+
+    MODES = ("color", "track_changes")
+    HEAD, MID, TAIL = "The second paragraph mentions ", "Figure 1", " and little else."
+
+    def marked(self, base_text, *parts):
+        """Run both modes on [P1, base_text] against [P1, parts]: [(mode, output, summary, log)]."""
+        base = self.doc([P1, base_text])
+        clean = self.doc([P1, "x"], pieces(1, *parts))
+        runs = []
+        for mode in self.MODES:
+            code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+            self.assertEqual(code, 0, log)
+            runs.append((mode, out, summary, log))
+        return runs
+
+    def test_a_bookmark_in_the_middle_of_a_changed_paragraph(self):
+        for mode, out, summary, log in self.marked(P2, self.HEAD, START("fig1", 7), self.MID, END(7), self.TAIL):
+            with self.subTest(mode=mode):
+                self.assertEqual(bookmark_text(out, "fig1"), "Figure 1")
+                self.assertEqual(summary["warnings"], [])
+
+    def test_text_deleted_right_before_and_right_after_stays_outside(self):
+        base = "The second paragraph mentions the old Figure 1 indeed and little else."
+        for mode, out, summary, log in self.marked(base, self.HEAD, START("fig1", 7), self.MID, END(7), self.TAIL):
+            with self.subTest(mode=mode):
+                self.assertEqual(bookmark_text(out, "fig1"), "Figure 1")
+                self.assertEqual(summary["warnings"], [])
+
+    def test_a_bookmark_over_the_whole_paragraph_keeps_deleted_edges_outside(self):
+        base = "Formerly first. The second paragraph mentions Figure 1 and little else. Formerly last."
+        text = self.HEAD + self.MID + self.TAIL
+        for mode, out, summary, log in self.marked(base, START("all", 7), text, END(7)):
+            with self.subTest(mode=mode):
+                self.assertEqual(bookmark_text(out, "all"), text)
+                self.assertEqual(summary["warnings"], [])
+
+    def test_text_deleted_inside_a_bookmark_is_reported(self):
+        base = "The second paragraph mentions Figure 1 of the old set and little else."
+        parts = (self.HEAD, START("fig1", 7), "Figure 1 of the set", END(7), self.TAIL)
+        for mode, out, summary, log in self.marked(base, *parts):
+            with self.subTest(mode=mode):
+                self.assertEqual(bookmark_text(out, "fig1", accepted=True), "Figure 1 of the set")
+                if mode == "color":
+                    # The struck words sit between the two ends: nothing can keep them out, so the run says so.
+                    self.assertEqual(bookmark_text(out, "fig1"), "Figure 1 of the old set")
+                    self.assertEqual(len(summary["warnings"]), 1)
+                    self.assertIn('"fig1"', summary["warnings"][0])
+                    self.assertIn("WARNING", log)
+                else:
+                    self.assertEqual(summary["warnings"], [])
+
+    def test_an_empty_bookmark_stays_empty_and_in_order(self):
+        for mode, out, summary, log in self.marked(P2, self.HEAD, START("point", 7), END(7), self.MID + self.TAIL):
+            with self.subTest(mode=mode):
+                self.assertEqual(bookmark_text(out, "point"), "")
+                xml = doc_xml(out)
+                self.assertLess(xml.index("<w:bookmarkStart"), xml.index("<w:bookmarkEnd"))
+                self.assertIn(self.HEAD, xml[: xml.index('w:name="point"')])
+
+    def test_two_bookmarks_that_meet_where_text_was_deleted(self):
+        base = "The second paragraph mentions Figure 1 or so and little else."
+        parts = (START("a", 7), self.HEAD + self.MID, END(7), START("b", 8), self.TAIL, END(8))
+        for mode, out, summary, log in self.marked(base, *parts):
+            with self.subTest(mode=mode):
+                self.assertEqual(bookmark_text(out, "a"), self.HEAD + self.MID)
+                self.assertEqual(bookmark_text(out, "b"), self.TAIL)
+                self.assertEqual(summary["warnings"], [])
+
+    def test_a_bookmark_inside_a_link(self):
+        link = el("w:hyperlink", anchor="somewhere")
+        for part in (START("fig1", 7), None, END(7)):
+            if part is None:
+                run = el("w:r")
+                text = el("w:t")
+                text.text = self.MID
+                run.append(text)
+                part = run
+            link.append(part)
+        for mode, out, summary, log in self.marked(P2, self.HEAD, link, self.TAIL):
+            with self.subTest(mode=mode):
+                self.assertEqual(bookmark_text(out, "fig1"), "Figure 1")
+                xml = doc_xml(out)
+                inside = xml[xml.index("<w:hyperlink"): xml.index("</w:hyperlink>")]
+                self.assertIn("Figure 1", inside)
+                self.assertIn("w:bookmarkStart", inside)
+
+    def test_a_bookmark_across_paragraphs_with_a_deletion_between_its_ends(self):
+        def ends(d):
+            d.paragraphs[0]._p.insert(0, START("span", 9))
+            d.add_paragraph().add_run("A last paragraph.")
+            d.paragraphs[2]._p.append(END(9))
+
+        base = self.doc([P1, P2, "A last paragraph."])
+        clean = self.doc([P1, P2_NEW], ends)
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertEqual(len(summary["warnings"]), 1 if mode == "color" else 0)
+
+    def test_a_document_without_bookmarks_has_no_warnings(self):
+        code, out, summary, log = self.run_tool(self.doc([P1, P2]), self.doc([P1, P2_NEW]))
+        self.assertEqual(summary["warnings"], [])
+        self.assertNotIn("WARNING", log)
+
+
 if __name__ == "__main__":
     unittest.main()
