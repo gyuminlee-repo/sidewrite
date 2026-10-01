@@ -16,9 +16,12 @@
 //   lines           every quote has one line range, read from the PDF of the
 //                   manuscript text as it is now
 //   ledger          response-scope ledger rules (regex) hold in every answer
-//   prose_position  the answer text holds no location line or line number of
-//                   its own; the tool adds them
-//   rule_*          profile rules: word cap, opening, no other reviewer
+//   prose_position  the answer holds no location line or line number of its
+//                   own; the tool adds them
+//   rule_xref       no other reviewer is named
+//                   (these three read all the prose the letter prints for the
+//                   comment: the answer text and the reasons for declining)
+//   rule_*          profile rules of the answer text: word cap, opening
 //   warn only       lost_facts, pending_changes, rule_quote_words
 //
 // The profile must have its defaults filled (journal-profile.mjs).
@@ -27,6 +30,7 @@
 import { checkRegexItem, inScope } from "./ledger-check.mjs";
 import { lostFacts } from "./edit-facts.mjs";
 import { CITABLE, viewText, snapshotHash, staleReasons } from "./response-quotes.mjs";
+import { answerProse } from "./response-model.mjs";
 import { normalizeParaText } from "./revision-classify.mjs";
 
 // Counted by code, never taken from the model.
@@ -187,9 +191,13 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
         add("rule_quote_words", "warn", c.ref, `${wordCount(quote)} words quoted`);
     }
 
-    if (!text) continue;
-    const paras = text.split(/\n+/).map((t, i) => ({ index: i, text: t }));
-    for (const item of items) {
+    // What the letter prints as the answer: the text and the reasons for
+    // declining (response-model.mjs answerProse; the letter is written from
+    // the same list). The rules about what an answer may say are read there.
+    const paras = answerProse(c).map((t, i) => ({ index: i, text: t }));
+    const prose = paras.map((p) => p.text).join("\n");
+    // (A comment with nothing printed is the `answered` row, not a rule row.)
+    for (const item of paras.length ? items : []) {
       const out = checkRegexItem(item, paras);
       if (out.status === "violations")
         add(
@@ -202,7 +210,7 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
     }
     const position =
       paras.find((p) => BRACKET_LINE.test(p.text))?.text.trim() ??
-      positionRes.map((re) => re.exec(text)?.[0]).find(Boolean);
+      positionRes.map((re) => re.exec(prose)?.[0]).find(Boolean);
     if (position)
       add(
         "prose_position",
@@ -210,18 +218,21 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
         c.ref,
         `the response text holds "${position.slice(0, 60)}"; locations and line numbers are added by the tool`,
       );
+    // The reviewer being answered may be named, any other may not. An answer
+    // to the editor (reviewer 0) has no reviewer of its own: every number is
+    // a cross reference there.
+    const others = L.forbid_cross_reviewer
+      ? [...new Set(reviewersNamed(prose).filter((n) => n !== c.reviewer))]
+      : [];
+    if (others.length) add("rule_xref", "fail", c.ref, `mentions Reviewer ${others.join(", ")}`);
+
+    // The rules below are about the answer text itself.
+    if (!text) continue;
     if (L.max_words && wordCount(text) > L.max_words)
       add("rule_words", "fail", c.ref, `${wordCount(text)} words, limit ${L.max_words}`);
     if (openingError) add("rule_opening", "warn", c.ref, `opening_regex: ${openingError}`);
     else if (opening && !opening.test(text))
       add("rule_opening", "fail", c.ref, "first sentence does not match the profile opening");
-    // The reviewer being answered may be named, any other may not. An answer
-    // to the editor (reviewer 0) has no reviewer of its own: every number is
-    // a cross reference there.
-    const others = L.forbid_cross_reviewer
-      ? [...new Set(reviewersNamed(text).filter((n) => n !== c.reviewer))]
-      : [];
-    if (others.length) add("rule_xref", "fail", c.ref, `mentions Reviewer ${others.join(", ")}`);
     // An answer starts a sentence: its first capital is not a name.
     const lost = r.previous ? lostFacts(r.previous, text, { sentenceStart: true }) : [];
     if (lost.length) add("lost_facts", "warn", c.ref, `not in the new draft: ${lost.join("; ")}`);

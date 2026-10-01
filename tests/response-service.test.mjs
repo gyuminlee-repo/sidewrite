@@ -1014,3 +1014,49 @@ test("response_draft: a change decided while the model wrote marks the draft; a 
   );
   await t2.cleanup();
 });
+
+test("response_check: an LLM rule reads the reasons for declining too, as the letter prints them", async () => {
+  const REASON = "The supplier was not recorded, sadly.";
+  const paras = [
+    { index: 0, text: "We now state the unit." },
+    { index: 1, text: REASON },
+  ];
+  const m = model((req) =>
+    ledgerReply(req, paras, {
+      violations: [{ paragraph_index: 1, quote: "sadly", reason: "not courteous" }],
+    }),
+  );
+  const t = await setup({
+    job: m.job,
+    seed: comments({
+      requirements: [
+        { id: "q1", text: "state the unit" },
+        { id: "q2", text: "name the supplier" },
+      ],
+    }),
+    revision: {
+      ledger: [
+        {
+          id: "L1",
+          kind: "instruction",
+          text: "Be courteous.",
+          scope: "response",
+          check: { type: "llm" },
+        },
+      ],
+    },
+  });
+  await ready(t);
+  await t.ask("response_save", {
+    ref: "R1.1",
+    declined_requirements: [{ id: "q2", reason: REASON }],
+  });
+  const r = await t.ask("response_check", WITH_DOC);
+  assert.equal(m.requests.length, 1);
+  assert.ok(m.requests[0].prompt.includes(REASON), m.requests[0].prompt);
+  assert.deepEqual(
+    r.checks.map((x) => [x.id, x.level, x.ref, x.detail]),
+    [["ledger", "fail", "R1.1", "L1: sadly (not courteous)"]],
+  );
+  await t.cleanup();
+});

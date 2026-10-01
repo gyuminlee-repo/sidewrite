@@ -581,3 +581,95 @@ test("an edit Word did not answer is a warning: it may be in the manuscript with
   });
   assert.deepEqual(checkResponses(bare), []);
 });
+
+// ---- the reasons for declining are printed as answer paragraphs -----------------
+import { answerProse, buildLetterModel } from "../daemon/response-model.mjs";
+
+const printed = (input) =>
+  buildLetterModel(input.revision, input.profile)
+    .paragraphs.filter((p) => p.kind === "response")
+    .map((p) => p.text);
+
+test("the rules of the letter are checked in everything the letter prints as the answer", () => {
+  const declinedComment = (reason, response = null, letter = {}) =>
+    good(
+      (r) => Object.assign(r.comments[0], { declined: { reason }, response, changes: [] }),
+      letter,
+    );
+  const declinedRequest = (reason, text = "We now state the unit.", letter = {}) =>
+    good((r) => {
+      r.comments[0].requirements.push({ id: "q2", text: "name the supplier" });
+      r.comments[0].response.text = text;
+      r.comments[0].response.declined_requirements = [{ id: "q2", reason }];
+    }, letter);
+
+  // A forbidden word in the reason of a declined comment that has no answer text.
+  let input = declinedComment("Unfortunately this is outside the scope.");
+  assert.deepEqual(printed(input), ["Unfortunately this is outside the scope."]);
+  let rows = checkResponses(input);
+  assert.deepEqual(ids(rows), ["ledger:R1.1"]);
+  assert.equal(rows[0].detail, "L1: Unfortunately");
+  // The same in the reason of one declined request, next to a clean answer.
+  input = declinedRequest("Unfortunately the supplier was not recorded.");
+  assert.deepEqual(printed(input), [
+    "We now state the unit.",
+    "Unfortunately the supplier was not recorded.",
+  ]);
+  assert.deepEqual(ids(checkResponses(input)), ["ledger:R1.1"]);
+  // A reason the answer already gives word for word is printed once and hit once.
+  input = declinedRequest(
+    "Unfortunately it was not recorded.",
+    "Unfortunately it was not recorded.",
+  );
+  assert.deepEqual(printed(input), ["Unfortunately it was not recorded."]);
+  assert.equal(checkResponses(input).find((x) => x.id === "ledger").detail, "L1: Unfortunately");
+  // A reason for a request that is not listed any more is not printed, so not checked.
+  input = good((r) => {
+    r.comments[0].response.declined_requirements = [{ id: "q9", reason: "Unfortunately." }];
+  });
+  assert.deepEqual(ids(checkResponses(input)), []);
+
+  // Positions and other reviewers are rules about the printed prose as well.
+  input = declinedRequest("See line 12 of the manuscript.");
+  assert.deepEqual(ids(checkResponses(input)), ["prose_position:R1.1"]);
+  input = declinedRequest("Reviewer 2 asked for the opposite.", undefined, {
+    forbid_cross_reviewer: true,
+  });
+  assert.deepEqual(ids(checkResponses(input)), ["rule_xref:R1.1"]);
+  input = declinedComment("As we told Reviewer 2, this is out of scope.", null, {
+    forbid_cross_reviewer: true,
+  });
+  assert.deepEqual(ids(checkResponses(input)), ["rule_xref:R1.1"]);
+
+  // A phrase the letter must have counts wherever the answer prints it.
+  const thank = (i) =>
+    i.revision.ledger.push({
+      id: "L3",
+      kind: "instruction",
+      text: "thank the reviewer",
+      scope: "response",
+      check: { type: "regex", pattern: "thank", flags: "i", expect: "present" },
+    });
+  input = declinedRequest("We thank the reviewer, but the supplier was not recorded.");
+  thank(input);
+  assert.deepEqual(ids(checkResponses(input)), []);
+  input = declinedComment("Outside the scope of this study.");
+  thank(input);
+  assert.deepEqual(ids(checkResponses(input)), ["ledger:R1.1"]);
+});
+
+test("what is checked is what is printed: one list for the letter and the checks", () => {
+  const input = good((r) => {
+    r.comments[0].requirements.push({ id: "q2", text: "name the supplier" });
+    Object.assign(r.comments[0], { declined: { reason: "Out of scope." } });
+    r.comments[0].response.text = "First line.\n\n  \nSecond line.";
+    r.comments[0].response.declined_requirements = [
+      { id: "q2", reason: "Not  recorded." },
+      { id: "q1", reason: "First line." },
+    ];
+  });
+  const prose = answerProse(input.revision.comments[0]);
+  assert.deepEqual(prose, ["First line.", "Second line.", "Out of scope.", "Not recorded."]);
+  assert.deepEqual(printed(input), prose);
+  assert.deepEqual(answerProse({ response: null, declined: null }), []);
+});

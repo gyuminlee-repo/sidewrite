@@ -60,7 +60,7 @@ import {
   viewText,
 } from "./response-quotes.mjs";
 import { applyLineResults, lineRequests, locate, savePdf } from "./response-lines.mjs";
-import { buildLetterModel, letterPlainText } from "./response-model.mjs";
+import { answerProse, buildLetterModel, letterPlainText } from "./response-model.mjs";
 import { checkResponses, summarize, wordCount } from "./response-check.mjs";
 import { buildGlossPrompt, buildResponsePrompt, parseDraft } from "./response-prompt.mjs";
 import { runPy as defaultRunPy } from "./py-tool.mjs";
@@ -241,11 +241,10 @@ export function createResponseService({
     );
     if (!rules.length) return rows;
     const lines = [];
+    // Every paragraph the letter prints as an answer, reasons for declining
+    // included (the list the letter itself is written from).
     for (const c of revision.comments)
-      for (const text of String(c.response?.text ?? "")
-        .split(/\n+/)
-        .filter((t) => t.trim()))
-        lines.push({ index: lines.length, text, ref: c.ref });
+      for (const text of answerProse(c)) lines.push({ index: lines.length, text, ref: c.ref });
     if (!lines.length) return rows;
     const job = await oneshotJob(key);
     const records = [];

@@ -22,6 +22,30 @@ const squash = (s) =>
     .replace(/\s+/g, " ")
     .trim();
 
+// The prose the letter prints as the answer to one comment, a paragraph each,
+// in the order printed: the lines of the answer text, then the author's
+// reasons (they are part of the answer): the reason for declining the
+// comment, then one for each declined request, in the order of the requests.
+// A reason the answer text already gives word for word is not repeated; a
+// reason of a request that is no longer listed is not written.
+//
+// The letter (buildLetterModel) and the checks of the letter's rules
+// (response-check.mjs, the LLM rules in response-service.mjs) all read this
+// one list, so nothing is printed that was not checked.
+export function answerProse(c) {
+  const r = c.response;
+  const out = linesOf(r?.text);
+  const said = [squash(r?.text)];
+  const byRequest = new Map((r?.declined_requirements ?? []).map((d) => [d.id, d.reason]));
+  const reasons = [c.declined?.reason, ...(c.requirements ?? []).map((q) => byRequest.get(q.id))];
+  for (const reason of reasons.map(squash)) {
+    if (!reason || said.some((s) => s.includes(reason))) continue;
+    said.push(reason);
+    out.push(reason);
+  }
+  return out;
+}
+
 // R1.12 -> "12", E.2 -> "2".
 const commentNumber = (ref) => String(ref).slice(String(ref).lastIndexOf(".") + 1);
 
@@ -63,19 +87,7 @@ export function buildLetterModel(rev, profile, { gloss = false } = {}) {
 
     const r = c.response;
     const citations = (r?.citations ?? []).filter((cit) => !cit.problem);
-    for (const t of linesOf(r?.text)) add("response", t, body);
-    // The author's reasons are part of the answer: the reason for declining
-    // the comment, then one for each declined request, in the order of the
-    // requests. A reason the answer text already gives word for word is not
-    // repeated; a reason of a request that is no longer listed is not written.
-    const said = [squash(r?.text)];
-    const byRequest = new Map((r?.declined_requirements ?? []).map((d) => [d.id, d.reason]));
-    const reasons = [c.declined?.reason, ...(c.requirements ?? []).map((q) => byRequest.get(q.id))];
-    for (const reason of reasons.map(squash)) {
-      if (!reason || said.some((s) => s.includes(reason))) continue;
-      said.push(reason);
-      add("response", reason, body);
-    }
+    for (const t of answerProse(c)) add("response", t, body);
     if (gloss && r?.gloss)
       add(
         "gloss",
