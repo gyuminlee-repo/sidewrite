@@ -40,13 +40,15 @@ export function isStoredModelValid(v) {
 
 // The model of edits a pane stored, or null when it stored no choice. Until
 // the default became the best model, every saved setting carried model:
-// "sonnet" (the default of the time), chosen or not. So a stored model counts
-// as a choice only with the mark the menus set when the user picks one
-// (modelChosen); without it the stored value is that old default.
+// "sonnet" (the default of the time), chosen or not. So a stored "sonnet"
+// counts as a choice only with the mark the menus set when the user picks a
+// model (modelChosen); without it, it is that old default. Any other stored
+// model can only have come from the menu and is kept.
+const OLD_DEFAULT = "sonnet";
 export function storedEditsModel(settings) {
-  return settings?.modelChosen === true && isStoredModelValid(settings.model)
-    ? settings.model
-    : null;
+  const model = settings?.model;
+  if (!isStoredModelValid(model)) return null;
+  return settings.modelChosen === true || model !== OLD_DEFAULT ? model : null;
 }
 
 // The daemon answers set_model with the model it will use (it checks the
