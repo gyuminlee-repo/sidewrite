@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import tempfile
+import threading
 import unittest
 import xml.etree.ElementTree as ET
 import zipfile
@@ -118,6 +119,67 @@ class BuildTest(unittest.TestCase):
             code, rep = run_main(["--model", str(model), "--out", str(out)])
         self.assertEqual((code, rep["code"]), (3, "locked"))
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["model.json"])
+
+    def test_two_writes_to_one_path_at_once_both_succeed(self):
+        out = self.dir / "letter.docx"
+        models = [{"paragraphs": [{"kind": "response", "text": t * 200, "color": None}]} for t in "AB"]
+        # Both writers have written their temp file before either moves it.
+        both_written = threading.Barrier(2, timeout=10)
+        real = rd.write_zip
+
+        def write_then_wait(*args, **kwargs):
+            real(*args, **kwargs)
+            both_written.wait()
+
+        errors = []
+
+        def work(model):
+            try:
+                rd.write_docx(model, out)
+            except Exception as e:  # noqa: BLE001  (the test reports whatever went wrong)
+                errors.append(repr(e))
+
+        with mock.patch.object(rd, "write_zip", write_then_wait):
+            threads = [threading.Thread(target=work, args=(m,)) for m in models]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(errors, [])
+        z = zipfile.ZipFile(out)
+        self.assertIsNone(z.testzip())
+        self.assertIn(z.read("word/document.xml").decode("utf8"), [rd.document_xml(m) for m in models])
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["letter.docx"])
+
+    def test_a_tmp_file_that_was_already_there_is_left_alone(self):
+        out = self.dir / "letter.docx"
+        other = self.dir / "letter.docx.tmp"
+        other.write_text("not ours", encoding="utf-8")
+        rd.write_docx(MODEL, out)
+        self.assertEqual(other.read_text(encoding="utf-8"), "not ours")
+        self.assertTrue(zipfile.is_zipfile(out))
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["letter.docx", "letter.docx.tmp"])
+        # Also when the write fails.
+        with mock.patch.object(rd.os, "replace", side_effect=PermissionError("in use")):
+            with self.assertRaises(rd.Locked):
+                rd.write_docx(MODEL, out)
+        self.assertEqual(other.read_text(encoding="utf-8"), "not ours")
+
+    def test_a_failed_write_leaves_no_temp_file_and_keeps_the_old_letter(self):
+        out = self.dir / "letter.docx"
+        rd.write_docx(MODEL, out)
+        before = out.read_bytes()
+        real = rd.write_zip
+
+        def half_written(*args, **kwargs):
+            real(*args, **kwargs)
+            raise OSError("disk full")
+
+        with mock.patch.object(rd, "write_zip", half_written):
+            with self.assertRaises(OSError):
+                rd.write_docx({"paragraphs": [{"kind": "response", "text": "new", "color": None}]}, out)
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["letter.docx"])
+        self.assertEqual(out.read_bytes(), before)
 
 
 if __name__ == "__main__":

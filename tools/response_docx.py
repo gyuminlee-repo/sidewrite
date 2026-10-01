@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import uuid
 import zipfile
 from xml.sax.saxutils import escape, quoteattr
 
@@ -82,7 +83,8 @@ def document_xml(model):
 
 
 def write_zip(path, parts):
-    """parts: [(name, text)]. Fixed timestamps and attributes: same input, same bytes."""
+    """path: a file name or a binary file open for writing. parts: [(name, text)].
+    Fixed timestamps and attributes: same input, same bytes."""
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in parts:
             info = zipfile.ZipInfo(name, STAMP)
@@ -93,18 +95,29 @@ def write_zip(path, parts):
 
 
 def write_docx(model, out):
-    """Write the letter to `out` through a temp file next to it. Returns the paragraph count."""
+    """Write the letter to `out` and return the paragraph count.
+
+    The zip is written to a temp file of this call's own in the folder of
+    `out` (same file system, so the move over `out` is atomic) and created
+    exclusively: two writers of one path never share a temp file, and a file
+    that was already there is never touched. Only that own file is cleaned up.
+    """
     xml = document_xml(model)  # raises before anything is written
-    tmp = str(out) + ".tmp"
-    try:
-        write_zip(tmp, [("[Content_Types].xml", CONTENT_TYPES), ("_rels/.rels", RELS), ("word/document.xml", xml)])
+    out = str(out)
+    folder, base = os.path.split(os.path.abspath(out))
+    tmp = os.path.join(folder, ".%s.%d.%s.tmp" % (base, os.getpid(), uuid.uuid4().hex))
+    with open(tmp, "xb") as fh:  # from here on the file is ours
         try:
-            os.replace(tmp, str(out))
-        except PermissionError as e:
-            raise Locked(str(e)) from e
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+            write_zip(fh, [("[Content_Types].xml", CONTENT_TYPES), ("_rels/.rels", RELS), ("word/document.xml", xml)])
+            fh.close()
+            try:
+                os.replace(tmp, out)
+            except PermissionError as e:
+                raise Locked(str(e)) from e
+        finally:
+            fh.close()
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return len(model["paragraphs"])
 
 
