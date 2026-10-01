@@ -10,6 +10,21 @@ export function normalizeParaText(s) {
     .trim();
 }
 
+// Same function as daemon/doc-diff.mjs paragraphHash (FNV-1a 32 bit over the
+// UTF-16 code units of the normalized text, 8 hex digits); the test runs
+// both on one corpus. The daemon sends the hash of the paragraph it judged a
+// tracked edit on, the task pane compares it with the paragraph it is about
+// to edit (tools-word.js toolTrackedEdit).
+export function paragraphHash(text) {
+  const s = normalizeParaText(text);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+
 // The paragraph as it reads once this one change is accepted. Computed from
 // the text before the edit, because while the change is pending the Word
 // paragraph.text holds both the inserted and the deleted text.
@@ -305,16 +320,46 @@ export function invariantReport(revision, comments) {
     (ch) => !(ch.kind === "insert" && ch.state === "rejected") && !ch.comment_cleaned_at,
   );
   const recorded = new Set(changes.map((ch) => String(ch.word_comment_id)));
-  const missing = expected.filter((ch) => !ids.has(String(ch.word_comment_id)));
+  // A change the task pane applied without its rationale comment
+  // (comment_missing, no comment id) never had one: it is not a comment that
+  // went missing, and it is named apart. It is not ok either: every change
+  // needs its rationale comment.
+  const bare = (ch) => ch.word_comment_id == null && !!ch.comment_missing;
+  const uncommented = expected.filter(bare);
+  const missing = expected.filter((ch) => !bare(ch) && !ids.has(String(ch.word_comment_id)));
   const orphans = [...ids].filter((id) => !recorded.has(id));
   return {
     changes: changes.length,
     expected_comments: expected.length,
     tool_comments: ids.size,
     missing_comment: missing.map((ch) => ch.id),
+    uncommented: uncommented.map((ch) => ch.id),
     unrecorded_comment_ids: orphans,
-    ok: expected.length === ids.size && missing.length === 0 && orphans.length === 0,
+    ok:
+      expected.length === ids.size &&
+      missing.length === 0 &&
+      uncommented.length === 0 &&
+      orphans.length === 0,
   };
+}
+
+// The end of the status line of a refresh: "." when the report is ok, else
+// what does not match. The word MISMATCH stays in every such line (the
+// acceptance judge reads it).
+export function invariantText(inv) {
+  if (inv.ok) return ".";
+  const parts = [];
+  if (inv.missing_comment.length || inv.unrecorded_comment_ids.length || !inv.uncommented.length) {
+    parts.push(
+      `missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"}`,
+    );
+  }
+  if (inv.uncommented.length) {
+    parts.push(
+      `no rationale comment on ${inv.uncommented.join(",")}: applied in Word, the comment could not be added`,
+    );
+  }
+  return ` (MISMATCH: ${parts.join("; ")})`;
 }
 
 // Design 0 C1: once the author accepts or rejects a change, its rationale
@@ -357,6 +402,10 @@ export function ledgerStatusText(item) {
       ? `${item.violation_count} violation(s), ${unsureText(item)}`
       : `${item.violation_count} violation(s)`;
   if (item?.status === "unsure") return unsureText(item);
+  // The check did not run to its end (a model reply that could not be used
+  // or a failed call, a regex that does not compile): no paragraph of it is
+  // taken as checked.
+  if (item?.status === "error") return "check failed: nothing counts as passed";
   if (item?.status === "skipped")
     return SKIPPED_SCOPE_LABELS[item.scope] ?? `Checked at the ${item.scope} stage`;
   return item?.status;
@@ -482,11 +531,18 @@ export function ledgerCheckFromText(text) {
 }
 
 // L7. Everything that waits for the author, in one list.
+// A normal edit that is with Word right now: the daemon writes it to the
+// file before the call (review-service.mjs onAttempt) and takes it out with
+// the answer. Nothing for the author to decide, so it is not shown. One
+// that got no answer is outcome_unknown and is shown.
+export const inFlightEdit = (b) => b.state === "applying" && (b.blocked_by ?? []).length === 0;
+
 export function pendingDecisions(revision) {
   const blocked = [];
   const requirements = [];
   for (const c of revision?.comments ?? []) {
     for (const b of c.blocked ?? []) {
+      if (inFlightEdit(b)) continue;
       blocked.push({
         ref: c.ref,
         id: b.id,

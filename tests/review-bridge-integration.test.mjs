@@ -13,6 +13,7 @@ import { WebSocket } from "ws";
 import { createBridge } from "../daemon/bridge.mjs";
 import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit } from "../daemon/review-tools.mjs";
+import { PANE_CAPS } from "../taskpane/shared/tools-word.js";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 const TOKEN = "t";
@@ -66,7 +67,9 @@ async function daemon() {
 
 // The task pane of one document: hello, requests with request_id, and the
 // tool calls it was sent (it answers only when the test says so).
-async function pane(port, doc) {
+// caps: what the hello says the pane can do. The real task pane sends
+// PANE_CAPS (taskpane.js sendHello); [] is one from before caps.
+async function pane(port, doc, caps = PANE_CAPS) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   const frames = [];
   const waiters = new Map();
@@ -82,7 +85,7 @@ async function pane(port, doc) {
     ws.on("open", resolve);
     ws.on("error", reject);
   });
-  ws.send(JSON.stringify({ type: "hello", token: TOKEN, host: "word", active_doc: doc }));
+  ws.send(JSON.stringify({ type: "hello", token: TOKEN, host: "word", active_doc: doc, caps }));
   await until(() => frames.some((f) => f.type === "welcome"), "welcome");
   let n = 0;
   return {
@@ -120,11 +123,11 @@ const snap = (text, comments = []) => ({
 const revisionOf = async (doc) =>
   JSON.parse(await readFile(doc.replace(/\.docx$/, ".revision.json"), "utf8"));
 
-async function world() {
+async function world(caps) {
   const dir = await mkdtemp(join(tmpdir(), "review-bridge-"));
   const doc = join(dir, "paper.docx");
   const d = await daemon();
-  const p = await pane(d.port(), doc);
+  const p = await pane(d.port(), doc, caps);
   const saved = await p.ask("review_save_comments", {
     comments: [{ ref: "R1.1", reviewer: 1, text: "Name the medium." }],
   });
@@ -156,10 +159,17 @@ test("real bridge: the socket drops with an edit in flight, the pane reconnects 
 
     p2 = await pane(w.d.port(), w.doc);
     p2.send({ type: "tool_result", id: call.id, ok: true, result: APPLIED });
-    await until(async () => (await revisionOf(w.doc)).comments[0].changes.length === 1, "change");
+    // One save records the change and removes the unanswered edit: the
+    // first read that shows the change shows no blocked edit (two saves used
+    // to leave [1, 1] in between, and a read after a fixed wait hit it).
+    const first = await until(async () => {
+      const x = (await revisionOf(w.doc)).comments[0];
+      return x.changes.length === 1 && x;
+    }, "change");
+    assert.deepEqual([first.changes.length, first.blocked.length], [1, 0]);
     p2.send({ type: "tool_result", id: call.id, ok: true, result: APPLIED }); // a second copy
-    await sleep(50);
-    const c = (await revisionOf(w.doc)).comments[0];
+    // Answered after the second copy: same socket, and the same file chain.
+    const c = (await p2.ask("review_load")).revision.comments[0];
     assert.deepEqual([c.changes.length, c.blocked.length], [1, 0]);
     assert.equal(c.changes[0].word_comment_id, "12");
     assert.ok(w.d.lines.includes(`[review] late result recorded ${call.id}`));
@@ -274,6 +284,38 @@ test("real bridge: an edit answered after the pane's document changed is recorde
     await assert.rejects(access(doc2.replace(/\.docx$/, ".revision.json")));
   } finally {
     w.p.ws.terminate();
+    await w.d.bridge.close();
+    await w.cleanup();
+  }
+});
+
+// A task pane loaded before the daemon was updated: its hello names no
+// capability, so it would apply a tracked edit without comparing the
+// paragraph first. It is sent no tool call; one that reloads gets the edit.
+test("real bridge: a pane whose hello has no caps is sent no tracked edit; after a reload it is", async () => {
+  const w = await world([]);
+  let p2 = null;
+  try {
+    const key = w.d.keys.get(w.doc);
+    const r = await w.d.edit(key, EDIT, "R1.1");
+    assert.deepEqual([r.ok, r.code], [false, "TaskPaneOutdated"], JSON.stringify(r));
+    assert.match(r.message, /reload the task pane/i);
+    // Answered after anything the daemon sent before it: no tool call came.
+    const loaded = await w.p.ask("review_load");
+    assert.deepEqual(w.p.toolCalls(), []);
+    const c = loaded.revision.comments[0];
+    assert.deepEqual([c.changes.length, c.blocked.length], [0, 0]);
+
+    await w.p.close();
+    p2 = await pane(w.d.port(), w.doc); // the reloaded task pane
+    const running = w.d.edit(w.d.keys.get(w.doc), EDIT, "R1.1");
+    const call = await until(() => p2.toolCalls()[0], "tool_call");
+    assert.equal(typeof call.args.expected_before_hash, "string");
+    p2.send({ type: "tool_result", id: call.id, ok: true, result: APPLIED });
+    assert.equal((await running).ok, true);
+  } finally {
+    w.p.ws.terminate();
+    p2?.ws.terminate();
     await w.d.bridge.close();
     await w.cleanup();
   }
