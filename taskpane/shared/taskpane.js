@@ -47,7 +47,7 @@ import { initReviewPane } from "./review-pane.js";
 import { initResponsePane } from "./response-pane.js";
 import { initToolsPane } from "./tools-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
-import { declinedNote, fallbackNotice, modelLabel, modelLineText } from "./model-line.js";
+import { declinedNote, fallbackNotice, modelLabel, modelLineText, turnUsed } from "./model-line.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
 import {
@@ -865,18 +865,8 @@ async function handleServerMessage(msg) {
         // session, to another model: said in the chat and shown at once.
         if (msg.scope !== "local") {
           liveModel = msg.fallback || liveModel;
-          modelUsed.turn = {
-            provider: "claude",
-            asked: modelUsed.turn?.asked ?? editsModel(),
-            ran: msg.fallback ?? null,
-            // stay: the daemon leaves the document on the other model.
-            declined: {
-              original: msg.original,
-              fallback: msg.fallback,
-              category: msg.category ?? null,
-              stay: msg.stay === true,
-            },
-          };
+          // stay: the daemon leaves the document on the other model.
+          modelUsed.turn = turnUsed(modelUsed.turn, msg, editsModel());
           renderConnection();
           renderModelLine();
         }
@@ -898,7 +888,8 @@ async function handleServerMessage(msg) {
         // Authoritative: this is the model the SDK actually started with.
         liveModel = msg.model || liveModel;
         // asked: the model the daemon gave the session; model: the one it runs on.
-        modelUsed.turn = { provider: "claude", asked: msg.asked ?? null, ran: msg.model ?? null };
+        // (declined: the document stays on another model; said with every init.)
+        modelUsed.turn = turnUsed(modelUsed.turn, msg, editsModel());
         renderModelLine();
         pendingModelShort = null;
         renderConnection();
@@ -928,12 +919,15 @@ async function handleServerMessage(msg) {
     case "model_used":
       // A writing or judgment request was sent: what it asked for and ran on.
       if (msg.role in modelUsed) {
-        modelUsed[msg.role] = {
-          provider: msg.provider,
-          asked: msg.asked ?? null,
-          ran: msg.ran ?? null,
-          ok: msg.ok,
-        };
+        modelUsed[msg.role] =
+          msg.role === "turn"
+            ? turnUsed(modelUsed.turn, { ...msg, event: "model_used" }, editsModel())
+            : {
+                provider: msg.provider,
+                asked: msg.asked ?? null,
+                ran: msg.ran ?? null,
+                ok: msg.ok,
+              };
         renderModelLine();
       }
       break;

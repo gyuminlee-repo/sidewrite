@@ -288,3 +288,16 @@ test("a model that declines the manuscript twice: the session stays on the other
   );
   assert.match(code, /if \(session\) session\.ranModel = msg\.model;/);
 });
+
+// The CLI sends an init message at the start of every turn: the session_init
+// event of a session that stays on the other model carries that state, or
+// the pane would lose it with every turn.
+test("session_init carries the state of a model that declines the manuscript", () => {
+  const at = code.indexOf('event: "session_init"');
+  assert.ok(at > 0);
+  assert.match(code.slice(at - 600, at + 600), /declined: stayState\(session\?\.key\),/);
+  assert.match(
+    code,
+    /const stayState = \(key\) => \{\s*const d = staysOn\(key\);\s*return d\s*\? \{ original: d\.original, fallback: d\.fallback, category: d\.category, stay: true \}\s*: null;\s*\};/,
+  );
+});

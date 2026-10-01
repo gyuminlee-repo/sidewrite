@@ -273,3 +273,10 @@ test("after Extract rules the tab says why there is no candidate", () => {
     },
   );
 });
+
+// Before the daemon has said which file the pane is on, the line says
+// nothing: "Save the document" is for a document that is known to be unsaved.
+test("docLine: nothing while the file is not known yet", () => {
+  assert.equal(docLine(undefined), "");
+  assert.match(docLine(null), /^Save the document/);
+});

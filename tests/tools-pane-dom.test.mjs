@@ -534,3 +534,30 @@ test("the head of an answer names what really ran, when the pane knows it", asyn
     'Translation into Korean (Claude · Opus 5.5) for: "Grown at 30 °C."',
   );
 });
+
+// The Tools tab said "Save the document to a local folder" before the daemon
+// had answered which file the pane is on (an e2e run read that line of a
+// saved document). Until the answer the line is empty; the hint is for a
+// document the daemon says is not saved; another failure is an error, not
+// that hint.
+test("the file line: empty until the daemon answers, the save hint only for an unsaved document", async () => {
+  globalThis.document = fakeDocument([]);
+  const { initToolsPane } = await import("../taskpane/shared/tools-pane.js");
+  let answer = null;
+  const pane = initToolsPane({
+    sendRequest: async () => answer,
+    word: {},
+  });
+  const line = () => document.getElementById("tools-doc").textContent;
+  assert.equal(line(), "", "before the first answer");
+  answer = { ok: false, error: "Save the document to a local folder first." };
+  await pane.reload();
+  assert.match(line(), /^Save the document to a local folder to use the tools\.$/);
+  answer = { ok: false, error: "timed out" };
+  await pane.reload();
+  assert.equal(line(), "", "an error says nothing about the file");
+  assert.equal(document.getElementById("tools-message").textContent, "timed out");
+  answer = { ok: true, doc_name: "paper.docx", profile_name: "generic", policy_packs: {} };
+  await pane.reload();
+  assert.match(line(), /^Saved file: paper\.docx\. Profile: generic\./);
+});
