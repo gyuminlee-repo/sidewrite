@@ -6,6 +6,9 @@ import {
   applyTrackedEdit,
   trackedEditShape,
   TRACKED_EDIT_DESCRIPTION,
+  applyTrackedRewrite,
+  trackedRewriteShape,
+  TRACKED_REWRITE_DESCRIPTION,
   askAuthor,
   askAuthorShape,
   ASK_AUTHOR_DESCRIPTION,
@@ -848,6 +851,21 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
     },
   );
 
+  // A paragraph rewritten as a whole: reaches Word as office_tracked_edit calls.
+  const office_tracked_rewrite = tool(
+    "office_tracked_rewrite",
+    TRACKED_REWRITE_DESCRIPTION,
+    trackedRewriteShape,
+    async (args) => {
+      try {
+        const deps = { ...(opts.trackedEdit ?? {}), call: rawCall };
+        return asMcpResult(await applyTrackedRewrite(deps, args, opts.getReviewTurn?.() ?? null));
+      } catch (e) {
+        return asMcpError(e);
+      }
+    },
+  );
+
   // Writes the review file, not the document: no bridge call.
   const office_ask_author = tool(
     "office_ask_author",
@@ -908,6 +926,7 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
     office_resolve_comment,
     office_header_footer,
     office_tracked_edit,
+    office_tracked_rewrite,
     office_ask_author,
     office_requirement_outside,
   ];

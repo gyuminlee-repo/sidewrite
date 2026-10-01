@@ -337,6 +337,7 @@ const TOOL_STATUS_LABELS = {
   office_resolve_comment: "Resolving a comment…",
   office_header_footer: "Editing header/footer…",
   office_tracked_edit: "Applying a tracked change with its rationale…",
+  office_tracked_rewrite: "Rewriting a paragraph as tracked changes…",
   office_ask_author: "Noting a question for the author…",
   office_requirement_outside: "Noting a request that belongs to another file…",
   // Excel

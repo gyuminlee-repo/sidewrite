@@ -88,7 +88,7 @@ export function guardedCall(rawCall, getReviewTurn) {
     if (turn && !reviewTurnToolAllowed(name)) {
       return Promise.reject(
         new Error(
-          `${name} is disabled during review turn ${turn.ref}. Use office_tracked_edit: every change needs its own rationale comment.`,
+          `${name} is disabled during review turn ${turn.ref}. Use office_tracked_edit (or office_tracked_rewrite for a whole paragraph): every change needs its rationale comment.`,
         ),
       );
     }
