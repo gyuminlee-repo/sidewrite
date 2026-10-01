@@ -126,6 +126,8 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
   function render() {
     renderMenus();
     renderList();
+    // The choices the daemon accepted, readable by the acceptance driver.
+    $("providers-root").setAttribute("data-selection", JSON.stringify(sel));
   }
 
   // Send one choice. A refusal is shown and nothing changes.

@@ -14,11 +14,14 @@ import {
   buildComPlan,
   cleanupDecision,
   exitDecision,
+  featureIds,
   judge,
   minimalFind,
   norm,
   resolvedMatch,
-  rewriteCommand,
+  rewriteVerify,
+  stageOf,
+  staleMarkers,
   table,
 } from "./judge.mjs";
 
@@ -41,7 +44,8 @@ const { values: opt } = parseArgs({
     review: { type: "string", default: path.join(REPO, "tests/fixtures/fake_review.txt") },
     ledger: { type: "string", default: path.join(REPO, "tests/fixtures/review_ledger.json") },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
-    log: { type: "string", default: "/tmp/daemon-s2-e2e.log" },
+    // Default /tmp/daemon-<stage>-e2e.log.
+    log: { type: "string" },
     "cdp-port": { type: "string", default: process.env.E2E_CDP_PORT ?? "9333" },
     "win-node": {
       type: "string",
@@ -51,8 +55,15 @@ const { values: opt } = parseArgs({
     "feature-list": { type: "string", default: process.env.E2E_FEATURE_LIST },
     "plan-dir": { type: "string", default: process.env.E2E_PLAN_DIR },
     "plan-repo": { type: "string", default: process.env.E2E_PLAN_REPO },
-    "plan-log": { type: "string", default: "/tmp/daemon-s2.log" },
+    // Default /tmp/daemon-<stage>.log; --plan-dir defaults to /tmp/<stage>-run.
+    "plan-log": { type: "string" },
     features: { type: "string", default: "S2-18..S2-34" },
+    // Prefix of the feature ids and of the marker files (s2, s25, ...).
+    // Default: the stage of --features.
+    stage: { type: "string" },
+    // Provider for the review turns (claude, codex, antigravity), chosen in
+    // the pane's Providers section after the Review tab opened.
+    provider: { type: "string" },
     // Feature ids that depend on an event the run cannot force (judge.mjs
     // CONDITIONS). Repeat the flag or separate ids with commas.
     conditional: { type: "string", multiple: true, default: [] },
@@ -73,13 +84,24 @@ if (!opt["base-dir"] && !opt["run-dir"])
 if (!opt["playwright-core"])
   die("--playwright-core (Windows path of a playwright-core package) is required");
 
+let STAGE;
+try {
+  STAGE = (opt.stage ?? stageOf(opt.features)).toLowerCase();
+  featureIds(opt.features);
+} catch (e) {
+  die(e.message);
+}
+if (!/^s\d+$/.test(STAGE)) die(`--stage takes a prefix like s2 or s25, not ${opt.stage}`);
+const PLAN_DIR = opt["plan-dir"] ?? `/tmp/${STAGE}-run`;
+const PLAN_LOG = opt["plan-log"] ?? `/tmp/daemon-${STAGE}.log`;
+
 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 const RUN = path.resolve(opt["run-dir"] ?? path.join(opt["base-dir"], `e2e-${stamp}`));
 const TOOLS = path.join(RUN, "tools");
 const OK_DIR = path.join(RUN, "ok");
 const DOC = path.join(RUN, "review_manuscript.docx");
 const REVISION = path.join(RUN, "review_manuscript.revision.json");
-const LOG = opt.log;
+const LOG = opt.log ?? `/tmp/daemon-${STAGE}-e2e.log`;
 const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
 const MODE14_LOG = LOG.replace(/\.log$/, "") + "-mode14.log";
 const MODE14_DIR = path.join(RUN, "mode14");
@@ -244,26 +266,23 @@ const embedTaskpane = (src, out) =>
   );
 
 // ---- verify commands -------------------------------------------------------
-function featureIds(spec) {
-  const [a, b] = spec.split("..").map((s) => Number(s.replace(/^S2-/, "")));
-  const out = [];
-  for (let i = a; i <= (b ?? a); i++) out.push(`S2-${String(i).padStart(2, "0")}`);
-  return out;
-}
 function runFeatures() {
   if (!opt["feature-list"]) return;
   const list = JSON.parse(fs.readFileSync(opt["feature-list"], "utf8"));
   const features = Array.isArray(list) ? list : list.features;
-  const map = {};
-  if (opt["plan-dir"]) map[opt["plan-dir"].replace(/\/$/, "")] = RUN;
-  if (opt["plan-repo"]) map[`cd ${opt["plan-repo"].replace(/\/$/, "")} `] = `cd ${REPO} `;
-  map[opt["plan-log"]] = LOG;
-  map[opt["plan-log"].replace(/\.log$/, "") + "-knob.log"] = KNOB_LOG;
-  map["/tmp/s2-"] = path.join(OK_DIR, "s2-");
   for (const id of featureIds(opt.features)) {
     const f = features.find((x) => x.id === id);
     if (!f?.verify_command) continue;
-    const cmd = rewriteCommand(f.verify_command, map);
+    const cmd = rewriteVerify(f.verify_command, {
+      runDir: RUN,
+      prefix: STAGE,
+      planDir: PLAN_DIR,
+      planRepo: opt["plan-repo"],
+      repo: REPO,
+      planLog: PLAN_LOG,
+      log: LOG,
+      knobLog: KNOB_LOG,
+    });
     let code = 0;
     try {
       execFileSync("bash", ["-c", cmd], { stdio: "ignore", timeout: 300_000 });
@@ -303,6 +322,12 @@ async function main() {
   if (listening(WS_PORT) || listening(HTTP_PORT))
     die(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
   fs.rmSync(KNOB_LOG, { force: true });
+  // A reused run folder (--run-dir): markers and evidence of an earlier run
+  // are removed, so only what this run judges can satisfy a verify command.
+  if (fs.existsSync(OK_DIR)) {
+    record.stale_markers_removed = staleMarkers(fs.readdirSync(OK_DIR), STAGE);
+    for (const n of record.stale_markers_removed) fs.unlinkSync(path.join(OK_DIR, n));
+  }
 
   record.word.preexisting = wordPids();
 
@@ -313,6 +338,15 @@ async function main() {
   save();
 
   note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+  // A provider that cannot run review turns is refused here with its reason
+  // (the step fails); the turns below then run with Claude.
+  if (opt.provider) {
+    note("select-provider", pane("select-provider", { role: "turn", id: opt.provider }), {
+      label: `select-provider turn=${opt.provider}`,
+      ctx: { id: opt.provider },
+    });
+    pane("open-review");
+  }
   note("split", pane("split", { review_file: winPath(opt.review) }));
   note("edit-draft", pane("edit-draft", { requirements: { "R1.3": R13_REQUIREMENTS } }));
   note("ledger-add", pane("ledger-add", { ledger_file: winPath(opt.ledger) }));

@@ -213,6 +213,11 @@ test("choosing a judgment provider sends it with its first model and stores the 
   });
   assert.deepEqual(t.settings.oneshotProvider, { id: "ollama", model: "gemma4:12b" });
   assert.equal(t.pane.turnLabel(), null, "review turns are still Claude's");
+  // What the daemon accepted, for the acceptance driver (scripts/e2e).
+  assert.deepEqual(JSON.parse(t.$("providers-root").attributes["data-selection"]), {
+    turn: { id: "claude", model: null },
+    oneshot: { id: "ollama", model: "gemma4:12b" },
+  });
 });
 
 test("a refused choice is shown and not stored; the menu goes back", async () => {

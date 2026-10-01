@@ -105,6 +105,48 @@ const turnBusy = (page) =>
     return document.getElementById("input").disabled || !p.hidden;
   });
 
+// Providers section of the Setup tab (ids from taskpane/word/index.html,
+// rows from taskpane/shared/providers-pane.js). The list is asked for on
+// connect; wait until it is drawn or its message says why it is not.
+async function openProviders(page) {
+  await page.click('button.tab[data-tab="setup"]');
+  await page.waitForFunction(
+    () =>
+      document.querySelectorAll("#providers-list .provider-row").length > 0 ||
+      document.getElementById("providers-message").textContent.trim() !== "",
+    null,
+    { timeout: 120_000, polling: 200 },
+  );
+}
+function providersView(page) {
+  return page.evaluate(() => {
+    const t = (n) => (n ? n.textContent.replace(/\s+/g, " ").trim() : "");
+    const q = (s, root = document) => [...root.querySelectorAll(s)];
+    const menu = (id) =>
+      q(`#${id} option`).map((o) => ({
+        id: o.value,
+        text: t(o),
+        enabled: !o.disabled,
+        note: o.title,
+      }));
+    const raw = document.getElementById("providers-root").getAttribute("data-selection");
+    return {
+      menus: { turn: menu("provider-turn"), oneshot: menu("provider-oneshot") },
+      models: { turn: menu("provider-turn-model"), oneshot: menu("provider-oneshot-model") },
+      selection: raw ? JSON.parse(raw) : {},
+      rows: q("#providers-list .provider-row").map((r) => ({
+        id: r.getAttribute("data-provider"),
+        state: r.getAttribute("data-state"),
+        status: t(r.querySelector(".provider-status")),
+        policy: t(r.querySelector(".provider-policy")),
+        key_note: t(r.querySelector(".provider-key-note")),
+        key_box: !!r.querySelector('input[type="password"]'),
+      })),
+      message: t(document.getElementById("providers-message")),
+    };
+  });
+}
+
 const steps = {
   async "open-review"(page) {
     await page.click('button.tab[data-tab="review"]');
@@ -275,6 +317,176 @@ const steps = {
     await page.click(btn);
     const message = await waitMessage(page, 120_000);
     return { offer, ...(await view(page)), message };
+  },
+
+  // ---- stage 2.5: Providers section (Setup tab) ----
+
+  // The two menus, the row of every provider and the message line.
+  async providers(page) {
+    await openProviders(page);
+    return providersView(page);
+  },
+
+  // Choose a provider (and a model) for a role: a.role "turn" | "oneshot",
+  // a.id, a.model. A provider that is not in the menu or is disabled there
+  // is not chosen; `refused` then holds the text of its menu row.
+  async "select-provider"(page, a) {
+    await openProviders(page);
+    const menu = `#provider-${a.role}`;
+    const option = await page
+      .$eval(`${menu} option[value="${a.id}"]`, (o) => ({
+        disabled: o.disabled,
+        text: o.textContent,
+        note: o.title,
+      }))
+      .catch(() => null);
+    const selection = async () => (await providersView(page)).selection[a.role];
+    if (!option) return { role: a.role, selected: await selection(), refused: `no ${a.id} row` };
+    if (option.disabled) {
+      const refused = option.note ? `${option.text}: ${option.note}` : option.text;
+      return { role: a.role, selected: await selection(), refused };
+    }
+    const settled = (want) =>
+      page.waitForFunction(
+        ([role, w]) => {
+          const m = document.getElementById("providers-message").textContent.trim();
+          const raw = document.getElementById("providers-root").getAttribute("data-selection");
+          const s = raw ? JSON.parse(raw)[role] : null;
+          return m !== "" || (s && s.id === w.id && (w.model == null || s.model === w.model));
+        },
+        [a.role, want],
+        { timeout: 90_000, polling: 200 },
+      );
+    await page.evaluate(() => (document.getElementById("providers-message").textContent = ""));
+    await page.selectOption(menu, a.id);
+    await settled({ id: a.id });
+    if (a.model && !(await text(page, "#providers-message"))) {
+      await page.selectOption(`${menu}-model`, a.model);
+      await settled({ id: a.id, model: a.model });
+    }
+    const v = await providersView(page);
+    return { role: a.role, selected: v.selection[a.role], message: v.message };
+  },
+
+  // ---- stage 2.5: Review tab ----
+
+  // The review text from a file (a.path, a Windows path) instead of a paste.
+  async "load-review-file"(page, a) {
+    await clearMessage(page);
+    await page.setInputFiles("#review-file-input", a.path);
+    const message = await waitMessage(page, 60_000);
+    const chars = await page.$eval("#review-input", (n) => n.value.length);
+    return { message, chars };
+  },
+
+  async "export-ledger"(page) {
+    await clearMessage(page);
+    await page.click("#ledger-export");
+    await waitMessage(page, 60_000);
+    return view(page);
+  },
+
+  // a.path: a ledger JSON file (Windows path).
+  async "import-ledger"(page, a) {
+    await clearMessage(page);
+    await page.setInputFiles("#ledger-file-input", a.path);
+    await waitMessage(page, 60_000);
+    return view(page);
+  },
+
+  // Candidate rules from the review text in the paste box (a.review_file
+  // fills it first). a.pick: texts; a candidate is ticked when its line holds
+  // one of them, and no other is. Without a.pick the pane's own ticks stay.
+  // The ticked ones are added unless a.add is false.
+  async "suggest-ledger"(page, a) {
+    if (a.review_file) await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
+    await clearMessage(page);
+    await page.click("#ledger-suggest-review");
+    const suggest_message = await waitMessage(page, 10 * 60_000);
+    const rows = page.locator("#ledger-candidates label");
+    const n = await rows.count();
+    const candidates = [];
+    for (let i = 0; i < n; i++) {
+      const label = (await rows.nth(i).textContent()).replace(/\s+/g, " ").trim();
+      const box = rows.nth(i).locator('input[type="checkbox"]');
+      if (a.pick) await box.setChecked(a.pick.some((p) => label.includes(p)));
+      candidates.push({ label, checked: await box.isChecked() });
+    }
+    if (a.add === false || !candidates.some((c) => c.checked)) {
+      return { suggest_message, candidates, ...(await view(page)), message: "" };
+    }
+    await clearMessage(page);
+    await page.click("#ledger-candidates-add");
+    const message = await waitMessage(page, 60_000);
+    return { suggest_message, candidates, ...(await view(page)), message };
+  },
+
+  // Propose all: every comment that is not done, one turn after another.
+  // Waits until the Stop button of the run is gone and its summary shows.
+  async "propose-all"(page) {
+    if (await turnBusy(page)) throw new Error("a turn is already running");
+    const cards = await page.$$eval(".review-comment", (ns) => ns.length);
+    await clearMessage(page);
+    await page.click("#review-propose-all");
+    const order = [];
+    const started = Date.now();
+    const limit = TURN_TIMEOUT * Math.max(1, cards);
+    const running = () =>
+      page.evaluate(() => !document.getElementById("review-propose-stop").hidden);
+    // The run starts (Stop shows) or ends at once with a message (nothing open).
+    await page.waitForFunction(
+      () =>
+        !document.getElementById("review-propose-stop").hidden ||
+        document.getElementById("review-message").textContent.trim() !== "",
+      null,
+      { timeout: 30_000, polling: 200 },
+    );
+    while (await running()) {
+      const m = /Propose all: (\d+)\/(\d+) (\S+)\./.exec(await text(page, "#review-progress"));
+      if (m && order[order.length - 1] !== m[3]) order.push(m[3]);
+      if (Date.now() - started > limit)
+        throw new Error(`Propose all still running after ${limit} ms (at ${order.join(",")})`);
+      await sleep(1000);
+    }
+    // The summary line of the run, not the refresh message of its last turn.
+    await page.waitForFunction(
+      () =>
+        /proposed\.$|^No open comment/.test(
+          document.getElementById("review-message").textContent.trim(),
+        ),
+      null,
+      { timeout: 120_000, polling: 200 },
+    );
+    await sleep(4000);
+    return {
+      order,
+      seconds: Math.round((Date.now() - started) / 1000),
+      progress_hidden: await page.$eval("#review-progress", (n) => n.hidden),
+      ...(await view(page)),
+    };
+  },
+
+  // The pane gets the focus back: the status refreshes with no Refresh click.
+  // An auto-refresh does not start within 10 s of the one before; a.wait_ms
+  // (default 11 s) passes first.
+  async "focus-refresh"(page, a) {
+    await sleep(a.wait_ms ?? 11_000);
+    const before = await text(page, "#review-auto");
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    const changed = await page
+      .waitForFunction(
+        (b) => {
+          const t = document.getElementById("review-auto").textContent.trim();
+          return t !== "" && t !== b;
+        },
+        before,
+        { timeout: 120_000, polling: 200 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+    return { before, after: await text(page, "#review-auto"), changed, ...(await view(page)) };
   },
 
   view,

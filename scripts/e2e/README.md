@@ -44,17 +44,60 @@ copy of the test manuscript, its revision.json and comment backup, the Windows
 scripts (`tools/`), the machine-judged marker files (`ok/`, each with an
 `.evidence.json`) and `result.json` (every step with the pane texts read, the
 Word COM outcomes, the verify command exit codes and the cleanup record). The
-daemon log goes to `--log` (default `/tmp/daemon-s2-e2e.log`; a second
+daemon log goes to `--log` (default `/tmp/daemon-<stage>-e2e.log`; a second
 daemon started for the forbid-list knob writes `-knob.log`).
 
-Verify commands are rewritten before they run: `--plan-dir` becomes the run
+Verify commands are rewritten before they run (`rewriteVerify` in
+`judge.mjs`): `--plan-dir` (default `/tmp/<stage>-run`) becomes the run
 folder, `cd <--plan-repo> ` becomes this checkout, `--plan-log` (default
-`/tmp/daemon-s2.log`) and its `-knob.log` become this run's logs, `/tmp/s2-`
-markers become `ok/s2-`. Files of earlier runs are never read.
+`/tmp/daemon-<stage>.log`) and its `-knob.log` become this run's logs,
+`/tmp/<stage>-` markers and evidence files become `ok/<stage>-`. No marker
+path of a rewritten command is in `/tmp`, so a file left there by an earlier
+run or by hand cannot make it pass. When a run folder is reused
+(`--run-dir`), the `ok/<stage>-*.ok` and `ok/<stage>-*.evidence.json` files
+in it are removed at the start (`stale_markers_removed` in `result.json`).
+
+The stage is the prefix of the feature ids and of the markers: `s2` for
+`--features S2-18..S2-34`, `s25` for `--features S25-30..S25-41`. It is read
+from `--features`; `--stage s25` sets it by hand. A range stays in one stage.
+
+`--provider <id>` (claude, codex, antigravity) chooses the provider of the
+review turns in the pane's Providers section right after the Review tab
+opened (step `select-provider turn=<id>`). A provider the pane does not
+offer for review turns is not chosen: the step fails with the text of its
+menu row, and the turns run with Claude. Known conditions for
+`--conditional` in stage 2.5: `S25-33`, `S25-34` (a Codex review turn
+started), `S25-35` (an Antigravity review turn started), `S25-36` (any CLI
+review turn started), each read from `[cli-turn] start provider=...`.
 
 Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
 `--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
 `--keep-on-fail` (leave Word and the daemon up after a failed step).
+
+## Pane steps
+
+`pane-driver.cjs <step> <args.json>` runs one step and prints one JSON line.
+Stage 2: `open-review`, `split`, `edit-draft`, `ledger-add`, `check-all`,
+`preview`, `propose`, `refresh`, `clean-tool`, `delete-all`, `view`.
+Stage 2.5:
+
+| Step               | Args                                  | Does and returns                                                                                                       |
+| ------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `providers`        |                                       | Setup tab; both menus (`id`, `text`, `enabled`, `note`), every provider row (state, status, policy, key note), message |
+| `select-provider`  | `role` (turn, oneshot), `id`, `model` | chooses it; `selected` is what the daemon accepted, `refused` the menu text of a provider that cannot be chosen        |
+| `load-review-file` | `path` (Windows)                      | review text from a .txt or .md file; `message`, `chars` in the paste box                                               |
+| `export-ledger`    |                                       | Export ledger; the message names `<stem>.ledger.json`                                                                  |
+| `import-ledger`    | `path` (Windows)                      | Import ledger; `Added a ledger rule(s), skipped s ...`                                                                 |
+| `suggest-ledger`   | `review_file`, `pick`, `add`          | candidates from the review text; ticks the ones holding a `pick` text, adds the ticked ones unless `add` is false      |
+| `propose-all`      |                                       | Propose all until its Stop button is gone; `order` of the comments tried, the summary message                          |
+| `focus-refresh`    | `wait_ms`                             | dispatches `focus` on the pane window; `changed` is true when the auto-refresh line changed with no Refresh click      |
+
+`judge.mjs` holds the expected texts of these steps (`JUDGES`) and the
+evidence builders `providersEvidence` (one entry per provider id, for
+`ok/<stage>-providers.evidence.json`) and `proposeAllEvidence` (`overlaps`,
+`proposed`, `open_before` from the summary message and the daemon log).
+There is no step that registers the office tools with agy: the daemon
+registers them for the length of one agy review turn only.
 
 ## Resolved rationale comments
 

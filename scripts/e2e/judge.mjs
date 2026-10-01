@@ -83,6 +83,59 @@ export function rewriteCommand(cmd, map) {
   return out;
 }
 
+// "S25-30..S25-41" or "S2-18": the feature ids of one stage, in order, with
+// the number padded to two digits as the feature lists write it.
+export function featureIds(spec) {
+  const ends = String(spec)
+    .split("..")
+    .map((s) => /^(S\d+)-(\d+)$/.exec(s.trim()));
+  if (ends.length > 2 || ends.some((m) => !m)) {
+    throw new Error(`--features takes S<stage>-<n> or S<stage>-<n>..S<stage>-<m>, not ${spec}`);
+  }
+  const [a, b = a] = ends;
+  if (a[1] !== b[1]) throw new Error(`--features must stay in one stage, not ${spec}`);
+  if (Number(b[2]) < Number(a[2])) throw new Error(`--features ${spec} ends before it starts`);
+  const out = [];
+  for (let i = Number(a[2]); i <= Number(b[2]); i++) {
+    out.push(`${a[1]}-${String(i).padStart(2, "0")}`);
+  }
+  return out;
+}
+
+// The marker prefix of a feature spec: "S25-30..S25-41" -> "s25".
+export const stageOf = (spec) => featureIds(spec)[0].split("-")[0].toLowerCase();
+
+const noSlash = (p) => String(p).replace(/\/+$/, "");
+
+// A verify command of a feature list as this run must run it:
+//   /tmp/<prefix>-*   markers and evidence   -> <runDir>/ok/<prefix>-*
+//   planDir           the folder the list names -> runDir
+//   cd <planRepo>     the checkout the list names -> cd <repo>
+//   planLog, and its -knob.log               -> log, knobLog
+// After this no path of the command is a marker in /tmp, so a file left
+// there by an earlier run or by hand cannot make it pass.
+export function rewriteVerify(
+  cmd,
+  { runDir, prefix, planDir, planRepo, repo, planLog, log, knobLog } = {},
+) {
+  if (!runDir) throw new Error("rewriteVerify needs runDir");
+  if (!/^s\d+$/.test(String(prefix))) {
+    throw new Error(`rewriteVerify needs a stage prefix like s25, not ${prefix}`);
+  }
+  const map = { [`/tmp/${prefix}-`]: `${noSlash(runDir)}/ok/${prefix}-` };
+  if (planDir) map[noSlash(planDir)] = noSlash(runDir);
+  if (planRepo && repo) map[`cd ${noSlash(planRepo)} `] = `cd ${repo} `;
+  if (planLog && log) map[planLog] = log;
+  if (planLog && knobLog) map[planLog.replace(/\.log$/, "") + "-knob.log"] = knobLog;
+  return rewriteCommand(cmd, map);
+}
+
+// File names of an ok folder that are markers or evidence of the stage. The
+// runner removes them before a run, so a reused run folder starts empty.
+export function staleMarkers(names, prefix) {
+  return names.filter((n) => n.startsWith(`${prefix}-`) && /\.(ok|evidence\.json)$/.test(n));
+}
+
 // What to do with the Word process the runner started, from the answer of
 // word-com.ps1 quit. action: "none" | "kill" | "leave"; fail: the run fails.
 //   kill   only when quit ran (so every open document was in the run folder
@@ -122,6 +175,12 @@ export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = t
 export const CONDITIONS = {
   // A turn that ended on a Claude usage limit.
   "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
+  // A review turn run by a CLI provider. None starts when the provider is
+  // "judgments only" (the CLI will not call the office tools unattended).
+  "S25-33": { trigger: /^\[cli-turn\] start provider=codex /m },
+  "S25-34": { trigger: /^\[cli-turn\] start provider=codex /m },
+  "S25-35": { trigger: /^\[cli-turn\] start provider=antigravity /m },
+  "S25-36": { trigger: /^\[cli-turn\] start provider=/m },
 };
 const TURN_LOGGED = /^\[agent\] turn complete \(/m;
 
@@ -201,6 +260,65 @@ export function resolvedMatch(revision, word, message = "") {
         .map((x) => `${x.id} ${x.done === null ? "no comment" : x.done ? "done" : "open"}`)
         .join("; ") || "no accepted or rejected change with a comment") +
       (refused ? "; pane: not marked resolved" : ""),
+  };
+}
+
+// Evidence of the `providers` pane step, one entry per provider id at the
+// top level: enabled and note are those of the Judgments menu, turn_enabled
+// and turn_note those of the Review turns menu. pass: the list loaded and
+// Claude can be chosen for both.
+export function providersEvidence(step) {
+  const out = {};
+  const turn = new Map((step?.menus?.turn ?? []).map((o) => [o.id, o]));
+  const state = new Map((step?.rows ?? []).map((r) => [r.id, r.state]));
+  for (const o of step?.menus?.oneshot ?? []) {
+    out[o.id] = {
+      enabled: !!o.enabled,
+      note: o.note ?? "",
+      turn_enabled: !!turn.get(o.id)?.enabled,
+      turn_note: turn.get(o.id)?.note ?? "",
+      state: state.get(o.id) ?? null,
+    };
+  }
+  const pass = step?.ok !== false && !!out.claude?.enabled && !!out.claude?.turn_enabled;
+  return { pass, ...out };
+}
+
+// Review turns in a daemon log: `[review] prompt <ref> ...` starts one (a
+// preview does not), `[review] turn done <ref>` ends it. overlaps: starts
+// that came while another turn was open.
+export function turnOverlaps(log) {
+  const started = [];
+  const open = new Set();
+  let overlaps = 0;
+  for (const line of String(log ?? "").split("\n")) {
+    const s = /^\[review\] prompt (\S+) /.exec(line);
+    if (s && !line.endsWith("(preview)")) {
+      if (open.size) overlaps++;
+      open.add(s[1]);
+      started.push(s[1]);
+      continue;
+    }
+    const e = /^\[review\] turn done (\S+)/.exec(line);
+    if (e) open.delete(e[1]);
+  }
+  return { started, overlaps };
+}
+
+// Evidence of a Propose all run. message: the pane's summary line; log: the
+// daemon log lines written during the run.
+export function proposeAllEvidence({ message, log }) {
+  const m = /(\d+) of (\d+) proposed\./.exec(String(message ?? ""));
+  const { started, overlaps } = turnOverlaps(log);
+  const proposed = m ? Number(m[1]) : 0;
+  const open_before = m ? Number(m[2]) : null;
+  return {
+    pass: !!m && open_before > 0 && proposed === open_before && overlaps === 0,
+    overlaps,
+    proposed,
+    open_before,
+    started,
+    message: String(message ?? ""),
   };
 }
 
@@ -325,6 +443,71 @@ export const JUDGES = {
       !has(r.message, "MISMATCH"),
     expect: "Back up and delete 2 comments (tool 0, yours 2) then Backed up 2, deleted 2 of 2",
     got: `${r.offer} | ${r.message}`,
+  }),
+  // ---- stage 2.5 steps ----
+  providers: (r) => {
+    const e = providersEvidence(r);
+    const ids = (k) =>
+      Object.keys(e)
+        .filter((id) => id !== "pass" && e[id][k])
+        .join(",");
+    return {
+      pass: e.pass,
+      expect: "the list loaded; Claude selectable for review turns and judgments",
+      got: `judgments: ${ids("enabled")}; review turns: ${ids("turn_enabled")}`,
+    };
+  },
+  "select-provider": (r, ctx) => ({
+    pass: r.selected?.id === ctx.id && !r.refused && !r.message,
+    expect: `${ctx.id} selected, no message`,
+    got: `${r.selected?.id}${r.selected?.model ? `:${r.selected.model}` : ""}${r.refused ? ` | not selectable: ${r.refused}` : ""}${r.message ? ` | ${r.message}` : ""}`,
+  }),
+  "load-review-file": (r) => ({
+    pass: /^Loaded .+\. Split into comments next\.$/.test(r.message) && r.chars > 0,
+    expect: "Loaded <file>. Split into comments next. (text in the paste box)",
+    got: `${r.message} chars=${r.chars}`,
+  }),
+  "export-ledger": (r, ctx) => {
+    const m = /^Exported (\d+) ledger rule\(s\) to (.+)$/.exec(r.message ?? "");
+    return {
+      pass: !!m && (ctx.count == null || Number(m[1]) === ctx.count),
+      expect: `Exported ${ctx.count ?? "n"} ledger rule(s) to <stem>.ledger.json`,
+      got: r.message,
+    };
+  },
+  "import-ledger": (r, ctx) => {
+    const m = /^Added (\d+) ledger rule\(s\), skipped (\d+) already in the ledger\.$/.exec(
+      r.message ?? "",
+    );
+    return {
+      pass:
+        !!m &&
+        (ctx.added == null || Number(m[1]) === ctx.added) &&
+        (ctx.skipped == null || Number(m[2]) === ctx.skipped),
+      expect: `Added ${ctx.added ?? "a"} ledger rule(s), skipped ${ctx.skipped ?? "s"} already in the ledger.`,
+      got: r.message,
+    };
+  },
+  "suggest-ledger": (r) => {
+    const picked = (r.candidates ?? []).filter((c) => c.checked).length;
+    return {
+      pass: picked > 0 && /^Added [1-9]\d* ledger rule\(s\)/.test(r.message ?? ""),
+      expect: "candidates listed, the ticked ones added to the ledger",
+      got: `${(r.candidates ?? []).length} candidate(s), ${picked} ticked | ${r.message}`,
+    };
+  },
+  "propose-all": (r, ctx) => {
+    const e = proposeAllEvidence({ message: r.message, log: ctx.log });
+    return {
+      pass: e.pass && !r.message_error,
+      expect: "Propose all: n of n proposed. One review turn at a time.",
+      got: `${r.message} | started ${e.started.join(",")} overlaps=${e.overlaps}`,
+    };
+  },
+  "focus-refresh": (r) => ({
+    pass: r.changed === true && /^Auto-refreshed /.test(r.after ?? ""),
+    expect: "Auto-refreshed <time>: ... (no Refresh click)",
+    got: r.after || "(the auto-refresh line did not change)",
   }),
 };
 
