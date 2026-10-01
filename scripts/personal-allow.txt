@@ -2,3 +2,8 @@
 # against a hit line "path:line:match". One per line, the reason above it.
 # A line with a user's own name or path does not belong here: remove the
 # value from the file instead.
+
+# The fake docx of the anonymizer tests: an invented Windows user folder that
+# the tests look for in the anonymized copy (it must be gone there).
+tests/anon_docx_fixture.py:241:C:\\Users\\test.author
+tests/anon_docx_fixture.py:321:C:\\Users\\test.author

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // Review acceptance run without hands: daemon, a separate Word process with
 // a CDP port on its add-in pane, the Review tab steps, the author's Word
-// steps over COM, the feature_list verify commands, cleanup. Three flows:
-// stage 2 (main), stage 2.5 (mainS25) and stage 3 (mainS3), chosen by
-// --stage or --features.
+// steps over COM, the feature_list verify commands, cleanup. Four flows:
+// stage 2 (main), stage 2.5 (mainS25), stage 3 (mainS3) and stage 4 (mainS4,
+// the Tools tab), chosen by --stage or --features.
 // Runs from WSL; Word, its pane and COM are on Windows. See README.md.
 
 import { spawn, execFileSync } from "node:child_process";
@@ -12,24 +12,29 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
+  anonymizeEvidence,
   badgesMatch,
   buildComPlan,
   cleanupDecision,
   cleanupEvidence,
   cliTurnEvidence,
+  countEvidence,
   defaultFeatures,
   docStem,
   exitDecision,
   featureIds,
   exportEvidence,
   focusEvidence,
+  formatEvidence,
   guardEvidence,
+  guidelineEvidence,
   insertTarget,
   JUDGES,
   judge,
   langEvidence,
   ledgerEvidence,
   lineShift,
+  markedEvidence,
   minimalFind,
   modelsEvidence,
   norm,
@@ -44,6 +49,7 @@ import {
   rewriteVerify,
   S3_DECISIONS,
   secondReader,
+  selectionEvidence,
   siblingMatch,
   stageOf,
   staleEvidence,
@@ -71,7 +77,15 @@ const { values: opt } = parseArgs({
   options: {
     "base-dir": { type: "string", default: process.env.E2E_BASE_DIR },
     "run-dir": { type: "string" },
-    fixture: { type: "string", default: path.join(REPO, "tests/fixtures/review_manuscript.docx") },
+    // Default: tests/fixtures/review_manuscript.docx; stage 4:
+    // tests/fixtures/aux_manuscript.docx (scripts/e2e/make_aux_fixture.py).
+    fixture: { type: "string" },
+    // Stage 4: the guideline text that is pasted, the earlier version the
+    // marked copy is compared with, the language the selection is translated
+    // into.
+    guideline: { type: "string", default: path.join(REPO, "tests/fixtures/fake_guideline.txt") },
+    baseline: { type: "string", default: path.join(REPO, "tests/fixtures/aux_manuscript_v1.docx") },
+    "translate-lang": { type: "string", default: "German" },
     review: { type: "string", default: path.join(REPO, "tests/fixtures/fake_review.txt") },
     ledger: { type: "string", default: path.join(REPO, "tests/fixtures/review_ledger.json") },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
@@ -136,13 +150,19 @@ if (!opt["playwright-core"])
 let STAGE;
 try {
   STAGE = (opt.stage ?? stageOf(opt.features ?? defaultFeatures("s2"))).toLowerCase();
-  if (!/^s\d+$/.test(STAGE)) throw new Error(`--stage takes s2, s25 or s3, not ${opt.stage}`);
+  if (!/^s\d+$/.test(STAGE)) throw new Error(`--stage takes s2, s25, s3 or s4, not ${opt.stage}`);
   opt.features ??= defaultFeatures(STAGE);
   featureIds(opt.features);
 } catch (e) {
   die(e.message);
 }
-if (!["s2", "s25", "s3"].includes(STAGE)) die(`there is no flow for stage ${STAGE} (s2, s25, s3)`);
+if (!["s2", "s25", "s3", "s4"].includes(STAGE))
+  die(`there is no flow for stage ${STAGE} (s2, s25, s3, s4)`);
+opt.fixture ??= path.join(
+  REPO,
+  "tests/fixtures",
+  STAGE === "s4" ? "aux_manuscript.docx" : "review_manuscript.docx",
+);
 let AFTER_CLEANUP = [];
 try {
   const spec = opt["after-cleanup"] ?? (STAGE === "s3" ? "S3-41" : null);
@@ -401,7 +421,23 @@ async function setup() {
   record.word.preexisting = wordPids();
 
   embedTaskpane(opt.fixture, DOC);
-  await startDaemon(LOG);
+  // Stage 4: the journal profile whose format rules find what the fixture
+  // plants, next to the manuscript, and named as the default of this daemon.
+  const env = {};
+  if (STAGE === "s4") {
+    const profile = JSON.parse(
+      execFileSync("python3", [path.join(HERE, "make_aux_fixture.py"), "--profile"], {
+        encoding: "utf8",
+      }),
+    );
+    fs.mkdirSync(path.join(RUN, "journal_profiles"), { recursive: true });
+    fs.writeFileSync(
+      path.join(RUN, "journal_profiles", `${profile.name}.json`),
+      JSON.stringify(profile, null, 2),
+    );
+    env.CC_OFFICE_PROFILE = profile.name;
+  }
+  await startDaemon(LOG, env);
 
   record.word.launch = launchWord(DOC, path.join(RUN, "webview2"));
   save();
@@ -1107,6 +1143,132 @@ async function mainS3() {
   });
 }
 
+// Stage 4 (S4-30..S4-33, S4-37, S4-38): the Tools tab on the fake manuscript
+// of make_aux_fixture.py. Nothing here writes to the document: the pane's
+// snapshot is compared around the selection requests and around the checks.
+// Every feature gets its evidence file under ok/, and its .ok marker only
+// when the evidence passes.
+async function mainS4() {
+  const ledgerNow = () =>
+    fs.existsSync(REVISION) ? (JSON.parse(fs.readFileSync(REVISION, "utf8")).ledger ?? []) : [];
+  const logAt = () => readLog(LOG).length;
+  const logFrom = (at) => readLog(LOG).slice(at);
+  const paragraphs = () => pane("snapshot").paragraphs ?? [];
+  const python = (args) => {
+    try {
+      return {
+        exit: 0,
+        out: execFileSync("python3", args, { encoding: "utf8", maxBuffer: 64 << 20 }),
+      };
+    } catch (e) {
+      return { exit: e.status ?? 1, out: String(e.stdout ?? "") };
+    }
+  };
+
+  note("open-tools", pane("open-tools"));
+  if (opt["judgment-provider"]) {
+    const id = opt["judgment-provider"];
+    note("select-provider", pane("select-provider", { role: "oneshot", id }), {
+      label: `select-provider oneshot=${id}`,
+      ctx: { id },
+    });
+    pane("open-tools");
+  }
+
+  // ---- S4-33: translate the selection and ask about it; the document stays ----
+  const before = paragraphs();
+  const target = before.find((p) => /model organism/.test(p.text))?.index ?? 0;
+  const at = logAt();
+  const translate = note(
+    "tools-translate",
+    pane("tools-translate", { paragraph: target, lang: opt["translate-lang"] }),
+  );
+  const ask = note(
+    "tools-ask",
+    pane("tools-ask", { paragraph: target, question: "Which organism is this paragraph about?" }),
+  );
+  const afterSelection = paragraphs();
+  marker(
+    "s4-selection",
+    selectionEvidence({ translate, ask, before, after: afterSelection, log: logFrom(at) }),
+  );
+
+  // ---- S4-30: the guideline gives cited candidates; one is adopted ----
+  const pick = "abstract must not exceed";
+  const ledgerBefore = ledgerNow();
+  const extract = note(
+    "tools-extract",
+    pane("tools-extract", { guideline_file: winPath(opt.guideline) }),
+  );
+  const add = note("tools-add", pane("tools-add", { keep: pick }));
+  const adopted = guidelineEvidence({
+    extract,
+    add,
+    guideline: fs.readFileSync(opt.guideline, "utf8"),
+    ledgerBefore,
+    ledgerAfter: ledgerNow(),
+    pick,
+  });
+  marker("s4-profile", adopted);
+
+  // ---- S4-31, S4-32: the checks find what the fixture plants, and only report ----
+  const check = note("tools-check", pane("tools-check"));
+  marker("s4-count", countEvidence({ check, rule: adopted.added[0] }));
+  marker("s4-format", formatEvidence({ check, before: afterSelection, after: paragraphs() }));
+
+  // ---- S4-37: the button writes what the script writes, in both modes ----
+  const modes = [];
+  for (const mode of ["track_changes", "color"]) {
+    const step = note("tools-marked", pane("tools-marked", { path: winPath(opt.baseline), mode }), {
+      label: `tools-marked ${mode}`,
+    });
+    const name = /^Written: (\S+\.docx)/.exec(step.marked?.[0] ?? "")?.[1] ?? null;
+    const byScript = path.join(RUN, `script_marked_${mode}.docx`);
+    const script = python([
+      path.join(REPO, "tools/build_marked_diff.py"),
+      "--baseline",
+      opt.baseline,
+      "--clean",
+      DOC,
+      "--out",
+      byScript,
+      "--mode",
+      mode,
+    ]);
+    const equal =
+      !!name &&
+      script.exit === 0 &&
+      fs.existsSync(path.join(RUN, name)) &&
+      fs.readFileSync(path.join(RUN, name)).equals(fs.readFileSync(byScript));
+    modes.push({ mode, name, script_exit: script.exit, equal });
+  }
+  marker("s4-marked", markedEvidence(modes));
+
+  // ---- S4-38: the anonymized copy, checked again by the runner ----
+  const anonymized = note("tools-anonymize", pane("tools-anonymize"));
+  const copy = path.join(RUN, `${STEM}_anonymized.docx`);
+  let verifier = null;
+  if (fs.existsSync(copy)) {
+    const run = python([
+      path.join(REPO, "scripts/verify-anonymized.py"),
+      "--before",
+      DOC,
+      "--after",
+      copy,
+      "--json",
+    ]);
+    try {
+      verifier = JSON.parse(run.out.trim().split("\n").pop());
+    } catch (e) {
+      record.verifier_error = String(e?.message ?? e);
+    }
+  }
+  marker(
+    "s4-anonymize",
+    anonymizeEvidence({ step: anonymized, verifier, exists: fs.existsSync(copy) }),
+  );
+}
+
 // Close the Word this run started (pid, with `doc` open in it). It is stopped
 // by force only when quit ran and the process stayed (cleanupDecision); a
 // refused quit leaves Word and its documents alone and fails the run.
@@ -1266,7 +1428,7 @@ async function cleanup() {
     }
     quitWord(record.word.launch_mode14?.pid, DOC14, "quit_mode14");
   }
-  if (!failed && STAGE !== "s3" && !opt["skip-special"]) {
+  if (!failed && ["s2", "s25"].includes(STAGE) && !opt["skip-special"]) {
     try {
       if (record.cleanup.left_running?.length) throw new Error("a Word of this run is still up");
       await special();
@@ -1295,7 +1457,7 @@ async function cleanup() {
 let failed = null;
 try {
   await setup();
-  await (STAGE === "s2" ? main() : STAGE === "s3" ? mainS3() : mainS25());
+  await { s2: main, s25: mainS25, s3: mainS3, s4: mainS4 }[STAGE]();
 } catch (e) {
   failed = e;
   record.error = String(e?.stack ?? e);

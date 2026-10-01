@@ -2,9 +2,27 @@
 
 `run-acceptance.mjs` runs a Review tab acceptance procedure end to end:
 daemon, a separate Word process, the task pane clicks, the author's Word
-steps, and the feature_list verify commands. It has three flows: stage 2
-(`S2-18..S2-34`, the default), stage 2.5 (`--stage s25`, `S25-30..S25-41`)
-and stage 3 (`--stage s3`, `S3-30..S3-41`, the response letter).
+steps, and the feature_list verify commands. It has four flows: stage 2
+(`S2-18..S2-34`, the default), stage 2.5 (`--stage s25`, `S25-30..S25-41`),
+stage 3 (`--stage s3`, `S3-30..S3-41`, the response letter) and stage 4
+(`--stage s4`, `S4-30..S4-33,S4-37,S4-38`, the Tools tab).
+
+Stage 4 opens the fake manuscript `tests/fixtures/aux_manuscript.docx`
+(`make_aux_fixture.py`, every sentence invented) with the journal profile
+the same script prints, put under `journal_profiles/` in the run folder. Its
+steps: translate a selected paragraph and ask about it (the pane's snapshot
+of the document is the same before and after, and the daemon log shows no
+agent turn and no tool call); paste `tests/fixtures/fake_guideline.txt`,
+keep the abstract word limit of the candidates and add it (it is in the
+ledger of `revision.json` with the sentence it cites); run the checks (the
+count rule reports the planted abstract, the format rules report the five
+planted findings, the document is unchanged); make the marked copy in both
+modes (each file equals what `tools/build_marked_diff.py` writes from the
+same two files); make the anonymized copy (the runner runs
+`scripts/verify-anonymized.py` on it again: total 0, same text). The
+selection and guideline steps ask the judgment provider chosen in the pane
+(`--judgment-provider` picks one). `--features` takes a list of ranges for
+this stage (`S4-30..S4-33,S4-37`).
 
 ## Prerequisites
 
