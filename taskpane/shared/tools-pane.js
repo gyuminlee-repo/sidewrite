@@ -5,7 +5,16 @@
 // own, made by the daemon from the saved file.
 // Text from the daemon or the document is inserted with textContent only.
 
-import { docLine, selectionHead, candidateKind, candidateCite, rulesAdded } from "./tools-view.js";
+import {
+  docLine,
+  selectionHead,
+  candidateKind,
+  candidateCite,
+  rulesAdded,
+  fileTooLarge,
+  markedLines,
+} from "./tools-view.js";
+import { bytesToBase64 } from "./response-view.js";
 
 const CONNECTION_LOST =
   "The connection to the daemon was lost before the result came. Run it again.";
@@ -217,6 +226,30 @@ export function initToolsPane({
   onClick("tools-rules-add", addRules);
   $("tools-policy-scope").addEventListener("change", guard(savePolicy));
   renderRules();
+
+  const lines = (rows) =>
+    rows.map((x) =>
+      el("div", { class: x.bad ? "response-check-fail" : "review-reqs-line", text: x.text }),
+    );
+
+  // Marked copy: the earlier version is read here and sent; the daemon
+  // compares it with the saved file and writes the copy.
+  async function buildMarked() {
+    const f = $("tools-baseline").files?.[0];
+    if (!f) throw new Error("Choose the earlier version (.docx) first.");
+    if (!/\.docx$/i.test(f.name)) throw new Error(`${f.name} is not a .docx file.`);
+    if (fileTooLarge(f.size)) throw new Error(`${f.name} is too large to send to the daemon.`);
+    const mode = $("tools-marked-mode").value || "track_changes";
+    $("tools-marked").replaceChildren();
+    say(`Comparing the saved file with ${f.name}...`);
+    const r = await askJob("marked_build", {
+      mode,
+      baseline_base64: bytesToBase64(new Uint8Array(await f.arrayBuffer())),
+    });
+    say("");
+    $("tools-marked").replaceChildren(...lines(markedLines(r)));
+  }
+  onClick("tools-marked-build", buildMarked);
 
   renderDoc(); // loaded on "welcome" (taskpane.js calls reload once connected)
 

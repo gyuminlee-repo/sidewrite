@@ -313,6 +313,62 @@ test("the policy pack box shows the profile and saves an override of this paper"
   assert.equal(t.message(), "Review turns no longer carry rules 2 to 4 for this paper.");
 });
 
+// ---- marked copy -------------------------------------------------------------
+
+const docx = (name = "v1.docx", size = 3) => ({
+  name,
+  size,
+  arrayBuffer: async () => Uint8Array.of(80, 75, 3).buffer,
+});
+
+test("marked copy: the earlier version and the mode are sent, the result is listed", async () => {
+  const t = await setup({
+    respond: {
+      marked_build: (p) => ({
+        ok: true,
+        name: "paper_marked.docx",
+        mode: p.mode,
+        report: { paragraphs: { n_eq: 18, n_mod: 6, n_ins: 0, n_del: 0 }, warnings: [] },
+        notice: "Read from disk.",
+      }),
+    },
+  });
+  t.$("tools-baseline").files = [docx()];
+  t.$("tools-marked-mode").value = "color";
+  await t.$("tools-marked-build").click();
+  await tick();
+  assert.deepEqual(t.of("marked_build")[0].payload, { mode: "color", baseline_base64: "UEsD" });
+  assert.deepEqual(texts(t.$("tools-marked")), [
+    "Written: paper_marked.docx (colours).",
+    "Paragraphs: 6 changed, 0 added, 0 removed, 18 unchanged.",
+    "Read from disk.",
+  ]);
+  assert.equal(t.message(), "");
+});
+
+test("marked copy: a refusal is shown as the tool wrote it, with its paragraph number", async () => {
+  const refusal = 'paragraph 12 ("The cells were"): a text direction mark (w:dir) was added';
+  const t = await setup({ respond: { marked_build: () => ({ ok: false, error: refusal }) } });
+  t.$("tools-baseline").files = [docx()];
+  await t.$("tools-marked-build").click();
+  await tick();
+  assert.equal(t.of("marked_build")[0].payload.mode, "track_changes");
+  assert.deepEqual(texts(t.$("tools-marked")), ["No marked copy was written.", refusal]);
+});
+
+test("marked copy: no file, a file that is not a docx or one too large is said and not sent", async () => {
+  const t = await setup();
+  await t.$("tools-marked-build").click();
+  assert.equal(t.message(), "Choose the earlier version (.docx) first.");
+  t.$("tools-baseline").files = [docx("v1.doc")];
+  await t.$("tools-marked-build").click();
+  assert.equal(t.message(), "v1.doc is not a .docx file.");
+  t.$("tools-baseline").files = [docx("v1.docx", 80 * 1024 * 1024)];
+  await t.$("tools-marked-build").click();
+  assert.equal(t.message(), "v1.docx is too large to send to the daemon.");
+  assert.equal(t.of("marked_build").length, 0);
+});
+
 test("a page without the Tools tab (Excel) gets a pane that does nothing", async () => {
   const t = await setup({ missing: ["tools-root"] });
   assert.equal(t.requests.length, 0);

@@ -39,6 +39,29 @@ export function rulesAdded(r) {
   return `${parts.join("; ")}.`;
 }
 
+// A file larger than this does not fit one frame to the daemon (base64).
+const FRAME_LIMIT = 100 * 1024 * 1024 - 4096;
+export const fileTooLarge = (bytes) => Math.ceil(bytes / 3) * 4 > FRAME_LIMIT;
+
+// The lines under "Make marked copy": [{ text, bad? }].
+const MODE_WORDS = { track_changes: "tracked changes", color: "colours" };
+export function markedLines(r) {
+  if (!r.ok)
+    return [
+      { text: "No marked copy was written.", bad: true },
+      { text: r.error, bad: true },
+    ];
+  const p = r.report?.paragraphs ?? {};
+  return [
+    { text: `Written: ${r.name} (${MODE_WORDS[r.mode] ?? r.mode}).` },
+    {
+      text: `Paragraphs: ${p.n_mod ?? 0} changed, ${p.n_ins ?? 0} added, ${p.n_del ?? 0} removed, ${p.n_eq ?? 0} unchanged.`,
+    },
+    ...(r.report?.warnings ?? []).map((w) => ({ text: String(w), bad: true })),
+    { text: r.notice },
+  ];
+}
+
 // Which file the copies are made from.
 export const docLine = (doc) =>
   doc

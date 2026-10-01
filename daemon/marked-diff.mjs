@@ -12,10 +12,9 @@
 // The tool needs the Python package lxml. This module installs nothing: a
 // missing package is reported with what to install.
 //
-// Not wired yet. The caller passes runPy (daemon/py-tool.mjs), the path of
-// the uploaded baseline (daemon/uploads.mjs), the path of the current
-// document's bytes written to a temporary file (daemon/doc-bytes.mjs, with
-// its `source`), the local path of the document and existsSync.
+// Called by the Tools tab (aux-service.mjs marked_build) with the earlier
+// version the pane sent, written to a temporary file, and the saved file of
+// the document (source "disk").
 
 import { join, resolve } from "node:path";
 import { pyJson, pyError, siblingPath, outputTaken, REPO_ROOT, SAVE_FIRST } from "./doc-tools.mjs";

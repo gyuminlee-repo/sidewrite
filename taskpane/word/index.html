@@ -335,6 +335,23 @@
             </div>
           </label>
         </div>
+
+        <div class="setup-section">
+          <h3>Marked copy</h3>
+          <p class="setup-help">
+            Compares the saved file with an earlier version and writes a copy that shows the
+            changes. The copy is a new file next to the manuscript.
+          </p>
+          <label>Earlier version <input type="file" id="tools-baseline" accept=".docx" /></label>
+          <select id="tools-marked-mode" class="setting-select">
+            <option value="track_changes">Show as tracked changes</option>
+            <option value="color">Show in colours</option>
+          </select>
+          <button type="button" class="btn-primary btn-small" id="tools-marked-build">
+            Make marked copy
+          </button>
+          <div id="tools-marked"></div>
+        </div>
       </div>
     </section>
 

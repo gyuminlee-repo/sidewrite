@@ -7,6 +7,8 @@ import {
   candidateKind,
   candidateCite,
   rulesAdded,
+  fileTooLarge,
+  markedLines,
 } from "../taskpane/shared/tools-view.js";
 
 test("the document line names the saved file, or says to save", () => {
@@ -61,4 +63,29 @@ test("what was added is counted in words", () => {
     rulesAdded({ added: 2, skipped: 1, profile_keys: ["italics"] }),
     "2 rules added to the ledger; 1 already there; profile setting saved: italics.",
   );
+});
+
+test("the marked copy: what was written, or the refusal as the tool said it", () => {
+  assert.deepEqual(
+    markedLines({
+      ok: true,
+      name: "paper_marked.docx",
+      mode: "track_changes",
+      report: { paragraphs: { n_eq: 18, n_mod: 6, n_ins: 1, n_del: 0 }, warnings: ["w1"] },
+      notice: "Read from disk.",
+    }),
+    [
+      { text: "Written: paper_marked.docx (tracked changes)." },
+      { text: "Paragraphs: 6 changed, 1 added, 0 removed, 18 unchanged." },
+      { text: "w1", bad: true },
+      { text: "Read from disk." },
+    ],
+  );
+  const refusal = 'paragraph 12 ("The cells were"): a text direction mark (w:dir) was added';
+  assert.deepEqual(markedLines({ ok: false, error: refusal }), [
+    { text: "No marked copy was written.", bad: true },
+    { text: refusal, bad: true },
+  ]);
+  assert.equal(fileTooLarge(1024), false);
+  assert.equal(fileTooLarge(80 * 1024 * 1024), true);
 });

@@ -5,7 +5,7 @@
 //   tools_state, profile_rules_apply
 // Jobs (AUX_JOBS; they call a model or a Python tool): accepted at once, the
 // result follows as { type: "tools_event", event: "job_done", job_id, result }.
-//   selection_translate, selection_ask, profile_rules_extract
+//   selection_translate, selection_ask, profile_rules_extract, marked_build
 //
 // The selection requests get the selected text from the pane and answer with
 // text for the pane. They read no file and no revision, and nothing of the
@@ -18,6 +18,12 @@
 // the overrides of the paper's profile. A picked rule must cite a sentence
 // of the guideline text that is sent with it.
 //
+// Marked copy. marked_build compares the saved file with the earlier version
+// the pane sends and writes "<name>_marked.docx" next to the manuscript, with
+// the tool and the options the script uses (tools/build_marked_diff.py), so
+// the button and the script give the same file. A refusal of the tool is the
+// error of the job, word for word.
+//
 // Nothing here writes to the open document. A copy (marked, anonymized) is a
 // new file next to the manuscript, made from the file as it was last saved.
 //
@@ -25,7 +31,10 @@
 // once per request (at(key)); a failure is an error reply, never a silent
 // default.
 
-import { basename, dirname } from "node:path";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import {
   localDocPath,
   revisionPathFor,
@@ -41,9 +50,21 @@ import { extractGuidelineRules } from "./guideline-extract.mjs";
 import { splitSentences } from "./review-split.mjs";
 import { appendDecisions, decisionRecord } from "./decision-log.mjs";
 import { SAVE_FIRST } from "./doc-bytes.mjs";
+import { runPy as defaultRunPy } from "./py-tool.mjs";
+import { runMarkedDiff } from "./marked-diff.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
 
-export const AUX_JOBS = new Set(["selection_translate", "selection_ask", "profile_rules_extract"]);
+export const AUX_JOBS = new Set([
+  "selection_translate",
+  "selection_ask",
+  "profile_rules_extract",
+  "marked_build",
+]);
+
+export const MARKED_MODES = ["track_changes", "color"];
+
+// A file arrives as base64 in one WebSocket frame of at most 100 MiB.
+const MAX_BASE64 = 100 * 1024 * 1024;
 
 // A translation or an answer is prose: the model of a response draft
 // (response-service.mjs DRAFT_CLAUDE_MODEL), unless the pane chose another.
@@ -79,6 +100,8 @@ export function createAuxService({
   // Default language of the settings file: () => string | null.
   langDefault = null,
   sendEvent = () => {},
+  runPy = defaultRunPy,
+  exists = existsSync,
   log = console.log,
   env = process.env,
 }) {
@@ -212,6 +235,45 @@ export function createAuxService({
         added_ids: added.map((i) => i.id),
         profile_keys: Object.keys(overrides),
       };
+    },
+
+    // A copy of the saved file that shows what changed since the earlier
+    // version in the request. mode: "track_changes" or "color".
+    async marked_build(msg, key) {
+      const d = at(key);
+      const clean = d.doc;
+      if (!MARKED_MODES.includes(msg.mode))
+        throw new Error("Choose how the changes are shown: tracked changes or colours.");
+      const base64 = String(msg.baseline_base64 ?? "");
+      if (!base64) throw new Error("Choose the earlier version (.docx) first.");
+      if (base64.length > MAX_BASE64) throw new Error("The earlier version is too large to read.");
+      const { profile } = await profileOf(d, await load(d));
+      const dir = await mkdtemp(join(tmpdir(), "marked-"));
+      try {
+        // A name of our own: the file name of the pane is not used as a path.
+        const baseline = join(dir, "baseline.docx");
+        await writeFile(baseline, Buffer.from(base64, "base64"));
+        const r = await runMarkedDiff({
+          baseline,
+          clean,
+          docPath: clean,
+          profile: { ...profile, marked_mode: msg.mode },
+          source: "disk",
+          runPy,
+          exists,
+        });
+        log(`[tools] marked_build mode=${msg.mode} ok=${r.ok} path=${r.path ?? "-"}`);
+        if (!r.ok) throw new Error(r.error);
+        return {
+          path: r.path,
+          name: basename(r.path),
+          mode: msg.mode,
+          report: r.report,
+          notice: r.notice,
+        };
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     },
 
     // Which saved file the copies are made from, and the profile in force.
