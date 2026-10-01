@@ -312,7 +312,12 @@ export function createResponseService({
             (replace ? ` The file is at ${paths.docx}.` : ""),
         );
       }
-      return { paths, paragraphs: w.json.paragraphs ?? model.paragraphs.length, verify: v.json };
+      return {
+        paths,
+        wanted,
+        paragraphs: w.json.paragraphs ?? model.paragraphs.length,
+        verify: v.json,
+      };
     }
   }
 
@@ -320,8 +325,10 @@ export function createResponseService({
   async function writeText(d, model, overwrite) {
     const reviewers = [...new Set(model.paragraphs.map((p) => p.reviewer))].sort((a, b) => a - b);
     const out = [];
+    const wantedAll = [];
     for (const reviewer of reviewers) {
       const wanted = sidecarPath(d.doc, `.response.${reviewer === 0 ? "E" : `R${reviewer}`}.txt`);
+      wantedAll.push(wanted);
       const text = `${letterPlainText(model, reviewer)}\n`;
       for (let n = 1; ; n++) {
         if (!overwrite) n = await freeOutputIndex(wanted, { from: n });
@@ -335,7 +342,7 @@ export function createResponseService({
         }
       }
     }
-    return out;
+    return { paths: out, wanted: wantedAll };
   }
 
   const impl = {
@@ -641,11 +648,11 @@ export function createResponseService({
       });
       const overwrite = msg.overwrite === true;
       if (format === "text") {
-        const paths = await writeText(d, model, overwrite);
+        const { paths, wanted } = await writeText(d, model, overwrite);
         log(`[response] export text files=${paths.length}`);
-        return { exported: true, paths, checks, summary };
+        return { exported: true, paths, wanted, checks, summary };
       }
-      const { paths, paragraphs, verify } = await writeLetter(
+      const { paths, wanted, paragraphs, verify } = await writeLetter(
         d,
         model,
         snapshot.paragraphs.map(viewText),
@@ -660,7 +667,18 @@ export function createResponseService({
         }),
       );
       log(`[response] export path=${paths.docx} paragraphs=${paragraphs} verify=ok`);
-      return { exported: true, path: paths.docx, paths, checks, summary, verify, revision };
+      // wanted: the usual name. A different path means a file of that name was
+      // there, or open in Word, and was kept.
+      return {
+        exported: true,
+        path: paths.docx,
+        wanted,
+        paths,
+        checks,
+        summary,
+        verify,
+        revision,
+      };
     },
   };
 

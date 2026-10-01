@@ -661,6 +661,8 @@ test("response_export never replaces a letter that is there: the next free name,
   await writeFile(first.path, "edited by the author in Word");
   const second = await t.ask("response_export", { ...WITH_DOC, format: "docx" });
   assert.equal(basename(second.path), "paper.response-2.docx");
+  // The usual name is told with the one used, so the pane can say a file was kept.
+  assert.deepEqual([first.wanted, second.wanted], [first.path, first.path]);
   assert.deepEqual(
     [basename(second.paths.model), basename(second.paths.manuscript)],
     ["paper.response-2.model.json", "paper.response-2.manuscript.json"],
@@ -781,6 +783,7 @@ test("response_export as text: one file per reviewer and one for the editor, nev
     again.paths.map((p) => basename(p)),
     ["paper.response.E-2.txt", "paper.response.R1-2.txt", "paper.response.R2-2.txt"],
   );
+  assert.deepEqual([r.wanted, again.wanted], [r.paths, r.paths]);
   const unknown = await t.ask("response_export", { ...WITH_DOC, format: "pdf" });
   assert.match(unknown.error, /format/);
   await t.cleanup();

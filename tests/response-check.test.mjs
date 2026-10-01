@@ -426,3 +426,28 @@ test("declining needs a reason: a comment or a request declined with a blank one
     "requirements:R1.1",
   ]);
 });
+
+test("changes that still wait for a decision in Word are a warning on their comment, never a failure", () => {
+  const more = (states) =>
+    good((r) => {
+      for (const [i, state] of states.entries())
+        r.comments[0].changes.push({ id: `R1.1-${i + 2}`, kind: "replace", state, rationale: {} });
+    });
+  const rows = checkResponses(more(["pending", "pending", "unlocated"]));
+  assert.deepEqual(ids(rows), []);
+  assert.deepEqual(ids(rows, "warn"), ["undecided_changes:R1.1"]);
+  assert.equal(
+    rows[0].detail,
+    "2 pending, 1 not found: decide them in Word; only accepted changes are cited",
+  );
+  assert.equal(
+    checkResponses(more(["unlocated"]))[0].detail,
+    "1 not found: decide them in Word; only accepted changes are cited",
+  );
+  // Decided either way: nothing to warn about.
+  assert.deepEqual(checkResponses(more(["rejected", "rejected"])), []);
+  // A declined comment is warned about as well: its tracked changes are still in Word.
+  const declined = more(["pending"]);
+  declined.revision.comments[0].declined = { reason: "Out of scope." };
+  assert.deepEqual(ids(checkResponses(declined), "warn"), ["undecided_changes:R1.1"]);
+});

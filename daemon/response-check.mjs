@@ -103,6 +103,21 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
       add("requirements", "fail", c.ref, `${q.id} ${why}: ${q.text}`);
     }
 
+    // Not a failure: the letter is right about what is in the manuscript now.
+    // It is told because a decision taken later changes what the letter cites.
+    const waiting = (state) => (c.changes ?? []).filter((ch) => ch.state === state).length;
+    const undecided = [
+      waiting("pending") && `${waiting("pending")} pending`,
+      waiting("unlocated") && `${waiting("unlocated")} not found`,
+    ].filter(Boolean);
+    if (undecided.length)
+      add(
+        "undecided_changes",
+        "warn",
+        c.ref,
+        `${undecided.join(", ")}: decide them in Word; only accepted changes are cited`,
+      );
+
     // quote_changed is the quote_exact axis and lines_old the lines axis below.
     if (staleReasons(c, snapshot, render).includes("change_state"))
       add("stale", "fail", c.ref, "the cited changes are not the accepted changes; refresh");
