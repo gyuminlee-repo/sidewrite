@@ -219,6 +219,11 @@ const Comment = z.object({
   requirement_seq: z.number().int().nonnegative().nullable().default(null),
   blocked_seq: z.number().int().nonnegative().nullable().default(null),
   questions: z.array(Question).default([]),
+  // Requests the model said cannot be handled in this file (review-tools.mjs
+  // requirementOutside): one note per request id.
+  requirements_outside: z
+    .array(z.object({ id: z.string(), why: z.string().default(""), at: z.string() }))
+    .default([]),
   // The answer in the response letter, and the author's decision not to
   // change anything for this comment.
   response: Response.nullable().default(null),
@@ -480,6 +485,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       response: old ? clone(old.response ?? null) : null,
       declined: old ? clone(old.declined ?? null) : null,
       questions: old ? clone(old.questions ?? []) : [],
+      requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
     });
     const row = list[list.length - 1];
     row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });
@@ -646,6 +652,19 @@ export function answerQuestion(rev, ref, id, answer, now = new Date()) {
   if (!q) throw new Error(`No question ${id} under ${ref}`);
   q.answer = String(answer ?? "").trim();
   q.answered_at = q.answer ? now.toISOString() : null;
+  return next;
+}
+
+// A listed request the model said belongs to another file.
+export function setRequirementOutside(rev, ref, { id, why = "" }, now = new Date()) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  if (!c.requirements.some((r) => r.id === id))
+    throw new Error(`No requirement ${id} under ${ref}`);
+  c.requirements_outside = [
+    ...(c.requirements_outside ?? []).filter((n) => n.id !== id),
+    { id, why: String(why ?? "").trim(), at: now.toISOString() },
+  ];
   return next;
 }
 

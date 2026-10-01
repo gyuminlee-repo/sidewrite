@@ -30,6 +30,7 @@ export const REVIEW_RULES = [
   "Follow every author instruction below. They are decisions the author already made.",
   // Appended, never inserted: POLICY_PACKS names rules by index.
   "What only the author can know is asked, not guessed: a number that differs between two places, how something was measured, a statistic that would have to be computed again, a count or a direction that is in the author's records and not in the manuscript. Do not settle it with an edit. Call office_ask_author with the question and why the manuscript cannot answer it, and leave that text as it is. An edit that puts a number into the manuscript that nothing gives is refused.",
+  "Do not pass over a request in silence. Each one ends the turn as a change that names its id, as a question to the author (office_ask_author with its id), or as a note that it belongs to another file (office_requirement_outside with its id). What is left with none of these stays open on the card of the author.",
 ];
 
 // The fence of one prompt: a string that is not in the comment, so no line
@@ -253,7 +254,16 @@ export function buildReviewPrompt({
     lines.push(
       "Put in rationale.requirement_ids the id of every request this change handles. If it handles only part of a request, still put its id. Leave it empty only when the change answers none of them.",
     );
+    lines.push(
+      "Every request above ends this turn in one of three ways: a change that names its id, office_ask_author with its id (it waits for the author), or office_requirement_outside with its id (what it asks for is in another file). A request with none of these is shown to the author as open.",
+    );
     lines.push("");
+  } else {
+    // The extraction gave nothing (it failed, or was never run).
+    lines.push(
+      "No list of requests was extracted for this comment: list what the comment asks for yourself first, then handle each one.",
+      "",
+    );
   }
   const overview = reviewOverview(others, comment.ref);
   if (overview.lines.length) lines.push(...overview.lines, "");

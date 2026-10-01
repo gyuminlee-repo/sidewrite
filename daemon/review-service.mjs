@@ -60,6 +60,7 @@ import {
   addQuestion,
   answerQuestion,
   authorAnswers,
+  setRequirementOutside,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -524,6 +525,11 @@ export function createReviewService({
         });
         sendEvent(key, { type: "review_event", event: "comment_noted", ref });
         return saved;
+      },
+      // office_requirement_outside: the note goes under the comment.
+      onRequirementOutside: async ({ ref, note, at: d = at(key) }) => {
+        await update(d, (rev) => setRequirementOutside(withComment(d, rev, ref), ref, note));
+        sendEvent(key, { type: "review_event", event: "comment_noted", ref });
       },
       // blocked_id: the approved exception the edit came from (its item is
       // marked by review_override). attempt_id: the item a normal edit wrote

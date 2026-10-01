@@ -17,7 +17,8 @@ import {
   commentsToResolve,
   changeFlags,
   requirementsFromText,
-  unaddressedRequirements,
+  requirementsLine,
+  openRequestsText,
   doneBlockers,
   ledgerDraftFromChange,
   ledgerFormFromItem,
@@ -427,7 +428,6 @@ export function initReviewPane({
         if (v === c.status) o.selected = true;
         status.append(o);
       }
-      const open = unaddressedRequirements(c);
       status.addEventListener(
         "change",
         guard(async () => {
@@ -508,10 +508,7 @@ export function initReviewPane({
           state.reqDrafts.delete(c.ref);
         }),
       );
-      const reqLine = (c.requirements ?? []).length
-        ? `Requirements: ${c.requirements.map((r) => `${r.id} ${r.text}`).join("; ")}.` +
-          (open.length ? ` No change yet: ${open.map((r) => r.id).join(", ")}.` : "")
-        : "";
+      const reqLine = requirementsLine(c);
       const card = el(
         "div",
         { class: "review-comment" },
@@ -527,7 +524,7 @@ export function initReviewPane({
         el("div", { class: "review-comment-text", text: c.text }),
         reqs,
         saveReqs,
-        reqLine ? el("div", { class: "review-reqs-line", text: reqLine }) : null,
+        el("div", { class: "review-reqs-line", text: reqLine }),
       );
       // What the model asked instead of guessing (office_ask_author). An
       // answer goes into the prompt of the next turn.
@@ -757,10 +754,13 @@ export function initReviewPane({
     const ran = usedLabel("turn");
     const withModel = ran ? ` with ${ran}` : "";
     const blockedText = `${blocked} edit${blocked === 1 ? " was" : "s were"} blocked (see the blocked list of the comment)`;
-    if (n > 0) {
-      return `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`;
-    }
-    return `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
+    // Requests the turn left without a change, a question or a note.
+    const open = openRequestsText((state.revision?.comments ?? []).find((x) => x.ref === ref));
+    const line =
+      n > 0
+        ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
+        : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
+    return open ? `${line} ${open}` : line;
   }
   async function proposeRef(ref, release, useSelection) {
     state.reviewTurnOpen = true;

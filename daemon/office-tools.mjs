@@ -9,6 +9,9 @@ import {
   askAuthor,
   askAuthorShape,
   ASK_AUTHOR_DESCRIPTION,
+  requirementOutside,
+  requirementOutsideShape,
+  REQUIREMENT_OUTSIDE_DESCRIPTION,
 } from "./review-tools.mjs";
 
 // Wrap a bridge tool result for MCP. Handlers return {content: [...]}.
@@ -861,6 +864,21 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
     },
   );
 
+  const office_requirement_outside = tool(
+    "office_requirement_outside",
+    REQUIREMENT_OUTSIDE_DESCRIPTION,
+    requirementOutsideShape,
+    async (args) => {
+      try {
+        return asMcpResult(
+          await requirementOutside(opts.trackedEdit ?? {}, args, opts.getReviewTurn?.() ?? null),
+        );
+      } catch (e) {
+        return asMcpError(e);
+      }
+    },
+  );
+
   const wordTools = [
     office_get_selection,
     office_read_paragraphs,
@@ -891,6 +909,7 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
     office_header_footer,
     office_tracked_edit,
     office_ask_author,
+    office_requirement_outside,
   ];
   const excelTools = [
     excel_get_selected_range,

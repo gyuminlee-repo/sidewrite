@@ -58,8 +58,8 @@ export const REVIEW_BLOCKED_TOOLS = new Set([
 ]);
 
 // Tools of a review turn that write the review file and nothing in Word:
-// a question for the author.
-export const REVIEW_NOTE_TOOLS = new Set(["office_ask_author"]);
+// a question for the author, and a request that belongs to another file.
+export const REVIEW_NOTE_TOOLS = new Set(["office_ask_author", "office_requirement_outside"]);
 
 export function reviewTurnToolAllowed(name) {
   return REVIEW_READ_TOOLS.has(name) || REVIEW_NOTE_TOOLS.has(name) || name === REVIEW_WRITE_TOOL;
@@ -203,6 +203,36 @@ export async function askAuthor(deps, args, turn) {
     ok: true,
     question_id: saved.id,
     message: `Recorded as ${saved.id} on the card of ${turn.ref}. Leave the text it is about as it is in this turn; the author's answer comes with the next turn.`,
+  };
+}
+
+export const REQUIREMENT_OUTSIDE_DESCRIPTION =
+  "Review turns only. Say that ONE listed request of the comment cannot be handled in this file because what it asks for is in another file (a supplementary file, a figure file, the response letter). " +
+  "The author then sees the request as outside this file instead of open. Not for a request that needs something only the author knows (office_ask_author), and not for a request you chose not to handle.";
+
+export const requirementOutsideShape = {
+  comment_ref: commentRef('Reviewer comment the request belongs to, e.g. "R1.3".'),
+  requirement_id: z.string().describe("Id of the listed request (q2)."),
+  why: z
+    .string()
+    .min(1)
+    .describe("Which file or place it belongs to, and what has to be done there."),
+};
+
+// office_requirement_outside. deps: { begin(), getReviewContext(ref),
+// onRequirementOutside({ref, note: {id, why}, at}), log }.
+export async function requirementOutside(deps, args, turn) {
+  const t = await noteTurn(deps, "office_requirement_outside", args, turn);
+  if (t.error) return t.error;
+  await deps.onRequirementOutside({
+    ref: turn.ref,
+    note: { id: args.requirement_id, why: args.why },
+    at: t.at,
+  });
+  deps.log?.(`[review] requirement outside ${turn.ref} ${args.requirement_id}`);
+  return {
+    ok: true,
+    message: `${args.requirement_id} is shown to the author as outside this file.`,
   };
 }
 
