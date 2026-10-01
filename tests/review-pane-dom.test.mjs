@@ -457,7 +457,7 @@ test("Save shows the daemon's warning about comments it kept", async () => {
   assert.equal(t.$("review-message").hidden, false);
 });
 
-test("Save sends the section label the split gave a comment, and none where it gave none", async () => {
+test("Save sends the section label the split gave a comment, and an empty one where it gave none", async () => {
   const revision = { comments: [], ledger: [] };
   let t = null;
   t = await setup({
@@ -490,7 +490,7 @@ test("Save sends the section label the split gave a comment, and none where it g
     sent.map((c) => [c.ref, c.section, "section" in c]),
     [
       ["R1.1", "Major comments", true],
-      ["R1.2", undefined, false],
+      ["R1.2", "", true],
     ],
   );
 });
@@ -585,7 +585,67 @@ test("the draft row has a section field: Save sends an edited section and clears
       ["R1.1", "Abstract and title", true],
       ["R1.2", "", true],
       ["R1.3", "Minor comments", true],
-      ["R1.4", undefined, false],
+      ["R1.4", "", true],
+    ],
+  );
+});
+
+// A saved comment has a section; the review is split again from text whose
+// section headings were taken out. The empty field must clear the stored
+// label: a save without the key would keep it (replaceComments).
+test("a re-split without section headings sends an empty section for every row", async () => {
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "Shorten this section.",
+        section: "Abstract",
+        requirements: [],
+        status: "pending",
+        changes: [],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  let t = null;
+  t = await setup({
+    revision,
+    respond: {
+      review_split: () => {
+        t.pane.onEvent({
+          type: "review_event",
+          event: "job_done",
+          job_id: "j1",
+          result: {
+            ok: true,
+            method: "regex",
+            warnings: [],
+            comments: [
+              { ref: "R1.1", reviewer: 1, text: "Shorten the abstract." },
+              { ref: "R1.2", reviewer: 1, text: "Expand the methods." },
+            ],
+          },
+        });
+        return { ok: true, accepted: true, job_id: "j1" };
+      },
+      review_save_comments: () => ({ ok: true, revision, warnings: [] }),
+    },
+  });
+  await t.$("review-split").click();
+  const fields = findAll(t.$("review-draft"), (n) => n.attributes.class === "review-section");
+  assert.deepEqual(
+    fields.map((n) => n.value),
+    ["", ""],
+  );
+  await t.$("review-save").click();
+  const sent = t.requests.find((r) => r.type === "review_save_comments").payload.comments;
+  assert.deepEqual(
+    sent.map((c) => [c.ref, c.section]),
+    [
+      ["R1.1", ""],
+      ["R1.2", ""],
     ],
   );
 });

@@ -773,3 +773,22 @@ test("a save with an empty section clears the stored label; a save without the k
   assert.equal("section" in rev.comments[0], false);
   assert.equal(rev.comments[1].section, "Methods");
 });
+
+test("numbered comments on reviewer head lines stay with their reviewer, with no block label", async () => {
+  let called = 0;
+  const r = await splitReview(
+    "Reviewer 1: 1. Add units.\nReviewer 2: 1. Add controls.\nReviewer 1: 2. State n.\n",
+    { oneshot: async () => (called++, { ok: false, error: "off" }) },
+  );
+  assert.equal(called, 0);
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.reviewer, c.section, c.text]),
+    [
+      ["R1.1", 1, undefined, "Add units."],
+      ["R2.1", 2, undefined, "Add controls."],
+      ["R1.2", 1, undefined, "State n."],
+    ],
+  );
+  // Nothing was renumbered: no block warning.
+  assert.deepEqual(r.warnings, []);
+});

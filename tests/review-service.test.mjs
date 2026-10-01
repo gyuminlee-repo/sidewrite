@@ -2060,3 +2060,35 @@ test("the review context of a tracked edit gives the comment text with its secti
     await t.cleanup();
   }
 });
+
+// An empty section from the pane clears the stored label, so it is not in
+// the next prompt; a save without the key (an older pane) keeps it.
+test("review_save_comments: an empty section clears the label, a missing key keeps it", async () => {
+  const t = await setup();
+  try {
+    const first = [
+      { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "Abstract" },
+      { ref: "R1.2", reviewer: 1, text: "Expand this section.", section: "Methods" },
+    ];
+    await t.ask("review_save_comments", { comments: first });
+    const saved = await t.ask("review_save_comments", {
+      comments: [
+        { ref: "R1.1", reviewer: 1, text: "Shorten the abstract.", section: "" },
+        { ref: "R1.2", reviewer: 1, text: "Expand this section." },
+      ],
+    });
+    assert.deepEqual(
+      saved.revision.comments.map((c) => [c.ref, c.section]),
+      [
+        ["R1.1", undefined],
+        ["R1.2", "Methods"],
+      ],
+    );
+    const cleared = await t.ask("review_preview", { ref: "R1.1", paragraphs: [] });
+    assert.ok(!cleared.prompt.includes("Section of the review"), cleared.prompt);
+    const kept = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
+    assert.ok(kept.prompt.includes("Section of the review this comment is under: Methods"));
+  } finally {
+    await t.cleanup();
+  }
+});
