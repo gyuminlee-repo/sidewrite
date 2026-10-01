@@ -41,6 +41,7 @@
     <nav class="tabs">
       <button class="tab" data-tab="chat" aria-current="page">Chat</button>
       <button class="tab" data-tab="review">Review</button>
+      <button class="tab" data-tab="response">Response</button>
       <button class="tab" data-tab="library">Presets</button>
       <button class="tab" data-tab="setup">Setup</button>
     </nav>
@@ -215,6 +216,72 @@
             Delete ALL comments...
           </button>
         </div>
+      </div>
+    </section>
+
+    <!-- Response tab content: the response letter (response-pane.js) -->
+    <section class="tab-content" data-tab="response" hidden>
+      <div class="setup-content" id="response-root">
+        <div id="response-next" class="response-next"></div>
+        <div id="response-message" hidden></div>
+
+        <div class="setup-section">
+          <h3>1. Responses</h3>
+          <button type="button" class="btn-secondary btn-small" id="response-refresh">
+            Refresh from the manuscript
+          </button>
+          <button type="button" class="btn-secondary btn-small" id="response-draft-all">
+            Draft all missing
+          </button>
+          <div id="response-comments"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>2. Line numbers and checks</h3>
+          <button type="button" class="btn-secondary btn-small" id="response-locate">
+            Update line numbers
+          </button>
+          <button type="button" class="btn-secondary btn-small" id="response-check">
+            Run checks
+          </button>
+          <div id="response-summary"></div>
+          <div id="response-checks"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>3. Export</h3>
+          <button type="button" class="btn-primary btn-small" id="response-export">
+            Export letter (.docx)
+          </button>
+          <button type="button" class="btn-secondary btn-small" id="response-export-text">
+            Export plain text per reviewer
+          </button>
+          <div id="response-output"></div>
+        </div>
+
+        <details class="setup-section" id="response-profile-details">
+          <summary>Profile and language</summary>
+          <select id="response-profile" class="setting-select"></select>
+          <small id="response-profile-path"></small>
+          <label>Response language <input type="text" id="response-lang" /></label>
+          <label
+            >Rationale comment language <input type="text" id="response-rationale-lang"
+          /></label>
+          <label class="setting-row">
+            <input type="checkbox" id="response-gloss" />
+            <div class="setting-text">Add a second-language paragraph under each response</div>
+          </label>
+          <label>Second language <input type="text" id="response-gloss-lang" /></label>
+          <button type="button" class="btn-secondary btn-small" id="response-profile-save">
+            Save for this paper
+          </button>
+          <h4>Take colours and frames from an existing letter</h4>
+          <input type="file" id="response-letter-file" accept=".docx" />
+          <div id="response-proposal"></div>
+          <button type="button" class="btn-primary btn-small" id="response-proposal-apply" hidden>
+            Apply to this paper
+          </button>
+        </details>
       </div>
     </section>
 
