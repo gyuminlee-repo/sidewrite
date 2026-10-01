@@ -74,7 +74,7 @@ import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog, sameTermReport } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
-import { checkParagraphs } from "./paragraph-check.mjs";
+import { checkParagraphs, rewriteNote } from "./paragraph-check.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
@@ -964,7 +964,18 @@ export function createReviewService({
           `Forbidden rule(s) ${broken.map((b) => b.id).join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}), so no change would be applied. Fix or remove the rule in the Instruction ledger, then propose again.`,
         );
       }
-      pushTurn(key, host, built.text, { ref: msg.ref });
+      // "Rewrite this paragraph": the turn of this comment is told to write
+      // one paragraph anew (paragraph-check.mjs rewriteNote). A paragraph
+      // that does not hold two changes starts no turn.
+      const rewrite = Number.isInteger(msg.rewrite_paragraph)
+        ? rewriteNote(rev, msg.rewrite_paragraph, msg.ref)
+        : null;
+      if (rewrite) {
+        log(
+          `[review] rewrite turn ${msg.ref} paragraph=${msg.rewrite_paragraph} changes=${Number(/holds (\d+) changes/.exec(rewrite)?.[1] ?? 0)}`,
+        );
+      }
+      pushTurn(key, host, rewrite ? `${built.text}\n\n${rewrite}` : built.text, { ref: msg.ref });
       // The session of the pane has the manuscript as of this turn.
       if (built.manuscript.mode !== "none") manuscriptGiven(key, built.manuscript.hashes);
       turnHolds.get(key)?.();

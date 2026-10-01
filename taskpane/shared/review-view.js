@@ -542,7 +542,20 @@ const CONSISTENCY_KIND = {
   contradiction: "the paragraph contradicts itself.",
   conflict: "changes of different comments work against each other.",
   review_as_source: "a sentence takes the review as its source.",
+  claim_left: "a claim a change withdrew is still made.",
+  open_question: "a sentence rests on what an open question to the author is about.",
 };
+
+// The comment whose turn rewrites a paragraph: the one with the most changes
+// in it (the first of them when equal). Change ids are "<ref>-<n>".
+function rewriteRef(changeIds) {
+  const n = new Map();
+  for (const id of changeIds) {
+    const ref = String(id).replace(/-\d+$/, "");
+    n.set(ref, (n.get(ref) ?? 0) + 1);
+  }
+  return [...n].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
 
 // The message line after a check. model: the label of what it ran on, or null.
 export function consistencyMessage(c, model) {
@@ -557,7 +570,8 @@ export function consistencyMessage(c, model) {
 }
 
 // The lines under the button: what was found, then the paragraphs that hold
-// three or more changes. [{ paragraph_index, text }]
+// three or more changes; those carry rewrite_ref, the comment whose turn
+// would write the paragraph anew. [{ paragraph_index, text, rewrite_ref? }]
 export function consistencyLines(c) {
   if (!c) return [];
   return [
@@ -570,6 +584,7 @@ export function consistencyLines(c) {
       .map((p) => ({
         paragraph_index: p.index,
         text: `${p.id ?? `p${p.index}`} holds ${p.change_ids.length} changes (${p.change_ids.join(", ")}): read it as a whole and rewrite it if it no longer reads as one paragraph.`,
+        rewrite_ref: rewriteRef(p.change_ids),
       })),
   ];
 }

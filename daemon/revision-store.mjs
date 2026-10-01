@@ -356,7 +356,13 @@ export const RevisionSchema = z.object({
           z.object({
             paragraph_index: z.number().int(),
             paragraph_id: z.string().nullable().default(null),
-            kind: z.enum(["contradiction", "conflict", "review_as_source"]),
+            kind: z.enum([
+              "contradiction",
+              "conflict",
+              "review_as_source",
+              "claim_left",
+              "open_question",
+            ]),
             detail: z.string(),
             change_ids: z.array(z.string()).default([]),
           }),

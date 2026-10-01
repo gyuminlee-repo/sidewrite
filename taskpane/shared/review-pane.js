@@ -738,6 +738,29 @@ export function initReviewPane({
         guard(() => word.selectParagraphByIndex(line.paragraph_index)),
       );
       box.append(b);
+      // Three or more changes in the paragraph: a turn of the comment with
+      // the most of them writes it anew (office_tracked_rewrite).
+      if (line.rewrite_ref) {
+        const rewrite = el("button", {
+          type: "button",
+          class: "btn-secondary btn-small",
+          text: "Rewrite this paragraph",
+        });
+        proposeButtons.push(rewrite);
+        rewrite.disabled = isTurnInFlight() || queue.running;
+        const run = guard((release) =>
+          proposeRef(line.rewrite_ref, release, false, { rewrite_paragraph: line.paragraph_index }),
+        );
+        rewrite.addEventListener("click", () => {
+          if (isTurnInFlight() || queue.running) return;
+          return run(
+            onTurnStarted(
+              `Review ${line.rewrite_ref}: rewriting paragraph ${line.paragraph_index} (tracked)...`,
+            ),
+          );
+        });
+        box.append(rewrite);
+      }
     }
   }
 
@@ -785,7 +808,8 @@ export function initReviewPane({
         : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
     return open ? `${line} ${open}` : line;
   }
-  async function proposeRef(ref, release, useSelection) {
+  // extra: more fields of the request (rewrite_paragraph for a rewrite turn).
+  async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
     try {
       const paragraphs = useSelection ? await promptParagraphs() : [];
@@ -798,7 +822,7 @@ export function initReviewPane({
       // no turn for a request that waited longer at its gate.
       const r = await ask(
         "review_propose",
-        { ref, paragraphs, wait_ms: PROPOSE_WAIT_MS },
+        { ref, paragraphs, wait_ms: PROPOSE_WAIT_MS, ...extra },
         PROPOSE_WAIT_MS,
       );
       if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);

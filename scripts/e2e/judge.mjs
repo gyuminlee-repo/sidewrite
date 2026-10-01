@@ -1004,8 +1004,10 @@ export const JUDGES = {
   refresh: (r) => {
     const m = /Changes (\d+), expected tool comments (\d+), found (\d+)/.exec(r.message);
     return {
-      pass: !!m && m[1] === m[2] && m[2] === m[3] && !has(r.message, "MISMATCH"),
-      expect: "Changes N, expected tool comments N, found N. (no MISMATCH)",
+      // The parts of a rewritten paragraph share one comment: every comment
+      // that is expected is there, and there are not more comments than changes.
+      pass: !!m && Number(m[1]) >= Number(m[2]) && m[2] === m[3] && !has(r.message, "MISMATCH"),
+      expect: "Changes N, expected tool comments M, found M, M <= N. (no MISMATCH)",
       got: r.message,
     };
   },
@@ -1125,6 +1127,17 @@ export const JUDGES = {
       pass: e.pass && !r.message_error,
       expect: "Propose all: n of n proposed. One review turn at a time.",
       got: `${r.message} | started ${e.started.join(",")} overlaps=${e.overlaps}`,
+    };
+  },
+  // "Rewrite this paragraph": the turn ran and left changes of a rewrite
+  // under its comment (the flag of a change row, review-view.js changeFlags).
+  "rewrite-paragraph": (r, ctx) => {
+    const changes = (r.comments ?? []).find((c) => c.ref === ctx.ref)?.changes ?? [];
+    const n = changes.filter((ch) => (ch.flags ?? []).includes("Rewrite")).length;
+    return {
+      pass: !r.message_error && n > 0,
+      expect: `changes flagged Rewrite under ${ctx.ref}, no error`,
+      got: `${n} of ${changes.length} changes flagged Rewrite | ${r.message}`,
     };
   },
   "check-paragraphs": (r) => ({

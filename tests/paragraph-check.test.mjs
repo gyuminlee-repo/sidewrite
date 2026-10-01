@@ -430,6 +430,7 @@ test("view: the message after a check and the lines under the button", () => {
     {
       paragraph_index: 5,
       text: "id5 holds 3 changes (R1.1-3, R1.1-4, R1.1-6): read it as a whole and rewrite it if it no longer reads as one paragraph.",
+      rewrite_ref: "R1.1",
     },
   ]);
   assert.deepEqual(view.consistencyLines(null), []);
