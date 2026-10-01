@@ -17,8 +17,8 @@
 // and the result follows as { event: "job_done", job_id, result }, result
 // being what the reply would have held ({ ok: true, ... } or { ok: false,
 // error }). Their model calls can outlast any request timeout of the pane.
+// handler-wrap.mjs wraps both kinds.
 
-import { randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
 import {
   localDocPath,
@@ -66,6 +66,7 @@ import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
+import { wrapHandlers } from "./handler-wrap.mjs";
 
 async function exists(p) {
   try {
@@ -981,44 +982,6 @@ export function createReviewService({
     },
   };
 
-  const handlers = {};
-  for (const [type, fn] of Object.entries(impl)) {
-    if (JOB_TYPES.has(type)) {
-      // Returns once accepted; the job runs on and ends in job_done.
-      handlers[type] = async (msg, reply, key, host) => {
-        const job_id = randomUUID();
-        reply({
-          type: `${type}_result`,
-          request_id: msg.request_id,
-          ok: true,
-          accepted: true,
-          job_id,
-        });
-        const done = (result) =>
-          sendEvent(key, { type: "review_event", event: "job_done", job_id, result });
-        fn(msg, key, host)
-          .then(
-            (out) => done({ ok: true, ...out }),
-            (e) => done({ ok: false, error: e?.message ?? String(e) }),
-          )
-          // Nobody awaits the job: a failed send must not end the daemon.
-          .catch((e) => log(`[review] job_done not delivered: ${e?.message ?? e}`));
-      };
-      continue;
-    }
-    handlers[type] = async (msg, reply, key, host) => {
-      try {
-        const out = await fn(msg, key, host);
-        reply({ type: `${type}_result`, request_id: msg.request_id, ok: true, ...out });
-      } catch (e) {
-        reply({
-          type: `${type}_result`,
-          request_id: msg.request_id,
-          ok: false,
-          error: e?.message ?? String(e),
-        });
-      }
-    };
-  }
+  const handlers = wrapHandlers(impl, { jobTypes: JOB_TYPES, sendEvent, log });
   return { handlers, trackedEditDeps, turnEnded, lateToolResult };
 }
