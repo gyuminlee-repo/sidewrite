@@ -90,16 +90,71 @@ export async function fetchClaudeModels({
   }
 }
 
+// The best model for work whose quality matters (edits of the manuscript,
+// the response letter): the first row of the Opus family in the account's
+// list, by its name or by what it resolves to, else "sonnet". While the list
+// is unavailable its stand-in holds the alias "opus", which query() takes.
+export function bestClaudeModel(state) {
+  const opus = (state?.models ?? []).find(
+    (m) => /opus/i.test(m.value) || /opus/i.test(String(m.resolvedModel ?? "")),
+  );
+  return opus?.value ?? "sonnet";
+}
+
 // The model the daemon passes to query(): the three aliases always, anything
 // the account lists (by value or by resolved id), and, while the list is
-// unavailable, any well-formed claude-* id. Everything else is "sonnet".
+// unavailable, any well-formed claude-* id. No model asked for (a pane that
+// stored none) is the best one; a model that was asked for and cannot be
+// used is "sonnet".
 export function resolveModelChoice(requested, state) {
   const r = String(requested ?? "").trim();
+  if (!r) return bestClaudeModel(state);
   if (ALIASES.includes(r)) return r;
   const models = state?.models ?? [];
   if (models.some((m) => m.value === r || m.resolvedModel === r)) return r;
   if (state?.source !== "sdk" && ID_RE.test(r)) return r;
   return "sonnet";
+}
+
+// The CLI's notice that a request ended with a refusal and was run again on
+// another model (SDK message system/model_refusal_fallback). Unless its
+// scope is "local" (a subagent or a side question), the session stays on
+// that model from then on: the daemon did not ask for it and names no
+// fallback model itself. Seen in a real run of 20 review turns: asked opus,
+// claude-opus-5-5 until the notice in the third turn, claude-opus-5 after.
+// { session, log, event }: ids and the category only, none of its prose.
+export function refusalFallback(msg) {
+  const scope = msg.scope ?? "session";
+  const category = msg.api_refusal_category ?? null;
+  return {
+    session: scope !== "local",
+    log: `[agent] model refusal fallback original=${msg.original_model} fallback=${msg.fallback_model} scope=${scope} category=${category ?? "-"}`,
+    event: {
+      event: "model_fallback",
+      original: msg.original_model,
+      fallback: msg.fallback_model,
+      scope,
+      category,
+    },
+  };
+}
+
+// A model that declines a manuscript declines it on every turn (a real
+// revision: 18 refusals of the same category in 18 turns), so taking the
+// session back to the chosen model before each turn spends a refused request
+// a turn. The record of a pane's refusals: the first one is followed by one
+// more try on the chosen model; a second in a row of the same category, for
+// the same model asked, and the document stays on the other model.
+// prev: the record so far (or none). f: { asked, original, fallback, category }.
+export function declineStep(prev, { asked, original, fallback, category = null }) {
+  const again = prev && prev.asked === asked && prev.category === category;
+  const count = again ? prev.count + 1 : 1;
+  return { asked, original, fallback, category, count, stay: count >= 2 };
+}
+
+// The record, when it says to stay and is about the model chosen now.
+export function staysOnFallback(record, chosen) {
+  return record?.stay && record.asked === chosen ? record : null;
 }
 
 // What set_model does with a choice: the model to use and whether the

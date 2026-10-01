@@ -31,12 +31,17 @@ export function initToolsPane({
   // () => the request that confirms the stored providers while it is under
   // way (providers-pane.js whenRestored), else null.
   providersReady = () => null,
+  // (role) => what the last request of that kind of work really ran on
+  // ("Claude · Opus 5.5"), or null when the pane does not know (taskpane.js).
+  usedLabel = () => null,
 }) {
   const root = document.getElementById("tools-root");
   if (!root) return { onEvent() {}, reload: async () => {} }; // Excel pane: no Tools tab
   const $ = (id) => document.getElementById(id);
   const state = {
-    doc: null, // the tools_state answer, or null when the document is not saved
+    // The tools_state answer; null when the daemon says the document is not
+    // saved; undefined while it has not answered (or the request failed).
+    doc: undefined,
     rules: null, // { text, candidates, warnings, boxes } of the last guideline read
     busy: false,
     asking: 0, // job requests sent whose { accepted, job_id } has not come yet
@@ -157,7 +162,10 @@ export function initToolsPane({
     if (!r.ok) throw new Error(r.error || "The request failed.");
     say("");
     $("tools-selection").replaceChildren(
-      el("div", { class: "review-reqs-line", text: selectionHead(kind, text, r) }),
+      el("div", {
+        class: "review-reqs-line",
+        text: selectionHead(kind, text, r, usedLabel("writing")),
+      }),
       el("div", { class: "review-preview", text: r.text }),
     );
   }
@@ -301,7 +309,9 @@ export function initToolsPane({
       try {
         state.doc = await ask("tools_state");
       } catch (e) {
-        state.doc = null;
+        // Only "not saved" is that state; any other failure says nothing
+        // about the file.
+        state.doc = /^Save the document/.test(e.message) ? null : undefined;
         say(e.message, true);
       }
       renderDoc();

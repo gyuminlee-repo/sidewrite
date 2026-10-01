@@ -98,6 +98,7 @@ async function view(page) {
         blocked: q(".review-blocked", c).map(t),
       })),
       decisions: q("#review-decisions > div").map(t),
+      consistency: q("#review-consistency .review-violation").map(t),
       external: q("#review-external .review-external-item .review-violation").map(t),
       ledger: q("#review-ledger .review-ledger-item").map(t),
       violations: q("#review-violations .review-violation").map(t),
@@ -283,8 +284,16 @@ function providersView(page) {
       }));
     const raw = document.getElementById("providers-root")?.getAttribute("data-selection");
     return {
-      menus: { turn: menu("provider-turn"), oneshot: menu("provider-oneshot") },
-      models: { turn: menu("provider-turn-model"), oneshot: menu("provider-oneshot-model") },
+      menus: {
+        turn: menu("provider-turn"),
+        writing: menu("provider-writing"),
+        oneshot: menu("provider-oneshot"),
+      },
+      models: {
+        turn: menu("provider-turn-model"),
+        writing: menu("provider-writing-model"),
+        oneshot: menu("provider-oneshot-model"),
+      },
       selection: raw ? JSON.parse(raw) : {},
       rows: q("#providers-list .provider-row").map((r) => ({
         id: r.getAttribute("data-provider"),
@@ -461,6 +470,57 @@ const steps = {
     await clearMessage(page);
     await page.click("#review-refresh");
     await waitMessage(page, 120_000);
+    return view(page);
+  },
+
+  // "Check revised paragraphs": a status refresh, then the check of the
+  // paragraphs that hold two or more changes (one model request or more).
+  async "check-paragraphs"(page) {
+    await clearMessage(page);
+    await page.click("#review-check-paragraphs");
+    await waitMessage(
+      page,
+      20 * 60_000,
+      "^(Checked \\d+ revised paragraph|No paragraph holds two or more changes)",
+    );
+    return view(page);
+  },
+
+  // "Rewrite this paragraph" under "Check revised paragraphs": the n-th such
+  // button (a.nth, 0 by default) starts a review turn that writes the
+  // paragraph anew; waits as `propose` does until the turn is over.
+  async "rewrite-paragraph"(page, a = {}) {
+    if (await turnBusy(page)) throw new Error("a turn is already running");
+    const btn = page
+      .locator("#review-consistency button", { hasText: "Rewrite this paragraph" })
+      .nth(a.nth ?? 0);
+    await btn.click();
+    await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
+      timeout: 30_000,
+    });
+    const started = Date.now();
+    while (await turnBusy(page)) {
+      if (Date.now() - started > TURN_TIMEOUT)
+        throw new Error(`rewrite turn still running after ${TURN_TIMEOUT} ms`);
+      await sleep(1000);
+    }
+    await sleep(4000);
+    return { seconds: Math.round((Date.now() - started) / 1000), ...(await view(page)) };
+  },
+
+  // "Allow exception" of a blocked edit, pressed and confirmed: the row of
+  // comment a.ref that reads "Blocked by <a.blocked_by>:". The daemon sends
+  // the stored edit through the guarded write once more; an edit that is
+  // refused again ends with its reason on the message line (an error).
+  async "allow-exception"(page, a) {
+    const row = () =>
+      card(page, a.ref).locator(".review-blocked", { hasText: `Blocked by ${a.blocked_by}:` });
+    await clearMessage(page);
+    await row().locator("button", { hasText: "Allow exception" }).click();
+    await row().locator("button", { hasText: "Apply despite" }).click();
+    // An error ends the wait (the refusal is one); an edit that went in
+    // leaves no message and the step runs out of time.
+    await waitMessage(page, 180_000, "forbidden rule");
     return view(page);
   },
 
@@ -840,7 +900,7 @@ const steps = {
     await responseCard(page, a.ref)
       .locator("button", { hasText: /^Draft$/ })
       .click();
-    await waitResponse(page, TURN_TIMEOUT, `^Drafted ${escapeRe(a.ref)}\\.`);
+    await waitResponse(page, TURN_TIMEOUT, `^Drafted ${escapeRe(a.ref)}( with .+?)?\\.( |$)`);
     return responseView(page);
   },
 
@@ -849,7 +909,7 @@ const steps = {
     await clearResponse(page);
     await page.click("#response-draft-all");
     const limit = TURN_TIMEOUT * Math.max(1, cards);
-    await waitResponse(page, limit, "^(Drafted \\d+ responses?\\.$|Nothing to draft)");
+    await waitResponse(page, limit, "^(Drafted \\d+ responses?( with .+?)?\\.$|Nothing to draft)");
     return responseView(page);
   },
 

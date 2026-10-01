@@ -75,6 +75,41 @@ test("fetch: rejection and timeout fall back to aliases", async () => {
   assert.match(b.error, /timed out/);
 });
 
+// Edits and Writing default to the best model the account can use: a row of
+// the Opus family when the list has one, else sonnet.
+test("bestClaudeModel: the Opus row of the list, else sonnet; nothing asked for resolves to it", async () => {
+  const { bestClaudeModel, modelChange } = await import("../daemon/model-list.mjs");
+  const row = (value, resolvedModel = null) => ({ value, displayName: value, resolvedModel });
+  const withOpus = {
+    source: "sdk",
+    models: [row("sonnet", "claude-sonnet-5-5"), row("opus", "claude-opus-5-5"), row("haiku")],
+  };
+  assert.equal(bestClaudeModel(withOpus), "opus");
+  // Named by its id only, or only in what the row resolves to.
+  assert.equal(
+    bestClaudeModel({ source: "sdk", models: [row("sonnet"), row("claude-opus-5-5")] }),
+    "claude-opus-5-5",
+  );
+  assert.equal(
+    bestClaudeModel({ source: "sdk", models: [row("big", "claude-opus-5-5"), row("sonnet")] }),
+    "big",
+  );
+  const sdk = { source: "sdk", models: normalizeModels(SDK) };
+  assert.equal(bestClaudeModel(sdk), "sonnet", "an account without an Opus model");
+  // The list is not known: the alias, which query() always takes.
+  assert.equal(bestClaudeModel({ source: "fallback", models: FALLBACK_MODELS }), "opus");
+  assert.equal(bestClaudeModel(null), "sonnet");
+  // No model asked for (a pane that stored none) is the best one.
+  assert.equal(resolveModelChoice("", withOpus), "opus");
+  assert.equal(resolveModelChoice(null, sdk), "sonnet");
+  assert.deepEqual(modelChange({ requested: "", after: withOpus, running: "sonnet" }), {
+    model: "opus",
+    restart: true,
+  });
+  // A model that was asked for and is not listed is still replaced by sonnet.
+  assert.equal(resolveModelChoice("gpt-5", withOpus), "sonnet");
+});
+
 test("resolveModelChoice: listed, alias, explicit id on fallback, else sonnet", () => {
   const sdk = { source: "sdk", models: normalizeModels(SDK) };
   assert.equal(resolveModelChoice("fable", sdk), "fable");
@@ -180,4 +215,72 @@ test("modelChange: a session restarts only when the model it runs on is not the 
     }).restart,
     false,
   );
+});
+
+// The CLI itself changes the model of a session: when a request ends with a
+// refusal it runs it again on another model and, unless the notice says the
+// scope is local, keeps the session on that one (seen in a real run: asked
+// opus, claude-opus-5-5 until the notice, claude-opus-5 for every turn after).
+// The daemon says so in its log and to the pane, with ids only.
+test("refusalFallback: the log line and the pane event of a model_refusal_fallback notice", async () => {
+  const { refusalFallback } = await import("../daemon/model-list.mjs");
+  const msg = {
+    type: "system",
+    subtype: "model_refusal_fallback",
+    trigger: "refusal",
+    direction: "retry",
+    original_model: "claude-opus-5-5",
+    fallback_model: "claude-opus-5",
+    api_refusal_category: "bio",
+    api_refusal_explanation: "prose that is not for a log",
+    content: "prose",
+  };
+  assert.deepEqual(refusalFallback(msg), {
+    session: true,
+    log: "[agent] model refusal fallback original=claude-opus-5-5 fallback=claude-opus-5 scope=session category=bio",
+    event: {
+      event: "model_fallback",
+      original: "claude-opus-5-5",
+      fallback: "claude-opus-5",
+      scope: "session",
+      category: "bio",
+    },
+  });
+  const local = refusalFallback({ ...msg, scope: "local", api_refusal_category: null });
+  assert.equal(local.session, false);
+  assert.match(local.log, / scope=local category=-$/);
+  assert.equal(JSON.stringify(refusalFallback(msg)).includes("prose"), false);
+});
+
+// A real revision: the chosen model declined every one of 18 turns of a
+// manuscript (the CLI ran each again on another model), and going back to
+// the chosen model before each turn spent one refused request a turn. After
+// the second refusal in a row of the same kind the document stays on the
+// other model.
+test("declineStep and staysOnFallback: one more try after the first refusal, then the document stays", async () => {
+  const { declineStep, staysOnFallback } = await import("../daemon/model-list.mjs");
+  const f = {
+    asked: "opus",
+    original: "claude-opus-5-5",
+    fallback: "claude-opus-5",
+    category: "bio",
+  };
+  const first = declineStep(undefined, f);
+  assert.deepEqual(first, { ...f, count: 1, stay: false });
+  assert.equal(staysOnFallback(first, "opus"), null);
+  const second = declineStep(first, f);
+  assert.deepEqual(second, { ...f, count: 2, stay: true });
+  assert.equal(staysOnFallback(second, "opus"), second);
+  assert.equal(declineStep(second, f).count, 3);
+  // Another kind of refusal, or another model asked for, starts the count again.
+  assert.deepEqual(declineStep(first, { ...f, category: "cyber" }), {
+    ...f,
+    category: "cyber",
+    count: 1,
+    stay: false,
+  });
+  assert.equal(declineStep(first, { ...f, asked: "sonnet" }).count, 1);
+  // The record holds for the model that declined only: another choice is tried.
+  assert.equal(staysOnFallback(second, "sonnet"), null);
+  assert.equal(staysOnFallback(undefined, "opus"), null);
 });

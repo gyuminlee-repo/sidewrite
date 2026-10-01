@@ -6,6 +6,15 @@ import {
   applyTrackedEdit,
   trackedEditShape,
   TRACKED_EDIT_DESCRIPTION,
+  applyTrackedRewrite,
+  trackedRewriteShape,
+  TRACKED_REWRITE_DESCRIPTION,
+  askAuthor,
+  askAuthorShape,
+  ASK_AUTHOR_DESCRIPTION,
+  requirementOutside,
+  requirementOutsideShape,
+  REQUIREMENT_OUTSIDE_DESCRIPTION,
 } from "./review-tools.mjs";
 
 // Wrap a bridge tool result for MCP. Handlers return {content: [...]}.
@@ -842,6 +851,52 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
     },
   );
 
+  // A paragraph rewritten as a whole: reaches Word as office_tracked_edit calls.
+  const office_tracked_rewrite = tool(
+    "office_tracked_rewrite",
+    TRACKED_REWRITE_DESCRIPTION,
+    trackedRewriteShape,
+    async (args) => {
+      try {
+        const deps = { ...(opts.trackedEdit ?? {}), call: rawCall };
+        return asMcpResult(await applyTrackedRewrite(deps, args, opts.getReviewTurn?.() ?? null));
+      } catch (e) {
+        return asMcpError(e);
+      }
+    },
+  );
+
+  // Writes the review file, not the document: no bridge call.
+  const office_ask_author = tool(
+    "office_ask_author",
+    ASK_AUTHOR_DESCRIPTION,
+    askAuthorShape,
+    async (args) => {
+      try {
+        return asMcpResult(
+          await askAuthor(opts.trackedEdit ?? {}, args, opts.getReviewTurn?.() ?? null),
+        );
+      } catch (e) {
+        return asMcpError(e);
+      }
+    },
+  );
+
+  const office_requirement_outside = tool(
+    "office_requirement_outside",
+    REQUIREMENT_OUTSIDE_DESCRIPTION,
+    requirementOutsideShape,
+    async (args) => {
+      try {
+        return asMcpResult(
+          await requirementOutside(opts.trackedEdit ?? {}, args, opts.getReviewTurn?.() ?? null),
+        );
+      } catch (e) {
+        return asMcpError(e);
+      }
+    },
+  );
+
   const wordTools = [
     office_get_selection,
     office_read_paragraphs,
@@ -871,6 +926,9 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
     office_resolve_comment,
     office_header_footer,
     office_tracked_edit,
+    office_tracked_rewrite,
+    office_ask_author,
+    office_requirement_outside,
   ];
   const excelTools = [
     excel_get_selected_range,

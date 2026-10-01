@@ -65,7 +65,7 @@ import { runMarkedDiff } from "./marked-diff.mjs";
 import { runAnonymize } from "./anonymize.mjs";
 import { findFormatIssues } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
-import { usableHeadings } from "./response-service.mjs";
+import { usableHeadings, writingJob } from "./response-service.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
 
 export const AUX_JOBS = new Set([
@@ -80,10 +80,6 @@ export const MARKED_MODES = ["track_changes", "color"];
 
 // A file arrives as base64 in one WebSocket frame of at most 100 MiB.
 const MAX_BASE64 = 100 * 1024 * 1024;
-
-// A translation or an answer is prose: the model of a response draft
-// (response-service.mjs DRAFT_CLAUDE_MODEL), unless the pane chose another.
-const PROSE_CLAUDE_MODEL = "sonnet";
 
 // The longest selection that is sent to a model, in characters.
 export const MAX_SELECTION = 20000;
@@ -125,7 +121,7 @@ function selectedText(msg) {
 
 export function createAuxService({
   getContext,
-  // The one-shot of ONE JOB of a pane: async (key, { claudeModel }?) =>
+  // The one-shot of ONE JOB of a pane: async (key, { role, claudeModel }?) =>
   // { run, model } (providers/oneshot-router.mjs pin).
   oneshotFor = async () => ({ run: null, model: null }),
   // Default language of the settings file: () => string | null.
@@ -168,16 +164,28 @@ export function createAuxService({
     if (!job?.run) throw new Error(`No model is available for ${what}. Pick a provider in Setup.`);
     return job;
   }
-  const proseModel = { claudeModel: env.CC_OFFICE_RESPONSE_MODEL || PROSE_CLAUDE_MODEL };
+  // A translation or an answer is prose: a job of the pane's writing choice,
+  // as a response draft is.
+  const proseModel = writingJob(env);
   async function prose(job, request, what) {
     const r = await job.run(request);
     const text = r.ok ? String(r.text ?? "").trim() : "";
     if (!text) throw new Error(`${what} failed: ${r.error ?? "empty answer"}`);
     return text;
   }
+  // The receipt of a selection request, next to a saved document: the
+  // model and sizes, no text. A document that is not saved has no place for
+  // one; a receipt that cannot be written does not fail the answer.
+  async function selectionReceipt(key, kind, input, model, output) {
+    const doc = localDocPath(getContext(key)?.activeDoc, env);
+    if (!doc) return;
+    await appendDecisions(decisionsPathFor(doc), [
+      decisionRecord({ kind, input, model, output }),
+    ]).then(undefined, (e) => log(`[tools] decision log failed: ${e?.message ?? e}`));
+  }
 
   const impl = {
-    // The selected text in another language. Nothing is written anywhere.
+    // The selected text in another language. Only a receipt is written.
     async selection_translate(msg, key) {
       const text = selectedText(msg);
       const lang = String(msg.lang ?? "").trim();
@@ -185,10 +193,14 @@ export function createAuxService({
       const job = await modelFor(key, "translating", proseModel);
       const out = await prose(job, buildGlossPrompt(text, lang), "translation");
       log(`[tools] selection_translate chars=${text.length} lang=${lang} model=${job.model}`);
+      await selectionReceipt(key, "selection_translate", text, job.model, {
+        lang,
+        chars: text.length,
+      });
       return { text: out, lang, model: job.model };
     },
 
-    // An answer to a question about the selected text. Nothing is written.
+    // An answer to a question about the selected text. Only a receipt is written.
     async selection_ask(msg, key) {
       const text = selectedText(msg);
       const question = String(msg.question ?? "").trim();
@@ -196,6 +208,9 @@ export function createAuxService({
       const job = await modelFor(key, "answering", proseModel);
       const out = await prose(job, buildAskPrompt(text, question), "the answer");
       log(`[tools] selection_ask chars=${text.length} model=${job.model}`);
+      await selectionReceipt(key, "selection_ask", `${text}\n${question}`, job.model, {
+        chars: text.length,
+      });
       return { text: out, model: job.model };
     },
 

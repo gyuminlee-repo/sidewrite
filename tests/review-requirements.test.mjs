@@ -219,15 +219,36 @@ const BAD = {
   },
   "no sentences list": { sentences: "none" },
 };
+// A reply is read comment by comment: a comment whose sentences each have one
+// usable label gets its requirements; the others are left empty and named.
+// (Before, one bad label left every comment of the request empty: a real
+// review of 20 comments ended with none.) What each bad reply leaves:
+// [requirements of R1.1, requirements of R1.2, warning].
+const NAMED = (refs) => `model could not label requirement sentences of ${refs}; add them by hand`;
+const AFTER_BAD = {
+  "a sentence missing": [["Please add n."], [], NAMED("R1.2")],
+  "a sentence doubled": [["Please add n."], [], NAMED("R1.2")],
+  "a type outside the choices": [[], ["Report the unit."], NAMED("R1.1")],
+  "an unknown ref": [["Please add n."], [], NAMED("R1.2")],
+  "text instead of labels": [[], [], WARN],
+  "a sentence number out of range": [[], ["Report the unit."], NAMED("R1.1")],
+  "a sentence number zero": [[], ["Report the unit."], NAMED("R1.1")],
+  "a sentence number as text": [[], ["Report the unit."], NAMED("R1.1")],
+  // Types for parts of a sentence that has no cut mark: a request when one of them is.
+  "cuts on a sentence without cut marks": [["Please add n."], ["Report the unit."], null],
+  "an entry that is not an object": [[], ["Report the unit."], NAMED("R1.1")],
+  "no sentences list": [[], [], WARN],
+};
 for (const [name, json] of Object.entries(BAD)) {
-  test(`a reply with ${name} leaves requirements empty and warns`, async () => {
+  test(`a reply with ${name}: the comments it labels are kept, the others are named`, async () => {
+    const [first, second, warning] = AFTER_BAD[name];
     const r = await extractRequirements(TWO, { oneshot: async () => ({ ok: true, json }) });
     assert.deepEqual(
-      r.comments.map((c) => [c.ref, c.text, c.requirements]),
-      TWO.map((c) => [c.ref, c.text, []]),
+      r.comments.map((c) => c.requirements.map((q) => q.text)),
+      [first, second],
     );
-    assert.deepEqual(r.warnings, [WARN]);
-    assert.equal(r.requests, null);
+    assert.deepEqual(r.warnings, warning ? [warning] : []);
+    assert.equal(r.requests === null, !first.length && !second.length);
   });
 }
 
@@ -387,12 +408,17 @@ for (const [name, label] of Object.entries({
   "a cut that is neither split nor keep": { cuts: ["maybe"], types: ["request"] },
   "types that do not match the parts": { cuts: ["split"], types: ["request"] },
 })) {
-  test(`S2-30: a reply with ${name} leaves requirements empty and warns`, async () => {
+  // (Before: the requirements were left empty. Now the label is read for
+  // what it says: a request, not split.)
+  test(`S2-30: a reply with ${name} keeps the sentence as one request`, async () => {
     const r = await extractRequirements([C("R1.3", R13)], {
       oneshot: labelled({ "R1.3": [label] }),
     });
-    assert.deepEqual(r.comments[0].requirements, []);
-    assert.deepEqual(r.warnings, [WARN]);
+    assert.deepEqual(
+      r.comments[0].requirements.map((q) => squash(q.text)),
+      [squash(R13)],
+    );
+    assert.deepEqual(r.warnings, []);
   });
 }
 
@@ -409,14 +435,35 @@ const BAD_CUTS = {
   "a part type outside the choices": { cuts: ["split"], types: ["request", "question"] },
   "cuts that are not a list": { cuts: "split", types: ["request", "request"] },
 };
+// A label for a sentence with cut marks that does not fit the form is read
+// for what it does say (a model that does not think first often gives one
+// decision per part instead of one per mark): one type per part means a
+// split at every mark; any other usable type means the whole sentence, a
+// request when one of the types is. Only a label with no usable type is
+// dropped. What each leaves as the requirements of the sentence:
+const WHOLE = "Please state the unit, and describe the method.";
+const AFTER_BAD_CUTS = {
+  "a type instead of cuts": [WHOLE],
+  "too many cut decisions": ["Please state the unit", "describe the method."],
+  "no cut decision": [WHOLE],
+  "a cut decision outside the choices": [WHOLE],
+  "one type too few": [WHOLE],
+  "one type too many": ["Please state the unit"],
+  "a part type outside the choices": null,
+  "cuts that are not a list": ["Please state the unit", "describe the method."],
+};
 for (const [name, label] of Object.entries(BAD_CUTS)) {
-  test(`a cut-mark reply with ${name} leaves requirements empty and warns`, async () => {
+  test(`a cut-mark reply with ${name} is read for what it says`, async () => {
     assert.equal(clauseCuts(CUT_ONE[0].text).length, 1);
     const r = await extractRequirements(CUT_ONE, {
       oneshot: async () => ({ ok: true, json: { sentences: [{ ref: "R1.3", s: 1, ...label }] } }),
     });
-    assert.deepEqual(r.comments[0].requirements, []);
-    assert.deepEqual(r.warnings, [WARN]);
+    const want = AFTER_BAD_CUTS[name];
+    assert.deepEqual(
+      r.comments[0].requirements.map((q) => squash(q.text)),
+      want ?? [],
+    );
+    assert.deepEqual(r.warnings, want ? [] : [WARN]);
   });
 }
 
@@ -482,4 +529,149 @@ test("a request under a section is extracted verbatim, with the section in the m
   );
   // The requirement is text of the comment, not of the section label.
   for (const c of r.comments) assert.ok(c.text.includes(c.requirements[0].text));
+});
+
+// A long review in one request ran into the time limit of a one-shot (a real
+// review of 25 comments: "timed out after 120000 ms"), and every comment was
+// left without requirements. The sentences now go in batches: a request that
+// fails costs its own comments only, and the warning names them.
+test("a long review is labelled in batches; a batch that fails leaves only its comments without requirements", async () => {
+  const { REQUIREMENT_BATCH_SENTENCES } = await import("../daemon/review-split.mjs");
+  assert.equal(REQUIREMENT_BATCH_SENTENCES, 40);
+  const body = (n) => Array.from({ length: n }, (_, i) => `Please add item ${i + 1}.`).join(" ");
+  const comments = [
+    C("R1.1", body(30)),
+    C("R1.2", body(30)),
+    C("R1.3", body(8)),
+    C("R1.4", body(50)),
+  ];
+  const prompts = [];
+  // Labels every sentence of the prompt it is given as a request.
+  const all = async ({ prompt }) => {
+    prompts.push(prompt);
+    const sentences = [...prompt.matchAll(/^\[(R\d+\.\d+) s(\d+)\] /gm)].map((m) => ({
+      ref: m[1],
+      s: Number(m[2]),
+      type: "request",
+    }));
+    return { ok: true, json: { sentences } };
+  };
+  const refsOf = (prompt) => [
+    ...new Set([...prompt.matchAll(/^\[(R\d+\.\d+) s\d+\] /gm)].map((m) => m[1])),
+  ];
+  const ok = await extractRequirements(comments, { oneshot: all });
+  // R1.1 alone (30 + 30 is over the limit), R1.2 with R1.3 (38), R1.4 alone though it is over it.
+  assert.deepEqual(prompts.map(refsOf), [["R1.1"], ["R1.2", "R1.3"], ["R1.4"]]);
+  assert.deepEqual(ok.warnings, []);
+  assert.deepEqual(ok.requests, { "R1.1": 30, "R1.2": 30, "R1.3": 8, "R1.4": 50 });
+  assert.equal(ok.comments[3].requirements.length, 50);
+  assert.equal(ok.input, prompts.join("\n\n"));
+
+  // The second request times out.
+  let n = 0;
+  const flaky = async (req) =>
+    ++n === 2 ? { ok: false, error: "timed out after 120000 ms" } : all(req);
+  const part = await extractRequirements(comments, { oneshot: flaky });
+  assert.deepEqual(
+    part.comments.map((c) => c.requirements.length),
+    [30, 0, 0, 50],
+  );
+  assert.deepEqual(part.warnings, [
+    "requirement extraction failed for R1.2, R1.3: timed out after 120000 ms; add them by hand",
+  ]);
+  assert.deepEqual(part.requests, { "R1.1": 30, "R1.4": 50 });
+  assert.equal(part.asked, true);
+
+  // A reply that does not label a batch is said for that batch.
+  n = 0;
+  const wrong = async (req) => (++n === 3 ? { ok: true, json: { sentences: [] } } : all(req));
+  const bad = await extractRequirements(comments, { oneshot: wrong });
+  assert.deepEqual(bad.warnings, [
+    "model could not label requirement sentences of R1.4; add them by hand",
+  ]);
+  assert.deepEqual(
+    bad.comments.map((c) => c.requirements.length),
+    [30, 30, 8, 0],
+  );
+
+  // A usage limit ends the run: the requests after it are not sent.
+  n = 0;
+  const limited = async (req) =>
+    ++n === 2
+      ? { ok: false, error: "Claude usage limit reached.", limited: { limited: true } }
+      : all(req);
+  const cut = await extractRequirements(comments, { oneshot: limited });
+  assert.equal(n, 2, "no third request");
+  assert.deepEqual(cut.warnings, [
+    "requirement extraction failed for R1.2, R1.3, R1.4: Claude usage limit reached.; add them by hand",
+  ]);
+  // Every request failed: as before, nothing is changed and no count is given.
+  const none = await extractRequirements(comments, {
+    oneshot: async () => ({ ok: false, error: "timed out after 120000 ms" }),
+  });
+  assert.equal(none.requests, null);
+  assert.equal(none.warnings.length, 3);
+  assert.ok(none.comments.every((c) => c.requirements.length === 0));
+});
+
+// The replay of a real review: 3 requests, 2 timed out and 1 had labels that
+// did not fit, and the daemon log said nothing of it. Measured on a made-up
+// review of 25 comments: Haiku took 95 to 120 s a request with its default
+// thinking (11,000 to 13,000 output tokens for a 2,500-character reply) and
+// about 10 s without.
+test("the labelling request asks for no thinking, and every request leaves a line in the log", async () => {
+  const comments = [
+    C("R1.1", "Nice work. Please add n."),
+    C("R1.2", "Report the unit."),
+    C("R1.3", "Please state the unit, and describe the method."),
+  ];
+  const reqs = [];
+  const lines = [];
+  const reply = {
+    sentences: [
+      { ref: "R1.1", s: 1, type: "other" },
+      { ref: "R1.1", s: 2, type: "request" },
+      // R1.2 is missing; R1.3 has two decisions for one mark.
+      { ref: "R1.3", s: 1, cuts: ["split", "split"], types: ["request", "request"] },
+    ],
+  };
+  const r = await extractRequirements(comments, {
+    oneshot: async (req) => {
+      reqs.push(req);
+      return { ok: true, json: reply };
+    },
+    log: (l) => lines.push(l),
+  });
+  assert.deepEqual(reqs[0].thinking, { type: "disabled" });
+  assert.deepEqual(
+    r.comments.map((c) => c.requirements.length),
+    [1, 0, 2],
+  );
+  assert.deepEqual(r.warnings, [
+    "model could not label requirement sentences of R1.2; add them by hand",
+  ]);
+  assert.deepEqual(r.requests, { "R1.1": 1, "R1.3": 2 });
+  assert.deepEqual(lines, [
+    "[review] requirement extract batch 1/1 comments=3 sentences=4 labelled=2/3 unlabelled=R1.2",
+  ]);
+  // A failed request says why; a whole batch labelled has no list.
+  lines.length = 0;
+  await extractRequirements(comments, {
+    oneshot: async () => ({ ok: false, error: "timed out after 120000 ms" }),
+    log: (l) => lines.push(l),
+  });
+  assert.deepEqual(lines, [
+    "[review] requirement extract batch 1/1 comments=3 sentences=4 failed: timed out after 120000 ms",
+  ]);
+  lines.length = 0;
+  await extractRequirements([comments[1]], {
+    oneshot: async () => ({
+      ok: true,
+      json: { sentences: [{ ref: "R1.2", s: 1, type: "request" }] },
+    }),
+    log: (l) => lines.push(l),
+  });
+  assert.deepEqual(lines, [
+    "[review] requirement extract batch 1/1 comments=1 sentences=1 labelled=1/1",
+  ]);
 });

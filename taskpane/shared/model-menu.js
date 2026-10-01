@@ -17,10 +17,38 @@ export function modelMenuOptions(models, current) {
   return rows;
 }
 
+// The rows of the model menus before the account's list is known.
+export const ALIAS_MODELS = [
+  { value: "haiku", displayName: "Haiku", description: "cheapest", resolvedModel: null },
+  { value: "sonnet", displayName: "Sonnet", description: "balanced", resolvedModel: null },
+  { value: "opus", displayName: "Opus", description: "most capable", resolvedModel: null },
+];
+
+// The model of edits (review turns and the chat), one value for the chat box
+// and for Setup: the stored choice; else the default the daemon answered
+// set_model with (the best model the account lists); else, before it
+// answered, the alias it takes for that.
+export function editsModelValue(stored, daemonDefault) {
+  return stored || daemonDefault || "opus";
+}
+
 // A stored model choice the pane may send to the daemon, which checks it
 // against the account's list. "default" was retired: a model is always named.
 export function isStoredModelValid(v) {
   return typeof v === "string" && v !== "default" && /^[A-Za-z0-9][\w.:\-[\]]{0,80}$/.test(v);
+}
+
+// The model of edits a pane stored, or null when it stored no choice. Until
+// the default became the best model, every saved setting carried model:
+// "sonnet" (the default of the time), chosen or not. So a stored "sonnet"
+// counts as a choice only with the mark the menus set when the user picks a
+// model (modelChosen); without it, it is that old default. Any other stored
+// model can only have come from the menu and is kept.
+const OLD_DEFAULT = "sonnet";
+export function storedEditsModel(settings) {
+  const model = settings?.model;
+  if (!isStoredModelValid(model)) return null;
+  return settings.modelChosen === true || model !== OLD_DEFAULT ? model : null;
 }
 
 // The daemon answers set_model with the model it will use (it checks the

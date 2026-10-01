@@ -1161,7 +1161,7 @@ test("ledger suggestions: a checklist from the review text; Add selected imports
 
 // P15 "Propose all": one review turn per open comment, the next one only
 // after the turn_done of the one before.
-async function proposeAllSetup({ providersReady } = {}) {
+async function proposeAllSetup({ providersReady, usedLabel } = {}) {
   const { createTurnState } = await import("../taskpane/shared/turn-state.js");
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
@@ -1218,6 +1218,7 @@ async function proposeAllSetup({ providersReady } = {}) {
     },
     isTurnInFlight: () => turn.inFlight,
     providersReady,
+    usedLabel,
   });
   await pane.reload();
   const $ = (id) => document.getElementById(id);
@@ -1233,7 +1234,7 @@ async function proposeAllSetup({ providersReady } = {}) {
       ...(error ? { error } : {}),
     });
   };
-  return { pane, turn, proposals, sent, fail, doc, $, wait, endTurn };
+  return { pane, turn, proposals, sent, fail, doc, revision, $, wait, endTurn };
 }
 
 test("Propose all sends the next review_propose only after turn_done; an error stops the queue", async () => {
@@ -2181,4 +2182,379 @@ test("Refresh status, Clean up tool comments and Delete all run once at a time",
     assert.equal(calls[name], 1);
   }
   assert.equal(t.requests.filter((r) => r.type === "review_refresh").length, 1);
+});
+
+test("Propose all says what the turns ran on, when the pane knows it", async () => {
+  const roles = [];
+  const t = await proposeAllSetup({
+    usedLabel: (role) => (roles.push(role), "Claude · Opus 5.5"),
+  });
+  try {
+    const all = t.$("review-propose-all").click();
+    for (const ref of ["R1.1", "R1.3", "R2.1"]) {
+      await t.wait();
+      t.endTurn(ref);
+      await t.wait();
+    }
+    await all;
+    assert.equal(
+      t.$("review-message").textContent,
+      "Propose all with Claude · Opus 5.5: 3 of 3 proposed.",
+    );
+    assert.deepEqual([...new Set(roles)], ["turn"]);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// The author pressed Propose changes on one comment: when its turn is over
+// the tab says what came of it and what it ran on, in front of the status.
+test("a single Propose changes ends with a line: how many changes, for which comment, with what", async () => {
+  const t = await proposeAllSetup({
+    usedLabel: (role) => (role === "turn" ? "Claude · Opus 5.5" : null),
+  });
+  const buttons = () => findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+  try {
+    // No change came of the turn.
+    await buttons()[0].click();
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1"],
+    );
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^No change was proposed for R1\.1 with Claude · Opus 5\.5: the reason is in the Chat tab\. Accepted 0, /,
+    );
+    // Two changes on record after the turn, each with its comment in Word.
+    await buttons()[0].click();
+    await t.wait();
+    const c = t.revision.comments[0];
+    c.changes.push(
+      {
+        id: "R1.1-1",
+        word_comment_id: "w1",
+        state: "pending",
+        kind: "replace",
+        before: "b",
+        after: "a",
+        rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+      },
+      {
+        id: "R1.1-2",
+        word_comment_id: "w2",
+        state: "pending",
+        kind: "replace",
+        before: "b",
+        after: "a",
+        rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+      },
+    );
+    t.doc.comments.push(
+      { id: "w1", content: "[R1.1] a / b / c" },
+      { id: "w2", content: "[R1.1] d / e / f" },
+    );
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^Proposed 2 changes for R1\.1 with Claude · Opus 5\.5\. Accepted 0, /,
+    );
+    // An edit the forbid list blocked is said, also when nothing else came.
+    await buttons()[0].click();
+    await t.wait();
+    c.blocked.push({
+      id: "R1.1-b1",
+      args: { find: "x", replace: "novel x" },
+      blocked_by: ["L2"],
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^No change was proposed for R1\.1 with Claude · Opus 5\.5: 1 edit was blocked \(see the blocked list of the comment\)\. Accepted 0, /,
+    );
+    // A turn that failed gets no such line.
+    await buttons()[0].click();
+    await t.wait();
+    t.endTurn("R1.1", "Claude usage limit reached.");
+    await t.wait();
+    await t.wait();
+    assert.equal(/Proposed|No change was proposed/.test(t.$("review-message").textContent), false);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// What the model asked the author instead of guessing (office_ask_author):
+// on the card of the comment, each with a box for the answer.
+test("a comment card shows the questions for the author; Save answer sends the answer", async () => {
+  const card = (questions) => ({
+    ref: "R1.1",
+    reviewer: 1,
+    text: "The run time does not agree.",
+    requirements: [{ id: "q1", text: "make the run time consistent" }],
+    status: "in_progress",
+    changes: [],
+    blocked: [],
+    questions,
+  });
+  const revision = {
+    comments: [
+      card([
+        {
+          id: "a1",
+          requirement_id: "q1",
+          question: "Which run time is right?",
+          why: "Two values.",
+          answer: "",
+          answered_at: null,
+        },
+        {
+          id: "a2",
+          requirement_id: null,
+          question: "How many flasks?",
+          why: "Not said.",
+          answer: "12",
+          answered_at: "2026-01-01T00:00:00Z",
+        },
+      ]),
+      { ...card([]), ref: "R1.2" },
+    ],
+    ledger: [],
+  };
+  const t = await setup({ revision });
+  const all = () => findAll(t.$("review-comments"), () => true);
+  const texts = all().map((n) => n.textContent);
+  assert.equal(
+    texts.filter((x) => x === "Questions for the author").length,
+    1,
+    "only on the card that has some",
+  );
+  assert.ok(texts.includes("a1 (q1): Which run time is right?"));
+  assert.ok(texts.includes("Why it is asked: Two values."));
+  assert.ok(texts.includes("a2: How many flasks?"));
+  const answers = () => all().filter((n) => n.attributes.class === "review-answer");
+  assert.deepEqual(
+    answers().map((n) => n.value),
+    ["", "12"],
+  );
+  typeInto(answers()[0], "3,020 hours.");
+  // The pane is told a question was noted: it loads again, the draft stays.
+  t.pane.onEvent({ type: "review_event", event: "comment_noted", ref: "R1.1" });
+  await settle();
+  assert.equal(t.requests.filter((r) => r.type === "review_load").length, 2);
+  assert.equal(answers()[0].value, "3,020 hours.");
+  await all()
+    .filter((n) => n.textContent === "Save answer")[0]
+    .click();
+  assert.deepEqual(t.requests.filter((r) => r.type === "review_question_answer").at(-1).payload, {
+    ref: "R1.1",
+    id: "a1",
+    answer: "3,020 hours.",
+  });
+});
+
+// A turn that handles one request of three and says nothing of the others:
+// the line after the turn and the card both name the two left open.
+test("after a turn the line names the requests still open; the card shows the state of each", async () => {
+  const t = await proposeAllSetup({
+    usedLabel: (role) => (role === "turn" ? "Claude · Opus 5.5" : null),
+  });
+  const c = t.revision.comments[0];
+  c.requirements = [
+    { id: "q1", text: "state the unit" },
+    { id: "q2", text: "give the n" },
+    { id: "q3", text: "name the test" },
+  ];
+  const buttons = () => findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+  const lines = () =>
+    findAll(t.$("review-comments"), (n) => n.attributes.class === "review-reqs-line").map(
+      (n) => n.textContent,
+    );
+  try {
+    await t.pane.reload();
+    assert.equal(
+      lines()[0],
+      "Requirements: q1 state the unit; q2 give the n; q3 name the test. Open: q1, q2, q3.",
+    );
+    assert.equal(
+      lines()[1],
+      "Requests not extracted: add them above, one per line. Until then a turn lists them itself.",
+    );
+    await buttons()[0].click();
+    await t.wait();
+    c.changes.push({
+      id: "R1.1-1",
+      word_comment_id: "w1",
+      state: "pending",
+      kind: "replace",
+      before: "b",
+      after: "a",
+      rationale: { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] },
+    });
+    t.doc.comments.push({ id: "w1", content: "[R1.1] a / b / c" });
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^Proposed 1 change for R1\.1 with Claude · Opus 5\.5\. 2 requests of R1\.1 are still open \(q2, q3\)\. Accepted 0, /,
+    );
+    assert.equal(
+      lines()[0],
+      "Requirements: q1 state the unit; q2 give the n; q3 name the test. Changed: q1. Open: q2, q3.",
+    );
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// The term a change took out is still in other paragraphs of the last
+// status refresh: the card of the comment says where.
+test("a comment card names the places where a term its changes took out is still present", async () => {
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "Gene A is not essential: the claim is not supported.",
+        requirements: [],
+        status: "in_progress",
+        changes: [
+          {
+            id: "R1.1-1",
+            word_comment_id: "w1",
+            state: "pending",
+            kind: "replace",
+            find: "is essential for",
+            text: "was associated with",
+            narrowed_from: null,
+            before: "Gene A is essential for growth.",
+            after: "Gene A was associated with growth.",
+            rationale: {
+              what: "w",
+              why: "Essentiality is not shown.",
+              addresses: "a",
+              requirement_ids: [],
+            },
+          },
+        ],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+    snapshot: {
+      taken_at: "2026-01-01T00:00:00Z",
+      paragraphs: [
+        "Gene A is essential.",
+        "Gene A was associated with growth.",
+        "An essential gene.",
+      ],
+      ids: null,
+    },
+  };
+  const t = await setup({ revision });
+  const lines = findAll(t.$("review-comments"), (n) => n.attributes.class === "review-residue").map(
+    (n) => n.textContent,
+  );
+  assert.deepEqual(lines, [
+    '"essential" (taken out by R1.1-1) is still present in 2 other places: p0, p2.',
+  ]);
+});
+
+// "Check revised paragraphs": a status refresh first (the check reads the
+// document as it is), then the job; its findings stay under the button.
+test("Check revised paragraphs refreshes the status, runs the check and lists what it found", async () => {
+  const revision = { comments: [], ledger: [] };
+  const consistency = {
+    checked_at: "2026-01-02T03:04:05.000Z",
+    model: "claude-opus-9",
+    paragraphs: [{ index: 2, id: "p2", change_ids: ["R1.1-1", "R2.3-1"], many: false }],
+    findings: [
+      {
+        paragraph_index: 2,
+        paragraph_id: "p2",
+        kind: "contradiction",
+        detail: "It says fast and slow.",
+        change_ids: ["R1.1-1"],
+      },
+    ],
+    warnings: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const selected = [];
+  let t = null;
+  t = await setup({
+    revision,
+    word: {
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }),
+      selectParagraphByIndex: async (i) => selected.push(i),
+    },
+    respond: {
+      review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+      review_check_paragraphs: () => {
+        queueMicrotask(() =>
+          t.pane.onEvent({
+            type: "review_event",
+            event: "job_done",
+            job_id: "j7",
+            result: { ok: true, consistency, revision: { ...revision, consistency } },
+          }),
+        );
+        return { ok: true, accepted: true, job_id: "j7" };
+      },
+    },
+  });
+  assert.deepEqual(t.$("review-consistency").children, []);
+  await t.$("review-check-paragraphs").click();
+  assert.deepEqual(
+    t.requests.map((r) => r.type).filter((x) => x !== "review_load"),
+    ["review_refresh", "review_check_paragraphs"],
+  );
+  assert.equal(t.$("review-message").textContent, "Checked 1 revised paragraph: 1 problem.");
+  const rows = t.$("review-consistency").children;
+  assert.deepEqual(
+    rows.map((n) => n.textContent),
+    ["p2: the paragraph contradicts itself. It says fast and slow. (R1.1-1)"],
+  );
+  await rows[0].click();
+  assert.deepEqual(selected, [2]);
+});
+
+// "Rewrite this paragraph" under a paragraph that holds three or more
+// changes: a review turn of the comment with the most changes there, told
+// which paragraph to write anew.
+test("Rewrite this paragraph starts a review turn that carries the paragraph", async () => {
+  const t = await proposeAllSetup({});
+  t.revision.consistency = {
+    checked_at: "2026-01-02T03:04:05.000Z",
+    model: null,
+    paragraphs: [{ index: 5, id: "p5", change_ids: ["R1.3-1", "R1.3-2", "R1.1-4"], many: true }],
+    findings: [],
+    warnings: [],
+  };
+  try {
+    await t.pane.reload();
+    const buttons = findAll(
+      t.$("review-consistency"),
+      (n) => n.textContent === "Rewrite this paragraph",
+    );
+    assert.equal(buttons.length, 1);
+    await buttons[0].click();
+    await t.wait();
+    const sent = t.sent.filter(([type]) => type === "review_propose").at(-1);
+    assert.deepEqual([sent[1].ref, sent[1].rewrite_paragraph, sent[1].paragraphs], ["R1.3", 5, []]);
+    t.endTurn("R1.3");
+    await t.wait();
+    await t.wait();
+  } finally {
+    await t.pane.reload();
+  }
 });

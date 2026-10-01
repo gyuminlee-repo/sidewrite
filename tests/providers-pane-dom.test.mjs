@@ -119,14 +119,21 @@ const confirmed = (p, over = {}) => ({
   ok: true,
   selection: {
     turn: p.turn ?? { id: "claude", model: null },
+    writing: p.writing ?? null,
     oneshot: p.oneshot ?? null,
-    state: { turn: "ready", oneshot: "ready" },
-    error: { turn: null, oneshot: null },
+    state: { turn: "ready", writing: "ready", oneshot: "ready" },
+    error: { turn: null, writing: null, oneshot: null },
     ...over,
   },
 });
 
-async function setup({ settings = {}, respond = {}, list = rows(), connect = true } = {}) {
+async function setup({
+  settings = {},
+  respond = {},
+  list = rows(),
+  connect = true,
+  editsModel = undefined,
+} = {}) {
   globalThis.document = fakeDocument();
   const { initProvidersPane } = await import("../taskpane/shared/providers-pane.js");
   const requests = [];
@@ -143,6 +150,7 @@ async function setup({ settings = {}, respond = {}, list = rows(), connect = tru
     sendRequest,
     settings,
     saveSettings: (s) => saved.push(JSON.stringify(s)),
+    ...(editsModel ? { editsModel } : {}),
   });
   // As taskpane.js: the stored choices right after hello, the list on welcome.
   if (connect) {
@@ -161,12 +169,27 @@ const textsOf = (node) => findAll(node, (n) => !!n.textContent).map((n) => n.tex
 
 test("the menus list what passed; a provider that cannot be chosen is disabled and says why", async () => {
   const t = await setup();
-  // Review turns: Claude only. Codex is for judgments, like Ollama.
-  assert.deepEqual(optionTexts(t.$("provider-turn")), ["Claude (Agent SDK)"]);
+  // Edits: Claude only; the others are listed, disabled, each with its reason.
+  assert.deepEqual(optionTexts(t.$("provider-turn")), [
+    "Claude (Agent SDK)",
+    "Codex CLI (not for edits)",
+    "Ollama (local) (not for edits)",
+    "Groq (No API key)",
+  ]);
   assert.deepEqual(
-    t.$("provider-turn").children.map((o) => o.disabled),
-    [false],
+    t.$("provider-turn").children.map((o) => [o.disabled, o.title]),
+    [
+      [false, ""],
+      [true, NO_LOOP],
+      [true, NO_LOOP],
+      [true, "No API key"],
+    ],
   );
+  // Writing: what is available, as for judgments.
+  assert.deepEqual(optionTexts(t.$("provider-writing")), optionTexts(t.$("provider-oneshot")));
+  assert.equal(t.$("provider-writing").value, "claude");
+  assert.deepEqual(optionTexts(t.$("provider-writing-model")), ["Best model (default)", "Sonnet"]);
+  assert.equal(optionTexts(t.$("provider-oneshot-model"))[0], "Default model");
   assert.deepEqual(optionTexts(t.$("provider-oneshot")), [
     "Claude (Agent SDK)",
     "Codex CLI",
@@ -203,7 +226,7 @@ test("the menus list what passed; a provider that cannot be chosen is disabled a
   assert.deepEqual(
     t.requests.map((r) => [r.type, r.payload]),
     [
-      ["restore_providers", { turn: null, oneshot: null }],
+      ["restore_providers", { turn: null, writing: null, oneshot: null }],
       ["providers_list", {}],
     ],
   );
@@ -234,7 +257,74 @@ test("choosing a judgment provider sends it with its first model and stores the 
   // What the daemon accepted, for the acceptance driver (scripts/e2e).
   assert.deepEqual(JSON.parse(t.$("providers-root").attributes["data-selection"]), {
     turn: { id: "claude", model: null },
+    writing: { id: "claude", model: null },
     oneshot: { id: "ollama", model: "gemma4:12b" },
+  });
+});
+
+// Writing (response drafts, translations, questions) has a provider and a
+// model of its own, stored apart from the one of the judgments.
+test("choosing a writing provider and model sends them under their own role and stores them", async () => {
+  const t = await setup({ settings: { oneshotProvider: { id: "ollama", model: "gemma4:12b" } } });
+  assert.equal(t.$("provider-writing").value, "claude");
+  const m = t.$("provider-writing-model");
+  m.value = "sonnet";
+  await m.fire("change");
+  assert.deepEqual(t.sent("set_provider"), [{ role: "writing", id: "claude", model: "sonnet" }]);
+  assert.deepEqual(t.settings.writingProvider, { id: "claude", model: "sonnet" });
+  const sel = t.$("provider-writing");
+  sel.value = "codex";
+  await sel.fire("change");
+  assert.deepEqual(t.sent("set_provider")[1], { role: "writing", id: "codex", model: null });
+  assert.deepEqual(t.settings.writingProvider, { id: "codex", model: null });
+  // The judgments keep theirs.
+  assert.deepEqual(t.settings.oneshotProvider, { id: "ollama", model: "gemma4:12b" });
+  assert.equal(t.$("provider-oneshot").value, "ollama");
+  // Sent with the others after a reconnect.
+  const again = await setup({ settings: t.settings });
+  assert.deepEqual(again.sent("restore_providers"), [
+    {
+      turn: null,
+      writing: { id: "codex", model: null },
+      oneshot: { id: "ollama", model: "gemma4:12b" },
+    },
+  ]);
+  assert.equal(again.$("provider-writing").value, "codex");
+});
+
+// The model of edits is one value: the one the chat box holds. Setup shows
+// it and changes it through the same function, so the two cannot differ.
+test("the model of edits in Setup is the chat box's: shown from it, changed through it", async () => {
+  let model = "opus";
+  const set = [];
+  const editsModel = {
+    get: () => model,
+    rows: () => [
+      { value: "sonnet", label: "Sonnet 5.5", title: "" },
+      { value: "opus", label: "Opus 5.5", title: "" },
+    ],
+    set: (v) => (set.push(v), (model = v)),
+  };
+  const t = await setup({ editsModel });
+  const m = t.$("provider-turn-model");
+  assert.equal(m.disabled, false);
+  assert.deepEqual(optionTexts(m), ["Sonnet 5.5", "Opus 5.5"]);
+  assert.equal(m.value, "opus");
+  m.value = "sonnet";
+  await m.fire("change");
+  assert.deepEqual(set, ["sonnet"]);
+  // Not a provider choice: nothing goes to set_provider and nothing is stored here.
+  assert.deepEqual(t.sent("set_provider"), []);
+  assert.equal(t.saved.length, 0);
+  // A change made in the chat box shows here after render().
+  model = "opus";
+  t.pane.render();
+  assert.equal(t.$("provider-turn-model").value, "opus");
+  // What the pane chose, for the line that says what runs.
+  assert.deepEqual(t.pane.selection(), {
+    turn: { id: "claude", model: null },
+    writing: { id: "claude", model: null },
+    oneshot: { id: "claude", model: null },
   });
 });
 
@@ -267,7 +357,12 @@ test("the stored choices go to the daemon right after hello, before and without 
   const restoring = t.pane.restoreStored();
   assert.deepEqual(
     t.requests.map((r) => [r.type, r.payload]),
-    [["restore_providers", { turn: null, oneshot: { id: "ollama", model: "gemma4:12b" } }]],
+    [
+      [
+        "restore_providers",
+        { turn: null, writing: null, oneshot: { id: "ollama", model: "gemma4:12b" } },
+      ],
+    ],
   );
   // Until the daemon answers, the Review tab holds its requests (whenRestored).
   assert.equal(t.pane.restoring(), true);
@@ -363,7 +458,7 @@ test("after a daemon restart the same stored choices are sent again, unchanged",
   const second = await setup({ settings });
   for (const t of [first, second]) {
     assert.deepEqual(t.sent("restore_providers"), [
-      { turn: null, oneshot: { id: "ollama", model: "gemma4:12b" } },
+      { turn: null, writing: null, oneshot: { id: "ollama", model: "gemma4:12b" } },
     ]);
     assert.equal(t.requests[0].type, "restore_providers");
     assert.equal(t.$("provider-oneshot").value, "ollama");

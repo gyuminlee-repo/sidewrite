@@ -140,6 +140,7 @@ async function setup({
   providersReady,
   hold = [],
   missing = [],
+  usedLabel,
 } = {}) {
   globalThis.document = fakeDocument(missing);
   const { initResponsePane } = await import("../taskpane/shared/response-pane.js");
@@ -167,6 +168,7 @@ async function setup({
   pane = initResponsePane({
     sendRequest,
     providersReady,
+    usedLabel,
     word: {
       collectReviewSnapshot: async () => (wordCalls.push("snapshot"), SNAPSHOT),
       collectHeadings: async () => (wordCalls.push("headings"), HEADINGS),
@@ -355,6 +357,19 @@ test("Draft all missing: only comments without an answer that are not declined, 
     ["R1.2", "R2.1", "R2.2"],
   );
   assert.equal(ok.message(), "Drafted 3 responses.");
+
+  // With what the drafts ran on, when the pane knows it (model_used events).
+  const roles = [];
+  const named = await setup({
+    revision,
+    respond: { response_draft: () => ({ ok: true, revision }) },
+    usedLabel: (role) => (roles.push(role), "Claude · Opus 5.5"),
+  });
+  await named.$("response-draft-all").click();
+  assert.equal(named.message(), "Drafted 3 responses with Claude · Opus 5.5.");
+  assert.deepEqual([...new Set(roles)], ["writing"]);
+  await button(named.card("R1.2"), "Draft").click();
+  assert.match(named.message(), /^Drafted R1\.2 with Claude · Opus 5\.5\./);
 });
 
 test("Update line numbers sends the PDF Word rendered; a PDF too large for one frame is not sent", async () => {

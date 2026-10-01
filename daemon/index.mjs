@@ -30,7 +30,15 @@ import { createResponseService } from "./response-service.mjs";
 import { createAuxService } from "./aux-service.mjs";
 import { markStale } from "./response-quotes.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
-import { createModelCache, modelChange, resolveModelChoice } from "./model-list.mjs";
+import {
+  bestClaudeModel,
+  createModelCache,
+  refusalFallback,
+  declineStep,
+  staysOnFallback,
+  modelChange,
+  resolveModelChoice,
+} from "./model-list.mjs";
 import { createKeyStore } from "./providers/keys.mjs";
 import { probeAll, createProbeCache } from "./providers/probe.mjs";
 import { createOneshotRouter } from "./providers/oneshot-router.mjs";
@@ -320,18 +328,38 @@ const reviewTurnByKey = new Map();
 // model is fixed per agent loop, so a change while a loop is live triggers
 // a resuming restart (see the set_model handler).
 const modelByKey = new Map();
+// What the session of a pane was given of the manuscript in a review turn
+// (review-prompt.mjs manuscriptBlock): pane key -> { hashes, fresh }. fresh:
+// given in a turn that starts the session itself (a first turn, or the
+// restart after a model fallback); that start keeps it. Any other start of
+// a session, and a compaction of its history, forgets it: the next review
+// turn then carries the whole manuscript again.
+const manuscriptByKey = new Map();
 // The models the signed-in account can use (model-list.mjs), fetched once at
 // start and kept for ten minutes. Until it is known, and when the fetch
 // fails, the three aliases and well-formed claude-* ids are accepted.
 const modelCache = createModelCache();
 
-// The model to pass to query(). Draftspect always pins an explicit
-// model (cost-control UI), never silently inherits the CLI default, which
-// can be Opus. Falls back to "sonnet" if the taskpane hasn't said yet.
+// The model to pass to query(). Draftspect always pins an explicit model,
+// never the CLI default: the one the pane chose, or, when it chose none (or
+// has not said yet), the best the account lists (model-list.mjs
+// bestClaudeModel).
 function modelArgFor(key) {
-  const m = modelByKey.get(key);
-  return m ? resolveModelChoice(m, modelCache.current()) : "sonnet";
+  return resolveModelChoice(modelByKey.get(key), modelCache.current());
 }
+// Refusals of the chosen model in this pane (model-list.mjs declineStep):
+// pane key -> record. After two in a row the session is left on the model
+// the CLI moved it to, for as long as that choice stands.
+const declinedByKey = new Map();
+const staysOn = (key) => staysOnFallback(declinedByKey.get(key), modelArgFor(key));
+// That state for the pane, with every session_init (the CLI sends an init at
+// the start of each turn, and the pane takes what edits run on from it).
+const stayState = (key) => {
+  const d = staysOn(key);
+  return d
+    ? { original: d.original, fallback: d.fallback, category: d.category, stay: true }
+    : null;
+};
 
 function sessionFor(key) {
   return sessions.get(key) ?? null;
@@ -515,6 +543,8 @@ function onPaneClose(key) {
   explicitWorkspaceKeys.delete(key);
   loopRestartByKey.delete(key);
   modelByKey.delete(key);
+  manuscriptByKey.delete(key);
+  declinedByKey.delete(key);
   selection.drop(key);
   startQueue.delete(key);
 }
@@ -526,12 +556,28 @@ function onPaneClose(key) {
 // conversation. Deferred via setImmediate so it lands after the message
 // is queued and after any in-flight finally; the new loop then drains
 // this pane's queue. No other pane's loop is ever touched.
-async function ensureLoopForMessage(key, host) {
+// idle: no turn of this pane was running when the message came.
+async function ensureLoopForMessage(key, host, { idle = true } = {}) {
   if (!key) return;
   const cwd = cwdForKey(key);
   const live = sessionFor(key);
   if (live && !live.settled) {
-    return; // this pane's loop is live and will consume the message
+    // (staysOn: the chosen model declined twice in a row; the session is
+    // left where the CLI put it.)
+    if (!live.fellBackTo || !idle || staysOn(key)) return; // the live loop will consume the message
+    // The CLI moved this session to another model after a refusal
+    // (model_refusal_fallback) and keeps it there. The retry of that turn
+    // stays; this turn starts on the model the user chose again. The old
+    // session's wait for a message ends here, before the caller queues the
+    // new one, so the restarted session is the one that reads it.
+    console.log(
+      `[agent] model restored to ${modelArgFor(key)} after the fallback to ${live.fellBackTo}`,
+    );
+    bridge.clearUserMessages(key, { keepQueued: true });
+    restartSession(key, host, { reason: "model_restored", keepQueued: true }).catch((err) =>
+      console.warn("[daemon] restart after a model fallback failed:", err.message),
+    );
+    return;
   }
   let resumeId = null;
   try {
@@ -566,9 +612,21 @@ const oneshotRouter = createOneshotRouter({
   keys: providerKeys,
   // Waits for the pane's confirmed choice and throws when there is none:
   // the router then answers with that error and sends nothing anywhere.
-  getChoice: (key) => selection.ready(key, "oneshot"),
+  getChoice: (key, role) => selection.ready(key, role),
+  // A choice of Claude that names no model: writing gets the best model of
+  // the account, a judgment the cheap one.
+  claudeDefault: (role) =>
+    role === "writing" ? bestClaudeModel(modelCache.current()) : ONESHOT_MODEL,
+  // What each request really ran on, for the line of the pane that says so.
+  onUsed: (key, used) => bridge.sendToTaskpane({ type: "model_used", ...used }, key),
   log: console.log,
 });
+
+// Will the next turn of this pane start (or restart) its session?
+const startsSession = (key) => {
+  const s = sessionFor(key);
+  return !s || s.settled || (!!s.fellBackTo && !staysOn(key));
+};
 
 const review = createReviewService({
   getContext: (key) => bridge.getContext(key),
@@ -595,10 +653,16 @@ const review = createReviewService({
   oneshotModel: ONESHOT_MODEL,
   // Judgments go to the provider the pane chose (default: Claude, haiku),
   // fixed for each job when it starts.
-  oneshotJob: (key) => oneshotRouter.pin(key),
+  // (options: the paragraph check asks for the role and model of the edits.)
+  oneshotJob: (key, options) => oneshotRouter.pin(key, options),
   // A review turn starts only with a confirmed provider for review turns.
   turnGate: (key) => selection.ready(key, "turn"),
   getModel: (key) => modelArgFor(key),
+  // The model the session of the pane runs on, for receipts.
+  getRunModel: (key) =>
+    sessionFor(key)?.fellBackTo ?? sessionFor(key)?.ranModel ?? modelArgFor(key),
+  manuscriptSeen: (key) => (startsSession(key) ? null : (manuscriptByKey.get(key)?.hashes ?? null)),
+  manuscriptGiven: (key, hashes) => manuscriptByKey.set(key, { hashes, fresh: startsSession(key) }),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
   // The answers of the response letter that a change of the manuscript made
   // out of date (same rule as the Response tab).
@@ -642,8 +706,9 @@ const bridge = createBridge({
   allowedOrigins: [HTTP_ORIGIN],
   onHello: (key, host, doc) => onPaneConnect(key, host, doc),
   onUserMessage: (key, host) => {
+    const idle = !turnBusy.has(key);
     turnBusy.add(key);
-    return ensureLoopForMessage(key, host);
+    return ensureLoopForMessage(key, host, { idle });
   },
   onClose: (key) => onPaneClose(key),
   // A tracked edit answered after its timeout or disconnect: record it.
@@ -803,11 +868,11 @@ const bridge = createBridge({
         c && typeof c === "object" && c.id ? { id: c.id, model: c.model } : null;
       const state = await selection.restore(
         key,
-        { turn: pick(msg.turn), oneshot: pick(msg.oneshot) },
+        { turn: pick(msg.turn), writing: pick(msg.writing), oneshot: pick(msg.oneshot) },
         () => probeCache.get(),
       );
       console.log(
-        `[providers] restore turn=${state.state.turn} oneshot=${state.state.oneshot}` +
+        `[providers] restore turn=${state.state.turn} writing=${state.state.writing} oneshot=${state.state.oneshot}` +
           ` provider=${state.oneshot?.id ?? (state.state.oneshot === "ready" ? "claude" : "-")}`,
       );
       reply({
@@ -858,12 +923,37 @@ const bridge = createBridge({
       const after = await modelCache.get();
       // Read after the wait: a session a first message started meanwhile
       // has recorded the model it runs on (session.model).
+      const chosen = resolveModelChoice(requested, after);
       const { model, restart } = modelChange({
         requested,
         after,
-        running: sessionFor(key)?.model ?? null,
+        // A session the CLI moved to another model runs on that one.
+        // One left on that model because this choice declines the
+        // manuscript counts as running on the choice: no restart.
+        running: staysOnFallback(declinedByKey.get(key), chosen)
+          ? chosen
+          : (sessionFor(key)?.fellBackTo ?? sessionFor(key)?.model ?? null),
       });
+      // Another model chosen: what the old one declined is no longer of use.
+      if (prev !== undefined && prev !== model) declinedByKey.delete(key);
       modelByKey.set(key, model);
+      // A pane that connects again has lost what it was told: the state goes
+      // again, without a chat notice.
+      const stays = staysOn(key);
+      if (stays) {
+        bridge.sendAssistantEvent(
+          {
+            ...refusalFallback({
+              original_model: stays.original,
+              fallback_model: stays.fallback,
+              api_refusal_category: stays.category,
+            }).event,
+            stay: true,
+            quiet: true,
+          },
+          key,
+        );
+      }
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
       // Relaunch when the model a session of this pane runs on is not the
       // one just decided: a later choice that differs, or, on the first
@@ -1223,6 +1313,11 @@ async function startSessionForFolder(
   // triggered the lazy start) — clearing here would drop it, leaving
   // userMessageStream awaiting forever and the SDK with no first input
   // (no init, taskpane stuck on "Working…").
+  // The manuscript a review turn gave: this start keeps it only when that
+  // turn is what starts the session.
+  const given = manuscriptByKey.get(key);
+  if (given?.fresh) given.fresh = false;
+  else manuscriptByKey.delete(key);
   const prior = sessionFor(key);
   if (prior) {
     prior.abortController.abort();
@@ -1444,7 +1539,11 @@ function handleAgentMessage(msg, session) {
   switch (msg.type) {
     case "system": {
       if (msg.subtype === "init") {
-        console.log(`[agent] init session ${msg.session_id} (model: ${msg.model})`);
+        // asked: the model query() was given; model: the one the CLI runs.
+        // effort: what the CLI will send (the SDK's default; none is set here).
+        console.log(
+          `[agent] init session ${msg.session_id} (model: ${msg.model}) asked=${session?.model ?? "-"} effort=${msg.effort ?? "-"}`,
+        );
         try {
           const tn = Array.isArray(msg.tools) ? msg.tools : Object.keys(msg.tools ?? {});
           diag(
@@ -1455,11 +1554,15 @@ function handleAgentMessage(msg, session) {
         } catch (e) {
           diag("init tools introspection failed:", e?.message);
         }
+        // For the receipts of a review turn (getRunModel).
+        if (session) session.ranModel = msg.model;
         bridge.sendAssistantEvent(
           {
             event: "session_init",
             session_id: msg.session_id,
             model: msg.model,
+            asked: session?.model ?? null,
+            declined: stayState(session?.key),
           },
           session?.key,
         );
@@ -1471,6 +1574,39 @@ function handleAgentMessage(msg, session) {
             console.warn("[daemon] Could not save session id:", err.message),
           );
         }
+      } else if (msg.subtype === "compact_boundary") {
+        // The history was summarized: the manuscript an earlier turn gave
+        // may be gone from it, so the next review turn gives it again.
+        console.log(`[agent] system/${msg.subtype}`);
+        if (session?.key) manuscriptByKey.delete(session.key);
+      } else if (msg.subtype === "model_refusal_fallback") {
+        // The CLI ran a refused request again on another model. The pane is
+        // told at once. For the session the swap lasts: it is recorded
+        // (session.fellBackTo) next to the model that was asked for
+        // (session.model), and set_model compares the user's choice with
+        // it, so choosing the model again restarts the session on it.
+        // A second refusal in a row of the same kind: the session is left
+        // on the other model from then on (ensureLoopForMessage).
+        const f = refusalFallback(msg);
+        console.log(f.log);
+        let stay = false;
+        if (f.session && session) {
+          session.fellBackTo = msg.fallback_model;
+          const d = declineStep(declinedByKey.get(session.key), {
+            asked: session.model,
+            original: msg.original_model,
+            fallback: msg.fallback_model,
+            category: msg.api_refusal_category ?? null,
+          });
+          declinedByKey.set(session.key, d);
+          stay = d.stay;
+          if (d.stay) {
+            console.log(
+              `[agent] model stays on ${d.fallback}: ${d.original} declined ${d.count} turns in a row (category=${d.category ?? "-"})`,
+            );
+          }
+        }
+        bridge.sendAssistantEvent({ ...f.event, stay }, session?.key);
       } else {
         console.log(`[agent] system/${msg.subtype}`);
       }
@@ -1540,7 +1676,17 @@ function handleAgentMessage(msg, session) {
         session.turnProducedOutput = false;
       }
       for (const ev of events) bridge.sendAssistantEvent(ev, session?.key);
-      if (session?.key) endTurnState(session.key, turnOutcome(events, msg));
+      // The chosen model answered this turn (the CLI did not move the
+      // session): a refusal counted before is not one of two in a row.
+      if (session?.key && !session.fellBackTo) declinedByKey.delete(session.key);
+      // text: the answer of the turn, for what a review turn reports in its
+      // last line (review-service.mjs turnEnded).
+      if (session?.key) {
+        endTurnState(session.key, {
+          ...turnOutcome(events, msg),
+          text: typeof msg.result === "string" ? msg.result : null,
+        });
+      }
       break;
     }
     case "user": {

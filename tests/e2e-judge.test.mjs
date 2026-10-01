@@ -1,8 +1,14 @@
 // Known answers for the pure parts of the acceptance runner (scripts/e2e).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildComPlan, judge, minimalFind, rewriteCommand } from "../scripts/e2e/judge.mjs";
-import { formatRationaleComment } from "../daemon/review-tools.mjs";
+import {
+  buildComPlan,
+  judge,
+  minimalFind,
+  resolvedMatch,
+  rewriteCommand,
+} from "../scripts/e2e/judge.mjs";
+import { applyTrackedEdit, formatRationaleComment } from "../daemon/review-tools.mjs";
 
 const rationale = { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] };
 const change = (id, extra = {}) => ({
@@ -45,6 +51,82 @@ test("buildComPlan: decisions per comment, first R1.3 change edited, comment tex
   const r14 = ops.find((o) => o.change_id === "R1.4-1");
   assert.equal(r14.comment_text, formatRationaleComment("R1.4", rationale, { lost: ["250 mL"] }));
   assert.match(r14.comment_text, /^\[R1\.4\] w \/ y \/ a \[q1\]\n/);
+});
+
+// The plan finds a change in Word by the text of its rationale comment, so
+// that text has to be the one the daemon gave Word, line for line. An
+// insertion that takes a word from the review gets a last line "From the
+// review, ..." (an acceptance run failed on it: "rationale comment not
+// found"). Here the daemon writes the edit to a Word that is not there, and
+// the plan is built from what it recorded: no model chooses the form.
+test("buildComPlan: the comment text of an insertion with a word from the review is the one Word was given", async () => {
+  const sent = [];
+  const recorded = [];
+  const deps = {
+    log: () => {},
+    getLedger: async () => [],
+    getReviewContext: async () => ({
+      requirements: [{ id: "q1", text: "state the unit" }],
+      comment_text: "The temperature has no unit. State it as degrees Celsius.",
+      paragraphs: ["Methods", "The invented flasks were held at 30 degrees for two days."],
+      paragraph_ids: null,
+      recent_changes: [],
+      author_texts: [],
+    }),
+    call: async (name, args) => {
+      sent.push(args);
+      return {
+        ok: true,
+        word_comment_id: 9,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      };
+    },
+    onEdit: async ({ change }) => {
+      recorded.push(change);
+      return { id: "R1.1-1" };
+    },
+    paneChecksTarget: () => true,
+  };
+  const r = await applyTrackedEdit(
+    deps,
+    {
+      comment_ref: "R1.1",
+      find: "held at 30 degrees",
+      insert_after: " Celsius",
+      rationale: {
+        what: "Added the unit.",
+        why: "The reviewer asks for it.",
+        addresses: "the unit",
+        requirement_ids: ["q1"],
+      },
+    },
+    { ref: "R1.1" },
+  );
+  assert.equal(r.ok, true, r.message);
+  assert.deepEqual([recorded[0].kind, recorded[0].from_review], ["insert", ["Celsius"]]);
+  assert.match(sent[0].comment_text, /\nFrom the review, not checked against the source: Celsius$/);
+  const { ops, skipped } = buildComPlan({
+    comments: [{ ref: "R1.1", changes: [{ ...recorded[0], id: "R1.1-1" }] }],
+  });
+  assert.deepEqual(skipped, []);
+  assert.deepEqual([ops[0].kind, ops[0].op], ["insert", "accept"]);
+  assert.equal(ops[0].comment_text, sent[0].comment_text);
+  // The judge of the resolved comments looks the comment up by the same text.
+  const accepted = { ...recorded[0], id: "R1.1-1", state: "accepted" };
+  const resolved = resolvedMatch(
+    { comments: [{ ref: "R1.1", changes: [accepted] }] },
+    { comments: [{ text: sent[0].comment_text, done: true }] },
+  );
+  assert.equal(resolved.pass, true, resolved.got);
+  // Both last lines together, in the order the daemon writes them.
+  const both = change("R1.4-1", { lost_facts: ["250 mL"], from_review: ["Celsius"] });
+  assert.equal(
+    buildComPlan({ comments: [{ ref: "R1.4", changes: [both] }] }).ops[0].comment_text,
+    formatRationaleComment("R1.4", rationale, { lost: ["250 mL"], fromReview: ["Celsius"] }),
+  );
 });
 
 test("minimalFind: replaces sharing an edge word are not minimal", () => {
@@ -296,7 +378,6 @@ test("exitDecision: failed verify commands and features_error fail the run; a co
 // C1: after accept/reject and Refresh the rationale comment of the change is
 // resolved. Read from Word over COM (Comment.Done), not from the pane.
 test("resolvedMatch: comments of accepted and rejected changes are Done in Word, edited ones need not be", async () => {
-  const { resolvedMatch } = await import("../scripts/e2e/judge.mjs");
   const text = (ref, id) =>
     formatRationaleComment(ref, { ...rationale, what: `w ${id}` }, { lost: [] });
   const ch = (ref, n, state, extra = {}) =>
@@ -492,7 +573,7 @@ test("providersEvidence: one entry per provider from the judgment menu, with the
         { id: "claude", text: "Claude (Agent SDK)", enabled: true, note: "" },
         {
           id: "codex",
-          text: "Codex CLI (judgments only)",
+          text: "Codex CLI (not for edits)",
           enabled: false,
           note: "Judgments only. x",
         },
@@ -579,12 +660,12 @@ test("judge: the stage 2.5 pane steps", () => {
       ok: true,
       selected: { id: "claude", model: null },
       message: "",
-      refused: "Codex CLI (judgments only)",
+      refused: "Codex CLI (not for edits)",
     },
     { id: "codex" },
   );
   assert.equal(refused.pass, false);
-  assert.match(refused.got, /Codex CLI \(judgments only\)/);
+  assert.match(refused.got, /Codex CLI \(not for edits\)/);
 
   const loaded = {
     ok: true,
@@ -1075,9 +1156,11 @@ test("the pane steps wait for the message their own action ends with", async () 
   const waits = [...driver.matchAll(/waitMessage\(page, [^,]+, "((?:[^"\\]|\\.)*)"\)/g)].map((m) =>
     JSON.parse(`"${m[1]}"`),
   );
-  assert.deepEqual(waits, ["^Split by ", "candidate rule\\(s\\) by "]);
+  assert.deepEqual(waits, ["^Split by ", "forbidden rule", "candidate rule\\(s\\) by "]);
   assert.match("Split by regex: 5 comment(s). Edit, then Save.", new RegExp(waits[0]));
-  assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[1]));
+  assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[2]));
+  // allow-exception: the refusal of the forbid guard, as the daemon words it.
+  assert.ok(read("../daemon/review-tools.mjs").includes("matches forbidden rule(s) ${open.join("));
   const HOLD = "Waiting for the daemon to confirm the stored provider choice...";
   for (const w of waits) assert.doesNotMatch(HOLD, new RegExp(w));
   assert.ok(pane.includes("say(`Split by ${r.method}"));
@@ -1769,6 +1852,7 @@ test("the response steps wait for the message their own action ends with, with n
     "Declined q2 of R1.3.",
     "Drafted R1.1.",
     "Drafted 4 responses.",
+    "Drafted 4 responses with Claude · Opus 5.5.",
     "Nothing to draft: every comment has a response or is declined.",
     "Saved R1.1.",
     "Line numbers updated: 3/3 quotes located.",
@@ -1800,8 +1884,8 @@ test("the response steps wait for the message their own action ends with, with n
     "Saved for this paper: profile ",
     "Declined ${c.ref}.",
     "Declined ${q.id} of ${c.ref}.",
-    "Drafted ${ref}.",
-    'Drafted ${plural(done, "response")}.',
+    'Drafted ${ref}${withModel(usedLabel("writing"))}.',
+    'Drafted ${plural(done, "response")}${withModel(usedLabel("writing"))}.',
     "Nothing to draft",
     "Saved ${c.ref}.",
     "Line numbers updated: ",
@@ -1954,6 +2038,59 @@ test("second reader: one line, a hyphen at the line end, a page break and lines 
   const gap = " 40   Growth reached a plateau after\n 42   four days in every flask.\n";
   assert.equal(
     read(gap, "Growth reached a plateau after four days in every flask.", 40, 42),
+    false,
+  );
+});
+
+// The result lines of the pane may name what ran ("... with Claude · Opus
+// 5.5."): the judges take both forms.
+test("judges take a result line with or without the model that ran", () => {
+  const one = (message) => judge("response-draft", { ok: true, message }, { ref: "R1.1" }).pass;
+  assert.equal(one("Drafted R1.1."), true);
+  assert.equal(one("Drafted R1.1 with Claude · Opus 5.5."), true);
+  assert.equal(one("Drafted R1.1 with Claude · Opus 5.5. 1 check fails for it: x."), true);
+  assert.equal(one("Drafted R1.10."), false);
+  assert.equal(one("Drafting R1.1..."), false);
+});
+
+test("judge check-paragraphs: the check ran to its message, with or without problems", () => {
+  const j = (message, message_error = false) =>
+    judge("check-paragraphs", { message, message_error, consistency: [] }).pass;
+  assert.equal(j("Checked 3 revised paragraphs with Claude · Opus 5.5: 2 problems."), true);
+  assert.equal(j("Checked 1 revised paragraph: no problem found."), true);
+  assert.equal(j("No paragraph holds two or more changes: nothing to check."), true);
+  assert.equal(j("review_check_paragraphs failed", true), false);
+  assert.equal(j("Accepted 0, rejected 0"), false);
+});
+
+test("judge refresh: the parts of a rewrite share a comment, so changes may outnumber comments", () => {
+  const j = (message) => judge("refresh", { message }).pass;
+  assert.equal(
+    j(
+      "Accepted 0, rejected 0, edited 0, pending 6, not found 0. Changes 6, expected tool comments 3, found 3.",
+    ),
+    true,
+  );
+  assert.equal(
+    j(
+      "Accepted 0, rejected 0, edited 0, pending 6, not found 0. Changes 6, expected tool comments 3, found 2 (MISMATCH: missing R1.2-1, unrecorded -)",
+    ),
+    false,
+  );
+  assert.equal(j("Changes 2, expected tool comments 3, found 3."), false);
+});
+
+test("judge rewrite-paragraph: the turn ran and left changes marked as a rewrite", () => {
+  const ok = {
+    message: "Proposed 4 changes for R1.3. Accepted 0",
+    message_error: false,
+    comments: [{ ref: "R1.3", changes: [{ flags: ["Rewrite"] }, { flags: [] }] }],
+  };
+  assert.equal(judge("rewrite-paragraph", ok, { ref: "R1.3" }).pass, true);
+  const none = { ...ok, comments: [{ ref: "R1.3", changes: [{ flags: [] }] }] };
+  assert.equal(judge("rewrite-paragraph", none, { ref: "R1.3" }).pass, false);
+  assert.equal(
+    judge("rewrite-paragraph", { ...ok, message_error: true }, { ref: "R1.3" }).pass,
     false,
   );
 });

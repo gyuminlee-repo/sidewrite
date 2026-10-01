@@ -328,15 +328,20 @@ export function invariantReport(revision, comments) {
   const uncommented = expected.filter(bare);
   const missing = expected.filter((ch) => !bare(ch) && !ids.has(String(ch.word_comment_id)));
   const orphans = [...ids].filter((id) => !recorded.has(id));
+  // The parts of a rewritten paragraph share one comment: comments are
+  // counted, not changes.
+  const wanted =
+    new Set(expected.filter((ch) => !bare(ch)).map((ch) => String(ch.word_comment_id))).size +
+    uncommented.length;
   return {
     changes: changes.length,
-    expected_comments: expected.length,
+    expected_comments: wanted,
     tool_comments: ids.size,
     missing_comment: missing.map((ch) => ch.id),
     uncommented: uncommented.map((ch) => ch.id),
     unrecorded_comment_ids: orphans,
     ok:
-      expected.length === ids.size &&
+      wanted === ids.size &&
       missing.length === 0 &&
       uncommented.length === 0 &&
       orphans.length === 0,
@@ -368,13 +373,15 @@ export function commentsToResolve(rows, revision, comments) {
   const open = new Set((comments ?? []).filter((c) => !c.resolved).map((c) => String(c.id)));
   const byId = new Map();
   for (const c of revision?.comments ?? []) for (const ch of c.changes ?? []) byId.set(ch.id, ch);
-  const out = [];
+  // A comment the parts of a rewrite share is resolved when every part is decided.
+  const decided = new Map();
   for (const r of rows ?? []) {
-    if (r.state !== "accepted" && r.state !== "rejected") continue;
     const id = byId.get(r.change_id)?.word_comment_id;
-    if (id != null && open.has(String(id))) out.push(String(id));
+    if (id == null) continue;
+    const done = r.state === "accepted" || r.state === "rejected";
+    decided.set(String(id), (decided.get(String(id)) ?? true) && done);
   }
-  return out;
+  return [...decided].filter(([id, all]) => all && open.has(id)).map(([id]) => id);
 }
 
 export const STATE_LABELS = {
@@ -452,7 +459,10 @@ export function changeFlags(ch) {
   if (ch?.lost_facts?.length) out.push({ kind: "lost", text: `Lost: ${ch.lost_facts.join("; ")}` });
   if (ch?.unsourced_terms?.length)
     out.push({ kind: "unsourced", text: `No source: ${ch.unsourced_terms.join(", ")}` });
+  if (ch?.from_review?.length)
+    out.push({ kind: "unsourced", text: `From the review: ${ch.from_review.join(", ")}` });
   if (ch?.narrowed_from) out.push({ kind: "narrowed", text: "Narrowed" });
+  if (ch?.rewrite_id) out.push({ kind: "narrowed", text: "Rewrite" });
   return out;
 }
 
@@ -464,21 +474,125 @@ export function requirementsFromText(text) {
     .filter(Boolean);
 }
 
-// L5. Requirements of a comment that no change answers. A rejected change
-// answers nothing.
-export function unaddressedRequirements(comment) {
+// L5. The state of every request of a comment, in list order:
+//   changed            a change that is not rejected names it
+//   needs_author       a question with its id has no answer yet
+//   outside_this_file  the model noted it as belonging to another file (why)
+//   open               none of these: nobody spoke of it
+// A turn has to end every request in one of the first three; open is what a
+// request is until then, so a request passed over in silence shows.
+export function requirementStates(comment) {
   const used = new Set();
   for (const ch of comment?.changes ?? []) {
     if (ch.state === "rejected") continue;
     for (const id of ch.rationale?.requirement_ids ?? []) used.add(id);
   }
-  return (comment?.requirements ?? []).filter((r) => !used.has(r.id));
+  const asked = new Set(
+    (comment?.questions ?? []).filter((q) => !q.answer).map((q) => q.requirement_id),
+  );
+  const outside = new Map((comment?.requirements_outside ?? []).map((n) => [n.id, n.why]));
+  return (comment?.requirements ?? []).map((r) => ({
+    ...r,
+    state: used.has(r.id)
+      ? "changed"
+      : asked.has(r.id)
+        ? "needs_author"
+        : outside.has(r.id)
+          ? "outside_this_file"
+          : "open",
+    ...(!used.has(r.id) && !asked.has(r.id) && outside.has(r.id) ? { why: outside.get(r.id) } : {}),
+  }));
+}
+
+const inState = (comment, state) => requirementStates(comment).filter((r) => r.state === state);
+
+// Requests of a comment nobody spoke of (open).
+export function unaddressedRequirements(comment) {
+  return inState(comment, "open").map(({ state, ...r }) => r);
+}
+
+// The line of a comment card under its requirement box.
+export function requirementsLine(comment) {
+  const rows = requirementStates(comment);
+  if (!rows.length) {
+    return "Requests not extracted: add them above, one per line. Until then a turn lists them itself.";
+  }
+  const part = (label, state, text = (r) => r.id) => {
+    const of = rows.filter((r) => r.state === state);
+    return of.length ? ` ${label}: ${of.map(text).join(", ")}.` : "";
+  };
+  return (
+    `Requirements: ${rows.map((r) => `${r.id} ${r.text}`).join("; ")}.` +
+    part("Changed", "changed") +
+    part("Waiting for the author", "needs_author") +
+    part("Outside this file", "outside_this_file", (r) => (r.why ? `${r.id} (${r.why})` : r.id)) +
+    part("Open", "open")
+  );
+}
+
+// After a turn: "2 requests of R1.2 are still open (q2, q3)."; "" when none is.
+export function openRequestsText(comment) {
+  const open = inState(comment, "open");
+  if (!open.length) return "";
+  return `${open.length} request${open.length === 1 ? "" : "s"} of ${comment.ref} ${open.length === 1 ? "is" : "are"} still open (${open.map((r) => r.id).join(", ")}).`;
+}
+
+// ---- "Check revised paragraphs" (daemon/paragraph-check.mjs) ---------------
+const CONSISTENCY_KIND = {
+  contradiction: "the paragraph contradicts itself.",
+  conflict: "changes of different comments work against each other.",
+  review_as_source: "a sentence takes the review as its source.",
+  claim_left: "a claim a change withdrew is still made.",
+  open_question: "a sentence rests on what an open question to the author is about.",
+};
+
+// The comment whose turn rewrites a paragraph: the one with the most changes
+// in it (the first of them when equal). Change ids are "<ref>-<n>".
+function rewriteRef(changeIds) {
+  const n = new Map();
+  for (const id of changeIds) {
+    const ref = String(id).replace(/-\d+$/, "");
+    n.set(ref, (n.get(ref) ?? 0) + 1);
+  }
+  return [...n].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+}
+
+// The message line after a check. model: the label of what it ran on, or null.
+export function consistencyMessage(c, model) {
+  const n = c.paragraphs.length;
+  const more = (c.warnings ?? []).length ? ` ${c.warnings.join(" ")}` : "";
+  if (!n) return `No paragraph holds two or more changes: nothing to check.${more}`;
+  const k = c.findings.length;
+  return (
+    `Checked ${n} revised paragraph${n === 1 ? "" : "s"}${model ? ` with ${model}` : ""}: ` +
+    `${k ? `${k} problem${k === 1 ? "" : "s"}` : "no problem found"}.${more}`
+  );
+}
+
+// The lines under the button: what was found, then the paragraphs that hold
+// three or more changes; those carry rewrite_ref, the comment whose turn
+// would write the paragraph anew. [{ paragraph_index, text, rewrite_ref? }]
+export function consistencyLines(c) {
+  if (!c) return [];
+  return [
+    ...c.findings.map((f) => ({
+      paragraph_index: f.paragraph_index,
+      text: `${f.paragraph_id ?? `p${f.paragraph_index}`}: ${CONSISTENCY_KIND[f.kind] ?? f.kind} ${f.detail}${f.change_ids.length ? ` (${f.change_ids.join(", ")})` : ""}`,
+    })),
+    ...c.paragraphs
+      .filter((p) => p.many)
+      .map((p) => ({
+        paragraph_index: p.index,
+        text: `${p.id ?? `p${p.index}`} holds ${p.change_ids.length} changes (${p.change_ids.join(", ")}): read it as a whole and rewrite it if it no longer reads as one paragraph.`,
+        rewrite_ref: rewriteRef(p.change_ids),
+      })),
+  ];
 }
 
 // What is still open when a comment is marked Done; the tab asks once more
 // when the list is not empty. ledger: revision.ledger (the confirmed rules,
 // with the status of their last check).
-//   - requirements no change answers (L5)
+//   - requests nobody spoke of, and requests that wait for the author (L5)
 //   - changes not decided in Word: pending, or not found in the document
 //   - changes applied without their rationale comment (invariantReport's
 //     `uncommented`), and edits Word did not answer (outcome_unknown)
@@ -487,6 +601,11 @@ export function doneBlockers(comment, ledger) {
   const out = [];
   const open = unaddressedRequirements(comment);
   if (open.length) out.push(`${open.map((r) => `${r.id} "${r.text}"`).join(", ")} has no change`);
+  const asked = inState(comment, "needs_author");
+  if (asked.length)
+    out.push(
+      `${asked.map((r) => `${r.id} "${r.text}"`).join(", ")} ${asked.length === 1 ? "waits" : "wait"} for the author's answer`,
+    );
   const n = (state) => (comment?.changes ?? []).filter((ch) => ch.state === state).length;
   const pending = n("pending");
   const unlocated = n("unlocated");
@@ -594,11 +713,12 @@ export function pendingDecisions(revision) {
         text: `${c.ref} ${b.blocked_by.length ? `blocked by ${b.blocked_by.join(", ")}` : "edit with no answer from Word"}: "${b.args?.replace ?? b.args?.insert_after ?? ""}"`,
       });
     }
-    for (const r of unaddressedRequirements(c)) {
+    for (const r of requirementStates(c)) {
+      if (r.state !== "open" && r.state !== "needs_author") continue;
       requirements.push({
         ref: c.ref,
         id: r.id,
-        text: `${c.ref}${c.section ? ` (${c.section})` : ""} ${r.id} has no change: ${r.text}`,
+        text: `${c.ref}${c.section ? ` (${c.section})` : ""} ${r.id} ${r.state === "open" ? "has no change" : "waits for the author's answer"}: ${r.text}`,
       });
     }
   }

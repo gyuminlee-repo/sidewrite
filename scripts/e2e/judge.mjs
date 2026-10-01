@@ -33,6 +33,99 @@ function decisionFor(decisions, ref, i) {
   return d[Math.min(i, d.length - 1)];
 }
 
+// The text of the rationale comment of a change as Word was given it
+// (review-tools.mjs applyTrackedEdit): the lines of lost facts and of words
+// from the review belong to it. A change is found in Word by this text.
+export const commentTextOf = (ref, ch) =>
+  formatRationaleComment(ref, ch.rationale, {
+    lost: ch.lost_facts ?? [],
+    fromReview: ch.from_review ?? [],
+  });
+
+// The edit the acceptance run sends to the guarded write for S2-23: it puts
+// the forbidden word of ledger rule L2 (tests/fixtures/review_ledger.json)
+// into the paragraph of R1.3 of the fixture manuscript. The item it is put
+// on file with names another rule (L1), so "Allow exception" lifts that one
+// only and L2 has to refuse the edit.
+export const FORBID_GUARD_EDIT = {
+  comment_ref: "R1.3",
+  find: "synthetic carbon source",
+  replace: "novel synthetic carbon source",
+  rationale: {
+    what: "Called the carbon source novel.",
+    why: "Written by the acceptance run to show the forbid guard; no model wrote it.",
+    addresses: "describe the synthetic carbon source as a novel substrate",
+  },
+};
+export const FORBID_GUARD_SEED_RULE = "L1";
+
+// S2-23, without a model: an edit that holds a forbidden word was sent to
+// the guarded write of the daemon (run-acceptance.mjs forbidGuard) and must
+// have been refused before Word.
+//   step      what the pane showed after "Allow exception" (view)
+//   log       the daemon log written since the step began
+//   revision  revision.json after the step
+//   before    revision.json before it, with the seeded item (an edit of a
+//             turn the guard blocked earlier is not the record of this step)
+//   word, wordBefore   word-com.ps1 state after and before the step
+//   seedId    the id of the seeded item (it must still be there, not applied)
+// pass: the pane shows the refusal by the rule; the daemon logged the block;
+// the daemon recorded the blocked edit under the rule; no change holds the
+// word without an approved exception for the rule; Word has no new tracked
+// change and no inserted text with the word.
+export function forbidBlockEvidence({
+  step,
+  log,
+  revision,
+  before,
+  word,
+  wordBefore,
+  seedId,
+  ref = "R1.3",
+  rule = "L2",
+  word_re = /\bnovel(?:ty)?\b/i,
+}) {
+  const at = ref.replace(".", "\\.");
+  const comment = (revision?.comments ?? []).find((c) => c.ref === ref);
+  const holds = (b) => word_re.test(String(b.args?.replace ?? b.args?.insert_after ?? ""));
+  const had = new Set(
+    ((before?.comments ?? []).find((c) => c.ref === ref)?.blocked ?? []).map((b) => b.id),
+  );
+  const recorded = (comment?.blocked ?? []).filter(
+    (b) => !had.has(b.id) && b.state === "blocked" && b.blocked_by.includes(rule) && holds(b),
+  );
+  const changes = (revision?.comments ?? [])
+    .flatMap((c) => c.changes ?? [])
+    .filter((ch) => word_re.test(String(ch.text ?? "")) && !(ch.override_of ?? []).includes(rule))
+    .map((ch) => ch.id);
+  const inserted = (word?.revisions ?? []).filter(
+    (r) => r.type === 1 && word_re.test(r.text ?? ""),
+  );
+  const checks = {
+    refused:
+      step?.ok !== false &&
+      step?.message_error === true &&
+      new RegExp(`forbidden rule\\(s\\) ${rule}\\b`).test(step?.message ?? ""),
+    logged: new RegExp(`^\\[review\\] blocked ${at} by=${rule}$`, "m").test(String(log ?? "")),
+    recorded: recorded.length === 1,
+    seed_kept: (comment?.blocked ?? []).some((b) => b.id === seedId && b.state === "blocked"),
+    no_change: changes.length === 0,
+    word_unchanged:
+      word?.ok === true &&
+      wordBefore?.ok === true &&
+      (word.revisions ?? []).length === (wordBefore.revisions ?? []).length &&
+      inserted.length === 0,
+  };
+  return {
+    pass: Object.values(checks).every(Boolean),
+    checks,
+    message: step?.message ?? step?.error ?? null,
+    recorded: recorded.map((b) => ({ id: b.id, blocked_by: b.blocked_by })),
+    changes_with_the_word: changes,
+    word_revisions: [(wordBefore?.revisions ?? []).length, (word?.revisions ?? []).length],
+  };
+}
+
 // ops for word-com.ps1 apply. A change without a rationale comment cannot be
 // found in Word and is listed in `skipped`.
 export function buildComPlan(revision, decisions = DEFAULT_DECISIONS) {
@@ -51,7 +144,7 @@ export function buildComPlan(revision, decisions = DEFAULT_DECISIONS) {
         kind: ch.kind,
         find: ch.find,
         text: ch.text,
-        comment_text: formatRationaleComment(c.ref, ch.rationale, { lost: ch.lost_facts ?? [] }),
+        comment_text: commentTextOf(c.ref, ch),
         replacements: WORD_EDITS,
       });
     });
@@ -255,7 +348,7 @@ export function resolvedMatch(revision, word, message = "") {
     for (const ch of c.changes ?? []) {
       if (ch.state !== "accepted" && ch.state !== "rejected") continue;
       if (!ch.word_comment_id || ch.comment_missing || ch.comment_cleaned_at) continue;
-      const text = formatRationaleComment(c.ref, ch.rationale, { lost: ch.lost_facts ?? [] });
+      const text = commentTextOf(c.ref, ch);
       const com = byText.get(norm(text));
       seen.push({ id: ch.id, done: com ? com.done === true : null });
     }
@@ -735,9 +828,7 @@ export function siblingMatch(revision, view, word, { ref, hand }) {
         ? ["accepted", "Accepted"]
         : null;
   const sibling = (word?.revisions ?? []).some((r) => r.type === 1 && has(r.text, hand.trim()));
-  const text = ch
-    ? norm(formatRationaleComment(ref, ch.rationale, { lost: ch.lost_facts ?? [] }))
-    : "";
+  const text = ch ? norm(commentTextOf(ref, ch)) : "";
   const com = (word?.comments ?? []).find((c) => norm(c.text) === text);
   return {
     pass: !!want && sibling && ch.state === want[0] && badge === want[1] && com?.done === true,
@@ -1004,8 +1095,10 @@ export const JUDGES = {
   refresh: (r) => {
     const m = /Changes (\d+), expected tool comments (\d+), found (\d+)/.exec(r.message);
     return {
-      pass: !!m && m[1] === m[2] && m[2] === m[3] && !has(r.message, "MISMATCH"),
-      expect: "Changes N, expected tool comments N, found N. (no MISMATCH)",
+      // The parts of a rewritten paragraph share one comment: every comment
+      // that is expected is there, and there are not more comments than changes.
+      pass: !!m && Number(m[1]) >= Number(m[2]) && m[2] === m[3] && !has(r.message, "MISMATCH"),
+      expect: "Changes N, expected tool comments M, found M, M <= N. (no MISMATCH)",
       got: r.message,
     };
   },
@@ -1127,6 +1220,26 @@ export const JUDGES = {
       got: `${r.message} | started ${e.started.join(",")} overlaps=${e.overlaps}`,
     };
   },
+  // "Rewrite this paragraph": the turn ran and left changes of a rewrite
+  // under its comment (the flag of a change row, review-view.js changeFlags).
+  "rewrite-paragraph": (r, ctx) => {
+    const changes = (r.comments ?? []).find((c) => c.ref === ctx.ref)?.changes ?? [];
+    const n = changes.filter((ch) => (ch.flags ?? []).includes("Rewrite")).length;
+    return {
+      pass: !r.message_error && n > 0,
+      expect: `changes flagged Rewrite under ${ctx.ref}, no error`,
+      got: `${n} of ${changes.length} changes flagged Rewrite | ${r.message}`,
+    };
+  },
+  "check-paragraphs": (r) => ({
+    pass:
+      !r.message_error &&
+      /^(Checked \d+ revised paragraphs?( with .+?)?: (\d+ problems?|no problem found)\.|No paragraph holds two or more changes: nothing to check\.)/.test(
+        r.message,
+      ),
+    expect: "Checked N revised paragraph(s)...: K problem(s) | no problem found.",
+    got: `${r.message} | ${(r.consistency ?? []).length} line(s)`,
+  }),
   "focus-refresh": (r) => ({
     pass: r.changed === true && /^Auto-refreshed /.test(r.after ?? ""),
     expect: "Auto-refreshed <time>: ... (no Refresh click)",
@@ -1197,9 +1310,12 @@ export const JUDGES = {
         .join(",")} | open requests ${open.length}`,
     };
   },
+  // The line may name what the draft ran on: "Drafted R1.1 with Claude · Opus 5.5."
   "response-draft": (r, ctx = {}) => ({
-    pass: !r.message_error && (r.message ?? "").startsWith(`Drafted ${ctx.ref}.`),
-    expect: `Drafted ${ctx.ref}.`,
+    pass:
+      !r.message_error &&
+      new RegExp(`^Drafted ${escapeRe(ctx.ref)}( with .+?)?\\.( |$)`).test(r.message ?? ""),
+    expect: `Drafted ${ctx.ref}. (or: Drafted ${ctx.ref} with <provider and model>.)`,
     got: r.message,
   }),
   "response-draft-all": (r) => {
@@ -1207,7 +1323,7 @@ export const JUDGES = {
     return {
       pass:
         !r.message_error &&
-        /^(Drafted \d+ responses?\.|Nothing to draft)/.test(r.message ?? "") &&
+        /^(Drafted \d+ responses?( with .+?)?\.( |$)|Nothing to draft)/.test(r.message ?? "") &&
         missing.length === 0,
       expect: "Drafted n responses. (every comment answered or declined)",
       got: `${r.message} | without an answer: ${missing.map((c) => c.ref).join(",") || "-"}`,

@@ -76,8 +76,14 @@ export const ChangeSchema = z.object({
   lost_facts: z.array(z.string()).default([]),
   // L2: new facts and words found neither in the manuscript nor in the comment.
   unsourced_terms: z.array(z.string()).default([]),
+  // New words and quantities that the review has and the manuscript does not.
+  from_review: z.array(z.string()).default([]),
   // L3: the find/replace the model asked for, when the applied range is smaller.
   narrowed_from: z.object({ find: z.string(), text: z.string() }).nullable().default(null),
+  // A part of a paragraph rewritten as a whole (review-tools.mjs
+  // applyTrackedRewrite): the id its parts share. They also share one
+  // rationale comment (word_comment_id).
+  rewrite_id: z.string().nullable().default(null),
   // Up to 3 words before and after the changed range at edit time, so one
   // change can be judged apart from others in the same paragraph. null for
   // changes recorded before this field (whole-paragraph rule).
@@ -187,6 +193,21 @@ const Response = z.object({
     .default([]),
 });
 
+// A question the model put to the author instead of settling it with an
+// edit (review-tools.mjs askAuthor): what only the author's records can say.
+// answer: what the author wrote on the card ("" until then). An answer goes
+// into the prompt of every later turn and counts as a source of numbers.
+const Question = z.object({
+  id: z.string().regex(/^a\d+$/),
+  // The listed request the question holds up, when there is one.
+  requirement_id: z.string().nullable().default(null),
+  question: z.string().min(1),
+  why: z.string().default(""),
+  asked_at: z.string(),
+  answer: z.string().default(""),
+  answered_at: z.string().nullable().default(null),
+});
+
 const Comment = z.object({
   // R<reviewer>.<n>; E.<n> is the editor letter with reviewer 0.
   ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
@@ -203,6 +224,18 @@ const Comment = z.object({
   // comment (see "id counters" below). null: a file from before the counters.
   requirement_seq: z.number().int().nonnegative().nullable().default(null),
   blocked_seq: z.number().int().nonnegative().nullable().default(null),
+  questions: z.array(Question).default([]),
+  // Words the comment names, from the requirement labelling
+  // (taskpane/shared/named-terms.js adds what the text itself quotes).
+  named_terms: z.array(z.string()).default([]),
+  // Paragraph ids the last turn of this comment named as still holding the
+  // term it changed (review-prompt.mjs sameTermReport).
+  same_term_at: z.array(z.string()).default([]),
+  // Requests the model said cannot be handled in this file (review-tools.mjs
+  // requirementOutside): one note per request id.
+  requirements_outside: z
+    .array(z.object({ id: z.string(), why: z.string().default(""), at: z.string() }))
+    .default([]),
   // The answer in the response letter, and the author's decision not to
   // change anything for this comment.
   response: Response.nullable().default(null),
@@ -301,6 +334,44 @@ export const RevisionSchema = z.object({
     .nullable()
     .default(null),
   external: z.array(External).default([]),
+  // The last "Check revised paragraphs" (paragraph-check.mjs): which
+  // paragraphs were read (those with two or more changes; many: three or
+  // more) and what was found in them.
+  consistency: z
+    .object({
+      checked_at: z.string(),
+      model: z.string().nullable().default(null),
+      paragraphs: z
+        .array(
+          z.object({
+            index: z.number().int(),
+            id: z.string().nullable().default(null),
+            change_ids: z.array(z.string()).default([]),
+            many: z.boolean().default(false),
+          }),
+        )
+        .default([]),
+      findings: z
+        .array(
+          z.object({
+            paragraph_index: z.number().int(),
+            paragraph_id: z.string().nullable().default(null),
+            kind: z.enum([
+              "contradiction",
+              "conflict",
+              "review_as_source",
+              "claim_left",
+              "open_question",
+            ]),
+            detail: z.string(),
+            change_ids: z.array(z.string()).default([]),
+          }),
+        )
+        .default([]),
+      warnings: z.array(z.string()).default([]),
+    })
+    .nullable()
+    .default(null),
   // Journal profile of this paper and its own values on top of it
   // (journal-profile.mjs effectiveProfile).
   journal_profile: z.string().nullable().default(null),
@@ -425,6 +496,15 @@ export function withRevision(path, manuscript, fn) {
 
 const clone = (x) => structuredClone(x);
 
+// Order of changes for replaying them on the snapshot (currentTexts): by
+// the time they were recorded, and within one instant by the number of their
+// id (the parts of a rewrite can be recorded in the same millisecond).
+export function byCreated(a, b) {
+  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+  const n = (x) => Number(String(x.id ?? "").match(/(\d+)$/)?.[1] ?? 0);
+  return n(a) - n(b);
+}
+
 export function findComment(rev, ref) {
   return rev.comments.find((c) => c.ref === ref) ?? null;
 }
@@ -463,6 +543,12 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       blocked_seq: old ? blockedSeq(old) : 0,
       response: old ? clone(old.response ?? null) : null,
       declined: old ? clone(old.declined ?? null) : null,
+      questions: old ? clone(old.questions ?? []) : [],
+      requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
+      same_term_at: old ? clone(old.same_term_at ?? []) : [],
+      named_terms: Array.isArray(c.named_terms)
+        ? c.named_terms.filter((t) => typeof t === "string")
+        : clone(old?.named_terms ?? []),
     });
     const row = list[list.length - 1];
     row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });
@@ -591,6 +677,73 @@ export function setRequirements(rev, ref, texts) {
   c.requirement_seq = requirementSeq({ ...c, requirement_seq: seq });
   return next;
 }
+
+// A question for the author under a comment: ids a1, a2, ... in the order
+// asked (questions are never removed, so the next id is the count plus one
+// and no counter is kept). The same question asked again while it has no
+// answer gives the row that is there.
+export function addQuestion(
+  rev,
+  ref,
+  { requirement_id = null, question, why = "" },
+  now = new Date(),
+) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  c.questions ??= [];
+  const text = String(question ?? "").trim();
+  const same = c.questions.find((q) => !q.answer && q.question === text);
+  if (same) return { revision: next, question: same };
+  const row = Question.parse({
+    id: `a${nextNumber(
+      c.questions.map((q) => q.id),
+      "a",
+    )}`,
+    requirement_id: requirement_id ?? null,
+    question: text,
+    why: String(why ?? "").trim(),
+    asked_at: now.toISOString(),
+  });
+  c.questions.push(row);
+  return { revision: next, question: row };
+}
+
+// The author's answer to a question; an empty one takes the answer back.
+export function answerQuestion(rev, ref, id, answer, now = new Date()) {
+  const next = clone(rev);
+  const q = (requireComment(next, ref).questions ?? []).find((x) => x.id === id);
+  if (!q) throw new Error(`No question ${id} under ${ref}`);
+  q.answer = String(answer ?? "").trim();
+  q.answered_at = q.answer ? now.toISOString() : null;
+  return next;
+}
+
+// A listed request the model said belongs to another file.
+export function setRequirementOutside(rev, ref, { id, why = "" }, now = new Date()) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  if (!c.requirements.some((r) => r.id === id))
+    throw new Error(`No requirement ${id} under ${ref}`);
+  c.requirements_outside = [
+    ...(c.requirements_outside ?? []).filter((n) => n.id !== id),
+    { id, why: String(why ?? "").trim(), at: now.toISOString() },
+  ];
+  return next;
+}
+
+// The paragraphs the last turn of a comment named as still holding its term.
+// null when the comment is gone or the list is the one on file.
+export function setSameTerm(rev, ref, ids) {
+  const old = findComment(rev, ref);
+  if (!old || JSON.stringify(old.same_term_at ?? []) === JSON.stringify(ids)) return null;
+  const next = clone(rev);
+  findComment(next, ref).same_term_at = ids;
+  return next;
+}
+
+// What the author answered, anywhere in the review.
+export const authorAnswers = (rev) =>
+  (rev?.comments ?? []).flatMap((c) => (c.questions ?? []).map((q) => q.answer).filter(Boolean));
 
 export function setCommentStatus(rev, ref, status) {
   const next = clone(rev);

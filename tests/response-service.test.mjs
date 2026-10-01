@@ -301,8 +301,8 @@ test("response_draft goes to the pane's provider; the answer is saved as the mod
   const t = await setup({ job: m.job });
   const r = await t.ask("response_draft", { ref: "R1.1", ...WITH_DOC });
   assert.equal(r.ok, true, r.error);
-  // One job handle, asked for with the drafting default for Claude.
-  assert.deepEqual(t.pinned, [["k", { claudeModel: "sonnet" }]]);
+  // One job handle, of the pane's writing choice: no model is named here.
+  assert.deepEqual(t.pinned, [["k", { role: "writing" }]]);
   assert.equal(m.requests.length, 1);
   assert.equal("model" in m.requests[0], false);
   assert.match(m.requests[0].prompt, /\[R1\.1-1\] replaced <<<30 degrees>>> with <<<30 °C>>>/);
@@ -340,7 +340,7 @@ test("response_draft: the Claude default can be set by the environment; no model
   const env = { ...ENV, CC_OFFICE_RESPONSE_MODEL: "opus" };
   const t = await setup({ job: m.job, env });
   await t.ask("response_draft", { ref: "R1.1", ...WITH_DOC });
-  assert.deepEqual(t.pinned, [["k", { claudeModel: "opus" }]]);
+  assert.deepEqual(t.pinned, [["k", { role: "writing", claudeModel: "opus" }]]);
   await t.cleanup();
 
   const none = await setup();

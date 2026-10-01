@@ -72,6 +72,19 @@ Word COM outcomes, the verify command exit codes and the cleanup record). The
 daemon log goes to `--log` (default `/tmp/daemon-<stage>-e2e.log`; a second
 daemon started for the forbid-list knob writes `-knob.log`).
 
+Stage 2 shows the forbid guard without a model (S2-23, marker
+`s2-forbid-block`). After the review turns the run puts a blocked edit on
+file for R1.3 that holds the forbidden word of L2 and names L1 as the rule it
+waits for (`FORBID_GUARD_EDIT` in `judge.mjs`, written with the store's own
+`addBlocked` while no request is running), and presses "Allow exception" in
+the pane. The daemon sends the stored edit through the same guarded write as
+an edit of a turn; the exception lifts L1 only, so L2 must refuse it:
+`[review] blocked R1.3 by=L2` in the log, the refusal on the message line, a
+blocked edit recorded by the daemon, no change and no new tracked change in
+Word. The run then takes its own item off the file. The two steps that show
+whether the model avoids the word (`propose R1.3` and the knob run) stay, and
+S2-23 no longer depends on them.
+
 Verify commands are rewritten before they run (`rewriteVerify` in
 `judge.mjs`): `--plan-dir` (default `/tmp/<stage>-run`) becomes the run
 folder, `cd <--plan-repo> ` becomes this checkout, `--plan-log` (default
@@ -406,3 +419,97 @@ change mark, what stands in what, and where the change marks stand (around
 Exit code 0 when Word made both files, all five changes ran and the Word of
 the run is gone. The summary is `mathSummary` and `markRelations` in
 `word-math-probe-lib.mjs` (tests: `tests/word-math-probe.test.mjs`).
+
+## Replay of a real revision
+
+`replay.mjs` runs the Review tab on a copy of a real manuscript with its real
+review, and `replay-compare.py` puts the result next to what the authors did.
+Neither is part of the acceptance run and neither judges anything.
+
+```sh
+node scripts/e2e/replay.mjs \
+  --manuscript /path/to/before.docx --review /path/to/review.txt \
+  --base-dir /mnt/d/path/to/test-root \
+  --playwright-core 'D:\path\to\node_modules\playwright-core' \
+  [--model opus] [--writing-model opus] [--judgment-model haiku] \
+  [--only R1.1,R2.3] [--instructions rules.txt] [--forbid forbid.txt] \
+  [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked]
+
+python3 scripts/e2e/replay-compare.py \
+  --before /path/to/before.docx --after /path/to/submitted.docx \
+  --tool /mnt/d/path/to/test-root/replay-<time>/changes.json --out /path/to/out
+```
+
+The manuscript and the review are only read. The run folder
+`replay-<UTC time>` holds the copy (`manuscript.docx`, saved with its tracked
+changes and rationale comments), `manuscript.revision.json`,
+`manuscript.decisions.jsonl`, `changes.json` (per comment: the requests with
+their state `changed`, `needs_author`, `outside_this_file` or `open`, the
+questions for the author, the requests declared outside this file, the terms
+a change took out that other paragraphs still hold, the terms the reviewer
+named with every paragraph that holds them now and where the turn itself
+said the same term is left, the paragraphs written anew with the changes of
+each rewrite, what the paragraph check found on its changes, the edits a
+guard refused by code, the changes with the paragraph before and after,
+rationale, state, the id of their rewrite and the words that come from the
+review, how the turn ended, its time and model), `paragraph_check.json` (the
+result of "Check revised paragraphs", run once after the last turn),
+`responses.json` with `--draft-responses`, `summary.txt`, `result.json` and
+`daemon.log`. The screen shows step names and counts, never text of the
+manuscript. One review turn per comment, in order; a turn that fails or runs
+longer than `--turn-minutes` is recorded and the next comment goes on. Word
+and the resident daemon are handled as in the acceptance run.
+
+Before the run a Word of its own is asked whether it opens the copy the run
+will use (the add-in tagged on) as it is, with the same call as the Word judge
+of the marked copies (`OpenReadOnly` in `word-own.ps1`). A file Word wants to repair ends the run with "run again with --repair";
+with `--repair` Word opens it with Open and Repair, saves a repaired copy in
+the run folder and the run uses that copy (`summary.txt` says so). The given
+file is copied once and never opened in Word itself.
+
+`--model`, `--writing-model` and `--judgment-model` are chosen in Setup
+(Providers: Edits, Writing, Judgments; Claude). `summary.txt` and each turn
+of `changes.json` hold what the pane's own line says the work ran on. The
+run fails (FAILED in `summary.txt`, exit code 1) when that line, at the end,
+names another model than the one asked for and gives no reason. A document
+that stays on another model because the chosen one declines it says so in
+the line and is no failure; `summary.txt` then has a line "edits stayed on
+... because ... declines this manuscript (...)". Nor are the edits a failure
+when the last turn of the run was the one the model was replaced in after a
+refusal. Replacements and restorations are counted.
+
+With `--rewrite-stacked`, after the paragraph check every paragraph that holds
+three or more changes gets its "Rewrite this paragraph" turn (the buttons in
+the order of the check, each once), then the status is refreshed; the turns
+are in `changes.json` under `rewrite_turns` and the new changes carry a
+`rewrite_id`. Off by default.
+
+`summary.txt` lists the batches of the request extraction as the daemon
+logged them (labelled, unlabelled refs, or FAILED with the error).
+
+The refused edits are counted from the daemon log of each turn:
+`NumberNeedsAuthor` (a number changed without the author), `ForbidBlocked`
+(a forbid rule; the daemon gives this one no code), `ForbidRuleBroken`,
+`TaskPaneOutdated`, `RewriteBlocked`, `RewriteStopped` (a rewrite that
+stopped after one or more parts), the code of what stopped a rewrite before
+its first part (`ParagraphNotPlain` and others) and `Refused` (a refusal the
+replay does not know). One log line is one refused edit or rewrite.
+`RewriteNotExpressible` leaves no log line and is not counted. When no
+request was extracted in the whole run, `summary.txt` says "not measured" for
+the requirements no change names.
+
+`--instructions` and `--forbid` are text files with one rule per line (`#`
+starts a note); each line becomes a ledger rule the model checks.
+
+`replay-compare.py` uses the standard library only. It writes
+`reference_changes.json` (the paragraphs that differ between the two clean
+files: modified, rewritten, deleted, inserted; "rewritten" is a removed and
+an added paragraph that share enough words) and `compare.md` (counts, then the
+paragraphs changed by both, by the authors only, by the tool only, and the
+tool changes it could not place on a paragraph, and per comment what the
+tool said instead of changing: its questions for the author and the requests
+it declared outside this file, so silence and a question can be told apart;
+the terms the reviewer named and where they still stand, the paragraphs
+written anew, the changes with words from the review, and the findings of
+the paragraph check).
+Without `--tool` it writes the authors' side only.

@@ -74,6 +74,7 @@ export async function chatOneshot(
   if (request.temperature == null) delete request.temperature;
   let content;
   let finish;
+  let ran = null;
   try {
     let res;
     for (;;) {
@@ -104,7 +105,10 @@ export async function chatOneshot(
         : { ok: false, error };
     }
     try {
-      const choice = (await res.json())?.choices?.[0];
+      const body = await res.json();
+      const choice = body?.choices?.[0];
+      // The model the server says it ran, when it says so.
+      if (typeof body?.model === "string" && body.model) ran = { model_ran: body.model };
       content = choice?.message?.content;
       finish = choice?.finish_reason;
     } catch {
@@ -125,8 +129,8 @@ export async function chatOneshot(
         "the model stopped before it wrote an answer (finish_reason length; a thinking model can use its whole output on thinking)",
     };
   }
-  if (!expectJson) return { ok: true, text };
+  if (!expectJson) return { ok: true, text, ...ran };
   const json = parseJsonReply(text);
-  if (json === undefined) return { ok: false, error: "reply was not JSON", text };
-  return { ok: true, text, json };
+  if (json === undefined) return { ok: false, error: "reply was not JSON", text, ...ran };
+  return { ok: true, text, json, ...ran };
 }

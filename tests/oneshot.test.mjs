@@ -170,3 +170,46 @@ test("one-shot requests run the executable CC_OFFICE_CLAUDE_PATH names, and stay
   await runOneshot({ system: "s", prompt: "p" }, { queryFn: fakeQuery([ok("{}")], none), env: {} });
   assert.equal("pathToClaudeCodeExecutable" in none.options, false);
 });
+
+// The model a request ran on is what the CLI says at the start of the run
+// (system init), not what was asked for: the pane shows it.
+test("runOneshot reports the model the run was on, when the CLI names it", async () => {
+  const init = { type: "system", subtype: "init", model: "claude-haiku-4-5-20251001" };
+  const r = await runOneshot(
+    { system: "s", prompt: "p", expectJson: false, model: "haiku" },
+    { queryFn: fakeQuery([init, ok("plain")]) },
+  );
+  assert.deepEqual(r, { ok: true, text: "plain", model_ran: "claude-haiku-4-5-20251001" });
+  // Also with a reply that cannot be used, and not at all when nothing was said.
+  const bad = await runOneshot(
+    { system: "s", prompt: "p" },
+    { queryFn: fakeQuery([init, ok("x")]) },
+  );
+  assert.deepEqual([bad.ok, bad.model_ran], [false, "claude-haiku-4-5-20251001"]);
+  const none = await runOneshot(
+    { system: "s", prompt: "p", expectJson: false },
+    { queryFn: fakeQuery([ok("plain")]) },
+  );
+  assert.equal("model_ran" in none, false);
+});
+
+// A labelling job asks for no thinking (review-split.mjs): the setting goes
+// to the SDK as given, and is absent when the request names none.
+test("a request's thinking setting goes into the SDK options; none by default", async () => {
+  const { buildOneshotOptions, runOneshot } = await import("../daemon/oneshot.mjs");
+  assert.equal("thinking" in buildOneshotOptions({ system: "s" }), false);
+  assert.deepEqual(buildOneshotOptions({ system: "s", thinking: { type: "disabled" } }).thinking, {
+    type: "disabled",
+  });
+  let seen = null;
+  const queryFn = ({ options }) => {
+    seen = options;
+    return (async function* () {
+      yield { type: "result", subtype: "success", result: "{}" };
+    })();
+  };
+  await runOneshot({ system: "s", prompt: "p", thinking: { type: "disabled" } }, { queryFn });
+  assert.deepEqual(seen.thinking, { type: "disabled" });
+  await runOneshot({ system: "s", prompt: "p" }, { queryFn });
+  assert.equal("thinking" in seen, false);
+});

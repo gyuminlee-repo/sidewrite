@@ -20,6 +20,15 @@ function OpenNames($app) {
   return , $names
 }
 
+# Open one file read-only, without a repair and without a conversion prompt:
+# Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles). With
+# DisplayAlerts off, a file Word would have to repair is an error here. The
+# one place this call is written: marked-diff-word.ps1 and replay-open.ps1
+# both judge "Word opens this file" with it.
+function OpenReadOnly($app, [string]$path) {
+  return $app.Documents.Open($path, $false, $true, $false)
+}
+
 # The process that owns a Word Application, from its window. 0 when it cannot be read.
 Add-Type -Namespace MdwNative -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);'
 function AppProcessId($app) {

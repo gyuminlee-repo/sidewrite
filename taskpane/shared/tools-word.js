@@ -1567,7 +1567,32 @@ export async function toolHeaderFooter({ which, text }) {
 // expected_before_hash before it edits. The daemon sends office_tracked_edit
 // only to a pane that names it (review-tools.mjs TARGET_HASH_CAP): a pane
 // loaded before the daemon was updated would apply the edit unchecked.
-export const PANE_CAPS = ["target_hash"];
+// "tracked_rewrite": it takes the parts of a rewritten paragraph (no_comment,
+// plain_only below; daemon/review-tools.mjs REWRITE_CAP).
+export const PANE_CAPS = ["target_hash", "tracked_rewrite"];
+
+// What a paragraph holds besides plain text, or null. A rewrite as a whole
+// replaces runs of words and would cut through such a thing. A Word that
+// cannot list them (an older API set) gives no answer, and that is taken as
+// not plain: nothing is rewritten as a whole there.
+async function notPlain(context, para) {
+  const kinds = [
+    ["fields", "a field (a citation or cross-reference, for one)"],
+    ["inlinePictures", "a picture"],
+    ["footnotes", "a footnote"],
+    ["endnotes", "an endnote"],
+    ["contentControls", "a content control"],
+  ];
+  try {
+    const lists = kinds.map(([key]) => para[key]);
+    for (const list of lists) list.load("items");
+    await context.sync();
+    const k = lists.findIndex((list) => list.items.length > 0);
+    return k === -1 ? null : kinds[k][1];
+  } catch {
+    return "content this Word cannot list (fields, pictures, notes)";
+  }
+}
 
 // Tool: office_tracked_edit. Always tracked, whatever the
 // track-changes mode setting (taskpane.js dispatches it without writeArgs()).
@@ -1603,6 +1628,12 @@ export async function toolTrackedEdit({
   expected_before_hash,
   expected_paragraph,
   known_comment_ids,
+  // The parts of a paragraph rewritten as a whole (applyTrackedRewrite):
+  // no_comment: this part adds no rationale comment (the paragraph has one,
+  // on another part). plain_only: change nothing unless the paragraph is
+  // plain text (no field, picture, footnote, endnote or content control).
+  no_comment,
+  plain_only,
 }) {
   if (typeof find !== "string" || !find) throw new Error("`find` is required");
   if (find.length > 255) throw new Error("`find` exceeds the 255-character limit of Word search");
@@ -1610,7 +1641,9 @@ export async function toolTrackedEdit({
   if (isInsert === (typeof replace === "string")) {
     throw new Error("Give exactly one of replace or insert_after");
   }
-  if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
+  if (!no_comment && !isToolComment(comment_text)) {
+    throw new Error("comment_text must start with [R<n>.<m>]");
+  }
 
   return await Word.run(async (context) => {
     const { paragraphs, idMode } = await getParagraphsWithIds(context);
@@ -1671,6 +1704,18 @@ export async function toolTrackedEdit({
       }
     }
 
+    if (plain_only) {
+      const holds = await notPlain(context, para);
+      if (holds) {
+        return {
+          ok: false,
+          code: "ParagraphNotPlain",
+          paragraph_index: paragraphIndex,
+          message: `The paragraph holds ${holds}, so it is not rewritten as a whole. Nothing was changed.`,
+        };
+      }
+    }
+
     return await withTrackChanges(context, true, async () => {
       // The last read before the edit, in this Word.run: the next batch
       // that changes the document is the edit itself.
@@ -1709,6 +1754,8 @@ export async function toolTrackedEdit({
         // flags an applied result without this (an older task pane).
         target_checked: true,
       };
+      // A part of a rewrite without a comment of its own: done.
+      if (no_comment) return { ok: true, word_comment_id: null, no_comment: true, ...applied };
       // The range the comment of this edit goes on, or undefined.
       const anchorOf = async (at) => {
         let anchor;
