@@ -221,6 +221,15 @@ function classifyByContext(change, t, revisions, placed = null) {
   // about which occurrence is this change.
   const has = (form) => boundedMatches(t, normalizeParaText(form)).length === 1;
   // Is the middle part of the form L + own + R (found once) still tracked?
+  // With context words (L or R) the match is the place of the change. With
+  // none, the form is the change's own text alone and its one bounded match
+  // is not known to be the change: "s" inserted after "control" and still
+  // tracked, the words around it rewritten ("Our controls were assessed over
+  // 5 s."), matches only the unit "s" at the end, where nothing is tracked,
+  // and read accepted. So without context a tracked run of the same kind
+  // that holds the change's text anywhere in the paragraph counts as its
+  // own: the two cannot be told apart, and the change stays pending. A run
+  // of other text, or of the other kind, does not hold it back.
   const ownTracked = (kind, L, own, R) => {
     if (!placed) return revisions > 0;
     if (placed.short[kind]) return true;
@@ -228,7 +237,12 @@ function classifyByContext(change, t, revisions, placed = null) {
     const at = boundedMatches(t, form)[0];
     const a = at + collapse(L).trimStart().length;
     const b = at + form.length - collapse(R).trimEnd().length;
-    return placed.runs.some((r) => r.kind === kind && r.start < b && r.end > a);
+    const noContext = !collapse(L).trim() && !collapse(R).trim();
+    return placed.runs.some(
+      (r) =>
+        r.kind === kind &&
+        ((r.start < b && r.end > a) || (noContext && t.slice(r.start, r.end).includes(form))),
+    );
   };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);

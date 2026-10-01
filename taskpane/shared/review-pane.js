@@ -23,6 +23,8 @@ import {
   ledgerCheckFromText,
   ledgerStatusText,
   pendingDecisions,
+  invariantText,
+  inFlightEdit,
   reviewerOfRef,
   progressText,
   reviewTextFromFile,
@@ -222,6 +224,35 @@ export function initReviewPane({
     const wrap = el("div", { class: "review-change-wrap" }, row);
     for (const f of changeFlags(ch)) {
       wrap.append(el("span", { class: `review-flag review-flag-${f.kind}`, text: f.text }));
+    }
+    // Applied without its rationale comment: the comment can be added now.
+    if (ch.comment_missing && ch.word_comment_id == null) {
+      const add = el("button", {
+        type: "button",
+        class: "btn-secondary btn-small",
+        text: "Add rationale comment",
+      });
+      add.addEventListener(
+        "click",
+        guard(async () => {
+          const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
+          const t = await ask("review_comment_text", { ref, change_id: ch.id });
+          const r = await word.addChangeComment({
+            ...t.change,
+            comment_text: t.comment_text,
+            known_comment_ids: t.known_comment_ids,
+          });
+          if (!r.ok)
+            throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
+          await ask("review_comment_set", {
+            ref,
+            change_id: ch.id,
+            word_comment_id: r.word_comment_id,
+          });
+          say(`${ch.id}: rationale comment added.`);
+        }),
+      );
+      wrap.append(add);
     }
     if (ch.state === "rejected") {
       const draft = el("button", {
@@ -455,7 +486,7 @@ export function initReviewPane({
         reqLine ? el("div", { class: "review-reqs-line", text: reqLine }) : null,
       );
       for (const ch of c.changes) card.append(changeRow(ch));
-      for (const b of c.blocked) card.append(blockedRow(c.ref, b));
+      for (const b of c.blocked) if (!inFlightEdit(b)) card.append(blockedRow(c.ref, b));
       box.append(card);
     }
   }
@@ -747,9 +778,7 @@ export function initReviewPane({
     report(
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
-        (inv.ok
-          ? "."
-          : ` (MISMATCH: missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"})`) +
+        invariantText(inv) +
         outside +
         (unresolved.length
           ? ` ${unresolved.length} rationale comment(s) not marked resolved (Word: ${unresolved[0]}; one cause is a document in compatibility mode).`
@@ -1072,6 +1101,17 @@ export function initReviewPane({
             (inv) => {
               if (failed) return failed;
               if (inv.ok) return { ok: true };
+              // Only changes Word applied without their rationale comment:
+              // said as that, not as a mismatch.
+              if (
+                inv.uncommented.length &&
+                !inv.missing_comment.length &&
+                !inv.unrecorded_comment_ids.length
+              ) {
+                return unchecked(
+                  `${inv.uncommented.join(", ")} was applied in Word and its rationale comment could not be added; press Add rationale comment on that change, then Refresh status.`,
+                );
+              }
               return unchecked(
                 `the changes on record and the tool comments in Word do not match (missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"}); check those in Word, then press Refresh status.`,
               );
@@ -1094,6 +1134,36 @@ export function initReviewPane({
         // A tracked edit that timed out was applied after all and is now recorded.
         say(`${msg.ref}: an edit that timed out was applied; recorded as ${msg.change_id}.`);
         load()
+          .catch((e) => say(e.message, true))
+          .finally(render);
+      } else if (msg.event === "record_failed") {
+        // The load turns the attempt into an unanswered edit in the list,
+        // or, when the daemon could save the change this time, into the
+        // change (its attempt is then gone from the list).
+        load()
+          .then(
+            () => true,
+            () => false,
+          )
+          .then((loaded) => {
+            render();
+            const left = (state.revision?.comments ?? [])
+              .find((c) => c.ref === msg.ref)
+              ?.blocked?.some((b) => b.id === msg.attempt_id);
+            if (loaded && !left) {
+              say(`${msg.ref}: the edit was applied in Word; its record is saved now.`);
+            } else {
+              say(
+                `${msg.ref}: the edit was applied in Word but saving its record failed; press Refresh status to match them again.`,
+                true,
+              );
+            }
+          });
+      } else if (msg.event === "stale_target") {
+        // A tracked edit was refused: its paragraph is no longer as the
+        // daemon has it. A refresh gives the daemon the document as it is.
+        load()
+          .then(refresh)
           .catch((e) => say(e.message, true))
           .finally(render);
       } else if (msg.event === "change_recorded" || msg.event === "edit_blocked") {

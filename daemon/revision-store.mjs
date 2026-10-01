@@ -13,6 +13,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { toLocalPath } from "./workspace.mjs";
+import { compileCheck } from "./ledger-check.mjs";
 
 export const REVISION_VERSION = 1;
 
@@ -28,6 +29,16 @@ const RegexCheck = z.object({
   expect: z.enum(["absent", "present"]).default("absent"),
 });
 const LlmCheck = z.object({ type: z.literal("llm") });
+// A regex check as a rule may be entered: pattern and flags must compile
+// the way the checker compiles them (ledger-check.mjs compileCheck). Letters
+// that are each allowed can still be refused together ("ii").
+const CompiledRegexCheck = RegexCheck.superRefine((check, ctx) => {
+  try {
+    compileCheck(check);
+  } catch (e) {
+    ctx.addIssue({ code: "custom", path: ["pattern"], message: `invalid regex: ${e.message}` });
+  }
+});
 
 const Rationale = z.object({
   what: z.string().min(1),
@@ -77,11 +88,14 @@ export const ChangeSchema = z.object({
   checked_at: z.string().nullable().default(null),
 });
 
-// An approved exception whose tracked edit got no answer from the task pane
+// A tracked edit on its way to Word, or one the task pane did not answer
 // (OutcomeUnknown): the change it would record and the document form it
-// expects, so a late answer or a status refresh can record it once.
+// expects, so a late answer or a status refresh can record it once. It is
+// written before Word is called (addAttempt, setBlockedAttempt).
 const Attempt = z.object({
+  // The bridge call id, once a call got no answer; null before.
   tool_call_id: z.string().nullable(),
+  // When the edit was sent to Word; rewritten when its answer was given up.
   unknown_at: z.string(),
   comment_text: z.string(),
   change: z.record(z.string(), z.unknown()),
@@ -91,14 +105,17 @@ const Blocked = z.object({
   id: z.string(),
   args: z.record(z.string(), z.unknown()),
   // Ledger ids of the forbid rules that refused the edit. Empty: a normal
-  // edit (nothing refused it) that Word did not answer, kept here as
-  // outcome_unknown with its attempt until a refresh or a late answer
-  // settles it (addUnknownEdit).
+  // edit (nothing refused it), kept here with its attempt from before Word
+  // is called until its answer, a late answer or a refresh settles it
+  // (addAttempt). Its id is the id of the attempt.
   blocked_by: z.array(z.string()),
   created_at: z.string(),
-  // outcome_unknown: an override was sent and not answered; it may be in the
+  // outcome_unknown: the edit was sent and not answered; it may be in the
   // document, so a plain second override is refused (review-service.mjs).
-  // applying: an override is running now; any second override is refused.
+  // applying: the edit is with Word now; any second override is refused.
+  // An applying item no running call owns (the daemon stopped, or the
+  // record of an applied edit could not be saved) turns outcome_unknown
+  // (markStaleApplying).
   state: z.enum(["blocked", "applying", "outcome_unknown"]).default("blocked"),
   attempt: Attempt.nullable().default(null),
 });
@@ -144,25 +161,37 @@ const Violation = z.object({
   missing: z.boolean().optional(),
 });
 
-export const LedgerItemSchema = z.object({
-  id: z.string().regex(/^L\d+$/),
-  kind: z.enum(["instruction", "forbid"]),
-  text: z.string().min(1),
-  scope: z.enum(["manuscript", "response", "supplement"]).default("manuscript"),
-  check: z.discriminatedUnion("type", [RegexCheck, LlmCheck]),
-  // skipped: outside the manuscript scope, not checked against the manuscript.
-  // unsure: an LLM check could not judge some paragraphs and found no violation.
-  status: z
-    .enum(["unchecked", "ok", "violations", "error", "skipped", "unsure"])
-    .default("unchecked"),
-  violation_count: z.number().int().nonnegative().default(0),
-  checked_at: z.string().nullable().default(null),
-  // L10: violations of the last check keyed by paragraph hash, and the
-  // hashes of every paragraph that check covered (null: never checked).
-  violations: z.array(Violation).default([]),
-  unsure: z.array(Unsure).default([]),
-  checked_hashes: z.array(z.string()).nullable().default(null),
-});
+const ledgerItem = (regexCheck) =>
+  z.object({
+    id: z.string().regex(/^L\d+$/),
+    kind: z.enum(["instruction", "forbid"]),
+    text: z.string().min(1),
+    scope: z.enum(["manuscript", "response", "supplement"]).default("manuscript"),
+    check: z.discriminatedUnion("type", [regexCheck, LlmCheck]),
+    // skipped: outside the manuscript scope, not checked against the manuscript.
+    // unsure: an LLM check could not judge some paragraphs and found no violation.
+    status: z
+      .enum(["unchecked", "ok", "violations", "error", "skipped", "unsure"])
+      .default("unchecked"),
+    violation_count: z.number().int().nonnegative().default(0),
+    checked_at: z.string().nullable().default(null),
+    // L10: violations of the last check keyed by paragraph hash, and the
+    // hashes of every paragraph that check covered (null: never checked).
+    violations: z.array(Violation).default([]),
+    unsure: z.array(Unsure).default([]),
+    checked_hashes: z.array(z.string()).nullable().default(null),
+  });
+
+// A rule as it comes in (ledger_add, a ledger_update that carries a check,
+// an import): its regex must compile.
+export const LedgerItemSchema = ledgerItem(CompiledRegexCheck);
+// A rule as the file holds it. A file written before the schema compiled
+// the pattern can hold one that does not; refusing it here would lock the
+// author out of the whole review file (loadRevision and saveRevision both
+// parse with RevisionSchema). The file loads and saves, the ledger check
+// reports the rule as an error, and a tracked edit is refused while such a
+// forbid rule is active (ledger-check.mjs brokenForbidRules).
+const StoredLedgerItem = ledgerItem(RegexCheck);
 
 const External = z.object({
   id: z.string().regex(/^X\d+$/),
@@ -180,7 +209,7 @@ export const RevisionSchema = z.object({
   manuscript: z.string(),
   updated_at: z.string(),
   comments: z.array(Comment).default([]),
-  ledger: z.array(LedgerItemSchema).default([]),
+  ledger: z.array(StoredLedgerItem).default([]),
   // Highest L-number ever given out. null: a file from before the counter.
   ledger_seq: z.number().int().nonnegative().nullable().default(null),
   // L4: paragraph texts (reviewed view) at the last status refresh, and the
@@ -489,6 +518,26 @@ export function addChange(rev, ref, change, now = new Date()) {
   return { revision: next, change: row };
 }
 
+// A change that was applied without its rationale comment (comment_missing)
+// got the comment later (review-service.mjs review_comment_set): its id is
+// recorded, once, and never an id another change holds.
+export function setChangeComment(rev, ref, changeId, wordCommentId) {
+  const next = clone(rev);
+  const ch = requireComment(next, ref).changes.find((x) => x.id === changeId);
+  if (!ch) throw new Error(`No change ${changeId} under ${ref}`);
+  if (ch.word_comment_id != null) {
+    throw new Error(`${changeId} already has its rationale comment`);
+  }
+  const id = wordCommentId == null ? "" : String(wordCommentId);
+  if (!id) throw new Error("a Word comment id is required");
+  if (next.comments.some((c) => c.changes.some((x) => x.word_comment_id === id))) {
+    throw new Error(`Word comment ${id} belongs to another change`);
+  }
+  ch.word_comment_id = id;
+  ch.comment_missing = null;
+  return next;
+}
+
 // ids: Word comment ids the task pane's cleanup deleted. Marks the changes
 // whose rationale comment is one of them; returns null when none is.
 export function markCommentsCleaned(rev, ids, now = new Date()) {
@@ -530,10 +579,11 @@ export function addBlocked(rev, ref, { args, blocked_by }, now = new Date()) {
   return { revision: next, blocked: row };
 }
 
-// A tracked edit no forbid rule refused and Word did not answer: it may be
-// in the document. Kept like an unanswered exception (state outcome_unknown,
-// attempt), with no rule in blocked_by.
-export function addUnknownEdit(rev, ref, { args, attempt }, now = new Date()) {
+// A tracked edit no forbid rule refused, written BEFORE Word is called: from
+// then on it may be in the document. Kept like a claimed exception (state
+// applying, with the attempt), with no rule in blocked_by. Its id comes from
+// the blocked-edit counter of the comment, so no two attempts share one.
+export function addAttempt(rev, ref, { args, attempt }, now = new Date()) {
   const next = clone(rev);
   const c = requireComment(next, ref);
   c.blocked_seq = blockedSeq(c) + 1;
@@ -542,11 +592,20 @@ export function addUnknownEdit(rev, ref, { args, attempt }, now = new Date()) {
     args: clone(args),
     blocked_by: [],
     created_at: now.toISOString(),
-    state: "outcome_unknown",
+    state: "applying",
     attempt: Attempt.parse(clone(attempt)),
   };
   c.blocked.push(row);
   return { revision: next, blocked: row };
+}
+
+// The same for a claimed exception (claimBlocked), before Word is called.
+export function setBlockedAttempt(rev, ref, blockedId, attempt) {
+  const next = clone(rev);
+  const b = requireComment(next, ref).blocked.find((x) => x.id === blockedId);
+  if (!b) throw new Error(`No blocked edit ${blockedId} under ${ref}`);
+  b.attempt = Attempt.parse(clone(attempt));
+  return next;
 }
 
 export function markBlockedUnknown(rev, ref, blockedId, attempt) {
@@ -578,13 +637,22 @@ export function claimBlocked(rev, ref, blockedId, { force = false } = {}) {
   return { revision: next, blocked: before };
 }
 
-// End an override that did not apply: back to the state it had before.
-export function releaseBlocked(rev, ref, blockedId, state) {
+// End an override that did not apply: back to the state it had before, and
+// to the attempt it had then when one is given (`attempt`, null for none).
+export function releaseBlocked(rev, ref, blockedId, state, attempt) {
   const next = clone(rev);
   const b = findComment(next, ref)?.blocked.find((x) => x.id === blockedId);
   if (!b || b.state !== "applying") return null;
   b.state = state;
+  if (attempt !== undefined) b.attempt = clone(attempt);
   return next;
+}
+
+// The revision without that blocked edit, or null when it is not there.
+export function dropBlocked(rev, ref, blockedId) {
+  return findComment(rev, ref)?.blocked.some((b) => b.id === blockedId)
+    ? takeBlocked(rev, ref, blockedId).revision
+    : null;
 }
 
 // applying items no running override owns (the daemon stopped mid-call) may
@@ -640,7 +708,10 @@ export function updateLedgerItem(rev, id, patch) {
         checked_at: null,
       }
     : {};
-  next.ledger[i] = LedgerItemSchema.parse({ ...old, ...patch, ...reset, id });
+  // A patch without a check (a check result, a new text) is stored on the
+  // rule as the file holds it, also on one whose regex does not compile.
+  const schema = "check" in patch ? LedgerItemSchema : StoredLedgerItem;
+  next.ledger[i] = schema.parse({ ...old, ...patch, ...reset, id });
   return next;
 }
 
