@@ -201,6 +201,12 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 //
 // Refs. E.{k} for editor comments, k counting up in reading order.
 // R{reviewer}.{n} for reviewer comments: n is the number of the head.
+// The marker of a head is taken off the comment text when the ref carries
+// the number as written; wherever the ref differs from it (Minor "1." as
+// R1.4, a second round, numbers after text of a section, editor items after
+// the letter) the marker stays at the start of the text, as pasted, so the
+// comment can be found in the letter. For a combined head that is the whole
+// head ("Reviewer 1 Comment 1: ...").
 // When the numbers start again (a new section, or "1." after "3." with no
 // section head), the part goes on from the highest number so far, so
 // Major 1-3 and Minor 1-2 are R1.1 to R1.5. A head with no number (a line
@@ -212,8 +218,7 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // label as `section` ("Round 2" on a line of its own after the first
 // reviewer head, or as the text of the head line: "Reviewer 1: Second
 // round"), or "Block 2" where the letter gives none; a section inside the
-// block is joined to it ("Round 2 / Minor comments"). Where the ref differs
-// from the number as written, the written number stays in the comment text.
+// block is joined to it ("Round 2 / Minor comments").
 // Text before the first comment of a later block is a comment of its own
 // with the next number. One warning per reviewer names the blocks. A later
 // block whose comments all keep their written numbers gets no "Block n"
@@ -221,9 +226,15 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // Blocks opened by combined heads carry their own numbers and are left as
 // written.
 // R{reviewer}.0 is the text before the first comment of the first block of a
-// reviewer with a head; without any reviewer head that text is dropped (and
-// named by the check). A reviewer block with no head of any kind is split
-// at blank lines when it has more than one paragraph (a weak split: it does
+// reviewer with a head. When that text lies under more than one section
+// ("Major comments" text, then "Minor comments" text, then the numbers), each
+// section's text is a comment of its own with its own `section`: the first is
+// R{reviewer}.0, the others take the next numbers and the numbered comments
+// go on after them (so "1." under the second section is then R1.2); the same
+// holds in an editor block and in a later block. Without any reviewer head
+// the text before the first comment is dropped (and named by the check) and
+// takes no number, so "1." stays R1.1 however many sections of text come
+// before it. A reviewer block with no head of any kind is split at blank lines when it has more than one paragraph (a weak split: it does
 // not stop the model split), else kept whole as R{reviewer}.1.
 //
 // Limits, left to the model split or the user:
@@ -245,7 +256,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   const lines = sourceLines(text);
   let over;
   let blocks;
-  let forced; // line index -> comment number of a combined head
+  let forced; // line index -> { n, raw }: comment number and line of a combined head
   let gone; // line indexes dropped as boilerplate
   let rounds; // round labels taken off their lines
   const txt = (i) => fold(over[i]);
@@ -311,7 +322,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       const who = c && reviewerNumber(both[0]);
       if (who && /^\d+$/.test(both[1] ?? "") && COMBINED_REST.test(s.slice(c[0].length))) {
         over[i] = trimHead(line.slice(c[0].length)).trim();
-        forced.set(i, Number(both[1]));
+        forced.set(i, { n: Number(both[1]), raw: line });
         if (cur.headed && !cur.editor && cur.reviewer === who) cur.idx.push(i);
         else
           open({ reviewer: who, headed: true, numbered: true, combined: true, head: i, idx: [i] });
@@ -443,7 +454,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     idx.forEach((i, k) => {
       const s = txt(i);
       if (forced.has(i)) {
-        item = { n: forced.get(i), restart: false, idx: [i] };
+        item = { ...forced.get(i), restart: false, idx: [i] };
         items.push(item);
         last = i;
         gap = false;
@@ -580,23 +591,36 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       ]);
     }
     const out = [];
-    const preamble = { ...base, number: 0, kept: true, idx: [] };
+    // Text before the first comment: one row per part that has any, so the
+    // text under "Minor comments" does not end up under "Major comments".
+    // The first is the preamble (R{n}.0 in a first block); the others, and
+    // all of them in a later block, take the next numbers when the first
+    // comment comes. Without a reviewer head they are not returned, so they
+    // take no number either.
+    const before = [];
+    let numbered = !b.headed;
     for (const p of parts) {
       const mode = modeOf(p);
       const { pre, items } = mode ? partItems(p.idx, mode) : { pre: p.idx, items: [] };
       if (hasText(pre)) {
         if (out.length) out.push({ ...base, number: ++max, idx: pre, section: sec(p.section) });
         else {
-          preamble.idx.push(...pre);
-          preamble.section ??= p.section;
+          before.push({
+            ...base,
+            number: 0,
+            kept: !before.length,
+            idx: pre,
+            section: sec(p.section),
+          });
         }
       }
       let off = null;
       for (const it of items) {
-        // In a later block the text before the first comment is a comment of
-        // its own, with the next number.
-        if (later && !out.length && !preamble.number && hasText(preamble.idx)) {
-          preamble.number = ++max;
+        if (!numbered) {
+          before.forEach((row, k) => {
+            if (later || k > 0) row.number = ++max;
+          });
+          numbered = true;
         }
         let number;
         if (it.n === null) number = ++max;
@@ -604,8 +628,6 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
           if (off === null || it.restart) off = it.n <= max ? max - it.n + 1 : 0;
           number = it.n + off;
           max = Math.max(max, number);
-          // The number as written stays in the text where the ref differs.
-          if (later && number !== it.n && it.raw !== undefined) over[it.idx[0]] = it.raw;
         }
         const written = it.n !== null && number === it.n;
         const r = !b.headed && mode === "comment" ? R_MARK.exec(fold(lines[it.idx[0]])) : null;
@@ -614,34 +636,45 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
           number,
           idx: it.idx,
           written,
+          n: it.n,
+          raw: it.raw,
           section: sec(p.section),
           ...(r && { reviewer: Number(r[1]) }),
         });
       }
     }
-    preamble.section = sec(preamble.section);
-    return done(b.headed ? [preamble, ...out] : out);
+    return done(b.headed ? [...before, ...out] : out);
   };
 
   let editors = 0;
+  const textOf = (idx) => trimHead(idx.map((i) => over[i]).join("\n")).trim();
   const rows = blocks
     .flatMap((b) =>
       (!b.headed && count > 1) || b.letter || b.form
         ? [{ editor: true, kept: !b.form, form: !!b.form, late: !!b.late, idx: b.idx }]
         : blockRows(b),
     )
-    .map((r) => ({ ...r, text: trimHead(r.idx.map((i) => over[i]).join("\n")).trim() }))
+    .map((r) => ({ ...r, text: textOf(r.idx) }))
     .filter((r) => r.text)
-    .map((r) => ({
-      ...r,
-      comment: {
-        ref: r.editor ? `E.${++editors}` : `R${r.reviewer}.${r.number}`,
-        reviewer: r.editor ? 0 : r.reviewer,
-        text: r.text,
-        requirements: [],
-        ...(r.section && { section: r.section }),
-      },
-    }));
+    .map((r) => {
+      const number = r.editor ? ++editors : r.number;
+      // The number as written stays at the start of the text wherever the
+      // ref differs from it (numbers that start again in a new section, in a
+      // later block, after text of a section, in an editor block after the
+      // letter), so the author can find the comment in the letter.
+      const shifted = r.n != null && r.raw !== undefined && r.n !== number;
+      if (shifted) over[r.idx[0]] = r.raw;
+      return {
+        ...r,
+        comment: {
+          ref: r.editor ? `E.${number}` : `R${r.reviewer}.${number}`,
+          reviewer: r.editor ? 0 : r.reviewer,
+          text: shifted ? textOf(r.idx) : r.text,
+          requirements: [],
+          ...(r.section && { section: r.section }),
+        },
+      };
+    });
   const refs = (key) => rows.filter((x) => x[key]).map((x) => x.comment.ref);
   return {
     comments: rows.map((x) => x.comment),

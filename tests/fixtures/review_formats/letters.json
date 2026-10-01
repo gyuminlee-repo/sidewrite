@@ -21,7 +21,7 @@
         "R1.0": "The paper reports a growth assay in shaken flasks.",
         "R1.2": "Please add:\n1. the optical density at inoculation\n2. the wavelength",
         "R1.3": "The growth rate of 2.5 per day is not credible.\n2.5 mM substrate cannot support it.",
-        "R1.4": "Line 45: \"cell-free extract\" should be \"clarified lysate\".",
+        "R1.4": "1. Line 45: \"cell-free extract\" should be \"clarified lysate\".",
         "R2.2": "Please state the antifoam concentration.",
         "E.2": "Kind regards,\nThe Editorial Office\n\nIn compliance with data protection regulations, you may request that we remove your personal registration details at any time."
       },
@@ -42,8 +42,8 @@
         "R1.0": "The manuscript is within the scope of the journal.",
         "R1.2": "The term \"cell-free extract\" is misleading.\nCentrifugation alone does not remove every cell.",
         "R2.3": "Page 4, line 88: add the antifoam concentration.",
-        "E.2": "Please add a data availability statement.",
-        "E.3": "Please check the reference format."
+        "E.2": "1. Please add a data availability statement.",
+        "E.3": "2. Please check the reference format."
       },
       "sections": {},
       "strong": true
@@ -69,7 +69,7 @@
       "texts": {
         "E.2": "초록을 200단어 이내로 줄여 주십시오.",
         "R1.0": "본 논문은 플라스크 배양에서의 생장 측정을 다루고 있습니다.",
-        "R1.3": "Figure 2에 오차 막대를 추가해 주십시오.",
+        "R1.3": "1. Figure 2에 오차 막대를 추가해 주십시오.",
         "R2.2": "플라스크 구입처 문장은 삭제해 주십시오."
       },
       "sections": {
@@ -87,7 +87,7 @@
         "E.3": "2. Has the statistical analysis been done appropriately?\n\nReviewer #1: No\n\nReviewer #2: Yes",
         "E.5": "4. Review Comments to the Author\n\nPlease use the space below to explain your answers to the questions above.",
         "R1.0": "The manuscript reports a growth assay in shaken flasks.",
-        "R1.3": "The unit of the incubation temperature is missing.",
+        "R1.3": "1) The unit of the incubation temperature is missing.",
         "R2.1": "The study is sound. I have only one request: please add error bars to Fig. 2.",
         "E.6": "5. Do you want your name to be public for this review?\n\nReviewer #1: No\n\nReviewer #2: Yes: A. Reviewer\n\n[NOTE: If a reviewer sent comments as a file, the file is attached to this email.]"
       },

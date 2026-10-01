@@ -6,6 +6,7 @@ import {
   splitPrompt,
   SPLIT_SYSTEM,
   uncoveredText,
+  extractRequirements,
 } from "../daemon/review-split.mjs";
 import {
   emptyRevision,
@@ -791,4 +792,61 @@ test("numbered comments on reviewer head lines stay with their reviewer, with no
   );
   // Nothing was renumbered: no block warning.
   assert.deepEqual(r.warnings, []);
+});
+
+// ---- text under several sections before the first numbered comment ---------------
+
+test("each section's text before the first number is its own comment, with its own warning", async () => {
+  const review =
+    "Reviewer 1:\nMajor comments\nThe design is under-powered.\nMinor comments\nThe figures need work.\n1. Add units.\n2. State n.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.section, c.text]),
+    [
+      ["R1.0", "Major comments", "The design is under-powered."],
+      ["R1.1", "Minor comments", "The figures need work."],
+      ["R1.2", "Minor comments", "1. Add units."],
+      ["R1.3", "Minor comments", "2. State n."],
+    ],
+  );
+  // Only R1.0 is a kept preamble; the Minor text is a comment like any other.
+  assert.deepEqual(r.warnings, [
+    "Reviewer 1 text before the first numbered comment is kept as R1.0. Delete it if it asks for nothing.",
+  ]);
+  assert.deepEqual(uncoveredText(review, r.comments), []);
+});
+
+test("the requirement prompt gets the section of each un-numbered section text", async () => {
+  const comments = splitReviewRegex(
+    "Reviewer 1:\nMajor comments\nPlease enlarge this part.\nMinor comments\nPlease shorten this part.\n1. Add units.\n",
+  );
+  let prompt = "";
+  await extractRequirements(comments, {
+    oneshot: async (req) => {
+      prompt = req.prompt;
+      return { ok: false, error: "off" };
+    },
+  });
+  assert.match(prompt, /\[R1\.0 section\] Major comments\n\[R1\.0 s1\] Please enlarge this part\./);
+  assert.match(prompt, /\[R1\.1 section\] Minor comments\n\[R1\.1 s1\] Please shorten this part\./);
+});
+
+// ---- no reviewer head: dropped text takes no number -------------------------------
+
+test("without a reviewer head, text under sections before the numbers is named and takes no number", async () => {
+  const review =
+    "General comments\nThe topic is timely.\nSpecific comments\nDetails are missing.\n1. Add units.\n2. State n.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.section, c.text]),
+    [
+      ["R1.1", "Specific comments", "Add units."],
+      ["R1.2", "Specific comments", "State n."],
+    ],
+  );
+  assert.deepEqual(r.warnings, [
+    '3 sentence(s) of the review are in no comment: "The topic is timely.", "Details are missing.", "General comments". Add them if they ask for something.',
+  ]);
 });
