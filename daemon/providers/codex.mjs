@@ -19,7 +19,7 @@
 // kept: without it the sign-in has no model provider and the run fails.
 
 import { parseJsonReply } from "../oneshot.mjs";
-import { runCli as defaultRunCli, emptyWorkDir } from "./cli-exec.mjs";
+import { runCli as defaultRunCli, emptyWorkDir, resolveCliBin } from "./cli-exec.mjs";
 
 const LIMIT_RE = /(usage limit|rate limit|quota|too many requests|out of credits|\b429\b)/i;
 const toml = (s) => JSON.stringify(String(s));
@@ -104,7 +104,7 @@ export async function codexOneshot(
   { system, prompt, model, expectJson = true, timeoutMs = 120_000 },
   {
     runCli = defaultRunCli,
-    bin = process.env.CC_OFFICE_CODEX_BIN || "codex",
+    bin = resolveCliBin("codex", { envVar: "CC_OFFICE_CODEX_BIN" }),
     emptyDir = emptyWorkDir,
   } = {},
 ) {

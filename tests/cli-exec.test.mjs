@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { runCli } from "../daemon/providers/cli-exec.mjs";
+import { runCli, resolveCliBin } from "../daemon/providers/cli-exec.mjs";
 
 // A child process stand-in: stdout and stderr emit "data", stdin records
 // what was written, kill() records the signal.
@@ -102,4 +102,114 @@ test("a real process: stdin through cat, exit code of false", async () => {
   assert.equal(no.code, 1);
   const missing = await runCli("definitely-not-a-command-xyz", []);
   assert.equal(missing.stderr, "not installed");
+});
+
+// Windows: the daemon also runs natively (tray app). With shell:false an npm
+// ".cmd" shim cannot be started by name, so the executable behind it is found.
+function winFs(files) {
+  const norm = (p) => p.toLowerCase();
+  const map = new Map(Object.entries(files).map(([k, v]) => [norm(k), v]));
+  return {
+    exists: (p) => map.has(norm(p)),
+    readText: (p) => map.get(norm(p)),
+  };
+}
+const WIN_ENV = {
+  PATH: "C:\\Windows\\system32;C:\\Users\\u\\AppData\\Roaming\\npm;C:\\Tools",
+  PATHEXT: ".COM;.EXE;.BAT;.CMD",
+};
+const NPM_SHIM = [
+  "@ECHO off",
+  "GOTO start",
+  ":find_dp0",
+  "SET dp0=%~dp0",
+  ":start",
+  'IF EXIST "%dp0%\\node.exe" (',
+  '  SET "_prog=%dp0%\\node.exe"',
+  ") ELSE (",
+  '  SET "_prog=node"',
+  ")",
+  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*',
+].join("\r\n");
+
+test("resolveCliBin: other platforms use the name; the environment variable always wins", () => {
+  assert.deepEqual(resolveCliBin("codex", { platform: "linux", env: {} }), {
+    cmd: "codex",
+    prefixArgs: [],
+  });
+  assert.deepEqual(
+    resolveCliBin("codex", {
+      platform: "win32",
+      env: { ...WIN_ENV, CC_OFFICE_CODEX_BIN: "D:\\bin\\codex.exe" },
+      envVar: "CC_OFFICE_CODEX_BIN",
+      ...winFs({}),
+    }),
+    { cmd: "D:\\bin\\codex.exe", prefixArgs: [] },
+  );
+  assert.deepEqual(
+    resolveCliBin("agy", {
+      platform: "linux",
+      env: { CC_OFFICE_AGY_BIN: "/opt/agy" },
+      envVar: "CC_OFFICE_AGY_BIN",
+    }),
+    { cmd: "/opt/agy", prefixArgs: [] },
+  );
+});
+
+test("resolveCliBin on Windows: an .exe on PATH is used as it is, in PATH and PATHEXT order", () => {
+  const fs = winFs({ "C:\\Tools\\agy.exe": "", "C:\\Tools\\agy.cmd": "x" });
+  assert.deepEqual(resolveCliBin("agy", { platform: "win32", env: WIN_ENV, ...fs }), {
+    cmd: "C:\\Tools\\agy.exe",
+    prefixArgs: [],
+  });
+});
+
+test("resolveCliBin on Windows: an npm .cmd shim becomes node plus the script it runs", () => {
+  const dir = "C:\\Users\\u\\AppData\\Roaming\\npm";
+  const fs = winFs({ [`${dir}\\codex.cmd`]: NPM_SHIM });
+  assert.deepEqual(
+    resolveCliBin("codex", { platform: "win32", env: WIN_ENV, node: "C:\\node\\node.exe", ...fs }),
+    {
+      cmd: "C:\\node\\node.exe",
+      prefixArgs: [`${dir}\\node_modules\\@openai\\codex\\bin\\codex.js`],
+    },
+  );
+  // The shim's own node.exe next to it is preferred, as the shim does.
+  const own = winFs({ [`${dir}\\codex.cmd`]: NPM_SHIM, [`${dir}\\node.exe`]: "" });
+  assert.equal(
+    resolveCliBin("codex", { platform: "win32", env: WIN_ENV, node: "C:\\node\\node.exe", ...own })
+      .cmd,
+    `${dir}\\node.exe`,
+  );
+});
+
+test("resolveCliBin on Windows: a batch file that is no node shim, or nothing on PATH, is said plainly", () => {
+  const other = winFs({ "C:\\Tools\\codex.bat": "@echo off\r\npython %~dp0\\codex.py %*\r\n" });
+  const r = resolveCliBin("codex", {
+    platform: "win32",
+    env: WIN_ENV,
+    envVar: "CC_OFFICE_CODEX_BIN",
+    ...other,
+  });
+  assert.equal(r.cmd, null);
+  assert.match(r.error, /C:\\Tools\\codex\.bat is a batch file.*CC_OFFICE_CODEX_BIN/);
+  const none = resolveCliBin("codex", { platform: "win32", env: WIN_ENV, ...winFs({}) });
+  assert.deepEqual(
+    none,
+    { cmd: "codex", prefixArgs: [] },
+    "left to spawn, which reports not installed",
+  );
+});
+
+test("runCli takes a resolved command: prefix arguments come first, an unresolvable one is a result", async () => {
+  const f = fakeSpawn((c) => c.emit("close", 0, null));
+  await runCli({ cmd: "node.exe", prefixArgs: ["codex.js"] }, ["exec", "-"], {
+    spawnFn: f.spawnFn,
+  });
+  assert.deepEqual([f.calls[0].cmd, f.calls[0].args], ["node.exe", ["codex.js", "exec", "-"]]);
+  const bad = await runCli({ cmd: null, error: "codex.bat is a batch file" }, [], {
+    spawnFn: f.spawnFn,
+  });
+  assert.deepEqual([bad.code, bad.stderr], [-1, "codex.bat is a batch file"]);
+  assert.equal(f.calls.length, 1);
 });

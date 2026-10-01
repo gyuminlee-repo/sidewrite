@@ -18,6 +18,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { PRESETS, canRun } from "./registry.mjs";
+import { resolveCliBin } from "./cli-exec.mjs";
 
 const CMD_TIMEOUT_MS = 10_000;
 const AGY_MODELS_TIMEOUT_MS = 30_000;
@@ -93,9 +94,11 @@ export function ollamaChatModels(tags) {
 const netCode = (e) =>
   e?.name === "TimeoutError" ? "timeout" : (e?.cause?.code ?? e?.code ?? e?.name ?? "error");
 
-async function run(execFileFn, cmd, args, timeout) {
+// bin: what resolveCliBin returned ({ cmd, prefixArgs } or { cmd: null, error }).
+async function run(execFileFn, bin, args, timeout) {
+  if (!bin.cmd) return { code: -1, stdout: "", stderr: bin.error, unstartable: bin.error };
   try {
-    return await execFileFn(cmd, args, { timeout });
+    return await execFileFn(bin.cmd, [...bin.prefixArgs, ...args], { timeout });
   } catch (e) {
     if (e?.code === "ENOENT") return { missing: true };
     return { code: -1, stdout: "", stderr: String(e?.message ?? e) };
@@ -116,9 +119,10 @@ async function probeClaude({ claudeModels }) {
 }
 
 async function probeCodex({ execFileFn, readFileFn, env }) {
-  const bin = env.CC_OFFICE_CODEX_BIN || "codex";
+  const bin = resolveCliBin("codex", { env, envVar: "CC_OFFICE_CODEX_BIN" });
   const r = await run(execFileFn, bin, ["login", "status"], CMD_TIMEOUT_MS);
   if (r.missing) return { reason: "Codex CLI is not installed" };
+  if (r.unstartable) return { reason: r.unstartable };
   if (r.timedOut) return { reason: "codex login status timed out" };
   if (r.code !== 0 || !/Logged in/i.test(`${r.stdout}${r.stderr ?? ""}`)) {
     return { reason: "Not signed in (run: codex login)" };
@@ -139,9 +143,10 @@ async function probeCodex({ execFileFn, readFileFn, env }) {
 }
 
 async function probeAgy({ execFileFn, env }) {
-  const bin = env.CC_OFFICE_AGY_BIN || "agy";
+  const bin = resolveCliBin("agy", { env, envVar: "CC_OFFICE_AGY_BIN" });
   const r = await run(execFileFn, bin, ["models"], AGY_MODELS_TIMEOUT_MS);
   if (r.missing) return { reason: "Antigravity CLI (agy) is not installed" };
+  if (r.unstartable) return { reason: r.unstartable };
   if (r.timedOut) return { reason: "agy models timed out" };
   const models = parseAgyModels(r.stdout);
   if (r.code !== 0 || !models.length)

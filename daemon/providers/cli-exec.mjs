@@ -13,7 +13,8 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, win32 } from "node:path";
 
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 
@@ -25,15 +26,76 @@ export async function emptyWorkDir() {
   return dir;
 }
 
+// The command to start for a CLI name: { cmd, prefixArgs }, or
+// { cmd: null, error } when it is known that it cannot be started.
+//   - env[envVar] (CC_OFFICE_CODEX_BIN, CC_OFFICE_AGY_BIN) wins, as given.
+//   - Not Windows: the name; the system finds it on PATH.
+//   - Windows: spawn without a shell cannot start a ".cmd" or ".bat" by name
+//     (npm installs CLIs as such shims), so PATH and PATHEXT are searched
+//     here. An .exe or .com is used as it is. An npm shim is replaced by
+//     node plus the script the shim runs. Another batch file is an error
+//     that names the environment variable to set. Nothing found: the name,
+//     so the spawn reports "not installed".
+export function resolveCliBin(
+  name,
+  {
+    env = process.env,
+    envVar = null,
+    platform = process.platform,
+    node = process.execPath,
+    exists = existsSync,
+    readText = (p) => readFileSync(p, "utf8"),
+  } = {},
+) {
+  const override = envVar ? String(env[envVar] ?? "").trim() : "";
+  if (override) return { cmd: override, prefixArgs: [] };
+  if (platform !== "win32") return { cmd: name, prefixArgs: [] };
+  const get = (k) => env[Object.keys(env).find((x) => x.toUpperCase() === k) ?? k] ?? "";
+  const dirs = String(get("PATH")).split(";").filter(Boolean);
+  const exts = String(get("PATHEXT") || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .filter(Boolean);
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const file = win32.join(dir, `${name}${ext.toLowerCase()}`);
+      if (!exists(file)) continue;
+      if (!/\.(cmd|bat)$/i.test(file)) return { cmd: file, prefixArgs: [] };
+      // npm's shim: ... "%_prog%"  "%dp0%\node_modules\<pkg>\bin\<x>.js" %*
+      const m = /"%(?:~)?dp0%\\([^"]+\.(?:js|cjs|mjs))"/i.exec(String(readText(file) ?? ""));
+      if (m) {
+        const own = win32.join(dir, "node.exe");
+        return { cmd: exists(own) ? own : node, prefixArgs: [win32.join(dir, m[1])] };
+      }
+      return {
+        cmd: null,
+        prefixArgs: [],
+        error: `${file} is a batch file, which cannot be started directly.${envVar ? ` Set ${envVar} to the program it runs.` : ""}`,
+      };
+    }
+  }
+  return { cmd: name, prefixArgs: [] };
+}
+
+// cmd: a command name or path, or what resolveCliBin returned.
 export function runCli(
   cmd,
   args,
   { stdin = null, timeoutMs = 120_000, killGraceMs = 5_000, cwd, env, spawnFn = spawn } = {},
 ) {
+  const bin = typeof cmd === "string" ? { cmd, prefixArgs: [] } : cmd;
   return new Promise((resolve) => {
+    if (!bin?.cmd) {
+      resolve({
+        code: -1,
+        stdout: "",
+        stderr: String(bin?.error ?? "no command"),
+        timedOut: false,
+      });
+      return;
+    }
     let child;
     try {
-      child = spawnFn(cmd, args, {
+      child = spawnFn(bin.cmd, [...(bin.prefixArgs ?? []), ...args], {
         cwd,
         env,
         shell: false,
