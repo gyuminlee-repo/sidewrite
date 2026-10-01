@@ -8,6 +8,7 @@ import {
   importLedgerItems,
   emptyRevision,
   addLedgerItem,
+  removeLedgerItem,
 } from "../daemon/revision-store.mjs";
 
 const fx = JSON.parse(
@@ -54,4 +55,23 @@ test("export keeps rules, drops ids and check results, re-imports", () => {
   assert.equal(importLedgerItems(emptyRevision("/y.docx"), doc.items).added.length, 1);
   // Importing an export into the revision it came from adds nothing.
   assert.equal(importLedgerItems(rev, doc.items).skipped.length, 1);
+});
+
+// The ledger counter of revision-store.mjs ("id counters"): import goes
+// through addLedgerItem, so an id that was given out is not given out again.
+test("import: ids come from the ledger counter, also after a replace or a removal", () => {
+  const a = importLedgerItems(emptyRevision("/x/p.docx"), fx.items);
+  const replaced = importLedgerItems(a.revision, [fx.items[1]], { mode: "replace" });
+  assert.deepEqual(
+    replaced.revision.ledger.map((i) => i.id),
+    ["L4"],
+  );
+  assert.equal(replaced.revision.ledger_seq, 4);
+  const removed = removeLedgerItem(a.revision, "L3");
+  const again = importLedgerItems(removed, fx.items);
+  assert.deepEqual(
+    again.revision.ledger.map((i) => i.id),
+    ["L1", "L2", "L4"],
+  );
+  assert.deepEqual([again.added.length, again.skipped.length], [1, 2]);
 });

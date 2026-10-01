@@ -25,8 +25,19 @@ node scripts/e2e/run-acceptance.mjs \
   --playwright-core 'D:\path\to\node_modules\playwright-core' \
   --feature-list /path/to/feature_list.json \
   --plan-dir <folder the feature_list commands name> \
-  --plan-repo <repo path the feature_list commands cd into>
+  --plan-repo <repo path the feature_list commands cd into> \
+  --conditional S2-27
 ```
+
+The exit code is 0 only when every step passed, every verify command exited
+0 and the Word started by the run was closed. `--conditional <id>` (repeat
+or comma-separate) names a feature that depends on an event the run cannot
+force. Such a feature is reported `SKIPPED-CONDITION-NOT-MET` and does not
+fail the run only when its verify command failed and the event is provably
+absent from this run's daemon logs (the logs show finished turns and no
+line of the event). Known conditions (`CONDITIONS` in `judge.mjs`): `S2-27`,
+a turn that ended on a usage limit (`[agent] turn complete (usage_limit)`).
+An id without a known condition counts like any other feature.
 
 A new folder `e2e-<UTC time>` is made under `--base-dir`. It holds the tagged
 copy of the test manuscript, its revision.json and comment backup, the Windows
@@ -42,8 +53,24 @@ folder, `cd <--plan-repo> ` becomes this checkout, `--plan-log` (default
 markers become `ok/s2-`. Files of earlier runs are never read.
 
 Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
-`--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--keep-on-fail`
-(leave Word and the daemon up after a failed step).
+`--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
+`--keep-on-fail` (leave Word and the daemon up after a failed step).
+
+## Resolved rationale comments
+
+- After the author's Word steps and the Refresh, the runner reads
+  `Comment.Done` of every comment over COM and requires that the rationale
+  comment of each accepted or rejected change is resolved (row
+  `word: rationale comments resolved`). The test manuscript is built in
+  compatibility mode 15 for this; in mode 14 Word refuses to resolve.
+- Mode-14 check (`mode-14:` rows, files under `mode14/` in the run folder,
+  daemon log `-mode14.log`): after the main Word is closed, the runner
+  builds a compatibility mode 14 copy with
+  `scripts/make-test-manuscript.py --compat 14`, opens it in a second Word
+  of its own, keeps comment R1.1, proposes its change, accepts it over COM
+  and refreshes. Expected: the refresh message carries the counts and
+  `n rationale comment(s) not marked resolved (Word: ...)`, and the comment
+  is still open in Word. It costs one more model turn.
 
 ## How Word is started
 
@@ -66,6 +93,12 @@ Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
   without saving and only when every open document is in the run folder; the
   runner then checks that the started process id is gone and that every Word
   process that was running before is still there.
+- When `quit` refuses (a document outside the run folder is open in the Word
+  the runner started) or cannot say which documents are open, the runner does
+  not stop that Word: it stays up, `result.json` lists it under
+  `cleanup.left_running`, and the run exits non-zero. The process is stopped
+  by force only when `quit` ran on run-folder documents and the process is
+  still there.
 
 ## Files
 

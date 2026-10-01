@@ -9,7 +9,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { badgesMatch, buildComPlan, judge, minimalFind, rewriteCommand, table } from "./judge.mjs";
+import {
+  badgesMatch,
+  buildComPlan,
+  cleanupDecision,
+  exitDecision,
+  judge,
+  minimalFind,
+  norm,
+  resolvedMatch,
+  rewriteCommand,
+  table,
+} from "./judge.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
@@ -42,7 +53,12 @@ const { values: opt } = parseArgs({
     "plan-repo": { type: "string", default: process.env.E2E_PLAN_REPO },
     "plan-log": { type: "string", default: "/tmp/daemon-s2.log" },
     features: { type: "string", default: "S2-18..S2-34" },
+    // Feature ids that depend on an event the run cannot force (judge.mjs
+    // CONDITIONS). Repeat the flag or separate ids with commas.
+    conditional: { type: "string", multiple: true, default: [] },
     "skip-knob": { type: "boolean", default: false },
+    // Leave out the second Word run on a compatibility mode 14 copy.
+    "skip-mode14": { type: "boolean", default: false },
     // Leave Word and the daemon running when a step fails, to look at them.
     "keep-on-fail": { type: "boolean", default: false },
   },
@@ -65,6 +81,9 @@ const DOC = path.join(RUN, "review_manuscript.docx");
 const REVISION = path.join(RUN, "review_manuscript.revision.json");
 const LOG = opt.log;
 const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
+const MODE14_LOG = LOG.replace(/\.log$/, "") + "-mode14.log";
+const MODE14_DIR = path.join(RUN, "mode14");
+const DOC14 = path.join(MODE14_DIR, "review_manuscript.docx");
 const winPath = (p) => execFileSync("wslpath", ["-w", p], { encoding: "utf8" }).trim();
 const unixPath = (p) => execFileSync("wslpath", ["-u", p], { encoding: "utf8" }).trim();
 
@@ -111,12 +130,22 @@ function powershell(script, args, timeoutMs = 300_000) {
   const line = out.replace(/\r/g, "").trim().split("\n").filter(Boolean).pop();
   return JSON.parse(line);
 }
-function com(action, extra = []) {
-  return powershell("word-com.ps1", ["-Doc", winPath(DOC), "-Action", action, ...extra]);
+function com(action, extra = [], doc = DOC) {
+  return powershell("word-com.ps1", ["-Doc", winPath(doc), "-Action", action, ...extra]);
 }
+const psList = (cmd) =>
+  execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" })
+    .replace(/\r/g, "")
+    .trim()
+    .split(",")
+    .filter(Boolean)
+    .map(Number);
+const wordPids = () =>
+  psList("(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','");
 
+let paneTag = "";
 let pane = (step, args = {}) => {
-  const argsFile = path.join(RUN, `args-${step}.json`);
+  const argsFile = path.join(RUN, `args-${paneTag}${step}.json`);
   fs.writeFileSync(argsFile, JSON.stringify(args));
   let out;
   try {
@@ -189,6 +218,30 @@ async function stopDaemon() {
   ).catch(() => daemon.kill("SIGKILL"));
   await until(() => !listening(WS_PORT) && !listening(HTTP_PORT), 10_000, "ports free");
 }
+// Logs this run wrote. A -knob.log of an earlier run is removed at the start,
+// so a verify command or a condition check never reads it.
+const runLogs = () => [...new Set([LOG, daemonLog])].map(readLog).join("\n");
+
+// A Word of its own for `doc`, with the CDP port on its pane.
+function launchWord(doc, userData) {
+  const launch = powershell("word-launch.ps1", [
+    "-DocPath",
+    winPath(doc),
+    "-Port",
+    opt["cdp-port"],
+    "-UserDataFolder",
+    winPath(userData),
+  ]);
+  if (launch.exited || record.word.preexisting.includes(launch.pid))
+    throw new Error(`Word launch failed: ${JSON.stringify(launch)}`);
+  return launch;
+}
+const embedTaskpane = (src, out) =>
+  execFileSync(
+    "python3",
+    [path.join(HERE, "embed_taskpane.py"), "--manifest", opt.manifest, "--src", src, "--out", out],
+    { stdio: "inherit" },
+  );
 
 // ---- verify commands -------------------------------------------------------
 function featureIds(spec) {
@@ -249,44 +302,14 @@ async function main() {
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   if (listening(WS_PORT) || listening(HTTP_PORT))
     die(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
+  fs.rmSync(KNOB_LOG, { force: true });
 
-  const ps = (cmd) =>
-    execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { cwd: RUN, encoding: "utf8" })
-      .replace(/\r/g, "")
-      .trim();
-  record.word.preexisting = ps(
-    "(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','",
-  )
-    .split(",")
-    .filter(Boolean)
-    .map(Number);
+  record.word.preexisting = wordPids();
 
-  execFileSync(
-    "python3",
-    [
-      path.join(HERE, "embed_taskpane.py"),
-      "--manifest",
-      opt.manifest,
-      "--src",
-      opt.fixture,
-      "--out",
-      DOC,
-    ],
-    { stdio: "inherit" },
-  );
+  embedTaskpane(opt.fixture, DOC);
   await startDaemon(LOG);
 
-  const launch = powershell("word-launch.ps1", [
-    "-DocPath",
-    winPath(DOC),
-    "-Port",
-    opt["cdp-port"],
-    "-UserDataFolder",
-    winPath(path.join(RUN, "webview2")),
-  ]);
-  record.word.launch = launch;
-  if (launch.exited || record.word.preexisting.includes(launch.pid))
-    throw new Error(`Word launch failed: ${JSON.stringify(launch)}`);
+  record.word.launch = launchWord(DOC, path.join(RUN, "webview2"));
   save();
 
   note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
@@ -341,6 +364,22 @@ async function main() {
   const after = note("refresh-after-user", pane("refresh"), { label: "refresh after Word" });
   marker("s2-list-matches", { pass: after.ok !== false && badgesMatch(after).pass, view: after });
 
+  // C1: the rationale comments of the accepted and rejected changes are now
+  // resolved, as Word itself reports them (Comment.Done).
+  record.word.state_after_refresh = com("state");
+  const resolved = resolvedMatch(
+    JSON.parse(fs.readFileSync(REVISION, "utf8")),
+    record.word.state_after_refresh,
+    after.message,
+  );
+  record.word.resolved = resolved;
+  rows.push({
+    step: "word: rationale comments resolved",
+    result: resolved.pass ? "PASS" : "FAIL",
+    got: resolved.got,
+  });
+  save();
+
   note("clean-tool", pane("clean-tool"));
   note("refresh", pane("refresh"), { label: "refresh after cleanup", judge: "none" });
   const added = com("add-comment", ["-Text", "Author note added for the delete-all check."]);
@@ -375,47 +414,140 @@ async function main() {
   });
 }
 
+// Close the Word this run started (pid, with `doc` open in it). It is stopped
+// by force only when quit ran and the process stayed (cleanupDecision); a
+// refused quit leaves Word and its documents alone and fails the run.
+function quitWord(pid, doc, key = "quit") {
+  if (!pid) return;
+  let quit;
+  try {
+    quit = com("quit", ["-AllowDir", winPath(RUN), "-ExpectPid", String(pid)], doc);
+  } catch (e) {
+    quit = { ok: false, error: e.message };
+  }
+  record.cleanup[key] = quit;
+  let alive = true;
+  try {
+    alive = wordPids().includes(pid);
+  } catch {}
+  const d = cleanupDecision({
+    pid,
+    preexisting: record.word.preexisting ?? [],
+    quit,
+    runDir: winPath(RUN),
+    alive,
+  });
+  if (d.action === "kill") {
+    try {
+      execFileSync("powershell.exe", [
+        "-NoProfile",
+        "-Command",
+        `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+      ]);
+      (record.cleanup.stopped_pids ??= []).push(pid);
+    } catch {}
+  }
+  if (d.action === "leave") {
+    (record.cleanup.left_running ??= []).push({ pid, reason: d.reason });
+    console.error(`run-acceptance: ${d.reason}`);
+  }
+  if (d.fail) rows.push({ step: `cleanup: Word ${pid}`, result: "FAIL", got: d.reason });
+}
+
+// A copy of the manuscript in compatibility mode 14 (Word 2010), where Word
+// refuses Comment.resolved: one comment, one proposed change, accepted in
+// Word. The refresh must still show its counts, with the note that the
+// rationale comment could not be marked resolved, and the comment stays open.
+// Runs after the main Word is gone (its CDP port is free), in a Word and a
+// daemon log of its own.
+async function mode14() {
+  const label = (x) => `mode-14: ${x}`;
+  const src = path.join(MODE14_DIR, "source.docx");
+  fs.mkdirSync(MODE14_DIR, { recursive: true });
+  execFileSync(
+    "python3",
+    [
+      path.join(REPO, "scripts/make-test-manuscript.py"),
+      "--variant",
+      "review",
+      "--compat",
+      "14",
+      src,
+    ],
+    { stdio: "ignore" },
+  );
+  embedTaskpane(src, DOC14);
+  await stopDaemon();
+  await startDaemon(MODE14_LOG);
+  // The WebView2 of the Word that just quit may hold the CDP port a moment.
+  const cdpBusy = () =>
+    psList(
+      `[int][bool](Get-NetTCPConnection -LocalPort ${Number(opt["cdp-port"])} -State Listen -ErrorAction SilentlyContinue)`,
+    )[0] === 1;
+  await until(() => !cdpBusy(), 60_000, "CDP port free");
+  paneTag = "mode14-";
+  record.word.launch_mode14 = launchWord(DOC14, path.join(RUN, "webview2-mode14"));
+  save();
+  const revisionPath = path.join(MODE14_DIR, "review_manuscript.revision.json");
+  note("open-review", pane("open-review"), { label: label("open-review"), ctx: { revisionPath } });
+  note("split", pane("split", { review_file: winPath(opt.review) }), { label: label("split") });
+  note("edit-draft", pane("edit-draft", { keep_ref: "^R1\\.1$" }), {
+    label: label("keep R1.1"),
+    judge: "none",
+  });
+  await propose("R1.1", label("propose R1.1"));
+  note("refresh", pane("refresh"), { label: label("refresh before Word") });
+  const plan = buildComPlan(JSON.parse(fs.readFileSync(revisionPath, "utf8")), {});
+  const planFile = path.join(MODE14_DIR, "com-plan.json");
+  fs.writeFileSync(planFile, JSON.stringify(plan, null, 2));
+  const applied = com("apply", ["-PlanJson", winPath(planFile)], DOC14);
+  record.word.apply_mode14 = applied;
+  rows.push({
+    step: label("word: accept"),
+    result: applied.ok && plan.ops.length > 0 ? "PASS" : "FAIL",
+    got: [applied.results ?? []]
+      .flat()
+      .map((x) => `${x.change_id} ${x.op}${x.error ? ` ERR ${x.error}` : ""}`)
+      .join("; "),
+  });
+  note("refresh-mode14", pane("refresh"), { label: label("refresh after Word") });
+  const state = com("state", [], DOC14);
+  record.word.state_mode14 = state;
+  const texts = new Set(plan.ops.map((o) => norm(o.comment_text)));
+  const tool = state.comments.filter((c) => texts.has(c.text));
+  rows.push({
+    step: label("word: rationale comments stay open"),
+    result: tool.length > 0 && tool.every((c) => c.done !== true) ? "PASS" : "FAIL",
+    got: tool.map((c) => `done=${c.done}`).join("; ") || "no rationale comment found",
+  });
+  save();
+}
+
+// After the main run and its verify commands: close the Word of the main
+// run, then the mode-14 check, then the daemon.
 async function cleanup() {
   const pid = record.word.launch?.pid;
-  if (pid && !record.word.preexisting?.includes(pid)) {
+  quitWord(pid, DOC);
+  if (!failed && !opt["skip-mode14"]) {
     try {
-      record.cleanup.quit = com("quit", ["-AllowDir", winPath(RUN), "-ExpectPid", String(pid)]);
+      if (record.cleanup.left_running?.length || wordPids().includes(pid))
+        throw new Error("the Word of the main run is still up");
+      await mode14();
     } catch (e) {
-      record.cleanup.quit = { ok: false, error: e.message };
+      record.mode14_error = String(e?.stack ?? e);
+      rows.push({ step: "mode-14: run", result: "FAIL", got: String(e?.message ?? e) });
     }
-    if (!record.cleanup.quit?.exited) {
-      // Only the process this run started, by its id.
-      try {
-        execFileSync("powershell.exe", [
-          "-NoProfile",
-          "-Command",
-          `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
-        ]);
-        record.cleanup.stopped_pid = pid;
-      } catch {}
-    }
+    quitWord(record.word.launch_mode14?.pid, DOC14, "quit_mode14");
   }
   await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
   try {
-    const left = execFileSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-Command",
-        "(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','",
-      ],
-      { encoding: "utf8" },
-    )
-      .replace(/\r/g, "")
-      .trim()
-      .split(",")
-      .filter(Boolean)
-      .map(Number);
+    const left = wordPids();
+    const own = [pid, record.word.launch_mode14?.pid].filter(Boolean);
     record.cleanup.word_after = left;
     record.cleanup.preexisting_alive = (record.word.preexisting ?? []).every((p) =>
       left.includes(p),
     );
-    record.cleanup.own_word_gone = pid ? !left.includes(pid) : null;
+    record.cleanup.own_word_gone = own.length ? own.every((p) => !left.includes(p)) : null;
   } catch (e) {
     record.cleanup.word_after_error = e.message;
   }
@@ -452,19 +584,34 @@ try {
 } catch (e) {
   record.features_error = String(e?.message ?? e);
 }
+// Before the mode-14 check starts a daemon with a log of its own.
+const mainLogs = runLogs();
 if (failed && opt["keep-on-fail"]) {
   record.cleanup.kept = { word_pid: record.word.launch?.pid, daemon_pid: daemon?.pid };
   daemon?.unref();
 } else {
   await cleanup();
 }
+const decision = exitDecision({
+  failed: !!failed,
+  rows,
+  features: record.features,
+  featuresError: record.features_error,
+  conditional: opt.conditional.flatMap((x) => x.split(",")).filter(Boolean),
+  logs: mainLogs,
+});
+record.features = decision.features;
+record.exit = { code: decision.code, reasons: decision.reasons };
 record.finished_at = new Date().toISOString();
 save();
 console.log("\n" + table(rows));
 if (record.features.length) {
-  console.log("\nfeature  exit");
-  for (const f of record.features) console.log(`${f.id.padEnd(7)}  ${f.exit}`);
+  console.log("\nfeature  exit  status");
+  for (const f of record.features)
+    console.log(`${f.id.padEnd(7)}  ${String(f.exit).padEnd(4)}  ${f.status}`);
 }
+if (record.features_error) console.log(`\nfeatures error: ${record.features_error}`);
 console.log(`\ncleanup: ${JSON.stringify(record.cleanup)}`);
 console.log(`result: ${path.join(RUN, "result.json")}`);
-process.exit(failed || rows.some((r) => r.result === "FAIL") ? 1 : 0);
+for (const r of decision.reasons) console.error(`run-acceptance: ${r}`);
+process.exit(decision.code);

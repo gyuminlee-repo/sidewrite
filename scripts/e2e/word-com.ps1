@@ -5,13 +5,14 @@
 # Every action prints one JSON object.
 #
 # Actions
-#   state           comments and revisions of the document
+#   state           comments (with done = resolved) and revisions of the document
 #   apply           -PlanJson <file>: accept or reject the tracked changes of
 #                   each rationale comment, optionally edit one inserted word
 #   delete-text     -Text <s>: delete its first occurrence, track changes off
 #   add-comment     -Text <s> [-Paragraph <n>]: a comment by the Word user
 #   quit            -AllowDir <dir> -ExpectPid <n>: close without saving when
-#                   every open document is under AllowDir
+#                   every open document is under AllowDir; else refused =
+#                   "foreign_documents" and nothing is closed
 param(
   [Parameter(Mandatory = $true)][string]$Doc,
   [Parameter(Mandatory = $true)][string]$Action,
@@ -43,7 +44,10 @@ function RevList() {
 function CommentList() {
   $list = @()
   foreach ($c in $d.Comments) {
-    $list += [pscustomobject]@{ com = $c; text = (Norm $c.Range.Text); start = $c.Scope.Start; end = $c.Scope.End; author = $c.Author }
+    # Done: the comment is resolved. Unreadable in some documents: null then.
+    $done = $null
+    try { $done = [bool]$c.Done } catch { $done = $null }
+    $list += [pscustomobject]@{ com = $c; text = (Norm $c.Range.Text); start = $c.Scope.Start; end = $c.Scope.End; author = $c.Author; done = $done }
   }
   return $list
 }
@@ -74,7 +78,7 @@ switch ($Action) {
     Out ([ordered]@{
       ok = $true
       track_revisions = $d.TrackRevisions
-      comments = @(CommentList | ForEach-Object { [ordered]@{ text = $_.text; author = $_.author; start = $_.start; end = $_.end } })
+      comments = @(CommentList | ForEach-Object { [ordered]@{ text = $_.text; author = $_.author; start = $_.start; end = $_.end; done = $_.done } })
       revisions = @(RevList | ForEach-Object { [ordered]@{ type = $_.type; text = $_.text; start = $_.start; end = $_.end } })
     })
   }
@@ -155,7 +159,9 @@ switch ($Action) {
     foreach ($x in $app.Documents) { $names += $x.FullName }
     $allow = (Norm $AllowDir).TrimEnd("\") + "\"
     $outside = @($names | Where-Object { -not (Norm $_).StartsWith($allow, [System.StringComparison]::OrdinalIgnoreCase) })
-    if ($outside.Count -gt 0) { Out ([ordered]@{ ok = $false; error = "documents outside the test folder are open"; documents = $names }); break }
+    # Refused: Word stays up with every document untouched. The runner must not
+    # stop the process either (cleanupDecision in judge.mjs).
+    if ($outside.Count -gt 0) { Out ([ordered]@{ ok = $false; refused = "foreign_documents"; error = "documents outside the test folder are open"; documents = $names; outside = $outside; pid = $ExpectPid }); break }
     foreach ($x in $app.Documents) { $x.Saved = $true }
     $app.Quit()
     [System.Runtime.InteropServices.Marshal]::ReleaseComObject($d) | Out-Null

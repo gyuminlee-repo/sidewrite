@@ -83,6 +83,71 @@ export function rewriteCommand(cmd, map) {
   return out;
 }
 
+// What to do with the Word process the runner started, from the answer of
+// word-com.ps1 quit. action: "none" | "kill" | "leave"; fail: the run fails.
+//   kill   only when quit ran (so every open document was in the run folder
+//          and was closed unsaved) and the process is still there.
+//   leave  quit refused because a document outside the run folder is open
+//          in that Word, or the open documents are unknown (the COM call
+//          failed): unsaved work of the user may be in it, Word stays up.
+export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = true }) {
+  if (!pid || preexisting.includes(pid)) return { action: "none", fail: false, reason: "" };
+  const dir =
+    String(runDir ?? "")
+      .replace(/\\+$/, "")
+      .toLowerCase() + "\\";
+  const docs = Array.isArray(quit?.documents) ? quit.documents : null;
+  const outside = (docs ?? []).filter((d) => !String(d).toLowerCase().startsWith(dir));
+  if (quit?.refused || outside.length) {
+    return {
+      action: "leave",
+      fail: true,
+      reason: `Word ${pid} left running: documents outside the run folder are open (${(quit?.outside ?? outside).join(", ")})`,
+    };
+  }
+  if (quit?.ok === true && docs) {
+    if (quit.exited === true) return { action: "none", fail: false, reason: "" };
+    return { action: "kill", fail: false, reason: `Word ${pid} still alive after quit` };
+  }
+  if (!alive) return { action: "none", fail: false, reason: "" };
+  return {
+    action: "leave",
+    fail: true,
+    reason: `Word ${pid} left running: its open documents are unknown (${quit?.error ?? "no answer from quit"})`,
+  };
+}
+
+// Features whose verify_command can pass only when something happened that
+// the run cannot force. trigger: the daemon log line of that event.
+export const CONDITIONS = {
+  // A turn that ended on a Claude usage limit.
+  "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
+};
+const TURN_LOGGED = /^\[agent\] turn complete \(/m;
+
+// Exit code of the run. features: [{ id, exit }] of the verify commands;
+// conditional: ids given with --conditional; logs: text of the daemon logs
+// this run wrote. A conditional feature that failed is
+// SKIPPED-CONDITION-NOT-MET only when its trigger is provably absent: the
+// logs show finished turns and none with the trigger. Otherwise it counts.
+export function exitDecision({ failed, rows, features, featuresError, conditional = [], logs }) {
+  const reasons = [];
+  if (failed) reasons.push("the run stopped on an error");
+  for (const r of rows ?? []) if (r.result === "FAIL") reasons.push(`step failed: ${r.step}`);
+  if (featuresError) reasons.push(`verify commands did not run: ${featuresError}`);
+  const text = typeof logs === "string" ? logs : "";
+  const out = (features ?? []).map((f) => {
+    if (f.exit === 0) return { ...f, status: "PASS" };
+    const cond = conditional.includes(f.id) ? CONDITIONS[f.id] : null;
+    if (cond && TURN_LOGGED.test(text) && !cond.trigger.test(text)) {
+      return { ...f, status: "SKIPPED-CONDITION-NOT-MET" };
+    }
+    reasons.push(`verify command failed: ${f.id} (exit ${f.exit})`);
+    return { ...f, status: "FAIL" };
+  });
+  return { code: reasons.length ? 1 : 0, reasons, features: out };
+}
+
 const has = (s, sub) => String(s ?? "").includes(sub);
 
 // R1.1 all Accepted, R1.2 all Rejected, R1.3 first change Edited by you.
@@ -100,6 +165,42 @@ export function badgesMatch(view) {
       b.every((x) => x === "Rejected") &&
       c[0] === "Edited by you",
     got: `R1.1 ${a.join("/")}; R1.2 ${b.join("/")}; R1.3 ${c.join("/")}`,
+  };
+}
+
+// word-com.ps1 Norm: how the script prints a comment text.
+export const norm = (s) =>
+  String(s ?? "")
+    .replace(/[\r\n\u000b\u0007]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// C1: after the author accepts or rejects a change and presses Refresh, its
+// rationale comment is resolved. revision: revision.json after that refresh;
+// word: word-com.ps1 state (comments with `done` = Comment.Done); message:
+// the pane's refresh message. Edited and pending changes keep an open comment.
+export function resolvedMatch(revision, word, message = "") {
+  const byText = new Map((word?.comments ?? []).map((c) => [norm(c.text), c]));
+  const seen = [];
+  for (const c of revision?.comments ?? []) {
+    for (const ch of c.changes ?? []) {
+      if (ch.state !== "accepted" && ch.state !== "rejected") continue;
+      if (!ch.word_comment_id || ch.comment_missing || ch.comment_cleaned_at) continue;
+      const text = formatRationaleComment(c.ref, ch.rationale, { lost: ch.lost_facts ?? [] });
+      const com = byText.get(norm(text));
+      seen.push({ id: ch.id, done: com ? com.done === true : null });
+    }
+  }
+  const refused = has(message, "not marked resolved");
+  return {
+    pass: seen.length > 0 && seen.every((x) => x.done === true) && !refused,
+    expect:
+      "every accepted or rejected change has its rationale comment Done in Word; no 'not marked resolved' note",
+    got:
+      (seen
+        .map((x) => `${x.id} ${x.done === null ? "no comment" : x.done ? "done" : "open"}`)
+        .join("; ") || "no accepted or rejected change with a comment") +
+      (refused ? "; pane: not marked resolved" : ""),
   };
 }
 
@@ -174,6 +275,29 @@ export const JUDGES = {
     return {
       pass: !!m && m[1] === m[2] && m[2] === m[3] && !has(r.message, "MISMATCH"),
       expect: "Changes N, expected tool comments N, found N. (no MISMATCH)",
+      got: r.message,
+    };
+  },
+  // A document in compatibility mode 14: Word refuses Comment.resolved. The
+  // refresh still shows its counts, and one note for the handled changes.
+  "refresh-mode14": (r) => {
+    const m =
+      /^Accepted (\d+), rejected (\d+), .*Changes (\d+), expected tool comments (\d+), found (\d+)/.exec(
+        r.message,
+      );
+    const n = /(\d+) rationale comment\(s\) not marked resolved \(Word: /.exec(r.message);
+    const handled = m ? Number(m[1]) + Number(m[2]) : 0;
+    return {
+      pass:
+        !!m &&
+        !!n &&
+        handled > 0 &&
+        Number(n[1]) === handled &&
+        m[3] === m[4] &&
+        m[4] === m[5] &&
+        !has(r.message, "MISMATCH"),
+      expect:
+        "Accepted a, rejected r ... Changes N, expected tool comments N, found N. (a+r) rationale comment(s) not marked resolved (Word: ...)",
       got: r.message,
     };
   },
