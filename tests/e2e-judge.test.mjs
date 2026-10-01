@@ -1203,3 +1203,82 @@ test("the pane steps wait for the message their own action ends with", async () 
   assert.ok(pane.includes("candidate rule(s) by ${r.method}."));
   assert.ok(pane.includes(`const PROVIDER_WAIT = "${HOLD}";`));
 });
+
+// The account's model list comes from outside and can be late once (seen on
+// 2026-10-01: "Model list unavailable (timed out after 20000 ms); aliases
+// only"; the pane fell back to the aliases, as it should). The `models` step
+// asks once more before it is judged. Only the step does: the pane's own
+// fallback is unchanged.
+test("models step: an unavailable list is asked for once more, after the daemon's fallback has run out", async () => {
+  const { createRequire } = await import("node:module");
+  const { steps, MODELS_RETRY_AFTER_MS } = createRequire(import.meta.url)(
+    "../scripts/e2e/pane-driver.cjs",
+  );
+  // The daemon keeps a failed list for 60 s (model-list.mjs fallbackTtlMs).
+  const list = (await import("node:fs")).readFileSync(
+    new URL("../daemon/model-list.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(list, /fallbackTtlMs = 60_000/);
+  assert.ok(MODELS_RETRY_AFTER_MS > 60_000 && MODELS_RETRY_AFTER_MS <= 70_000);
+
+  const LATE = "Model list unavailable (timed out after 20000 ms); aliases only";
+  const GOOD = "Models your Claude account can use";
+  const menu = (title, values) => ({
+    title,
+    selected: "sonnet",
+    options: values.map((v) => ({ value: v, label: v })),
+  });
+  const fakePage = (readings) => {
+    const did = [];
+    return {
+      did,
+      waitForFunction: async () => void did.push("wait"),
+      waitForTimeout: async (ms) => void did.push(`sleep ${ms}`),
+      reload: async () => void did.push("reload"),
+      evaluate: async () => ({ message: "", comments: [] }),
+      $eval: async (sel) => (sel === "#composer-model" ? readings.shift() : ""),
+    };
+  };
+
+  // In time: one reading, no reload.
+  const ok = fakePage([menu(GOOD, ["sonnet", "claude-fable-5"])]);
+  const first = await steps.models(ok);
+  assert.equal(first.title, GOOD);
+  assert.equal("retried" in first, false);
+  assert.equal(ok.did.includes("reload"), false);
+
+  // Late once: wait out the fallback, reload the pane, back to the Review tab, read again.
+  const late = fakePage([
+    menu(LATE, ["opus", "sonnet", "haiku"]),
+    menu(GOOD, ["sonnet", "claude-fable-5"]),
+  ]);
+  const second = await steps.models(late);
+  assert.deepEqual([second.title, second.retried, second.first_title], [GOOD, true, LATE]);
+  assert.deepEqual(
+    late.did.filter((d) => d !== "wait"),
+    [`sleep ${MODELS_RETRY_AFTER_MS}`, "reload"],
+  );
+  assert.ok(late.did.indexOf("reload") < late.did.lastIndexOf("wait"), "waits for the pane again");
+
+  // Late twice: one retry, and the step says what it saw.
+  const twice = fakePage([menu(LATE, ["opus"]), menu(LATE, ["opus"])]);
+  const third = await steps.models(twice);
+  assert.deepEqual([third.title, third.retried], [LATE, true]);
+  assert.equal(twice.did.filter((d) => d === "reload").length, 1);
+
+  // The judgments of both outcomes.
+  const { JUDGES, modelsEvidence } = await import("../scripts/e2e/judge.mjs");
+  const log =
+    "[models] source=fallback count=3 error=timed out after 20000 ms\n[models] source=sdk count=11\n";
+  assert.equal(JUDGES.models({ ok: true, ...second }).pass, true);
+  const e = modelsEvidence({ step: { ok: true, ...second }, log });
+  assert.deepEqual([e.pass, e.retried, e.first_title], [true, true, LATE]);
+  assert.equal(JUDGES.models({ ok: true, ...third }).pass, false);
+  assert.equal(
+    modelsEvidence({ step: { ok: true, ...third }, log: log.split("\n")[0] }).pass,
+    false,
+  );
+  const plain = modelsEvidence({ step: { ok: true, ...first }, log });
+  assert.deepEqual([plain.pass, plain.retried], [true, false]);
+});
