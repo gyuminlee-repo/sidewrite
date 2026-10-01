@@ -174,3 +174,34 @@ test("a refusal fallback of the CLI is logged, told to the pane, and recorded as
   // The daemon itself names no fallback model.
   assert.equal(/fallbackModel/.test(code), false);
 });
+
+// After a refusal fallback the CLI keeps the session on the other model. The
+// retry inside that turn stays (and is shown); the next turn starts on the
+// model the user chose again: the session is restarted, resuming, before the
+// new message is queued, and the old session is given no further message.
+test("the turn after a refusal fallback goes back to the chosen model, and its message is not lost", () => {
+  const at = code.indexOf("async function ensureLoopForMessage(key, host, { idle = true } = {})");
+  assert.ok(at > 0);
+  const body = code.slice(at, at + 900);
+  assert.match(
+    body,
+    /if \(live && !live\.settled\) \{\s*if \(!live\.fellBackTo \|\| !idle\) return;/,
+  );
+  // First the old session's wait for a message ends (no await before it: the
+  // caller queues the message right after this function returns its promise).
+  const restore = body.slice(body.indexOf("live.fellBackTo"));
+  assert.ok(
+    restore.indexOf("bridge.clearUserMessages(key, { keepQueued: true })") <
+      restore.indexOf('restartSession(key, host, { reason: "model_restored", keepQueued: true })'),
+  );
+  assert.equal(/await/.test(restore.slice(0, restore.indexOf("restartSession("))), false);
+  assert.match(
+    body,
+    /\[agent\] model restored to \$\{modelArgFor\(key\)\} after the fallback to \$\{live\.fellBackTo\}/,
+  );
+  // A chat message sent while a turn runs does not restart under that turn.
+  assert.match(
+    code,
+    /onUserMessage: \(key, host\) => \{\s*const idle = !turnBusy\.has\(key\);\s*turnBusy\.add\(key\);\s*return ensureLoopForMessage\(key, host, \{ idle \}\);/,
+  );
+});
