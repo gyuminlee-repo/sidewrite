@@ -177,8 +177,12 @@ export function anonymizeLines(r) {
   return out;
 }
 
-// Which file the copies are made from.
+// Which file the copies are made from. undefined: the daemon has not said
+// yet (the pane is connecting), and the line says nothing; null: it said the
+// document is not saved to a local folder.
 export const docLine = (doc) =>
   doc
     ? `Saved file: ${doc.doc_name}. Profile: ${doc.profile_name}. Copies are made from the saved file, so save before you make one.`
-    : "Save the document to a local folder to use the tools.";
+    : doc === null
+      ? "Save the document to a local folder to use the tools."
+      : "";

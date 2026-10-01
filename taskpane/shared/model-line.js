@@ -80,6 +80,48 @@ export function roleText(role, { used, choice }, models) {
   return asked === next ? `${head}${label}` : `${head}${label} (next: ${next})`;
 }
 
+// What edits ran on, after an event of the daemon (taskpane.js keeps it):
+//   session_init    the model the session runs on. The CLI sends an init at
+//                   the start of every turn, so the daemon says with it
+//                   whether the document stays on another model (declined);
+//                   without that the state would be gone with every turn.
+//   model_fallback  a refused request was run again on another model; a
+//                   local one (that answer only) changes nothing here.
+//   model_used      a request of this kind outside the session (the
+//                   paragraph check): the state of a declining model stays.
+// editsModel: the model chosen for edits, when nothing was asked for yet.
+export function turnUsed(prev, msg, editsModel) {
+  if (msg.event === "session_init") {
+    return {
+      provider: "claude",
+      asked: msg.asked ?? null,
+      ran: msg.model ?? null,
+      ...(msg.declined ? { declined: msg.declined } : {}),
+    };
+  }
+  if (msg.event === "model_fallback") {
+    if (msg.scope === "local") return prev;
+    return {
+      provider: "claude",
+      asked: prev?.asked ?? editsModel,
+      ran: msg.fallback ?? null,
+      declined: {
+        original: msg.original,
+        fallback: msg.fallback,
+        category: msg.category ?? null,
+        stay: msg.stay === true,
+      },
+    };
+  }
+  return {
+    provider: msg.provider,
+    asked: msg.asked ?? null,
+    ran: msg.ran ?? null,
+    ok: msg.ok,
+    ...(prev?.declined?.stay ? { declined: prev.declined } : {}),
+  };
+}
+
 export function modelLineText(state, models) {
   return ROLES.map((role) => roleText(role, state[role], models)).join("   ");
 }

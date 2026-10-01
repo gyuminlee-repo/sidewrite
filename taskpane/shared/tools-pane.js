@@ -39,7 +39,9 @@ export function initToolsPane({
   if (!root) return { onEvent() {}, reload: async () => {} }; // Excel pane: no Tools tab
   const $ = (id) => document.getElementById(id);
   const state = {
-    doc: null, // the tools_state answer, or null when the document is not saved
+    // The tools_state answer; null when the daemon says the document is not
+    // saved; undefined while it has not answered (or the request failed).
+    doc: undefined,
     rules: null, // { text, candidates, warnings, boxes } of the last guideline read
     busy: false,
     asking: 0, // job requests sent whose { accepted, job_id } has not come yet
@@ -307,7 +309,9 @@ export function initToolsPane({
       try {
         state.doc = await ask("tools_state");
       } catch (e) {
-        state.doc = null;
+        // Only "not saved" is that state; any other failure says nothing
+        // about the file.
+        state.doc = /^Save the document/.test(e.message) ? null : undefined;
         say(e.message, true);
       }
       renderDoc();

@@ -352,6 +352,14 @@ function modelArgFor(key) {
 // the CLI moved it to, for as long as that choice stands.
 const declinedByKey = new Map();
 const staysOn = (key) => staysOnFallback(declinedByKey.get(key), modelArgFor(key));
+// That state for the pane, with every session_init (the CLI sends an init at
+// the start of each turn, and the pane takes what edits run on from it).
+const stayState = (key) => {
+  const d = staysOn(key);
+  return d
+    ? { original: d.original, fallback: d.fallback, category: d.category, stay: true }
+    : null;
+};
 
 function sessionFor(key) {
   return sessions.get(key) ?? null;
@@ -1554,6 +1562,7 @@ function handleAgentMessage(msg, session) {
             session_id: msg.session_id,
             model: msg.model,
             asked: session?.model ?? null,
+            declined: stayState(session?.key),
           },
           session?.key,
         );
