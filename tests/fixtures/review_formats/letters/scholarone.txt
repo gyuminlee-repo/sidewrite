@@ -1,0 +1,29 @@
+Dear Dr. Author:
+
+Manuscript ID EX-2026-0001 entitled "An invented manuscript" has been reviewed. The comments of the reviewers are included at the bottom of this letter.
+
+Sincerely,
+The Editorial Office
+Editor-in-Chief, Journal of Examples
+
+Associate Editor Comments to the Author:
+Please shorten the abstract to 200 words.
+
+Reviewer(s)' Comments to Author:
+
+Reviewer: 1
+
+Comments to the Author
+The manuscript describes a growth assay. The work is clear but the methods need detail.
+
+1. State the incubation temperature with its unit.
+2. Report the number of replicates in Table
+2. The legend does not give it.
+3. Please add the following to the Methods:
+   a) the strain
+   b) the medium
+
+Reviewer: 2
+
+Comments to the Author
+The study is sound. I recommend adding error bars to Fig. 2 and naming the antifoam agent.

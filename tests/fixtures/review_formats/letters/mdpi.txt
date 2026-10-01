@@ -1,0 +1,22 @@
+Round 1
+
+Reviewer 1 Report
+
+Comments and Suggestions for Authors
+The manuscript is within the scope of the journal.
+
+Point 1: The unit of the incubation temperature is missing.
+
+Point 2: The term "cell-free extract" is misleading.
+Centrifugation alone does not remove every cell.
+
+Reviewer 2 Report
+
+Comments and Suggestions for Authors
+Line 12: the strain name has a typo.
+Lines 30-32: the sentence about the flasks can be deleted.
+Page 4, line 88: add the antifoam concentration.
+
+Academic Editor
+1. Please add a data availability statement.
+2. Please check the reference format.

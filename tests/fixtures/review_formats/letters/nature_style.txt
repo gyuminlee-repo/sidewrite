@@ -1,0 +1,18 @@
+Reviewer #1 (Remarks to the Author):
+
+The authors follow growth on a synthetic carbon source. The data are of interest.
+
+The first concern is the missing temperature unit in the Methods.
+
+The second concern is the claim of novelty, which needs a citation.
+
+Reviewer #2 (Remarks to the Author):
+
+Specific comments:
+(1) Add error bars to Fig. 2.
+(2) State how growth was followed.
+(3) Name the antifoam agent.
+
+Reviewer #3 (Remarks to the Author):
+
+I have no further requests. The revision can be accepted once the units are added.

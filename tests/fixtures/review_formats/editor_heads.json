@@ -1,0 +1,187 @@
+{
+  "family": "editor_heads",
+  "cases": [
+    {
+      "name": "bare Editor",
+      "kind": "positive",
+      "text": "Editor\nPlease shorten the abstract.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract."
+      }
+    },
+    {
+      "name": "Editor's comments with colon",
+      "kind": "positive",
+      "text": "Editor's comments:\nPlease shorten the abstract.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract."
+      }
+    },
+    {
+      "name": "Associate Editor with text on the line",
+      "kind": "positive",
+      "text": "Associate Editor: Please shorten the abstract.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract."
+      }
+    },
+    {
+      "name": "Academic Editor with numbered comments",
+      "kind": "positive",
+      "text": "Academic Editor\n1. Shorten the abstract.\n2. Add a data statement.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Shorten the abstract.",
+        "E.2": "Add a data statement."
+      }
+    },
+    {
+      "name": "Handling Editor",
+      "kind": "positive",
+      "text": "Handling Editor:\nPlease shorten the abstract.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract."
+      }
+    },
+    {
+      "name": "Editor-in-Chief",
+      "kind": "positive",
+      "text": "Editor-in-Chief:\nPlease shorten the abstract.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract."
+      }
+    },
+    {
+      "name": "Guest Editor",
+      "kind": "positive",
+      "text": "Guest Editor\nPlease shorten the abstract.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract."
+      }
+    },
+    {
+      "name": "comments from the editors and reviewers (Editorial Manager)",
+      "kind": "positive",
+      "text": "Dear Author,\nThe reports are below.\n\nComments from the editors and reviewers:\n\nReviewer #1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Dear Author,\nThe reports are below."
+      }
+    },
+    {
+      "name": "Korean editor",
+      "kind": "positive",
+      "text": "\ud3b8\uc9d1\uc704\uc6d0\n\ucd08\ub85d\uc744 200\ub2e8\uc5b4\ub85c \uc904\uc5ec \uc8fc\uc2ed\uc2dc\uc624.\n\n\uc2ec\uc0ac\uc704\uc6d0 1\n1. \ub2e8\uc704\ub97c \ud45c\uae30\ud574 \uc8fc\uc2ed\uc2dc\uc624.\n2. \ubc18\ubcf5 \uc218\ub97c \uba85\uc2dc\ud574 \uc8fc\uc2ed\uc2dc\uc624.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "\ucd08\ub85d\uc744 200\ub2e8\uc5b4\ub85c \uc904\uc5ec \uc8fc\uc2ed\uc2dc\uc624."
+      }
+    },
+    {
+      "name": "editor block after the reviewers",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nAssociate Editor:\nPlease also update the references.",
+      "refs": ["R1.1", "R1.2", "E.1"],
+      "texts": {
+        "R1.2": "State n.",
+        "E.1": "Please also update the references."
+      }
+    },
+    {
+      "name": "letter then editor comments",
+      "kind": "positive",
+      "text": "Dear Author,\nThe reports are below.\n\nEditor's comments:\nShorten the abstract.\n\nReviewer #1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2"],
+      "texts": {
+        "E.2": "Shorten the abstract."
+      }
+    },
+    {
+      "name": "Associate Editor Comments to the Author (ScholarOne)",
+      "kind": "positive",
+      "text": "Associate Editor Comments to the Author:\nPlease shorten the abstract.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract."
+      }
+    },
+    {
+      "name": "the editor in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nThe editor asked us to check the statistics as well.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nThe editor asked us to check the statistics as well."
+      }
+    },
+    {
+      "name": "editorial",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nEditorial changes are needed throughout the text.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nEditorial changes are needed throughout the text."
+      }
+    },
+    {
+      "name": "editors in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nEditors of this journal usually require a data statement.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nEditors of this journal usually require a data statement."
+      }
+    },
+    {
+      "name": "editor-in-chief in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nEditor-in-Chief decisions aside, the controls are missing.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nEditor-in-Chief decisions aside, the controls are missing."
+      }
+    },
+    {
+      "name": "associate editor in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nAssociate Editor suggested a new title in round one.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nAssociate Editor suggested a new title in round one."
+      }
+    },
+    {
+      "name": "Korean editorial board in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\n\ud3b8\uc9d1\uc704\uc6d0\ud68c\uc758 \uacb0\uc815\uacfc \ubcc4\uac1c\ub85c \ub300\uc870\uad70\uc774 \ud544\uc694\ud569\ub2c8\ub2e4.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\n\ud3b8\uc9d1\uc704\uc6d0\ud68c\uc758 \uacb0\uc815\uacfc \ubcc4\uac1c\ub85c \ub300\uc870\uad70\uc774 \ud544\uc694\ud569\ub2c8\ub2e4."
+      }
+    },
+    {
+      "name": "possessive in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nEditor's choice of reviewers is not my concern here.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nEditor's choice of reviewers is not my concern here."
+      }
+    },
+    {
+      "name": "title line in the letter signature stays in the letter",
+      "kind": "trap",
+      "text": "Dear Author,\nPlease revise.\n\nSincerely,\nThe handling office\nEditor-in-Chief\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Dear Author,\nPlease revise.\n\nSincerely,\nThe handling office\nEditor-in-Chief"
+      }
+    }
+  ]
+}
