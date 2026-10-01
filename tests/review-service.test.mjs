@@ -2396,3 +2396,39 @@ test("review_save_comments: an empty section clears the label, a missing key kee
     await t.cleanup();
   }
 });
+
+// H4 with the job pin of stage 2.5: the second request for a batch whose
+// reply was in the wrong form goes to the provider and model the check
+// started with, also when the pane's choice changed in between.
+test("ledger_check: the retry of a malformed reply runs on the pinned provider of the job", async () => {
+  const asked = [];
+  let pins = 0;
+  const provider = (name, bad) => async (req) => {
+    asked.push(name);
+    return bad && asked.length === 1
+      ? { ok: true, json: { violations: [] } }
+      : ledgerReply(req, []);
+  };
+  const t = await setup({
+    // Each job pins the choice of its start; the choice changes after the first pin.
+    oneshotJob: async () =>
+      ++pins === 1
+        ? { run: provider("ollama:first", true), model: "ollama:first" }
+        : { run: provider("claude", false), model: "haiku" },
+  });
+  try {
+    await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
+    const r = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 0, text: "A paragraph.", reviewed_text: null }] },
+    });
+    assert.equal(r.revision.ledger[0].status, "ok");
+    assert.deepEqual([pins, asked], [1, ["ollama:first", "ollama:first"]]);
+    const rows = (await readDecisions(t.dir)).filter((d) => d.kind === "ledger_check");
+    assert.deepEqual(
+      rows.map((d) => [d.model, d.output.verdict]),
+      [["ollama:first", "ok"]],
+    );
+  } finally {
+    await t.cleanup();
+  }
+});

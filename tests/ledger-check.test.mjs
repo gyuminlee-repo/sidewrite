@@ -515,12 +515,19 @@ test("LLM check: a good reply to the second request is used; the first one is no
       name,
     );
   }
-  // A failed model call (limit, refusal, timeout) is not a form error: no second request.
-  let n = 0;
-  const r = await checkLlmItem(LLM_ITEM, P3, {
-    oneshot: async () => (n++, { ok: false, error: "Claude usage limit reached." }),
-  });
-  assert.deepEqual([r.status, r.error, n], ["error", "Claude usage limit reached.", 1]);
+  // A failed model call (limit, refusal, timeout, a server whose answer was
+  // no JSON at all) is not a form error: no second request.
+  for (const error of [
+    "Claude usage limit reached.",
+    "the reply was not JSON from the server",
+    "agy output was not JSON",
+  ]) {
+    let n = 0;
+    const r = await checkLlmItem(LLM_ITEM, P3, {
+      oneshot: async () => (n++, { ok: false, error }),
+    });
+    assert.deepEqual([r.status, r.error, n], ["error", error, 1]);
+  }
 });
 
 test("LLM check: paragraph numbers given as numeric strings are read; lists may be left out when empty", async () => {

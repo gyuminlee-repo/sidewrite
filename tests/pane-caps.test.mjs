@@ -162,3 +162,45 @@ test("service: a task pane with the capability gets the edit", async () => {
     await w.cleanup();
   }
 });
+
+// A review turn in which no edit can be applied is not started: it would
+// only spend the model's turn, and a "Propose all" run would spend one for
+// every comment after it. The refusal is the answer of review_propose, which
+// a task pane of any age shows and which ends its Propose all run.
+test("service: review_propose is refused for a task pane without the capability; no turn is queued", async () => {
+  for (const caps of [undefined, ["target_hash"]]) {
+    const dir = await mkdtemp(join(tmpdir(), "pane-caps-propose-"));
+    const doc = join(dir, "paper.docx");
+    const pushed = [];
+    const svc = createReviewService({
+      getContext: () => ({ activeDoc: doc, ...(caps ? { caps } : {}) }),
+      callTool: null,
+      pushTurn: (...a) => pushed.push(a),
+      log: () => {},
+      env: { CC_OFFICE_WSL_PATHS: "0" },
+    });
+    const ask = (type, payload = {}) =>
+      new Promise((resolve) =>
+        svc.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+      );
+    try {
+      await ask("review_save_comments", {
+        comments: [{ ref: "R1.1", reviewer: 1, text: "Rename." }],
+      });
+      const r = await ask("review_propose", { ref: "R1.1", paragraphs: [] });
+      if (caps) {
+        assert.deepEqual([r.ok, r.started, pushed.length], [true, true, 1]);
+        continue;
+      }
+      assert.equal(r.ok, false);
+      assert.match(r.error, /reload the task pane/i);
+      assert.equal(pushed.length, 0);
+      const c = (await ask("review_load")).revision.comments[0];
+      assert.equal(c.status, "pending", "the comment is not marked in progress");
+      // The prompt can still be previewed.
+      assert.equal((await ask("review_preview", { ref: "R1.1", paragraphs: [] })).ok, true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});

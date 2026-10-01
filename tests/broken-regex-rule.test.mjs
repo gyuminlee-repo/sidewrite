@@ -15,6 +15,8 @@ import {
   loadRevision,
   saveRevision,
   replaceComments,
+  importLedgerItems,
+  ledgerExportDoc,
 } from "../daemon/revision-store.mjs";
 import * as ledgerCheck from "../daemon/ledger-check.mjs";
 import { applyTrackedEdit } from "../daemon/review-tools.mjs";
@@ -221,6 +223,117 @@ test("service: ledger_add and ledger_update refuse a broken regex; a stored one 
         ["L2", "error"],
       ],
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Ledger import (ledger_import, also the way ledger_suggest candidates come
+// in) goes through the input schema: a file with one rule that does not
+// compile adds nothing, in append and in replace mode.
+test("ledger import: a file with a regex that does not compile is refused as a whole", async () => {
+  const rule = (text, pattern, flags = "i") => ({
+    kind: "forbid",
+    text,
+    check: regex(pattern, flags),
+  });
+  const good = [rule("no novel", "novel"), rule("no robust", "robust")];
+  const base = importLedgerItems(emptyRevision("/m/paper.docx"), [rule("kept", "kept")]).revision;
+  for (const [name, bad, why] of [
+    ["pattern", rule("broken", "("), /item 2: check\.pattern: invalid regex/],
+    ["flags", rule("broken", "a", "ii"), /item 2: check\.pattern: invalid regex/],
+  ]) {
+    for (const mode of ["append", "replace"]) {
+      assert.throws(
+        () => importLedgerItems(base, [good[0], bad, good[1]], { mode }),
+        why,
+        `${name} ${mode}`,
+      );
+    }
+  }
+  assert.deepEqual([base.ledger.map((i) => i.id), base.ledger_seq], [["L1"], 1]);
+  assert.equal(importLedgerItems(base, good).added.length, 2);
+
+  // Through the service: the file on disk is as it was, the counter too.
+  const dir = await mkdtemp(join(tmpdir(), "broken-rule-import-"));
+  const doc = join(dir, "paper.docx");
+  const svc = createReviewService({
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    callTool: null,
+    pushTurn: () => {},
+    log: () => {},
+    env: { CC_OFFICE_WSL_PATHS: "0" },
+  });
+  const ask = (type, payload = {}) =>
+    new Promise((resolve) =>
+      svc.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+    );
+  try {
+    assert.equal((await ask("ledger_add", { item: rule("kept", "kept") })).ok, true);
+    const path = join(dir, "paper.revision.json");
+    const before = await readFile(path, "utf8");
+    for (const mode of ["append", "replace"]) {
+      const r = await ask("ledger_import", {
+        doc: { items: [good[0], rule("broken", "("), good[1]] },
+        mode,
+      });
+      assert.equal(r.ok, false, mode);
+      assert.match(r.error, /item 2: check\.pattern: invalid regex/, mode);
+      assert.equal(await readFile(path, "utf8"), before, `${mode}: nothing written`);
+    }
+    const ok = await ask("ledger_import", { doc: { items: good } });
+    assert.deepEqual([ok.ok, ok.added_ids], [true, ["L2", "L3"]]);
+
+    // A rule a file from before the check still holds is exported as it is,
+    // and that export is refused on import: the rule is fixed first.
+    const rev = await loadRevision(path, doc);
+    await writeFile(path, JSON.stringify({ ...rev, ledger: [...rev.ledger, forbid("L4", "(")] }));
+    const out = ledgerExportDoc(await loadRevision(path, doc));
+    assert.equal(out.items.at(-1).check.pattern, "(");
+    const back = await ask("ledger_import", { doc: out, mode: "replace" });
+    assert.equal(back.ok, false);
+    assert.match(back.error, /item 4: check\.pattern: invalid regex/);
+    assert.equal((await loadRevision(path, doc)).ledger.length, 4, "replace emptied nothing");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// No edit can be applied while an active forbid rule does not compile, so no
+// review turn is started either (one turn per comment in a Propose all run).
+test("service: review_propose is refused while a stored forbid rule does not compile", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "broken-rule-propose-"));
+  const doc = join(dir, "paper.docx");
+  const pushed = [];
+  const svc = createReviewService({
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    callTool: null,
+    pushTurn: (...a) => pushed.push(a),
+    log: () => {},
+    env: { CC_OFFICE_WSL_PATHS: "0" },
+  });
+  const ask = (type, payload = {}) =>
+    new Promise((resolve) =>
+      svc.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+    );
+  try {
+    const path = join(dir, "paper.revision.json");
+    const rev = replaceComments(await loadRevision(path, doc), [
+      { ref: "R1.1", reviewer: 1, text: "c" },
+    ]);
+    // A must-keep rule that does not compile stops no edit, so it stops no turn.
+    const keep = forbid("L1", "(", { check: regex("(", "", "present") });
+    await writeFile(path, JSON.stringify({ ...rev, ledger: [keep], ledger_seq: 1 }));
+    const ok = await ask("review_propose", { ref: "R1.1", paragraphs: [] });
+    assert.deepEqual([ok.ok, pushed.length], [true, 1], ok.error);
+
+    const now = await loadRevision(path, doc);
+    await writeFile(path, JSON.stringify({ ...now, ledger: [keep, BROKEN], ledger_seq: 2 }));
+    const r = await ask("review_propose", { ref: "R1.1", paragraphs: [] });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /L2/);
+    assert.match(r.error, /invalid regex/i);
+    assert.equal(pushed.length, 1, "no second turn");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
