@@ -208,6 +208,51 @@
       "kind": "trap",
       "text": "Comment 1: Add units.\nComment 1: State n.",
       "refs": ["R1.1", "R1.1"]
+    },
+    {
+      "name": "manuscript part labels with no blank line before them",
+      "kind": "positive",
+      "text": "Reviewer 1:\nAbstract:\n1. State the number of isolates.\n2. Define the abbreviation\nMethods:\n1. Give the agar concentration.\n2. Give the temperature.",
+      "refs": ["R1.1", "R1.2", "R1.3", "R1.4"],
+      "texts": {
+        "R1.2": "Define the abbreviation",
+        "R1.3": "Give the agar concentration."
+      },
+      "sections": {
+        "R1.1": "Abstract",
+        "R1.2": "Abstract",
+        "R1.3": "Methods",
+        "R1.4": "Methods"
+      }
+    },
+    {
+      "name": "manuscript part labels over bullets, no blank lines",
+      "kind": "positive",
+      "text": "Reviewer 1:\nIntroduction:\n- Cite the earlier work.\nResults and Discussion:\n- Add units.\n- State n.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "sections": {
+        "R1.1": "Introduction",
+        "R1.2": "Results and Discussion",
+        "R1.3": "Results and Discussion"
+      }
+    },
+    {
+      "name": "another short colon line with no blank before it starts a sub-list",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nPlease check:\n1. the strain\n2. the medium\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nPlease check:\n1. the strain\n2. the medium"
+      }
+    },
+    {
+      "name": "a part name that ends a wrapped sentence is no label",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Two things are missing in the\nMethods:\n1. the strain\n2. the medium\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Two things are missing in the\nMethods:\n1. the strain\n2. the medium"
+      }
     }
   ]
 }
