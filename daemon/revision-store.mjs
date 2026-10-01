@@ -109,6 +109,51 @@ const Requirement = z.object({
   text: z.string().min(1),
 });
 
+// ---- response letter (stage 3) ---------------------------------------------
+//
+// Only `text`, `gloss` and the decline reasons are prose a person or the model
+// wrote. Citations, line ranges and stale marks are computed by the daemon
+// (response-quotes.mjs, response-lines.mjs) and never taken from a request.
+
+// Line range of a quote, read from the margin numbers of the rendered PDF.
+const Lines = z.object({
+  start: z.number().int(),
+  end: z.number().int(),
+  start_page: z.number().int().nullable().default(null),
+  end_page: z.number().int().nullable().default(null),
+  // How often the quote is in the PDF inside its paragraph; 1 is the only good value.
+  match_count: z.number().int(),
+});
+
+const Citation = z.object({
+  change_ids: z.array(z.string()).default([]),
+  kind: z.enum(["revised", "removed"]).default("revised"),
+  // Manuscript heading above the change, the paragraph and the quoted sentence.
+  section: z.string().nullable().default(null),
+  paragraph_index: z.number().int().nullable().default(null),
+  quote: z.string().default(""),
+  lines: Lines.nullable().default(null),
+  // sha256 of the PDF `lines` was read from (response_render.pdf_sha).
+  lines_pdf: z.string().nullable().default(null),
+  // Why the change could not be placed ("unlocated", "sentence not found").
+  problem: z.string().nullable().default(null),
+});
+
+const Response = z.object({
+  text: z.string().default(""),
+  // Translation of `text`, written only when the profile asks for it.
+  gloss: z.string().default(""),
+  source: z.enum(["model", "author", "imported"]).default("model"),
+  drafted_at: z.string().nullable().default(null),
+  // The text this one replaced (the last draft, or the letter of an earlier round).
+  previous: z.string().nullable().default(null),
+  citations: z.array(Citation).default([]),
+  stale: z.array(z.enum(["quote_changed", "change_state", "lines_old"])).default([]),
+  declined_requirements: z
+    .array(z.object({ id: z.string(), reason: z.string().min(1) }))
+    .default([]),
+});
+
 const Comment = z.object({
   // R<reviewer>.<n>; E.<n> is the editor letter with reviewer 0.
   ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
@@ -125,6 +170,13 @@ const Comment = z.object({
   // comment (see "id counters" below). null: a file from before the counters.
   requirement_seq: z.number().int().nonnegative().nullable().default(null),
   blocked_seq: z.number().int().nonnegative().nullable().default(null),
+  // The answer in the response letter, and the author's decision not to
+  // change anything for this comment.
+  response: Response.nullable().default(null),
+  declined: z
+    .object({ reason: z.string().min(1) })
+    .nullable()
+    .default(null),
 });
 
 // A paragraph the LLM check could not judge (abstain). Not a violation; it
@@ -198,6 +250,30 @@ export const RevisionSchema = z.object({
     .nullable()
     .default(null),
   external: z.array(External).default([]),
+  // Journal profile of this paper and its own values on top of it
+  // (journal-profile.mjs effectiveProfile).
+  journal_profile: z.string().nullable().default(null),
+  profile_overrides: z.record(z.string(), z.unknown()).default({}),
+  // The rendered PDF the line ranges were read from, and the manuscript text
+  // it was rendered from (response-quotes.mjs snapshotHash).
+  response_render: z
+    .object({
+      pdf_sha: z.string(),
+      snapshot_hash: z.string(),
+      at: z.string(),
+      lines_indexed: z.number().int(),
+    })
+    .nullable()
+    .default(null),
+  response_export: z
+    .object({
+      path: z.string(),
+      exported_at: z.string(),
+      fail: z.number().int(),
+      warn: z.number().int(),
+    })
+    .nullable()
+    .default(null),
 });
 
 // ---- paths ----------------------------------------------------------------
@@ -242,6 +318,10 @@ export function emptyRevision(manuscript, now = new Date()) {
     ledger: [],
     snapshot: null,
     external: [],
+    journal_profile: null,
+    profile_overrides: {},
+    response_render: null,
+    response_export: null,
   };
 }
 
@@ -330,6 +410,8 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       changes: old ? clone(old.changes) : [],
       blocked: old ? clone(old.blocked) : [],
       blocked_seq: old ? blockedSeq(old) : 0,
+      response: old ? clone(old.response ?? null) : null,
+      declined: old ? clone(old.declined ?? null) : null,
     });
     const row = list[list.length - 1];
     row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });
@@ -735,3 +817,67 @@ export function dismissExternal(rev, id) {
   if (next.external.length === before) throw new Error(`No outside change ${id}`);
   return next;
 }
+
+// ---- response letter ---------------------------------------------------------
+
+// The prose of an answer. patch: { text?, gloss?, source?, previous?,
+// declined_requirements? }; nothing else is taken (citations and stale marks
+// have their own function below). A new text keeps the one it replaces as
+// `previous` and stamps drafted_at.
+const RESPONSE_PROSE = ["text", "gloss", "source", "previous", "declined_requirements"];
+export function setResponse(rev, ref, patch = {}, now = new Date()) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  const old = c.response ?? Response.parse({});
+  const take = Object.fromEntries(
+    RESPONSE_PROSE.filter((k) => k in patch).map((k) => [k, patch[k]]),
+  );
+  const textChanged = "text" in take && take.text !== old.text;
+  c.response = Response.parse({
+    ...old,
+    ...take,
+    previous: textChanged && old.text ? old.text : (take.previous ?? old.previous),
+    drafted_at: textChanged ? now.toISOString() : old.drafted_at,
+  });
+  return next;
+}
+
+// declined: { reason }; a blank reason takes the decline back.
+export function setDeclined(rev, ref, declined) {
+  const next = clone(rev);
+  const reason = String(declined?.reason ?? "").trim();
+  requireComment(next, ref).declined = reason ? { reason } : null;
+  return next;
+}
+
+// The computed citations of a comment and, when given, its stale marks.
+export function setCitations(rev, ref, citations, stale) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  c.response = Response.parse({ ...(c.response ?? {}), citations, ...(stale ? { stale } : {}) });
+  return next;
+}
+
+// The profile name and the paper's overrides. An override merges one level
+// deep, like the profile merge; a null value removes its key, also inside a
+// dict, and a dict left empty goes away.
+export function setProfile(rev, { journal_profile, overrides } = {}) {
+  const next = clone(rev);
+  if (journal_profile !== undefined) next.journal_profile = journal_profile;
+  const all = next.profile_overrides;
+  for (const [k, v] of Object.entries(overrides ?? {})) {
+    if (v === null) delete all[k];
+    else if (typeof v === "object" && !Array.isArray(v)) {
+      const base = all[k] && typeof all[k] === "object" && !Array.isArray(all[k]) ? all[k] : {};
+      const merged = Object.fromEntries(
+        Object.entries({ ...base, ...clone(v) }).filter(([, x]) => x !== null),
+      );
+      if (Object.keys(merged).length) all[k] = merged;
+      else delete all[k];
+    } else all[k] = v;
+  }
+  return next;
+}
+
+export const setRender = (rev, render) => ({ ...clone(rev), response_render: render });
+export const setExport = (rev, exported) => ({ ...clone(rev), response_export: exported });

@@ -28,6 +28,12 @@ import {
   addExternal,
   dismissExternal,
   EXTERNAL_KEEP,
+  setProfile,
+  setResponse,
+  setDeclined,
+  setCitations,
+  setRender,
+  setExport,
 } from "../daemon/revision-store.mjs";
 
 const WSL = { CC_OFFICE_WSL_PATHS: "1" };
@@ -604,4 +610,142 @@ test("the snapshot keeps the paragraph ids of the task pane next to the texts", 
   assert.equal(RevisionSchema.parse(rev).snapshot.ids, null);
   const old = { ...rev, snapshot: { taken_at: at.toISOString(), paragraphs: ["a"] } };
   assert.equal(RevisionSchema.parse(old).snapshot.ids, null);
+});
+
+// ---- response letter fields --------------------------------------------------
+
+const citation = (over = {}) => ({
+  change_ids: ["R1.1-1"],
+  kind: "revised",
+  section: "2. Methods",
+  paragraph_index: 9,
+  quote: "The temperature was held at 30 °C.",
+  ...over,
+});
+
+test("response fields: old files parse, drafts survive a comment-list save", () => {
+  let rev = RevisionSchema.parse({
+    version: 1,
+    manuscript: "m",
+    updated_at: "t",
+    comments: [{ ref: "R1.1", reviewer: 1, text: "c" }],
+  });
+  assert.equal(rev.comments[0].response, null);
+  assert.equal(rev.comments[0].declined, null);
+  assert.deepEqual([rev.journal_profile, rev.profile_overrides], [null, {}]);
+  assert.deepEqual([rev.response_render, rev.response_export], [null, null]);
+  rev = setResponse(rev, "R1.1", { text: "We agree.", source: "model" });
+  rev = setDeclined(rev, "R1.1", { reason: "Not measured in this study." });
+  rev = setCitations(rev, "R1.1", [citation()], ["lines_old"]);
+  const saved = replaceComments(rev, [{ ref: "R1.1", reviewer: 1, text: "c edited" }]);
+  assert.equal(saved.comments[0].text, "c edited");
+  assert.equal(saved.comments[0].response.text, "We agree.");
+  assert.equal(saved.comments[0].response.citations[0].quote, citation().quote);
+  assert.deepEqual(saved.comments[0].response.stale, ["lines_old"]);
+  assert.equal(saved.comments[0].declined.reason, "Not measured in this study.");
+  // The file form parses back to the same thing.
+  assert.deepEqual(RevisionSchema.parse(JSON.parse(JSON.stringify(saved))), saved);
+  // A comment kept only because work on it is in progress keeps them too.
+  const kept = replaceComments(rev, [], new Set(["R1.1"]));
+  assert.equal(kept.comments[0].response.text, "We agree.");
+});
+
+test("setResponse keeps the text it replaces as previous; setProfile deletes null keys", () => {
+  const t1 = new Date("2026-02-01T00:00:00Z");
+  const t2 = new Date("2026-02-02T00:00:00Z");
+  let rev = setResponse(base(), "R1.1", { text: "one" }, t1);
+  assert.deepEqual(
+    [
+      rev.comments[0].response.previous,
+      rev.comments[0].response.drafted_at,
+      rev.comments[0].response.source,
+    ],
+    [null, t1.toISOString(), "model"],
+  );
+  rev = setResponse(rev, "R1.1", { text: "two", source: "author" }, t2);
+  assert.equal(rev.comments[0].response.previous, "one");
+  assert.equal(rev.comments[0].response.drafted_at, t2.toISOString());
+  // The same text again is no new draft.
+  rev = setResponse(rev, "R1.1", { text: "two", gloss: "zwei" }, new Date("2026-02-03T00:00:00Z"));
+  assert.deepEqual(
+    [
+      rev.comments[0].response.previous,
+      rev.comments[0].response.drafted_at,
+      rev.comments[0].response.gloss,
+    ],
+    ["one", t2.toISOString(), "zwei"],
+  );
+  rev = setProfile(rev, {
+    journal_profile: "generic",
+    overrides: { colors: { response_body: "AA0000" }, rationale_lang: "Korean" },
+  });
+  rev = setProfile(rev, { overrides: { colors: { response_revised: "00AA00" } } });
+  rev = setProfile(rev, { overrides: { rationale_lang: null } });
+  assert.equal(rev.journal_profile, "generic");
+  assert.deepEqual(rev.profile_overrides, {
+    colors: { response_body: "AA0000", response_revised: "00AA00" },
+  });
+  // A null inside a dict removes that one key; the last key takes the dict with it.
+  rev = setProfile(rev, { overrides: { colors: { response_body: null } } });
+  assert.deepEqual(rev.profile_overrides, { colors: { response_revised: "00AA00" } });
+  rev = setProfile(rev, {
+    journal_profile: null,
+    overrides: { colors: { response_revised: null } },
+  });
+  assert.deepEqual([rev.journal_profile, rev.profile_overrides], [null, {}]);
+  assert.throws(() => setResponse(rev, "R9.9", { text: "x" }), /No reviewer comment R9\.9/);
+});
+
+test("setResponse takes prose and declines only; citations and stale marks come from code", () => {
+  let rev = setCitations(base(), "R1.1", [citation()], []);
+  // A comment with a citation and no draft yet has an empty response.
+  assert.equal(rev.comments[0].response.text, "");
+  rev = setResponse(rev, "R1.1", {
+    text: "We agree.",
+    citations: [citation({ quote: "made up" })],
+    stale: ["quote_changed"],
+    drafted_at: "1999-01-01T00:00:00.000Z",
+    declined_requirements: [{ id: "q1", reason: "Not recorded." }],
+  });
+  const r = rev.comments[0].response;
+  assert.equal(r.citations[0].quote, citation().quote);
+  assert.deepEqual(r.stale, []);
+  assert.notEqual(r.drafted_at, "1999-01-01T00:00:00.000Z");
+  assert.deepEqual(r.declined_requirements, [{ id: "q1", reason: "Not recorded." }]);
+  // setCitations replaces the list and keeps the prose; without `stale` the marks stay.
+  rev = setCitations(rev, "R1.1", [], ["change_state"]);
+  rev = setCitations(rev, "R1.1", [citation({ kind: "removed", quote: "" })]);
+  assert.deepEqual(
+    [
+      rev.comments[0].response.text,
+      rev.comments[0].response.citations[0].kind,
+      rev.comments[0].response.stale,
+    ],
+    ["We agree.", "removed", ["change_state"]],
+  );
+  assert.throws(
+    () => setResponse(rev, "R1.1", { declined_requirements: [{ id: "q1", reason: "" }] }),
+    /reason/,
+  );
+});
+
+test("setDeclined: a reason declines, a blank one takes the decline back", () => {
+  let rev = setDeclined(base(), "R1.2", { reason: "  Outside the scope.  " });
+  assert.deepEqual(rev.comments[1].declined, { reason: "Outside the scope." });
+  for (const none of [null, undefined, {}, { reason: "" }, { reason: "   " }])
+    assert.equal(setDeclined(rev, "R1.2", none).comments[1].declined, null);
+});
+
+test("setRender and setExport record the PDF the lines came from and the last export", () => {
+  const render = {
+    pdf_sha: "a".repeat(64),
+    snapshot_hash: "b".repeat(64),
+    at: "t",
+    lines_indexed: 40,
+  };
+  const exported = { path: "/m/paper.response.docx", exported_at: "t", fail: 0, warn: 1 };
+  const rev = RevisionSchema.parse(setExport(setRender(base(), render), exported));
+  assert.deepEqual([rev.response_render, rev.response_export], [render, exported]);
+  assert.equal(setRender(rev, null).response_render, null);
+  assert.equal(base().response_render, null);
 });
