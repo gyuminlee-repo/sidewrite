@@ -460,6 +460,38 @@ function proposalLog(provider, ref, log) {
   };
 }
 
+// A turn of a run with --proposal-fixture (the reply comes from a file,
+// daemon/proposal-fixture.mjs) on `ref`: what happened, for a person to read.
+// pass only says that the turn came to its end. log: the daemon log lines of
+// the turn; revision: the review file after it; word: word-com.ps1 state.
+export function fixtureTurnEvidence({ ref, log, revision, word }) {
+  const text = String(log ?? "");
+  const l = proposalLog("fixture", ref, text);
+  const of = (what) =>
+    [
+      ...text.matchAll(
+        new RegExp(`^\\[proposal\\] ${what} ref=${escapeRe(ref)} id=(P\\d+) code=(\\w+)$`, "gm"),
+      ),
+    ].map((m) => ({ id: m[1], code: m[2] }));
+  const c = commentOf(revision, ref);
+  return {
+    pass: l.started && !!l.done,
+    ref,
+    ...l,
+    skipped: of("skipped"),
+    rejected: of("rejected"),
+    stopped: of("stopped"),
+    changes: (c?.changes ?? []).length,
+    attempts: (c?.blocked ?? []).length,
+    word_comments: (word?.comments ?? []).filter((x) =>
+      String(x?.text ?? "")
+        .trimStart()
+        .startsWith(`[${ref}]`),
+    ).length,
+    word_revisions: (word?.revisions ?? []).length,
+  };
+}
+
 // S25-42: one proposal turn of the provider on `ref`. log: the daemon log
 // lines of that turn; revision: the review file after it; word: word-com.ps1
 // state after it ({ comments: [{ text }], revisions: [...] }). pass: the turn

@@ -19,6 +19,7 @@ import {
   docStem,
   exitDecision,
   featureIds,
+  fixtureTurnEvidence,
   focusEvidence,
   judge,
   minimalFind,
@@ -95,6 +96,11 @@ const { values: opt } = parseArgs({
     // CONDITIONS). Repeat the flag or separate ids with commas.
     conditional: { type: "string", multiple: true, default: [] },
     "skip-knob": { type: "boolean", default: false },
+    // Stage 2.5 only: a JSON file whose replies stand in for the provider of
+    // proposal turns (daemon/proposal-fixture.mjs). The run then proposes
+    // each comment of the file in its order, writes what happened and ends
+    // there: a measurement of the runner and Word, not an acceptance.
+    "proposal-fixture": { type: "string" },
     // Leave out the second Word run on a compatibility mode 14 copy.
     "skip-mode14": { type: "boolean", default: false },
     // Leave out the Word run on the document of tracked special characters.
@@ -259,7 +265,14 @@ async function startDaemon(logFile, extraEnv = {}, { append = false } = {}) {
   const fd = fs.openSync(logFile, append ? "a" : "w");
   daemon = spawn(process.execPath, ["daemon/index.mjs"], {
     cwd: REPO,
-    env: { ...process.env, CC_OFFICE_DEBUG: "1", ...extraEnv },
+    env: {
+      ...process.env,
+      CC_OFFICE_DEBUG: "1",
+      ...(opt["proposal-fixture"]
+        ? { CC_OFFICE_E2E_PROPOSAL_FIXTURE: path.resolve(opt["proposal-fixture"]) }
+        : {}),
+      ...extraEnv,
+    },
     stdio: ["ignore", fd, fd],
   });
   daemonLog = logFile;
@@ -654,6 +667,29 @@ async function mainS25() {
   // applies them as tracked changes.
   const codex = turnProvider("codex");
   const wordState = () => (codex.selected ? com("state") : null);
+  // --proposal-fixture: one turn per comment of the file, in its order, with
+  // the reply taken from the file (no provider is asked). What each turn did
+  // goes to ok/s25-fixture-<ref>.evidence.json; the run ends here.
+  if (opt["proposal-fixture"]) {
+    const refs = Object.keys(JSON.parse(fs.readFileSync(opt["proposal-fixture"], "utf8")));
+    for (const ref of codex.selected ? refs : []) {
+      const from = logAt();
+      proposeWith(ref, "fixture");
+      const e = fixtureTurnEvidence({
+        ref,
+        log: logFrom(from),
+        revision: revisionNow(),
+        word: com("state"),
+      });
+      marker(`s25-fixture-${ref}`, e);
+      rows.push({
+        step: `fixture turn ${ref}`,
+        result: e.pass ? "PASS" : "FAIL",
+        got: `outcome=${e.done?.outcome ?? "-"} applied=${e.done?.applied ?? "-"} skipped=${JSON.stringify(e.skipped)} stopped=${JSON.stringify(e.stopped)}`,
+      });
+    }
+    return;
+  }
   let at = logAt();
   if (codex.selected) proposeWith("R1.1", "codex");
   // S25-42: the changes are tracked changes in Word, each with its comment.

@@ -104,6 +104,23 @@ changes and the daemon applies each one as a tracked change
 daemon log) when the first try proposed nothing a rule forbids; `--skip-knob`
 leaves that out. Antigravity is offered for nothing and has no step.
 
+`--proposal-fixture <file.json>` (stage 2.5) runs the stretch from the
+proposal runner to Word without a model: the daemon is started with
+`CC_OFFICE_E2E_PROPOSAL_FIXTURE` and takes the reply of every proposal turn
+from that file (`daemon/proposal-fixture.mjs`; the daemon log says so in its
+first lines, and receipts carry the model `fixture:<file>`). The run selects
+Codex for review turns as usual (the pane must offer it; nothing is sent to
+it), proposes each comment of the file in its order, writes
+`ok/s25-fixture-<ref>.evidence.json` (the done line, proposals skipped,
+rejected or stopped with their codes, changes on file, comments and tracked
+changes in Word) and ends there. The verify commands of the other features
+do not pass in such a run. `tests/fixtures/proposal_fixture_deleted_text.json`
+measures whether Word's search counts text that a tracked change deleted:
+R1.2 replaces "cell-free extract", R1.5 (after the status refresh of its own
+turn) looks for "cell-free" in that paragraph (`stopped` with `Ambiguous`
+when Word counts the deleted text, applied when not), and R1.4 does both in
+one turn, where the daemon passes the second over (`FoundInDeletedText`).
+
 When the pane does not offer Codex for review turns (not installed, not
 signed in), the `select-provider turn=codex` row is `SKIP`, no proposal turn
 is run, and the four evidence files carry `pass: false` with the pane's
