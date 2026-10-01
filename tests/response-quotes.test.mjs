@@ -520,3 +520,48 @@ test("markStale: quote_changed and change_state stay until the answer is written
   const noPdf = markStale(staleRev({}, "accepted", null), edited(3, "day four", "day five"));
   assert.deepEqual(noPdf.comments[0].response.stale, []);
 });
+
+// The old sentence still stands in another paragraph (a summary that repeats
+// the method): the cited one changed all the same.
+test("stale: the quote is looked for in the paragraph of its change, not in the whole manuscript", () => {
+  const QUOTE = "The incubation temperature was held at 30 °C.";
+  const twice = {
+    paragraphs: [...snap.paragraphs, { index: 4, text: `In summary: ${QUOTE} Growth was slow.` }],
+  };
+  const c = {
+    changes: [ch({})],
+    response: { citations: citationsFor({ changes: [ch({})] }, twice, heads), stale: [] },
+  };
+  assert.equal(c.response.citations[0].quote, QUOTE);
+  assert.deepEqual(staleReasons(c, twice, null), []);
+  const edit = (s, index) => ({
+    paragraphs: s.paragraphs.map((p) =>
+      p.index === index ? { ...p, text: p.text.replace("30 °C", "32 °C") } : p,
+    ),
+  });
+  // The cited paragraph now says 32; the other one still says 30.
+  assert.deepEqual(staleReasons(c, edit(twice, 1), null), ["quote_changed"]);
+  // Only the other paragraph changed: the cited sentence is as it was.
+  assert.deepEqual(staleReasons(c, edit(twice, 4), null), []);
+  // A paragraph was put in above: the change is at index 2 now (applyStates
+  // follows it) and the saved citation still says 1.
+  const shifted = {
+    paragraphs: [
+      twice.paragraphs[0],
+      { index: 1, text: "A new first paragraph." },
+      ...twice.paragraphs.slice(1).map((p) => ({ ...p, index: p.index + 1 })),
+    ],
+  };
+  const moved = { ...c, changes: [ch({ paragraph_index: 2 })] };
+  assert.deepEqual(staleReasons(moved, shifted, null), []);
+  assert.deepEqual(staleReasons(moved, edit(shifted, 2), null), ["quote_changed"]);
+  // The paragraph of the change is gone (the change keeps its last index) and
+  // the paragraph that now stands there repeats the sentence: the answer is
+  // out of date by the state of its change.
+  const gone = { ...c, changes: [ch({ state: "unlocated" })] };
+  const left = { paragraphs: [snap.paragraphs[0], { ...twice.paragraphs[4], index: 1 }] };
+  assert.deepEqual(staleReasons(gone, left, null), ["change_state"]);
+  // A change with no paragraph at all has no sentence.
+  const none = { ...c, changes: [ch({ paragraph_index: null })] };
+  assert.deepEqual(staleReasons(none, twice, null), ["quote_changed"]);
+});

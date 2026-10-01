@@ -234,7 +234,15 @@ export function keepLines(fresh, old = []) {
 
 // Why the saved response of a comment is out of date. Call it with the
 // citations as saved, before they are replaced by fresh ones.
-//   quote_changed  a quoted sentence is no longer in the manuscript
+//   quote_changed  a quoted sentence is no longer in the paragraph of its
+//                  change. The same words in another paragraph do not count:
+//                  the answer is about the sentence that was changed. The
+//                  paragraph is the one the change is in now (applyStates
+//                  follows it when paragraphs are put in or taken out above);
+//                  a citation without a change id, or a change that records
+//                  no paragraph at all, falls back to the index saved with
+//                  the citation. (A change that is not found any more keeps
+//                  its last index; it is change_state that tells that one.)
 //   change_state   the cited changes are not the accepted changes any more
 //   lines_old      the manuscript text changed since the PDF the line
 //                  numbers were read from (render: revision.response_render)
@@ -243,10 +251,17 @@ export function staleReasons(comment, snapshot, render) {
   if (!r) return [];
   const out = new Set();
   const cits = r.citations ?? [];
-  const texts = (snapshot?.paragraphs ?? []).map(viewText);
-  for (const c of cits)
-    if (c.kind === "revised" && c.quote && !texts.some((t) => t.includes(c.quote)))
-      out.add("quote_changed");
+  const texts = new Map((snapshot?.paragraphs ?? []).map((p) => [p.index, viewText(p)]));
+  const changes = new Map((comment.changes ?? []).map((ch) => [ch.id, ch]));
+  for (const c of cits) {
+    if (c.kind !== "revised" || !c.quote) continue;
+    const ids = c.change_ids?.length ? c.change_ids : [null];
+    const here = ids.map((id) => {
+      const ch = changes.get(id);
+      return ch && ch.paragraph_index !== undefined ? ch.paragraph_index : c.paragraph_index;
+    });
+    if (!here.some((i) => (texts.get(i) ?? "").includes(c.quote))) out.add("quote_changed");
+  }
   const cited = new Set(cits.flatMap((c) => c.change_ids ?? []));
   const now = new Set(
     (comment.changes ?? []).filter((ch) => CITABLE.has(ch.state)).map((ch) => ch.id),
