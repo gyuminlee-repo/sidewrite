@@ -2038,3 +2038,25 @@ test("review_split: the section of a comment reaches the requirement extraction 
     await t.cleanup();
   }
 });
+
+// L2 reads the comment as a source of new words: the section label is part
+// of what the reviewer wrote, so a word of it is not flagged as unsourced.
+test("the review context of a tracked edit gives the comment text with its section", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", {
+      comments: [
+        { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "Abstract" },
+        { ref: "R1.2", reviewer: 1, text: "Add units." },
+      ],
+    });
+    const deps = t.svc.trackedEditDeps("k");
+    assert.equal(
+      (await deps.getReviewContext("R1.1")).comment_text,
+      "Abstract\nShorten this section.",
+    );
+    assert.equal((await deps.getReviewContext("R1.2")).comment_text, "Add units.");
+  } finally {
+    await t.cleanup();
+  }
+});
