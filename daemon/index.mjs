@@ -29,7 +29,7 @@ import { createReviewService } from "./review-service.mjs";
 import { createResponseService } from "./response-service.mjs";
 import { markStale } from "./response-quotes.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
-import { createModelCache, resolveModelChoice } from "./model-list.mjs";
+import { createModelCache, modelChange, resolveModelChoice } from "./model-list.mjs";
 import { createKeyStore } from "./providers/keys.mjs";
 import { probeAll, createProbeCache } from "./providers/probe.mjs";
 import { createOneshotRouter } from "./providers/oneshot-router.mjs";
@@ -882,14 +882,21 @@ const bridge = createBridge({
       // Recorded before the list is awaited, so a first message sent
       // meanwhile does not start on "sonnet"; modelArgFor checks it again.
       if (prev === undefined) modelByKey.set(key, requested);
-      const model = resolveModelChoice(requested, await modelCache.get());
+      const before = modelCache.current();
+      const { model, restart } = modelChange({
+        prev,
+        requested,
+        before,
+        after: await modelCache.get(),
+      });
       modelByKey.set(key, model);
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
-      // Only relaunch if the model actually changed for an already-known
-      // pane. On the initial connect `prev` is undefined (no live session
-      // yet — the lazy first-message start will read modelByKey), so we
-      // just record it. restartSession itself no-ops when no session.
-      if (prev !== undefined && prev !== model) {
+      // Relaunch when the model a session of this pane runs on is not the
+      // one just decided: a later choice that differs, or, on the first
+      // connect, a session that a message started while the list was awaited
+      // and whose model the list then replaced. restartSession itself no-ops
+      // when there is no session.
+      if (restart) {
         console.log(`[daemon] model changed → ${model} (key bound); restarting loop`);
         restartSession(key, host, { reason: "model_changed" }).catch((err) =>
           console.warn("[daemon] restart after model change failed:", err.message),

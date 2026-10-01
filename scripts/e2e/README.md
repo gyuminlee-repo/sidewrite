@@ -206,18 +206,18 @@ can show other text first: the notice of a click held until the daemon has
 confirmed the stored provider, or the late result of an earlier action.
 Stage 2.5:
 
-| Step               | Args                                  | Does and returns                                                                                                       |
-| ------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `models`           |                                       | the rows of the chat box's model menu once the daemon's list is in (`title`, `options`)                                |
-| `propose-stop`     | `ref`, `after_ms`                     | Propose changes, then Stop while the turn runs; `stopped`, the pane view after it                                      |
-| `providers`        |                                       | Setup tab; both menus (`id`, `text`, `enabled`, `note`), every provider row (state, status, policy, key note), message |
-| `select-provider`  | `role` (turn, oneshot), `id`, `model` | chooses it; `selected` is what the daemon accepted, `refused` the menu text of a provider that cannot be chosen        |
-| `load-review-file` | `path` (Windows)                      | review text from a .txt or .md file; `message`, `chars` in the paste box                                               |
-| `export-ledger`    |                                       | Export ledger; the message names `<stem>.ledger.json`                                                                  |
-| `import-ledger`    | `path` (Windows)                      | Import ledger; `Added a ledger rule(s), skipped s ...`                                                                 |
-| `suggest-ledger`   | `review_file`, `pick`, `add`          | candidates from the review text; ticks the ones holding a `pick` text, adds the ticked ones unless `add` is false      |
-| `propose-all`      |                                       | Propose all until its Stop button is gone; `order` of the comments tried, the summary message                          |
-| `focus-refresh`    | `wait_ms`                             | dispatches `focus` on the pane window; `changed` is true when the auto-refresh line changed with no Refresh click      |
+| Step               | Args                                  | Does and returns                                                                                                                                |
+| ------------------ | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `models`           |                                       | the rows of the chat box's model menu once the daemon's list is in (`title`, `options`); a list that is late is asked for once more (`retried`) |
+| `propose-stop`     | `ref`, `after_ms`                     | Propose changes, then Stop while the turn runs; `stopped`, the pane view after it                                                               |
+| `providers`        |                                       | Setup tab; both menus (`id`, `text`, `enabled`, `note`), every provider row (state, status, policy, key note), message                          |
+| `select-provider`  | `role` (turn, oneshot), `id`, `model` | chooses it; `selected` is what the daemon accepted, `refused` the menu text of a provider that cannot be chosen                                 |
+| `load-review-file` | `path` (Windows)                      | review text from a .txt or .md file; `message`, `chars` in the paste box                                                                        |
+| `export-ledger`    |                                       | Export ledger; the message names `<stem>.ledger.json`                                                                                           |
+| `import-ledger`    | `path` (Windows)                      | Import ledger; `Added a ledger rule(s), skipped s ...`                                                                                          |
+| `suggest-ledger`   | `review_file`, `pick`, `add`          | candidates from the review text; ticks the ones holding a `pick` text, adds the ticked ones unless `add` is false                               |
+| `propose-all`      |                                       | Propose all until its Stop button is gone; `order` of the comments tried, the summary message                                                   |
+| `focus-refresh`    | `wait_ms`                             | dispatches `focus` on the pane window; `changed` is true when the auto-refresh line changed with no Refresh click                               |
 
 Stage 3 (Response tab). Each step returns what the tab shows: `message`,
 `next`, `profile`, `summary`, `checks`, `export_label`, `output`,

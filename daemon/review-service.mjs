@@ -225,6 +225,7 @@ export function createReviewService({
   // (revision, snapshot) => revision, run in a refresh once the states of
   // the changes are set (index.mjs: the stale marks of saved responses).
   afterRefresh = null,
+  clock = Date.now,
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -778,7 +779,17 @@ export function createReviewService({
       return { prompt: built.text };
     },
     async review_propose(msg, key, host) {
+      const asked = clock();
       await turnGate(key);
+      // The pane waits wait_ms for this answer and then shows the request as
+      // failed. A turn started after that would run behind the author's
+      // back, so a request that was held longer starts nothing.
+      const waitMs = Number(msg.wait_ms);
+      if (waitMs > 0 && clock() - asked >= waitMs) {
+        throw new Error(
+          `The task pane stopped waiting for this request after ${Math.round(waitMs / 1000)} s, so no turn was started. Press Propose changes again.`,
+        );
+      }
       const d = at(key);
       const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs);
       // A turn in which no edit can be applied is not started: every

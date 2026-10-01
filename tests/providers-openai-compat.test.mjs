@@ -166,3 +166,33 @@ test("body fields of the preset are sent; those for JSON only when JSON is expec
     "temperature",
   ]);
 });
+
+// A reasoning model refuses a temperature (HTTP 400 naming the parameter).
+// The request is then sent once more without it; any other 400 stays a
+// failure. A local server stands in for the provider (in the helper process):
+// nothing is sent out.
+test("a 400 about temperature is retried once without it; another 400 is not", async () => {
+  const r = await stalledBody("temperature");
+  assert.deepEqual([r.picky.result.ok, r.picky.result.json], [true, { a: 1 }]);
+  assert.deepEqual(r.picky.temperatures, [0, "none"]);
+  assert.equal(r.picky.same_messages, true, "the same request otherwise");
+
+  assert.equal(r.never.result.ok, false);
+  assert.match(r.never.result.error, /^HTTP 400: Unsupported value: 'temperature'/);
+  assert.deepEqual(r.never.temperatures, [0, "none"], "once more, not again and again");
+
+  assert.deepEqual(r.other.result, { ok: false, error: "HTTP 400: model not found" });
+  assert.deepEqual(r.other.temperatures, [0], "no retry for another reason");
+});
+
+const ANSWER = { choices: [{ message: { content: '{"a":1}' } }] };
+
+test("the temperature is the preset's (body): 0 unless it says otherwise, none when it says null", async () => {
+  const f = reply(200, ANSWER);
+  await chatOneshot(REQ, { fetchFn: f });
+  assert.equal(reply.seen.body.temperature, 0);
+  await chatOneshot({ ...REQ, body: { temperature: 0.2 } }, { fetchFn: f });
+  assert.equal(reply.seen.body.temperature, 0.2);
+  await chatOneshot({ ...REQ, body: { temperature: null } }, { fetchFn: f });
+  assert.equal("temperature" in reply.seen.body, false);
+});

@@ -92,3 +92,16 @@ test("a Review refresh marks saved responses stale with the rule of the Response
   assert.match(block, /afterRefresh: \(rev, snap\) => markStale\(rev, snap\)/);
   assert.match(code, /import \{ markStale \} from "\.\/response-quotes\.mjs";/);
 });
+
+test("set_model: the list as it was before the wait decides whether a running session follows", () => {
+  const at = code.indexOf("set_model: async");
+  const body = code.slice(at, at + 1200);
+  assert.match(body, /const before = modelCache\.current\(\);/);
+  assert.ok(body.indexOf("modelCache.current()") < body.indexOf("await modelCache.get()"));
+  assert.match(
+    body,
+    /modelChange\(\{\s*prev,\s*requested,\s*before,\s*after: await modelCache\.get\(\),?\s*\}\)/,
+  );
+  assert.match(body, /if \(restart\)/);
+  assert.equal(/prev !== undefined && prev !== model/.test(body), false);
+});

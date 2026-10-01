@@ -364,6 +364,9 @@ export function modelsEvidence({ step, log }) {
     options,
     outside_aliases,
     source_sdk,
+    // The step asked a second time because the list was late the first time.
+    retried: step?.retried === true,
+    ...(step?.retried ? { first_title: step.first_title ?? null } : {}),
   };
 }
 

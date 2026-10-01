@@ -8,7 +8,7 @@
 //
 // turn_note: why review turns are off for an available provider, or null.
 //
-// A probe only reads: `codex login status`, `agy models`, GET requests, the
+// A probe only reads: `codex login status`, `agy models`, `agy mcp list`, GET requests, the
 // Codex model cache, and whether a key is stored. It never
 // writes a CLI's configuration and never asks a model anything. Every command
 // and request has a timeout and every provider a deadline, so a row always
@@ -29,17 +29,25 @@ const HTTP_TIMEOUT_MS = 5_000;
 const DEADLINE_MS = 35_000;
 const MAX_MODELS = 200;
 
+// agy is offered for nothing. Measured on 2026-10-01 (agy.mjs, fixture
+// agy_print_tool_probe.jsonl): in print mode it ran shell commands without
+// asking, --mode plan changed nothing and it has no switch for its tools.
+// What would pass: every tool of agy refused or switched off in a run that
+// is given text. Watching the stream is an alarm after the fact, so it does
+// not count.
+export const AGY_NOT_OFFERED =
+  "Not offered: the built-in tools of Antigravity CLI (agy) cannot be switched off, so manuscript text would sit next to them.";
+
 // Why a CLI provider is not offered for review turns. Checked with the real
 // CLIs on 2026-10-01 against the daemon's MCP endpoint, with the read-only
 // sandbox and no approval flag (tests/fixtures/codex_exec_turn_approval.jsonl,
 // agy_turn_denied.jsonl): each refused the office tool call itself. This
-// add-in never passes a flag that skips an approval, so both stay providers
-// for judgments. The texts quote what the CLI said.
+// add-in never passes a flag that skips an approval, so Codex stays a
+// provider for judgments. The text quotes what the CLI said.
 export const TURN_BLOCKED = Object.freeze({
   codex:
     'Judgments only. Codex CLI will not call the office tools without an approval: "MCP tool call requires approval, but approval policy is never".',
-  antigravity:
-    "Judgments only. agy print mode denies the office tools (permission mode request-review, denied_actions: CallMcpTool) unless permission prompts are skipped, which this add-in never does.",
+  antigravity: AGY_NOT_OFFERED,
 });
 const NO_TOOL_LOOP = "Judgments only: no tool loop for this provider in this stage.";
 
@@ -179,7 +187,25 @@ async function probeAgy({ execFileFn, env }) {
   const models = parseAgyModels(r.stdout);
   if (r.code !== 0 || !models.length)
     return { reason: "Not signed in, or no model listed (run: agy)" };
-  return { available: true, turn_ready: true, models };
+  // Read-only: the MCP servers agy has are more tools next to the text.
+  const mcp = await run(execFileFn, bin, ["mcp", "list"], CMD_TIMEOUT_MS);
+  const servers =
+    mcp.code === 0 && !/No MCP servers configured/i.test(mcp.stdout ?? "")
+      ? String(mcp.stdout ?? "")
+          .split("\n")
+          .map((l) => l.replace(/\s+/g, " ").trim())
+          .filter(Boolean)
+          .slice(0, 5)
+          .join("; ")
+          .slice(0, 200)
+      : "";
+  return {
+    available: false,
+    models,
+    reason: servers
+      ? `${AGY_NOT_OFFERED} agy also has MCP servers registered (${servers}).`
+      : AGY_NOT_OFFERED,
+  };
 }
 
 async function probeOllama({ fetchFn }, preset) {

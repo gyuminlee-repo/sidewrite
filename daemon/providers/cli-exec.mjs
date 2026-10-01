@@ -1,29 +1,62 @@
 // Run a provider CLI (codex, agy) once and collect what it printed (P14).
 //
 // runCli never throws and never rejects:
-//   { code, stdout, stderr, timedOut }
+//   { code, stdout, stderr, timedOut }  plus  aborted: true  or  killed: true
 // code is the exit code, or -1 when the process could not be started, was
 // ended by a signal, or timed out. A command that is not installed gives
 // stderr "not installed". No shell: the arguments reach the CLI as given, so
 // a prompt passed as an argument is never read as shell syntax.
 //
+// A run can be ended three ways, each with SIGTERM and, when the process is
+// still there after killGraceMs, SIGKILL: the timeout (timedOut), the
+// caller's `signal` (aborted), and kill() from onLine (killed).
+// onLine(line, kill) gets every line of stdout as it comes; after kill() no
+// further line is handed over.
+//
 // stdin is always closed (after `stdin` is written when given): a CLI that
 // reads a piped stdin would otherwise wait for it forever.
 
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { join, win32 } from "node:path";
+import { basename, dirname, join, resolve as resolvePath, win32 } from "node:path";
 
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 
-// An empty directory to run a judgment in: the CLI finds nothing to read
-// there and no project instructions.
-export async function emptyWorkDir() {
-  const dir = join(tmpdir(), "cc-office-oneshot-cwd");
-  await mkdir(dir, { recursive: true });
-  return dir;
+// A directory of its own for one run: the CLI finds nothing to read there,
+// and nothing another process put into a shared place. It is removed when
+// fn has ended, with whatever the run left in it (a hook of the user may
+// write there).
+export const RUN_DIR_PREFIX = "cc-office-run-";
+
+// Only a directory withRunDir made: directly under the temp folder, with
+// the prefix. Any other path is left alone.
+export async function removeRunDir(dir) {
+  const full = resolvePath(String(dir));
+  if (dirname(full) !== resolvePath(tmpdir())) return;
+  if (!basename(full).startsWith(RUN_DIR_PREFIX)) return;
+  await rm(full, { recursive: true, force: true });
+}
+
+export async function withRunDir(fn) {
+  const dir = await mkdtemp(join(tmpdir(), RUN_DIR_PREFIX));
+  try {
+    return await fn(dir);
+  } finally {
+    await removeRunDir(dir);
+  }
+}
+
+// The environment for a CLI that is given text to judge: the daemon's own,
+// without what a CLI and the hooks it starts have no business seeing: the
+// provider keys and settings of this add-in (CC_OFFICE_*) and every
+// variable named like a secret (*_KEY, *_TOKEN, *_SECRET). A CLI that signs
+// in through such a variable instead of its own sign-in loses it here.
+const SECRET_NAME = /^CC_OFFICE_|(_KEY|_TOKEN|_SECRET)$/i;
+export function childEnv(env = process.env) {
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !SECRET_NAME.test(k)));
 }
 
 // The command to start for a CLI name: { cmd, prefixArgs }, or
@@ -80,7 +113,16 @@ export function resolveCliBin(
 export function runCli(
   cmd,
   args,
-  { stdin = null, timeoutMs = 120_000, killGraceMs = 5_000, cwd, env, spawnFn = spawn } = {},
+  {
+    stdin = null,
+    timeoutMs = 120_000,
+    killGraceMs = 5_000,
+    cwd,
+    env,
+    signal = null,
+    onLine = null,
+    spawnFn = spawn,
+  } = {},
 ) {
   const bin = typeof cmd === "string" ? { cmd, prefixArgs: [] } : cmd;
   return new Promise((resolve) => {
@@ -110,25 +152,58 @@ export function runCli(
     const err = [];
     let size = 0;
     let timedOut = false;
+    let aborted = false;
+    let killed = false;
     let settled = false;
     let killTimer = null;
     const keep = (list) => (chunk) => {
       size += chunk.length;
       if (size <= MAX_OUTPUT_BYTES) list.push(Buffer.from(chunk));
     };
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const end = () => {
+      if (killTimer) return; // being ended already
       child.kill("SIGTERM");
       killTimer = setTimeout(() => child.kill("SIGKILL"), killGraceMs);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      end();
     }, timeoutMs);
+    const onAbort = () => {
+      aborted = true;
+      end();
+    };
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
-      resolve(result);
+      signal?.removeEventListener("abort", onAbort);
+      resolve({ ...result, ...(aborted && { aborted }), ...(killed && { killed }) });
     };
-    child.stdout.on("data", keep(out));
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    // Lines of stdout for onLine: a chunk can end in the middle of one.
+    let carry = "";
+    const decoder = new StringDecoder("utf8"); // a character can be cut by a chunk too
+    const kill = () => {
+      killed = true;
+      end();
+    };
+    const lines = (text, last) => {
+      if (!onLine) return;
+      const parts = (carry + text).split("\n");
+      carry = last ? "" : parts.pop();
+      for (const part of parts) {
+        if (killed) return;
+        const line = part.replace(/\r$/, "");
+        if (line || !last) onLine(line, kill);
+      }
+    };
+    child.stdout.on("data", (chunk) => {
+      keep(out)(chunk);
+      lines(decoder.write(Buffer.from(chunk)), false);
+    });
     child.stderr.on("data", keep(err));
     child.on("error", (e) =>
       finish({
@@ -139,9 +214,10 @@ export function runCli(
       }),
     );
     child.on("close", (code) => {
+      lines("", true); // a last line without a newline
       const stderr = Buffer.concat(err).toString("utf8");
       finish({
-        code: timedOut || typeof code !== "number" ? -1 : code,
+        code: timedOut || aborted || killed || typeof code !== "number" ? -1 : code,
         stdout: Buffer.concat(out).toString("utf8"),
         stderr: timedOut ? `timed out after ${timeoutMs} ms${stderr ? `: ${stderr}` : ""}` : stderr,
         timedOut,

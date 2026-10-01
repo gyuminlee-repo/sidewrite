@@ -213,3 +213,142 @@ test("runCli takes a resolved command: prefix arguments come first, an unresolva
   assert.deepEqual([bad.code, bad.stderr], [-1, "codex.bat is a batch file"]);
   assert.equal(f.calls.length, 1);
 });
+
+// ---- A run that can be ended from outside, read line by line, in a
+// directory of its own, with an environment that carries no keys ----
+
+test("abort: SIGTERM, then SIGKILL when it does not end, and the result says aborted", async () => {
+  const f = fakeSpawn(() => {}); // never ends by itself
+  const ac = new AbortController();
+  const run = runCli("codex", [], {
+    signal: ac.signal,
+    timeoutMs: 500,
+    killGraceMs: 20,
+    spawnFn: f.spawnFn,
+  });
+  await new Promise((r) => setTimeout(r, 5));
+  const { child } = f.calls[0];
+  assert.deepEqual(child.signals, []);
+  ac.abort();
+  assert.deepEqual(child.signals, ["SIGTERM"]);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+  child.emit("close", null, "SIGKILL");
+  const r = await run;
+  assert.deepEqual([r.code, r.aborted, r.timedOut], [-1, true, false]);
+
+  // A signal that is aborted already: the child is ended at once.
+  const g = fakeSpawn((c) => c.emit("close", null, "SIGTERM"));
+  const done = await runCli("codex", [], { signal: AbortSignal.abort(), spawnFn: g.spawnFn });
+  assert.deepEqual(g.calls[0].child.signals, ["SIGTERM"]);
+  assert.equal(done.aborted, true);
+});
+
+test("onLine gets every complete line once, the last one at the end; kill() ends the child", async () => {
+  const lines = [];
+  const f = fakeSpawn((c) => {
+    c.stdout.emit("data", Buffer.from("one\ntw"));
+    c.stdout.emit("data", Buffer.from("o\r\nthree"));
+    c.emit("close", 0, null);
+  });
+  const r = await runCli("codex", [], { onLine: (l) => lines.push(l), spawnFn: f.spawnFn });
+  assert.deepEqual(lines, ["one", "two", "three"]);
+  assert.equal(r.stdout, "one\ntwo\r\nthree");
+  // A character cut by a chunk is put together again.
+  const cut = [];
+  const bytes = Buffer.from("가나\n");
+  const h = fakeSpawn((c) => {
+    c.stdout.emit("data", bytes.subarray(0, 2));
+    c.stdout.emit("data", bytes.subarray(2));
+    c.emit("close", 0, null);
+  });
+  await runCli("codex", [], { onLine: (l) => cut.push(l), spawnFn: h.spawnFn });
+  assert.deepEqual(cut, ["가나"]);
+  assert.equal("killed" in r, false);
+
+  const seen = [];
+  const g = fakeSpawn((c) => {
+    c.stdout.emit("data", Buffer.from("a\nSTOP\nb\n"));
+    c.emit("close", null, "SIGTERM");
+  });
+  const k = await runCli("codex", [], {
+    spawnFn: g.spawnFn,
+    killGraceMs: 20,
+    onLine(line, kill) {
+      seen.push(line);
+      if (line === "STOP") kill();
+    },
+  });
+  assert.deepEqual(seen, ["a", "STOP"], "no line is handed over after kill()");
+  assert.deepEqual(g.calls[0].child.signals, ["SIGTERM"]);
+  assert.deepEqual([k.code, k.killed], [-1, true]);
+});
+
+test("withRunDir: a new directory per call, removed after success and after a throw", async () => {
+  const { withRunDir, removeRunDir, RUN_DIR_PREFIX } =
+    await import("../daemon/providers/cli-exec.mjs");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const seen = [];
+  const out = await withRunDir(async (dir) => {
+    seen.push(dir);
+    assert.equal(path.dirname(dir), os.tmpdir());
+    assert.ok(path.basename(dir).startsWith(RUN_DIR_PREFIX));
+    assert.deepEqual(fs.readdirSync(dir), []);
+    // What a hook of the user may leave behind goes with the directory.
+    fs.mkdirSync(path.join(dir, ".claude", "state"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".claude", "state", "x.tsv"), "x");
+    return "result";
+  });
+  assert.equal(out, "result");
+  await assert.rejects(
+    withRunDir(async (dir) => {
+      seen.push(dir);
+      throw new Error("boom");
+    }),
+    /boom/,
+  );
+  assert.equal(seen.length, 2);
+  assert.notEqual(seen[0], seen[1]);
+  for (const dir of seen) assert.equal(fs.existsSync(dir), false, dir);
+
+  // Only a directory this module made is removed.
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "not-ours-"));
+  const nested = fs.mkdtempSync(path.join(other, RUN_DIR_PREFIX));
+  try {
+    await removeRunDir(other);
+    await removeRunDir(nested);
+    await removeRunDir(path.join(os.tmpdir(), RUN_DIR_PREFIX, "..", path.basename(other)));
+    assert.equal(fs.existsSync(other), true);
+    assert.equal(fs.existsSync(nested), true);
+  } finally {
+    fs.rmdirSync(nested);
+    fs.rmdirSync(other);
+  }
+});
+
+test("childEnv: no provider key and no setting of the daemon reaches a CLI", async () => {
+  const { childEnv } = await import("../daemon/providers/cli-exec.mjs");
+  const env = {
+    PATH: "/usr/bin",
+    HOME: "/home/u",
+    LANG: "C.UTF-8",
+    OPENAI_API_KEY: "sk-a",
+    openrouter_api_key: "sk-b",
+    CC_OFFICE_KEY_OPENROUTER: "sk-c",
+    CC_OFFICE_MCP_TOKEN: "t",
+    CC_OFFICE_CODEX_BIN: "/opt/codex",
+    GITHUB_TOKEN: "ghp",
+    AWS_SECRET_ACCESS_KEY: "s",
+    MY_SECRET: "s2",
+    KEYBOARD: "us",
+  };
+  assert.deepEqual(childEnv(env), {
+    PATH: "/usr/bin",
+    HOME: "/home/u",
+    LANG: "C.UTF-8",
+    KEYBOARD: "us",
+  });
+  assert.equal(env.OPENAI_API_KEY, "sk-a", "the given object is not changed");
+});

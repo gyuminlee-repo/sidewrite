@@ -2605,6 +2605,41 @@ test("review_refresh without the hook leaves the responses alone", async () => {
   }
 });
 
+// A review_propose whose pane has stopped waiting (it says how long it waits
+// in wait_ms) must not start a turn when the gate lets it through later: the
+// author has seen that request fail.
+test("review_propose: a request the pane has given up starts no turn", async () => {
+  let clock = 1_000;
+  let gateTakes = 11_000;
+  const t = await setup({
+    clock: () => clock,
+    turnGate: async () => {
+      clock += gateTakes; // the provider was confirmed after this long
+    },
+  });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const late = await t.ask("review_propose", { ref: "R1.1", wait_ms: 10_000 });
+    assert.deepEqual(
+      [late.ok, late.error],
+      [
+        false,
+        "The task pane stopped waiting for this request after 10 s, so no turn was started. Press Propose changes again.",
+      ],
+    );
+    assert.deepEqual(t.pushed, [], "no turn was queued");
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").status, "pending");
+    // In time: the turn starts. A pane that sends no wait_ms is not held to one.
+    gateTakes = 9_000;
+    assert.equal((await t.ask("review_propose", { ref: "R1.1", wait_ms: 10_000 })).started, true);
+    gateTakes = 60_000;
+    assert.equal((await t.ask("review_propose", { ref: "R1.3" })).started, true);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // H4 with the job pin of stage 2.5: the second request for a batch whose
 // reply was in the wrong form goes to the provider and model the check
 // started with, also when the pane's choice changed in between.
