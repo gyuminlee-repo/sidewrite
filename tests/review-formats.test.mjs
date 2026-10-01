@@ -25,6 +25,7 @@ const FAMILIES = [
   "combined_heads",
   "sublists",
   "questionnaire",
+  "multi_block",
 ];
 
 // Head lines the split may consume without putting them in a comment.

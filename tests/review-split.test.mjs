@@ -720,3 +720,43 @@ test("a section label that ends up on no comment is named by the check", async (
     r.warnings.join(" | "),
   );
 });
+
+// ---- more than one block of a reviewer ------------------------------------------
+
+test("a second block of a reviewer goes on with the numbers, with one warning per reviewer", async () => {
+  const review =
+    "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 2:\n1. Add error bars.\n\nReviewer 1:\nThank you for the revision.\n1. Cite the method.\n\nReviewer 2:\n1. Add a scale bar.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.section, c.text]),
+    [
+      ["R1.1", undefined, "Add units."],
+      ["R1.2", undefined, "State n."],
+      ["R2.1", undefined, "Add error bars."],
+      ["R1.3", "Block 2", "Thank you for the revision."],
+      ["R1.4", "Block 2", "1. Cite the method."],
+      ["R2.2", "Block 2", "1. Add a scale bar."],
+    ],
+  );
+  assert.deepEqual(r.warnings, [
+    "Reviewer 1 text before the first numbered comment is kept as R1.3. Delete it if it asks for nothing.",
+    "Reviewer 1 has 2 blocks; numbering was continued: block 2 is R1.3 to R1.4.",
+    "Reviewer 2 has 2 blocks; numbering was continued: block 2 is R2.2.",
+  ]);
+});
+
+test("a round line that no block follows is named by the check", async () => {
+  const r = await splitReview("Reviewer 1:\n1. Add units.\n2. State n.\n\nRound 2\n");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.text]),
+    [
+      ["R1.1", "Add units."],
+      ["R1.2", "State n."],
+    ],
+  );
+  assert.ok(
+    r.warnings.some((w) => /in no comment: "Round 2"/.test(w)),
+    r.warnings.join(" | "),
+  );
+});
