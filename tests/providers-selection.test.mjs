@@ -19,7 +19,7 @@ const ROWS = [
     label: "Codex CLI",
     available: true,
     turn_ready: false,
-    turn_note: "Judgments only. Codex CLI will not call the office tools without an approval.",
+    turn_note: "Review turns are off for it in this test.",
     reason: null,
     models: [{ value: "gpt-6.1-sol" }],
   },
@@ -29,7 +29,7 @@ const ROWS = [
     label: "Ollama (local)",
     available: true,
     turn_ready: false,
-    turn_note: "Judgments only: no tool loop for this provider in this stage.",
+    turn_note: "Judgments only: review turns are not offered for this provider in this stage.",
     reason: null,
     models: [{ value: "qwen3.5:9b" }],
   },
@@ -39,7 +39,7 @@ const ROWS = [
     label: "DeepSeek",
     available: false,
     turn_ready: false,
-    turn_note: "Judgments only: no tool loop for this provider in this stage.",
+    turn_note: "Judgments only: review turns are not offered for this provider in this stage.",
     reason: "Connection failed (ECONNRESET)",
     models: [],
     has_key: true,
@@ -71,11 +71,11 @@ test("only a provider that passed its check can be chosen, and the refusal says 
   const sel = createProviderSelection();
   assert.throws(
     () => sel.set("a", "turn", { id: "codex", model: "gpt-6.1-sol" }, ROWS),
-    /Codex CLI cannot run review turns\. Judgments only\. Codex CLI will not call/,
+    /Codex CLI cannot run review turns\. Review turns are off for it in this test\./,
   );
   assert.throws(
     () => sel.set("a", "turn", { id: "ollama", model: "qwen3.5:9b" }, ROWS),
-    /Ollama \(local\) cannot run review turns\. Judgments only: no tool loop/,
+    /Ollama \(local\) cannot run review turns\. Judgments only: review turns are not offered/,
   );
   assert.throws(
     () => sel.set("a", "oneshot", { id: "deepseek", model: "x" }, ROWS),
@@ -126,4 +126,15 @@ test("the reply for the pane: rows and the pane's selection, and no key in it", 
   const out = JSON.stringify(providersListReply(leaky, sel.get("a")));
   assert.equal(out.includes("sk-secret"), false, "fields that could hold a key are not passed on");
   assert.equal(JSON.parse(out).providers[0].has_key, true);
+});
+
+// The rows the pane gets are a closed list of fields; turn_mode is one of
+// them (the pane says "proposals only" by it).
+test("providersListReply passes turn_mode on and drops a field it does not know", async () => {
+  const { providersListReply } = await import("../daemon/providers/selection.mjs");
+  const r = providersListReply(
+    [{ id: "codex", turn_ready: true, turn_mode: "proposal", secret: "x" }],
+    null,
+  );
+  assert.deepEqual(r.providers, [{ id: "codex", turn_ready: true, turn_mode: "proposal" }]);
 });

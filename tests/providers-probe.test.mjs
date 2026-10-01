@@ -6,7 +6,6 @@ import {
   codexModelsFromCache,
   ollamaChatModels,
   createProbeCache,
-  TURN_BLOCKED,
   AGY_NOT_OFFERED,
 } from "../daemon/providers/probe.mjs";
 
@@ -94,7 +93,7 @@ test("probeAll: available, turn_ready and reasons", async () => {
   );
   assert.ok(by.antigravity.models.length > 0, "its models are still listed");
   assert.equal(by.ollama.available, true);
-  assert.equal(by.ollama.turn_ready, false, "no tool loop for a local model in this stage");
+  assert.equal(by.ollama.turn_ready, false, "no review turns for a local model in this stage");
   assert.equal(by.openrouter.available, false);
   assert.match(by.openrouter.reason, /No API key/);
   assert.match(by["openai-compatible"].reason, /No API key/);
@@ -279,40 +278,41 @@ test("a codex model falls back to the top-level model of config.toml", async () 
   );
 });
 
-// A8, checked with the real CLIs on 2026-10-01 (tests/fixtures/
-// codex_exec_turn_approval.jsonl, agy_turn_denied.jsonl): neither calls the
-// office tools without an approval, and this add-in passes no flag that
-// skips one. Both are for judgments only, and the row says why.
-test("Codex and Antigravity are judgments only: not turn ready, with the CLI's own refusal as the note", async () => {
+// Review turns. Claude calls the office tools itself. Codex is given no
+// tools: it proposes and the daemon applies (turn_mode "proposal"). agy is
+// offered for nothing. A local or key provider has no review turns in this
+// stage, and its row says so.
+test("review turns: Claude as an agent, Codex by proposals, nobody else", async () => {
   const by = byId(await probeAll(deps()));
-  assert.deepEqual([by.codex.available, by.codex.turn_ready], [true, false]);
-  assert.match(by.codex.turn_note, /MCP tool call requires approval, but approval policy is never/);
-  assert.deepEqual([by.antigravity.available, by.antigravity.turn_ready], [false, false]);
-  assert.equal(by.antigravity.turn_note, AGY_NOT_OFFERED);
-  assert.equal(by.codex.turn_note, TURN_BLOCKED.codex);
-  assert.equal(by.antigravity.turn_note, TURN_BLOCKED.antigravity);
-  assert.deepEqual([by.claude.turn_ready, by.claude.turn_note], [true, null]);
-  assert.match(by.ollama.turn_note, /no tool loop/i);
-  assert.match(by.groq.turn_note, /no tool loop/i);
+  assert.deepEqual(
+    [by.claude.turn_ready, by.claude.turn_mode, by.claude.turn_note],
+    [true, "agent", null],
+  );
+  assert.deepEqual(
+    [by.codex.available, by.codex.turn_ready, by.codex.turn_mode, by.codex.turn_note],
+    [true, true, "proposal", null],
+  );
+  assert.deepEqual(
+    [by.antigravity.available, by.antigravity.turn_ready, by.antigravity.turn_mode],
+    [false, false, null],
+  );
+  assert.equal(by.antigravity.reason, AGY_NOT_OFFERED);
+  const note = "Judgments only: review turns are not offered for this provider in this stage.";
+  for (const id of ["ollama", "groq", "openrouter", "openai-compatible"]) {
+    assert.deepEqual([by[id].turn_ready, by[id].turn_mode, by[id].turn_note], [false, null, note]);
+  }
+  // Codex that is not signed in runs no review turn either.
+  const off = byId(await probeAll(deps({ execFileFn: async () => ({ code: 1, stdout: "" }) })));
+  assert.deepEqual([off.codex.available, off.codex.turn_ready], [false, false]);
 });
 
-// For a test run after a CLI changed its approval rules: the listed CLIs are
-// offered for review turns again. It adds no flag; the CLI still decides.
-test("CC_OFFICE_CLI_TURNS lets a listed CLI be tried for review turns", async () => {
-  const by = byId(await probeAll(deps({ env: { CC_OFFICE_CLI_TURNS: "codex, nope" } })));
-  assert.equal(by.codex.turn_ready, true);
-  assert.match(by.codex.turn_note, /CC_OFFICE_CLI_TURNS/);
-  assert.equal(by.antigravity.turn_ready, false);
-  assert.equal(by.ollama.turn_ready, false, "only a CLI provider can be listed");
-  const off = byId(
-    await probeAll(
-      deps({
-        env: { CC_OFFICE_CLI_TURNS: "codex" },
-        execFileFn: async () => ({ code: 1, stdout: "" }),
-      }),
-    ),
-  );
-  assert.equal(off.codex.turn_ready, false, "still not when it is not available");
+// The switch that once offered a CLI for review turns through the office
+// tools is gone: nothing in the environment changes a row.
+test("no environment variable changes which provider runs review turns", async () => {
+  const plain = await probeAll(deps());
+  const name = ["CC_OFFICE", "CLI", "TURNS"].join("_");
+  const env = { [name]: "codex, antigravity, ollama" };
+  assert.deepEqual(await probeAll(deps({ env })), plain);
 });
 
 test("probe cache: one probe for concurrent callers, again after the ttl or a refresh", async () => {
@@ -362,8 +362,8 @@ async function stalledBody(scenario) {
 }
 
 // agy is not offered whatever its state; the row still says what is known.
-test("Antigravity: not offered, also when listed in CC_OFFICE_CLI_TURNS; MCP servers are named", async () => {
-  const tried = byId(await probeAll(deps({ env: { CC_OFFICE_CLI_TURNS: "antigravity" } })));
+test("Antigravity: not offered for anything; MCP servers it has are named", async () => {
+  const tried = byId(await probeAll(deps()));
   assert.deepEqual([tried.antigravity.available, tried.antigravity.turn_ready], [false, false]);
   const ran = [];
   const withServers = byId(
@@ -373,7 +373,7 @@ test("Antigravity: not offered, also when listed in CC_OFFICE_CLI_TURNS; MCP ser
           ran.push(`${cmd} ${args.join(" ")}`);
           if (cmd === "agy" && args[0] === "models") return { code: 0, stdout: AGY_OUT };
           if (cmd === "agy" && args.join(" ") === "mcp list")
-            return { code: 0, stdout: "office  http://127.0.0.1:47834/mcp/x  enabled\n" };
+            return { code: 0, stdout: "notes  http://127.0.0.1:9000/sse  enabled\n" };
           return { code: 0, stdout: "Logged in using ChatGPT\n" };
         },
       }),
@@ -386,7 +386,7 @@ test("Antigravity: not offered, also when listed in CC_OFFICE_CLI_TURNS; MCP ser
   );
   assert.equal(
     withServers.antigravity.reason,
-    `${AGY_NOT_OFFERED} agy also has MCP servers registered (office http://127.0.0.1:47834/mcp/x enabled).`,
+    `${AGY_NOT_OFFERED} agy also has MCP servers registered (notes http://127.0.0.1:9000/sse enabled).`,
   );
   // Not installed is still said as that.
   const none = byId(

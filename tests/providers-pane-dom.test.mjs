@@ -57,7 +57,7 @@ function findAll(node, pred, out = []) {
   return out;
 }
 
-const NO_LOOP = "Judgments only: no tool loop for this provider in this stage.";
+const NO_LOOP = "Judgments only: review turns are not offered for this provider in this stage.";
 const rows = () => [
   {
     id: "claude",

@@ -15,35 +15,29 @@ test("the HTTP server, which carries /mcp, listens on loopback only", () => {
   assert.equal(/http\.listen\(HTTP_PORT,\s*\(/.test(code), false, "no listen on every interface");
 });
 
-test("/mcp is handled before the CORS headers, OPTIONS and the bridge token of the pane files", () => {
-  const mcp = code.indexOf('mcpPath.startsWith("/mcp/")');
-  assert.ok(mcp > 0);
-  for (const later of [
-    "Access-Control-Allow-Origin",
-    'req.method === "OPTIONS"',
-    '"/bridge-token"',
-  ]) {
-    assert.ok(code.indexOf(later) > mcp, later);
-  }
-  // A path under /mcp never falls through to the file server.
-  assert.match(code.slice(mcp, mcp + 600), /res\.writeHead\(404\)\.end\(\);\s*return;/);
+// The office tools are reached through the pane's own bridge and nothing
+// else: the HTTP server serves the pane files and has no tool endpoint.
+test("the HTTP server has no MCP route and the daemon starts no CLI with the office tools", () => {
+  assert.equal(/["'`]\/mcp\b/.test(code), false, "no route under /mcp");
+  assert.equal(/mcp_servers|StreamableHTTP/.test(code), false);
+  const imports = [...code.matchAll(/from "\.\/([\w/-]+)\.mjs"/g)].map((m) => m[1]);
+  assert.ok(imports.includes("proposal-turns"));
+  assert.deepEqual(
+    imports.filter((m) => /turns|mcp/.test(m)),
+    ["proposal-turns"],
+    "the proposal runner is the only turn runner next to the Claude session",
+  );
 });
 
-test("the endpoint serves the review service's recorder and the daemon's own review turns", () => {
-  assert.match(code, /getReviewTurn: \(key\) => reviewTurnByKey\.get\(key\) \?\? null/);
-  assert.match(code, /trackedEditDeps: \(key\) => review\.trackedEditDeps\(key\)/);
-});
-
-test("judgments go through the router; stop and shutdown reach a CLI turn", () => {
+test("judgments go through the router; shutdown stops a proposal turn", () => {
   // One handle per job: provider and model are fixed when the job starts.
   assert.match(code, /oneshotJob: \(key\) => oneshotRouter\.pin\(key\)/);
-  assert.match(code, /if \(cliTurns\.stop\(key\)\)/);
-  assert.match(code, /cliTurns\.shutdown\(\)/);
+  assert.match(code, /proposalTurns\.shutdown\(\)\.then\(bye, bye\)/);
   assert.match(code, /process\.on\("SIGTERM", shutdown\)/);
 });
 
 test("no message registers the office tools with agy outside a turn, and no flag skips an approval", () => {
-  assert.equal(/agy_mcp_connect|agyMcpAddArgs/.test(code), false);
+  assert.equal(/agy_mcp_connect|mcp["', ]+add/.test(code), false);
   assert.equal(
     /dangerously|skip-permissions|accept-edits|approval_policy|bypass/i.test(code),
     false,
@@ -133,8 +127,6 @@ test("a review turn of a proposing provider goes to the proposal runner; Stop an
     push.slice(0, 1500),
     /proposalTurns\s*\.start\(key, host, turn, \{\s*at: review\.at\(key\),\s*selected: turn\.selected,\s*choice: turn\.choice,?\s*\}\)/,
   );
-  // No CLI is started for a review turn any more.
-  assert.equal(/cliTurns\.start\(/.test(code), false);
   const stop = code.slice(code.indexOf("stop_agent: async"));
   assert.match(
     stop.slice(0, 900),

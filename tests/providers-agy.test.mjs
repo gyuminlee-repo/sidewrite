@@ -3,10 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   agyOneshotArgs,
-  agyTurnArgs,
   parseAgyResult,
   parseAgyLine,
-  agyMcpAddArgs,
   agyOneshot,
 } from "../daemon/providers/agy.mjs";
 
@@ -27,7 +25,7 @@ const result = (o) => JSON.stringify({ event: "result", result: o });
 const step = (o) => JSON.stringify({ event: "step_update", step_update: o });
 const out = (...lines) => ({ code: 0, stdout: [INIT, ...lines].join("\n"), stderr: "" });
 
-test("args: print mode, json, model, timeout, no slash commands; flags before name for mcp add", () => {
+test("args: print mode, json, model, timeout, no slash commands; no command that writes agy settings", async () => {
   const a = agyOneshotArgs({ prompt: "P", model: "gemini-3.8-flash-high", timeoutS: 120 });
   assert.deepEqual(a.slice(0, 2), ["-p", "P"]);
   // A judgment is read as a stream too, so that a tool step is seen.
@@ -37,26 +35,19 @@ test("args: print mode, json, model, timeout, no slash commands; flags before na
   assert.ok(a.includes("--disable-slash-commands"));
   assert.ok(a.includes("--sandbox"));
   assert.equal(agyOneshotArgs({ prompt: "P", timeoutS: 5 }).includes("--model"), false);
-  assert.ok(
-    agyTurnArgs({ prompt: "P", timeoutS: 900 }).join(" ").includes("--output-format stream-json"),
+  // `agy mcp add` writes the user's Antigravity settings: nothing here builds it.
+  const mod = await import("../daemon/providers/agy.mjs");
+  assert.deepEqual(
+    Object.keys(mod).filter((k) => /Args$/.test(k)),
+    ["agyOneshotArgs"],
   );
-  assert.deepEqual(agyMcpAddArgs({ url: "http://127.0.0.1:47834/mcp/agy", token: "T" }), [
-    "mcp",
-    "add",
-    "--type",
-    "http",
-    "--header",
-    "Authorization: Bearer T",
-    "office",
-    "http://127.0.0.1:47834/mcp/agy",
-  ]);
 });
 
 // Hard rule of this stage: no flag that approves tool calls or edits unseen.
 test("no permission-bypass flag in any argument list", () => {
   for (const args of [
     agyOneshotArgs({ prompt: "P", model: "m", timeoutS: 120 }),
-    agyTurnArgs({ prompt: "P", model: "m", timeoutS: 900 }),
+    agyOneshotArgs({ prompt: "P", timeoutS: 900 }),
   ]) {
     for (const a of args.slice(2)) assert.equal(BYPASS.test(a), false, a);
     assert.equal(args.includes("--mode"), false);
