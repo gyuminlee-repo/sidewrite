@@ -1167,3 +1167,80 @@ test("the failure of a turn goes to the log as a code, not as the sentence the a
     }
   }
 });
+
+// Word searches the text of a paragraph as it stands with its tracked
+// changes: text a tracked change deleted is still found (assumed from
+// tools-word.js, which reads the reviewed text apart from `.text`; to be
+// measured in Word). The daemon counts in the reviewed text. A proposal
+// whose find is once in the reviewed paragraph and also in the text an
+// earlier change deleted there would come back from Word as Ambiguous and
+// end the turn: it is passed over instead, and the proposals after it run.
+test("a proposal whose text is also in text an earlier change deleted is skipped, not sent to Word", async () => {
+  const list = [
+    P({
+      paragraph_id: "p2",
+      find: "cell-free extract",
+      text: "clarified cell-free lysate",
+      requirement_ids: [],
+    }),
+    // Once in the paragraph before and after the first change, and once more
+    // in what that change deleted.
+    P({ paragraph_id: "p2", find: "cell-free", text: "cell free", requirement_ids: [] }),
+    THREE[0],
+  ];
+  // A stand-in Word that searches as Word is taken to: deleted text counts.
+  const deleted = [];
+  const word = (args, n) => {
+    const hits = deleted.filter(
+      (d) => d.index === args.expected_paragraph.index && d.text.includes(args.find),
+    );
+    if (hits.length) {
+      return {
+        ok: false,
+        code: "Ambiguous",
+        hit_count: 2,
+        message: `"${args.find}" occurs 2 times`,
+      };
+    }
+    if (typeof args.replace === "string") {
+      deleted.push({ index: args.expected_paragraph.index, text: args.narrow?.find ?? args.find });
+    }
+    return {
+      ok: true,
+      word_comment_id: n,
+      paragraph_index: args.expected_paragraph.index,
+      before: "b",
+      after: "a",
+      target_checked: true,
+    };
+  };
+  const t = await setup({ generate: async () => reply(list), word });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.deepEqual(
+      t.wordCalls.map((c) => c[2].find),
+      ["cell-free extract", "30 degrees"],
+      "the second proposal is not sent",
+    );
+    assert.deepEqual(t.ended, [["k", { ok: true }]]);
+    assert.ok(
+      t
+        .texts()
+        .includes(
+          "P2 skipped (FoundInDeletedText): paragraph p2. Its text is also in text that a change before it deleted, where Word still finds it. Accept or reject that change in Word, press Refresh status, then propose again.\n",
+        ),
+    );
+    const [b] = await t.batch();
+    assert.deepEqual(
+      b.output.proposals.map((p) => [p.outcome, p.code]),
+      [
+        ["applied", null],
+        ["skipped", "FoundInDeletedText"],
+        ["applied", null],
+      ],
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
