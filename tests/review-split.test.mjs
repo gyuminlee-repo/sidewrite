@@ -667,3 +667,56 @@ test("label split: quote marks are taken off and full-width markers stripped", a
   assert.equal(wide.method, "llm");
   assert.deepEqual(refsTexts(wide), [["R2.3", "Add units.\nmore text"]]);
 });
+
+// ---- lines the regex split takes out -----------------------------------------
+
+test("lines dropped as boilerplate are listed in the result and named in a warning", async () => {
+  const review =
+    "Reviewer(s)' Comments to Author:\n\nReviewer: 1\n\nComments to the Author\n1. Add units.\n2. State n.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(r.dropped, ["Reviewer(s)' Comments to Author:", "Comments to the Author"]);
+  assert.deepEqual(r.warnings, [
+    '2 boilerplate line(s) were dropped: "Reviewer(s)\' Comments to Author:", "Comments to the Author". Add them back if they ask for something.',
+  ]);
+  const clean = await splitReview(
+    "Reviewer 1: Comments to the Author\n1. Add units.\n2. State n.\n",
+  );
+  assert.deepEqual(clean.dropped, []);
+  assert.deepEqual(clean.warnings, []);
+});
+
+test("rule lines of a questionnaire letter are listed as dropped", async () => {
+  const review =
+    "Reviewers' comments:\n\n1. Is the work sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n**********\n\n2. Review Comments\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.";
+  const r = await splitReview(review);
+  assert.deepEqual(r.dropped, ["Reviewers' comments:", "**********"]);
+  assert.ok(r.warnings.some((w) => /^2 boilerplate line\(s\) were dropped/.test(w)));
+});
+
+test("the label split lists the lines the model dropped", async () => {
+  const r = await splitReview("Page 2 of 5\nPlease add units.\nAlso state n.\n", {
+    oneshot: labels("drop", "comment_start", "comment_start"),
+  });
+  assert.deepEqual(r.dropped, ["Page 2 of 5"]);
+});
+
+test("a section label that ends up on no comment is named by the check", async () => {
+  const review = "Reviewer 1:\nMajor comments\n1. Add units.\n2. State n.\n";
+  assert.deepEqual(uncoveredText(review, [{ text: "Add units." }, { text: "State n." }]), [
+    "Major comments",
+  ]);
+  assert.deepEqual(uncoveredText(review, splitReviewRegex(review)), []);
+  // A section head with nothing under it gives no comment its label; the
+  // check names it.
+  const empty = "Reviewer 1:\n1. Add units.\n2. State n.\nMinor comments\n";
+  const r = await splitReview(empty);
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["R1.1", "R1.2"],
+  );
+  assert.ok(
+    r.warnings.some((w) => /in no comment: "Minor comments"/.test(w)),
+    r.warnings.join(" | "),
+  );
+});

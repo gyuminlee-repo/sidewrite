@@ -182,6 +182,82 @@
       "texts": {
         "E.1": "Dear Author,\nPlease revise.\n\nSincerely,\nThe handling office\nEditor-in-Chief"
       }
+    },
+    {
+      "name": "editor block with un-numbered sections",
+      "kind": "positive",
+      "text": "Editor:\nMajor comments:\nPlease shorten the abstract.\nMinor comments:\nPlease fix the typos.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Please shorten the abstract.",
+        "E.2": "Please fix the typos."
+      },
+      "sections": {
+        "E.1": "Major comments",
+        "E.2": "Minor comments"
+      }
+    },
+    {
+      "name": "editor block with text before its un-numbered sections",
+      "kind": "positive",
+      "text": "Associate Editor:\nThe reviewers agree on the main points.\n\nMajor comments\nShorten the abstract.\n\nMinor comments\nFix the typos.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "E.3", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "The reviewers agree on the main points.",
+        "E.3": "Fix the typos."
+      },
+      "sections": {
+        "E.2": "Major comments",
+        "E.3": "Minor comments"
+      }
+    },
+    {
+      "name": "editor block after the reviewers with un-numbered sections",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nHandling Editor:\nMajor comments\nShorten the abstract.\nPlease also cut the introduction.\n\nMinor comments\nFix the typos.",
+      "refs": ["R1.1", "R1.2", "E.1", "E.2"],
+      "texts": {
+        "E.1": "Shorten the abstract.\nPlease also cut the introduction.",
+        "E.2": "Fix the typos."
+      },
+      "sections": {
+        "E.1": "Major comments",
+        "E.2": "Minor comments"
+      }
+    },
+    {
+      "name": "editor block with numbered items in sections",
+      "kind": "positive",
+      "text": "Editor:\nMajor comments\n1. Shorten the abstract.\n2. Add a data statement.\nMinor comments\n1. Fix the typos.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "E.3", "R1.1", "R1.2"],
+      "sections": {
+        "E.1": "Major comments",
+        "E.2": "Major comments",
+        "E.3": "Minor comments"
+      }
+    },
+    {
+      "name": "editor block with one numbered and one un-numbered section",
+      "kind": "positive",
+      "text": "Editor:\nMajor comments\n1. Shorten the abstract.\n2. Add a data statement.\nMinor comments\nFix the typos throughout.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "E.3", "R1.1", "R1.2"],
+      "texts": {
+        "E.3": "Fix the typos throughout."
+      },
+      "sections": {
+        "E.1": "Major comments",
+        "E.2": "Major comments",
+        "E.3": "Minor comments"
+      }
+    },
+    {
+      "name": "section words in the letter before any head cut nothing",
+      "kind": "trap",
+      "text": "Dear Author,\nMajor comments:\nPlease shorten the abstract.\nMinor comments:\nPlease fix the typos.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Dear Author,\nMajor comments:\nPlease shorten the abstract.\nMinor comments:\nPlease fix the typos."
+      }
     }
   ]
 }

@@ -112,6 +112,39 @@
       "kind": "trap",
       "text": "Reviewer 1: The units are missing throughout the manuscript and must be added.\n\nReviewer 1: The number of replicates is also not stated anywhere in the text.",
       "refs": ["R1.1", "R1.1"]
+    },
+    {
+      "name": "a short head text, a blank line and a numbered review is a review, twice",
+      "kind": "trap",
+      "text": "Reviewer 1: First round\n\n1. Add units.\n2. State n.\n\nReviewer 1: Second round\n\n1. Add error bars.\n2. Cite the method.",
+      "refs": ["R1.0", "R1.1", "R1.2", "R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "two rounds of two reviewers with short head texts",
+      "kind": "trap",
+      "text": "Reviewer 1: Round 1\n\n1. Add units.\n2. State n.\n\nReviewer 2: Round 1\n\n1. Add error bars.\n\nReviewer 1: Round 2\n\n1. Cite the method.\n\nReviewer 2: Round 2\n\n1. Add a scale bar.",
+      "refs": ["R1.0", "R1.1", "R1.2", "R2.0", "R2.1", "R1.0", "R1.1", "R2.0", "R2.1"]
+    },
+    {
+      "name": "a short review of another reviewer before a two-round reviewer",
+      "kind": "trap",
+      "text": "Reviewer 1: Accept\n\nReviewer 2: Minor revision\n\n1. Add units.\n2. State n.\n\nReviewer 2: Round 2\n\n1. Add error bars.",
+      "refs": ["R1.1", "R2.0", "R2.1", "R2.2", "R2.0", "R2.1"],
+      "texts": {
+        "R1.1": "Accept"
+      }
+    },
+    {
+      "name": "a short head text, a blank line and a paragraph is a review, twice",
+      "kind": "trap",
+      "text": "Reviewer 1: Major revision\n\nThe units are missing in every table.\n\nReviewer 2:\n1. Add error bars.\n2. State n.\n\nReviewer 1: Minor revision\n\nThe units are still missing in Table 2.",
+      "refs": ["R1.1", "R1.2", "R2.1", "R2.2", "R1.1", "R1.2"],
+      "texts": {
+        "R1.2": "The units are missing in every table."
+      }
     }
   ]
 }
