@@ -147,3 +147,22 @@ test("formatPromptLog names the section when the comment has one", () => {
     '[review] prompt R1.4 instructions=L1,L3 forbid=L2 omitted_forbid=- paragraphs=2 section="Round 2 / Minor comments"',
   );
 });
+
+// The comment and ledger blocks are shared with the proposal prompt
+// (daemon/proposal.mjs). The whole output of four inputs was written down
+// before they were taken out: not a character may change.
+test("buildReviewPrompt gives exactly what it gave before its blocks were shared", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { CASES } = await import("./helpers/review-prompt-cases.mjs");
+  const before = JSON.parse(
+    readFileSync(new URL("./fixtures/review_prompt_outputs.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(Object.keys(before), Object.keys(CASES));
+  for (const [name, input] of Object.entries(CASES)) {
+    assert.deepEqual(buildReviewPrompt(input), before[name], name);
+  }
+  // The blocks are the shared ones.
+  const { commentBlock, ledgerBlock } = await import("../daemon/review-prompt.mjs");
+  assert.equal(typeof commentBlock, "function");
+  assert.equal(typeof ledgerBlock, "function");
+});
