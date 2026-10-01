@@ -1236,3 +1236,71 @@ test("an unanswered normal edit: named as such, no Allow exception, re-apply wit
   const sent = t.requests.filter((r) => r.type === "review_override");
   assert.deepEqual(sent[0].payload, { ref: "R1.1", blocked_id: "R1.1-b1", force: true });
 });
+
+// Codex review 15: Preview prompt sent only the ref, so with "send selected
+// paragraphs" on it showed the prompt without them while Propose changes
+// sent the selection.
+test("Preview prompt and Propose changes send the same paragraphs under the selection option", async () => {
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "pending",
+        changes: [],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const selected = [
+    { id: "U4", index: 4, text: "Cells were held at 30 degrees." },
+    { id: "U5", index: 5, text: "Growth was followed for 2 h." },
+  ];
+  let selectionReads = 0;
+  const respond = {
+    review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+    review_preview: () => ({ ok: true, prompt: "PROMPT" }),
+    review_propose: () => ({
+      ok: true,
+      started: true,
+      ref: "R1.1",
+      started_at: "2026-09-30T00:00:00Z",
+      revision,
+    }),
+  };
+  const t = await setup({
+    revision,
+    respond,
+    word: {
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }),
+      selectionParagraphs: async () => {
+        selectionReads += 1;
+        return selected;
+      },
+    },
+  });
+  const button = (label) => findAll(t.$("review-comments"), (n) => n.textContent === label)[0];
+  const sent = (type) => t.requests.filter((r) => r.type === type).map((r) => r.payload);
+
+  // Option on: both carry the selection.
+  t.$("review-use-selection").checked = true;
+  await button("Preview prompt").click();
+  await button("Propose changes").click();
+  assert.deepEqual(sent("review_preview"), [{ ref: "R1.1", paragraphs: selected }]);
+  assert.deepEqual(sent("review_propose"), [{ ref: "R1.1", paragraphs: selected }]);
+  assert.deepEqual(sent("review_preview")[0], sent("review_propose")[0]);
+  assert.equal(selectionReads, 2);
+  assert.equal(t.$("review-preview").textContent, "PROMPT");
+
+  // Option off: both carry none, and the selection is not read.
+  t.$("review-use-selection").checked = false;
+  await button("Preview prompt").click();
+  await button("Propose changes").click();
+  assert.deepEqual(sent("review_preview")[1], { ref: "R1.1", paragraphs: [] });
+  assert.deepEqual(sent("review_preview")[1], sent("review_propose")[1]);
+  assert.equal(selectionReads, 2);
+});

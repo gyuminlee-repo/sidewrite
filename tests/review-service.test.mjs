@@ -2024,3 +2024,96 @@ test("an unanswered normal edit can be applied again from the Review tab (force)
     await t.cleanup();
   }
 });
+
+// Codex review 15, class audit: a handler reads the pane's document once,
+// when the request arrives. What it does after an await (a model call, the
+// answer of Word, a queued turn) must not read the context again: the pane
+// may be gone by then, or its document saved under another name.
+test("no handler reads the pane's document again after its first await", async () => {
+  const ctx = { activeDoc: null };
+  const hooks = { oneshot: null, call: null, push: null };
+  const t = await setup({
+    getContext: () => ({ ...ctx }),
+    oneshot: async (req) => hooks.oneshot(req),
+    callImpl: (name, args) => hooks.call(name, args),
+    pushTurn: (...a) => hooks.push?.(...a),
+  });
+  const other = join(t.dir, "renamed.docx");
+  const gone = async (file) => assert.rejects(readFile(join(t.dir, file), "utf8"), file);
+  const here = () => (ctx.activeDoc = t.doc);
+  try {
+    here();
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
+    await t.ask("ledger_add", { item: NOVEL });
+
+    // ledger_check job: the pane goes away while the model answers.
+    hooks.oneshot = async () => {
+      ctx.activeDoc = null;
+      return { ok: true, json: { violations: [] } };
+    };
+    const checked = await t.ask("ledger_check", {
+      ids: ["L1"],
+      snapshot: { paragraphs: [{ index: 0, text: "A paragraph.", reviewed_text: null }] },
+    });
+    assert.equal(checked.ok, true, checked.error);
+    here();
+    assert.equal((await t.ask("review_load")).revision.ledger[0].status, "ok");
+    assert.equal((await readDecisions(t.dir)).filter((d) => d.kind === "ledger_check").length, 1);
+
+    // review_split job: the document is renamed while the model answers.
+    hooks.oneshot = async () => {
+      ctx.activeDoc = other;
+      return { ok: false, error: "x" };
+    };
+    const split = await t.ask("review_split", { text: "Please add error bars.\nAlso state n." });
+    assert.equal(split.ok, true, split.error);
+    here();
+    assert.ok((await readDecisions(t.dir)).some((d) => d.kind === "comment_split"));
+    await gone("renamed.decisions.jsonl");
+
+    // review_propose: the turn is queued, then the status is written.
+    hooks.push = () => (ctx.activeDoc = null);
+    const proposed = await t.ask("review_propose", { ref: "R1.1" });
+    assert.equal(proposed.ok, true, proposed.error);
+    assert.equal(proposed.revision.comments[0].status, "in_progress");
+    hooks.push = null;
+    here();
+
+    // review_override: Word answers after the document was renamed.
+    const deps = { ...t.svc.trackedEditDeps("k"), call: async () => ({ ok: true }) };
+    const R = { what: "w", why: "y", addresses: "a" };
+    await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.3", find: "substrate", replace: "novel substrate", rationale: R },
+      { ref: "R1.3" },
+    );
+    hooks.call = () => {
+      ctx.activeDoc = other;
+      return { ok: true, word_comment_id: 5, paragraph_index: 2, before: "b", after: "a" };
+    };
+    const over = await t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.deepEqual([over.ok, over.applied], [true, true], over.error);
+    here();
+    const rev = (await t.ask("review_load")).revision;
+    assert.deepEqual([rev.comments[1].changes.length, rev.comments[1].blocked.length], [1, 0]);
+    await gone("renamed.revision.json");
+
+    // A tracked edit of a turn: blocked, and applied, after the pane is gone.
+    const turn = { ...t.svc.trackedEditDeps("k") };
+    turn.call = async () => {
+      ctx.activeDoc = null;
+      return { ok: true, word_comment_id: 6, paragraph_index: 2, before: "b", after: "a" };
+    };
+    const ok = await applyTrackedEdit(
+      turn,
+      { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+      { ref: "R1.1" },
+    );
+    assert.equal(ok.ok, true, ok.message);
+    here();
+    assert.equal((await t.ask("review_load")).revision.comments[0].changes.length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});

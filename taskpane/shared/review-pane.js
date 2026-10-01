@@ -311,6 +311,14 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     );
   }
 
+  // The paragraphs that go into the prompt of a comment: the selection in
+  // Word when "send selected paragraphs" is on, else none. Preview prompt
+  // and Propose changes both use this, so the preview shows the prompt the
+  // turn will get.
+  async function promptParagraphs() {
+    return $("review-use-selection").checked ? await word.selectionParagraphs() : [];
+  }
+
   function renderComments() {
     const box = $("review-comments");
     box.replaceChildren();
@@ -350,7 +358,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       // turn_complete and turn_done before the answer (Codex review 7).
       // onTurnStarted returns a release that ends only this turn. The check
       // runs before guard() so an ignored click keeps the message line.
-      const run = guard((release) => proposeRef(c.ref, release, $("review-use-selection").checked));
+      const run = guard((release) => proposeRef(c.ref, release, true));
       propose.addEventListener("click", () => {
         if (isTurnInFlight() || queue.running) return;
         return run(
@@ -365,7 +373,11 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       preview.addEventListener(
         "click",
         guard(async () => {
-          const r = await ask("review_preview", { ref: c.ref });
+          // The same paragraphs as Propose changes would send now.
+          const r = await ask("review_preview", {
+            ref: c.ref,
+            paragraphs: await promptParagraphs(),
+          });
           $("review-preview").textContent = r.prompt;
           $("review-preview").hidden = false;
         }),
@@ -583,10 +595,13 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   // ---- actions --------------------------------------------------------------
   // Start the review turn of one comment. `release` (from onTurnStarted) ends
   // the turn taken for it when the request fails.
+  // useSelection: send the paragraphs Preview prompt would show
+  // (promptParagraphs); Propose all sends none, a selection belongs to one
+  // comment.
   async function proposeRef(ref, release, useSelection) {
     state.reviewTurnOpen = true;
     try {
-      const paragraphs = useSelection ? await word.selectionParagraphs() : [];
+      const paragraphs = useSelection ? await promptParagraphs() : [];
       // A fresh snapshot first: outside changes are caught before the turn
       // (L4) and the new words of the turn are checked against it (L2).
       await refresh();
