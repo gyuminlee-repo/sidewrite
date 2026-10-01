@@ -40,7 +40,7 @@ export function renderUnit({ node, repo, logFile, extraPath = [] }) {
 #   HOME   set by the user manager. The Claude login in $HOME/.claude is the
 #          one a terminal uses; nothing is copied and no key is kept here.
 #   PATH   the one variable set below: the node that starts the daemon, and
-#          the directories where claude, codex and python3 were found when
+#          the directories where claude, codex, agy and python3 were found when
 #          this was installed. Claude turns run the CLI bundled with the
 #          daemon unless CC_OFFICE_CLAUDE_PATH names another.
 # No variable of a terminal or of an agent session reaches the daemon.

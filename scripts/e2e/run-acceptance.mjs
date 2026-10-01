@@ -291,9 +291,12 @@ for (const [signal, code] of [
   ["SIGTERM", 143],
 ]) {
   process.on(signal, () => {
-    // The run's own daemon first, so the ports are free for the resident one.
-    daemon?.kill("SIGTERM");
-    process.exit(code);
+    // The run's own daemon first, and until its ports are free: a resident
+    // unit started while they are held fails and, after a few tries, stays
+    // down.
+    stopDaemon()
+      .catch((e) => console.error(`run-acceptance: ${e.message}`))
+      .finally(() => process.exit(code));
   });
 }
 // append: keep the log and write on (a restart in the middle of a run).

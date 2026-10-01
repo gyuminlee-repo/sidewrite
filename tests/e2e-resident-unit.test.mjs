@@ -77,5 +77,9 @@ test("the acceptance run pauses the resident unit before it looks at the ports a
   );
   assert.match(signals, /\["SIGINT", 130\]/);
   assert.match(signals, /\["SIGTERM", 143\]/);
-  assert.match(signals, /process\.on\(signal, \(\) => \{[\s\S]*process\.exit\(code\);/);
+  // The run's own daemon is stopped (and its ports are free) before that.
+  assert.match(
+    signals,
+    /process\.on\(signal, \(\) => \{[\s\S]*stopDaemon\(\)[\s\S]*\.finally\(\(\) => process\.exit\(code\)\);/,
+  );
 });

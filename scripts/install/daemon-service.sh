@@ -55,7 +55,7 @@ install() {
   mkdir -p "$UNIT_DIR" "$STATE_DIR"
   # Directories of the tools the daemon starts, as found now.
   local dirs=() tool path
-  for tool in claude codex python3; do
+  for tool in claude codex agy python3; do
     path=$(command -v "$tool" || true)
     if [ -n "$path" ]; then dirs+=("$(dirname "$path")"); fi
   done
