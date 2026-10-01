@@ -724,6 +724,7 @@ export function initReviewPane({
   const refresh = () => refreshWith(say);
   // report(text, bad): where the counts go. The message line for a refresh
   // the author or a turn asked for, the small line for an automatic one.
+  // Returns the invariant report (review-view.js invariantReport).
   async function refreshWith(report) {
     const snapshot = await word.collectReviewSnapshot();
     const r = await ask("review_refresh", { snapshot });
@@ -755,6 +756,7 @@ export function initReviewPane({
           : ""),
       !inv.ok,
     );
+    return inv; // turn_done: a mismatch ends a Propose all run
   }
 
   // L10: changed paragraphs only unless full.
@@ -1050,9 +1052,16 @@ export function initReviewPane({
         state.reviewTurnOpen = false;
         stopProgress();
         // Propose all: the next comment may start only when this turn ran
-        // AND the reload and refresh after it worked. A turn that ran but
-        // could not be checked is not counted (unchecked) and ends the run;
-        // what it recorded is saved by the daemon.
+        // AND the reload and refresh after it worked AND the refresh found
+        // the recorded changes and the tool comments in Word to match. A
+        // turn that ran but whose state is not confirmed is not counted
+        // (unchecked) and ends the run; what it recorded is saved by the
+        // daemon.
+        const unchecked = (what) => {
+          const error = `The turn for ${msg.ref} ran and its record is saved, but ${what}`;
+          say(error, true);
+          return { ok: false, unchecked: true, error };
+        };
         const failed =
           msg.ok === false
             ? { ok: false, error: msg.error || "The turn ended with an error." }
@@ -1060,15 +1069,21 @@ export function initReviewPane({
         load()
           .then(refresh)
           .then(
-            () => failed ?? { ok: true },
+            (inv) => {
+              if (failed) return failed;
+              if (inv.ok) return { ok: true };
+              return unchecked(
+                `the changes on record and the tool comments in Word do not match (missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"}); check those in Word, then press Refresh status.`,
+              );
+            },
             (e) => {
               if (failed) {
                 say(e.message, true);
                 return failed;
               }
-              const error = `The turn for ${msg.ref} ran and its record is saved, but the status check after it failed (${e.message}); press Refresh status to check again.`;
-              say(error, true);
-              return { ok: false, unchecked: true, error };
+              return unchecked(
+                `the status check after it failed (${e.message}); press Refresh status to check again.`,
+              );
             },
           )
           .then((result) => {
