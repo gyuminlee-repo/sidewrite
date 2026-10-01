@@ -277,8 +277,6 @@ export const ADVISORY = [
   "recommends",
   "recommended",
   "recommendation",
-  "guide",
-  "guideline",
   "aim",
 ];
 

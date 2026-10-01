@@ -558,6 +558,8 @@ const FIRM = [
     "The maximum length of the abstract is 250 words, not counting the title.",
     words("abstract", { max: 250 }),
   ],
+  // Author guidelines call themselves a guideline: the word alone does not make a limit advice.
+  ["The guideline for the abstract is a maximum of 250 words.", words("abstract", { max: 250 })],
   // "roundabout", "casino" and "notable" hold "about", "no" and "not", but not as words.
   ["The roundabout abstract must not exceed 250 words.", words("abstract", { max: 250 })],
   ["The casino maximum for the abstract is 250 words.", words("abstract", { max: 250 })],
