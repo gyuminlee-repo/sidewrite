@@ -86,18 +86,52 @@ export function batchParagraphs(paragraphs, maxChars = 6000) {
   return batches;
 }
 
-export const LEDGER_SYSTEM =
-  "You check a manuscript against one author instruction. Report only clear violations and quote the violating words exactly. If you are not sure whether a paragraph breaks the instruction, list it under unsure; do not guess that it has no violation. Reply with JSON only.";
+// ---- LLM check: one verdict for every paragraph ---------------------------------
+//
+// The model is asked for a verdict on EACH paragraph of a batch, under the
+// batch id of the request:
+//   {"batch_id":"b27","verdicts":[[0,"ok"],[1,"unsure"],[2,"violation"]],
+//    "violations":[{"paragraph_id":2,"quote":"...","reason":"..."}],
+//    "unsure":[{"paragraph_id":1,"reason":"..."}]}
+// Paragraphs go out under short numbers of the batch (0, 1, 2 ...), not their
+// document index, and the daemon makes the batch id: the model computes
+// nothing. A reply with only a list of violations cannot be told from one
+// that skipped paragraphs ("no violations" for text it did not read), and
+// the skipped paragraphs were cached as checked. So the set of paragraph
+// numbers with a verdict must be exactly the set asked about; anything else
+// (one left out, one twice, one outside the batch, another batch id, a
+// verdict and its evidence list that disagree) fails the batch: the item is
+// an error and nothing of it is cached. A reply in the wrong form is asked
+// for once more, with what was wrong, from the same runner; a model call
+// that failed (limit, refusal, timeout) is not.
+// Limit: this catches a reply that leaves paragraphs out. It does not prove
+// that the model read a paragraph it called "ok".
 
-export function ledgerPrompt(item, batch) {
+export const LEDGER_SYSTEM =
+  'You check paragraphs of a manuscript against one author instruction. Give every paragraph exactly one verdict: "ok" (the paragraph does not break the instruction), "violation" (it clearly breaks it; quote the violating words exactly) or "unsure" (you cannot tell). Do not leave a paragraph out and do not guess "ok" when you are not sure. Reply with JSON only.';
+
+const VERDICTS = ["ok", "violation", "unsure"];
+
+let lastBatch = 0;
+const nextBatchId = () => `b${++lastBatch}`;
+
+// batch: the paragraphs; they are numbered 0 .. batch.length - 1 in order.
+export function ledgerPrompt(item, batch, batchId) {
+  const last = batch.length - 1;
   return [
     `Instruction [${item.id}]: ${item.text}`,
-    'Return {"violations":[{"paragraph_index":<int>,"quote":"<exact words>","reason":"<short>"}],"unsure":[{"paragraph_index":<int>,"reason":"<short>"}]}.',
-    'Put a paragraph under "unsure" when you cannot tell whether it breaks the instruction. Use empty lists when nothing applies.',
+    `Batch ${batchId}: ${batch.length} paragraph(s), numbered 0 to ${last}.`,
+    "Return JSON of this form, with one verdict for every paragraph number:",
+    `{"batch_id":"${batchId}","verdicts":[[<paragraph number>,"ok"|"violation"|"unsure"], ...],"violations":[{"paragraph_id":<paragraph number>,"quote":"<exact words>","reason":"<short>"}],"unsure":[{"paragraph_id":<paragraph number>,"reason":"<short>"}]}`,
+    'Every paragraph with verdict "violation" needs an entry in "violations". "violations" and "unsure" hold only paragraphs with that verdict; use empty lists when there are none.',
     "Paragraphs:",
-    ...batch.map((p) => `[${p.index}] ${viewText(p)}`),
+    ...batch.map((p, k) => `[${k}] ${viewText(p)}`),
   ].join("\n");
 }
+
+// The second request for a batch whose reply could not be used.
+const retryPrompt = (prompt, problem, n) =>
+  `${prompt}\n\nYour last reply could not be used: ${problem}. Reply again in the JSON form above, with one verdict for each of the ${n} paragraph(s).`;
 
 // The words of `text` (a normalized paragraph) that the model quoted, or null.
 // Exact first; then the same words in another case or with other spacing.
@@ -115,33 +149,95 @@ export const QUOTE_NOT_FOUND = "model reported a violation but its quote was not
 const notInteger = (idx) =>
   typeof idx === "boolean" || idx === null || idx === "" || !Number.isInteger(Number(idx));
 
-// Why a one-shot reply is not {"violations":[{paragraph_index, quote,
-// reason}], "unsure"?:[{paragraph_index, reason}]}, or null when it is.
-// "unsure" is optional (a reply without it has no unsure paragraph). A
-// malformed reply must not read as "no violations": checkLlmItem turns it
-// into a check error.
-export function llmReplyProblem(json) {
-  if (!Array.isArray(json?.violations)) return "reply has no violations array";
-  for (const [i, v] of json.violations.entries()) {
-    if (v === null || typeof v !== "object") return `violations[${i}] is not an object`;
-    if (notInteger(v.paragraph_index)) return `violations[${i}].paragraph_index is not an integer`;
-    if (typeof v.quote !== "string") return `violations[${i}].quote is not a string`;
-    if (typeof v.reason !== "string") return `violations[${i}].reason is not a string`;
+// A reply to a batch of n paragraphs with id batchId, read strictly.
+// Returns { problem } (why it cannot be used) or { verdicts: [verdict of
+// paragraph 0, 1 ...], violations: [{ id, quote, reason }], unsure: Map(id ->
+// reason) }. "violations" and "unsure" may be left out when empty; an
+// "unsure" verdict needs no entry (its reason is then "").
+export function readLlmReply(json, batchId, n) {
+  const bad = (problem) => ({ problem });
+  if (json === null || typeof json !== "object" || Array.isArray(json))
+    return bad("reply is not a JSON object");
+  if (json.batch_id !== batchId)
+    return bad(`batch_id is ${JSON.stringify(json.batch_id ?? null)}, expected "${batchId}"`);
+  if (!Array.isArray(json.verdicts)) return bad("reply has no verdicts array");
+  const verdicts = new Array(n).fill(null);
+  for (const [i, v] of json.verdicts.entries()) {
+    if (!Array.isArray(v) || v.length !== 2 || notInteger(v[0]) || !VERDICTS.includes(v[1]))
+      return bad(`verdicts[${i}] is not [paragraph number, "ok" | "violation" | "unsure"]`);
+    const id = Number(v[0]);
+    if (id < 0 || id >= n)
+      return bad(`verdicts[${i}] names paragraph ${id}, which is not in the batch (0 to ${n - 1})`);
+    if (verdicts[id] !== null) return bad(`paragraph ${id} has more than one verdict`);
+    verdicts[id] = v[1];
   }
-  if (json.unsure === undefined) return null;
-  if (!Array.isArray(json.unsure)) return "unsure is not an array";
-  for (const [i, u] of json.unsure.entries()) {
-    if (u === null || typeof u !== "object") return `unsure[${i}] is not an object`;
-    if (notInteger(u.paragraph_index)) return `unsure[${i}].paragraph_index is not an integer`;
-    if (typeof u.reason !== "string") return `unsure[${i}].reason is not a string`;
+  const none = verdicts.flatMap((v, id) => (v === null ? [id] : []));
+  if (none.length) return bad(`no verdict for paragraph(s) ${none.join(", ")}`);
+
+  // An evidence list: entries for paragraphs of the batch whose verdict is `want`.
+  const entries = (key, want, fields) => {
+    const list = json[key] ?? [];
+    if (!Array.isArray(list)) return bad(`${key} is not an array`);
+    for (const [i, e] of list.entries()) {
+      if (e === null || typeof e !== "object") return bad(`${key}[${i}] is not an object`);
+      if (notInteger(e.paragraph_id)) return bad(`${key}[${i}].paragraph_id is not an integer`);
+      for (const f of fields)
+        if (typeof e[f] !== "string") return bad(`${key}[${i}].${f} is not a string`);
+      const id = Number(e.paragraph_id);
+      if (verdicts[id] !== want)
+        return bad(
+          `${key}[${i}] is for paragraph ${id}, whose verdict is ${JSON.stringify(verdicts[id] ?? "none")}`,
+        );
+    }
+    return { list: list.map((e) => ({ ...e, id: Number(e.paragraph_id) })) };
+  };
+  const v = entries("violations", "violation", ["quote", "reason"]);
+  if (v.problem) return v;
+  const u = entries("unsure", "unsure", ["reason"]);
+  if (u.problem) return u;
+  const bare = verdicts.findIndex(
+    (verdict, id) => verdict === "violation" && !v.list.some((e) => e.id === id),
+  );
+  if (bare !== -1)
+    return bad(`paragraph ${bare} has verdict "violation" and no entry in violations`);
+  return {
+    verdicts,
+    violations: v.list,
+    unsure: new Map(u.list.map((e) => [e.id, e.reason])),
+  };
+}
+
+// The usable reply to one batch, or { error }. A reply in the wrong form
+// (also one that is no JSON) is asked for once more.
+async function askBatch(item, batch, oneshot) {
+  const batchId = nextBatchId();
+  const prompt = ledgerPrompt(item, batch, batchId);
+  let problem = null;
+  for (const again of [false, true]) {
+    const r = await oneshot({
+      system: LEDGER_SYSTEM,
+      prompt: again ? retryPrompt(prompt, problem, batch.length) : prompt,
+    });
+    if (r.ok) {
+      const read = readLlmReply(r.json, batchId, batch.length);
+      if (!read.problem) return read;
+      problem = read.problem;
+    } else if (/not JSON/i.test(String(r.error))) {
+      problem = String(r.error);
+    } else {
+      return { error: r.error };
+    }
   }
-  return null;
+  return { error: `malformed LLM reply: ${problem}` };
 }
 
 // onDecision (optional): called once per paragraph the model judged, with
 // { item_id, paragraph_index, instruction, paragraph, verdict, error? };
 // verdict is violation, ok, unsure, or error (failed or malformed reply).
 // It carries the texts so the caller can fingerprint them (decision-log.mjs).
+// A paragraph that is in neither `violations` nor `unsure` of the result was
+// given the verdict "ok" by the model, in so many words: only those (and
+// located violations) are cached by checkLedgerIncremental.
 export async function checkLlmItem(
   item,
   paragraphs,
@@ -161,97 +257,54 @@ export async function checkLlmItem(
   const violations = [];
   const unsure = [];
   const decide = (batch, verdictOf, error) => {
-    for (const p of batch) {
+    for (const [k, p] of batch.entries()) {
       onDecision?.({
         item_id: item.id,
         paragraph_index: p.index,
         instruction: item.text,
         paragraph: viewText(p),
-        verdict: verdictOf(p.index),
+        verdict: verdictOf(k),
         ...(error ? { error } : {}),
       });
     }
   };
   for (const batch of batches) {
-    const r = await oneshot({ system: LEDGER_SYSTEM, prompt: ledgerPrompt(item, batch) });
-    if (!r.ok) {
-      decide(batch, () => "error", r.error);
-      return { id: item.id, status: "error", error: r.error, violations, unsure };
+    const reply = await askBatch(item, batch, oneshot);
+    if (reply.error) {
+      decide(batch, () => "error", reply.error);
+      return { id: item.id, status: "error", error: reply.error, violations, unsure };
     }
-    const problem = llmReplyProblem(r.json);
-    if (problem) {
-      const error = `malformed LLM reply: ${problem}`;
-      decide(batch, () => "error", error);
-      return { id: item.id, status: "error", error, violations, unsure };
-    }
-    const before = { violations: violations.length, unsure: unsure.length };
-    // Paragraphs with a reported violation whose quote is not in them.
-    const unlocated = new Map();
-    // An entry that names a paragraph outside the batch and cannot be placed:
-    // the reply is about text that was not asked, so no paragraph of this
-    // batch counts as ok on the strength of it (Codex review 13).
-    let stray = null;
-    for (const v of r.json.violations) {
-      let para = batch.find((p) => p.index === Number(v?.paragraph_index));
-      if (!para) {
-        // Its quote in exactly one paragraph of the batch says which one.
-        const holders = batch.filter(
-          (p) => locateQuote(viewText(p), String(v?.quote ?? "")) !== null,
-        );
-        if (holders.length !== 1) {
-          stray ??= v.paragraph_index;
-          continue;
-        }
-        para = holders[0];
-      }
-      // A quote that is not in the paragraph is no evidence and is dropped:
-      // the model must point at text.
-      const match = locateQuote(viewText(para), String(v?.quote ?? ""));
+    // Final verdict per paragraph of the batch. A violation whose quote is
+    // not in the paragraph is no evidence and is dropped: the model must
+    // point at text. A paragraph left with no located quote is not ok
+    // either: it turns unsure, stays with the author and out of the cache,
+    // so the next incremental check reads it again (Codex review 12).
+    const final = [...reply.verdicts];
+    const lostReason = new Map();
+    const hit = new Set();
+    for (const v of reply.violations) {
+      const para = batch[v.id];
+      const match = locateQuote(viewText(para), v.quote);
       if (match === null) {
-        if (!unlocated.has(para.index)) unlocated.set(para.index, String(v?.reason ?? ""));
+        if (!lostReason.has(v.id)) lostReason.set(v.id, v.reason);
         continue;
       }
-      violations.push({
-        paragraph_index: para.index,
-        start: null,
-        match,
-        reason: String(v?.reason ?? ""),
-      });
+      hit.add(v.id);
+      violations.push({ paragraph_index: para.index, start: null, match, reason: v.reason });
     }
-    for (const u of r.json.unsure ?? []) {
-      const para = batch.find((p) => p.index === Number(u.paragraph_index));
-      if (para) unsure.push({ paragraph_index: para.index, reason: u.reason });
-      else stray ??= u.paragraph_index;
-    }
-    // A paragraph under both lists is unsure: no violation is kept for it,
-    // and the incremental check reads it again (Codex review 9).
-    const open = new Set(unsure.slice(before.unsure).map((u) => u.paragraph_index));
-    for (let i = violations.length - 1; i >= before.violations; i--) {
-      if (open.has(violations[i].paragraph_index)) violations.splice(i, 1);
-    }
-    const hit = new Set(violations.slice(before.violations).map((v) => v.paragraph_index));
-    // The model saw a violation it could not point at: the paragraph is not
-    // ok. Unsure keeps it with the author and out of checked_hashes, so the
-    // next incremental check reads it again (Codex review 12).
-    for (const [index, reason] of unlocated) {
-      if (hit.has(index) || open.has(index)) continue;
-      unsure.push({
-        paragraph_index: index,
-        reason: reason ? `${QUOTE_NOT_FOUND} (${reason})` : QUOTE_NOT_FOUND,
-      });
-      open.add(index);
-    }
-    if (stray !== null) {
-      for (const p of batch) {
-        if (hit.has(p.index) || open.has(p.index)) continue;
+    for (const [k, p] of batch.entries()) {
+      if (final[k] === "unsure") {
+        unsure.push({ paragraph_index: p.index, reason: reply.unsure.get(k) ?? "" });
+      } else if (final[k] === "violation" && !hit.has(k)) {
+        final[k] = "unsure";
+        const reason = lostReason.get(k);
         unsure.push({
           paragraph_index: p.index,
-          reason: `model reply named paragraph ${stray}, which was not in the request; this paragraph has no result of its own`,
+          reason: reason ? `${QUOTE_NOT_FOUND} (${reason})` : QUOTE_NOT_FOUND,
         });
-        open.add(p.index);
       }
     }
-    decide(batch, (i) => (hit.has(i) ? "violation" : open.has(i) ? "unsure" : "ok"));
+    decide(batch, (k) => final[k]);
   }
   return { id: item.id, status: llmStatus(violations, unsure), violations, unsure };
 }

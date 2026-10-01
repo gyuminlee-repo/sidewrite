@@ -372,6 +372,10 @@ export function ledgerStatusText(item) {
       ? `${item.violation_count} violation(s), ${unsureText(item)}`
       : `${item.violation_count} violation(s)`;
   if (item?.status === "unsure") return unsureText(item);
+  // The check did not run to its end (a model reply that could not be used
+  // or a failed call, a regex that does not compile): no paragraph of it is
+  // taken as checked.
+  if (item?.status === "error") return "check failed: nothing counts as passed";
   if (item?.status === "skipped")
     return SKIPPED_SCOPE_LABELS[item.scope] ?? `Checked at the ${item.scope} stage`;
   return item?.status;
