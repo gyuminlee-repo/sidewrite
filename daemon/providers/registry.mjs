@@ -29,6 +29,15 @@ export const PRESETS = Object.freeze([
     roles: ["turn", "oneshot"],
     defaultEnabled: true,
     policy: "Your ChatGPT plan terms apply.",
+    // A proposal turn (proposal.mjs): the most characters, system and prompt
+    // together, that go out in one request; a longer one is refused, not
+    // cut. Codex adds the user's own global instructions to every run: about
+    // 25,000 input tokens for a prompt of a few lines (measured 2026-10-01).
+    // 120,000 characters are at most about 120,000 tokens (Korean text, one
+    // token per character at worst), which with that share and the reply
+    // stays under a context of 200,000 tokens. The context of each model
+    // was not measured; the number is a starting point.
+    proposalBudget: 120_000,
   },
   {
     id: "antigravity",

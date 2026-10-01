@@ -13,19 +13,11 @@ export const REVIEW_RULES = [
   "Follow every author instruction below. They are decisions the author already made.",
 ];
 
-export function buildReviewPrompt({
-  comment,
-  paragraphs = [],
-  ledger = [],
-  lang = "Korean",
-  includeForbid = true,
-}) {
-  const inScope = ledger.filter(inManuscriptScope);
-  const instructions = inScope.filter((i) => i.kind === "instruction");
-  const forbidAll = inScope.filter((i) => i.kind === "forbid");
-  const forbids = includeForbid ? forbidAll : [];
-  const lines = [
-    `[Review turn ${comment.ref}]`,
+// The comment as every review prompt shows it: who wrote it, the section of
+// the review it stands under, and its text between <<< and >>>. Shared with
+// the proposal prompt (proposal.mjs).
+export function commentBlock(comment) {
+  return [
     `${comment.reviewer === 0 ? "Editor" : `Reviewer ${comment.reviewer}`}, comment ${comment.ref} (verbatim):`,
     // The split takes a section label ("Abstract", "Round 2 / Minor comments")
     // off its line; without it "this section" in the comment means nothing.
@@ -33,8 +25,39 @@ export function buildReviewPrompt({
     "<<<",
     comment.text,
     ">>>",
-    "",
   ];
+}
+
+// The author's rules for the manuscript: instructions and the forbid list
+// (left out when includeForbid is false). lines, and the ids that went in.
+export function ledgerBlock(ledger, { includeForbid = true } = {}) {
+  const inScope = (ledger ?? []).filter(inManuscriptScope);
+  const instructions = inScope.filter((i) => i.kind === "instruction");
+  const forbidAll = inScope.filter((i) => i.kind === "forbid");
+  const forbids = includeForbid ? forbidAll : [];
+  const lines = ["Author instructions:"];
+  if (instructions.length) for (const i of instructions) lines.push(`- [${i.id}] ${i.text}`);
+  else lines.push("- (none)");
+  lines.push("", "Forbidden (an edit containing these is refused before it is applied):");
+  if (forbids.length) for (const i of forbids) lines.push(`- [${i.id}] ${i.text}`);
+  else lines.push("- (none listed)");
+  return {
+    lines,
+    instructionIds: instructions.map((i) => i.id),
+    forbidIds: forbids.map((i) => i.id),
+    omittedForbidIds: includeForbid ? [] : forbidAll.map((i) => i.id),
+  };
+}
+
+export function buildReviewPrompt({
+  comment,
+  paragraphs = [],
+  ledger = [],
+  lang = "Korean",
+  includeForbid = true,
+}) {
+  const rules = ledgerBlock(ledger, { includeForbid });
+  const lines = [`[Review turn ${comment.ref}]`, ...commentBlock(comment), ""];
   // L5: the separate requests of this comment; every change names the ones it answers.
   const reqs = comment.requirements ?? [];
   if (reqs.length) {
@@ -56,20 +79,15 @@ export function buildReviewPrompt({
       "No paragraphs were selected. Locate the text with office_find or office_read_paragraphs first.",
     );
   }
-  lines.push("", "Author instructions:");
-  if (instructions.length) for (const i of instructions) lines.push(`- [${i.id}] ${i.text}`);
-  else lines.push("- (none)");
-  lines.push("", "Forbidden (an edit containing these is refused before it is applied):");
-  if (forbids.length) for (const i of forbids) lines.push(`- [${i.id}] ${i.text}`);
-  else lines.push("- (none listed)");
+  lines.push("", ...rules.lines);
   lines.push("", "Rules:");
   REVIEW_RULES.forEach((r, n) => lines.push(`${n + 1}. ${r.replace("{lang}", lang)}`));
   lines.push("", `Call office_tracked_edit with comment_ref "${comment.ref}".`);
   return {
     text: lines.join("\n"),
-    instructionIds: instructions.map((i) => i.id),
-    forbidIds: forbids.map((i) => i.id),
-    omittedForbidIds: includeForbid ? [] : forbidAll.map((i) => i.id),
+    instructionIds: rules.instructionIds,
+    forbidIds: rules.forbidIds,
+    omittedForbidIds: rules.omittedForbidIds,
     section: comment.section || null,
   };
 }

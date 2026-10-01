@@ -56,3 +56,12 @@ test("only the Ollama preset carries request fields of its own", () => {
     if (p.id !== "ollama") assert.equal("body" in p || "jsonBody" in p, false, p.id);
   }
 });
+
+// A proposal turn is refused, not cut, over this many characters; only a
+// provider that runs proposal turns has the number.
+test("only Codex has a budget for a proposal turn", () => {
+  assert.equal(presetById("codex").proposalBudget, 120_000);
+  for (const p of PRESETS) {
+    if (p.id !== "codex") assert.equal("proposalBudget" in p, false, p.id);
+  }
+});
