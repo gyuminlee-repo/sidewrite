@@ -1195,14 +1195,40 @@ function validSentenceLabels(json, items) {
   );
 }
 
+// The most sentences one request labels. A real review of 25 comments in one
+// request ran into the time limit of a one-shot (120 s) and left every
+// comment without requirements; a batch of this size answers well inside it.
+export const REQUIREMENT_BATCH_SENTENCES = 40;
+
+// items in their order, in batches of at most `max` sentences. A comment is
+// never cut: one with more sentences than that is a batch of its own.
+function requirementBatches(items, max = REQUIREMENT_BATCH_SENTENCES) {
+  const out = [];
+  let size = 0;
+  for (const it of items) {
+    if (!out.length || size + it.sentences.length > max) {
+      out.push([]);
+      size = 0;
+    }
+    out.at(-1).push(it);
+    size += it.sentences.length;
+  }
+  return out;
+}
+
 // comments: the split result. A comment that already has requirements, has
-// no sentence or shares its ref is left as it is. One one-shot labels the
-// sentences of the rest; a request sentence, or a request part of a sentence
+// no sentence or shares its ref is left as it is. The sentences of the rest
+// are labelled by one-shots, a batch of comments each (requirementBatches),
+// one after the other; a request sentence, or a request part of a sentence
 // the model split at a cut point, becomes a requirement as written. A failed
-// call or a reply that does not label every sentence once leaves the
-// requirements empty, with a warning; the comments are otherwise unchanged.
-// Returns { comments, warnings, asked, input, requests }: input is the prompt
-// (for a fingerprint), requests the count of requirements per ref.
+// call or a reply that does not label every sentence of its batch once
+// leaves the requirements of that batch empty, with a warning that names
+// its comments when there is more than one batch; the other batches and the
+// comments themselves are not touched. A usage limit ends the run: the
+// batches after it are not sent.
+// Returns { comments, warnings, asked, input, requests }: input is the
+// prompts (for a fingerprint), requests the count of requirements per ref
+// that was labelled; null when none was.
 export async function extractRequirements(comments, { oneshot } = {}) {
   const none = { comments, warnings: [], asked: false, input: null, requests: null };
   if (!oneshot) return none;
@@ -1217,19 +1243,44 @@ export async function extractRequirements(comments, { oneshot } = {}) {
     }))
     .filter((it) => it.sentences.length);
   if (!items.length) return none;
-  const input = requirementPrompt(items);
-  const r = await oneshot({ system: REQUIREMENT_SYSTEM, prompt: input });
-  const failed = (warning) => ({ ...none, warnings: [warning], asked: true, input });
-  if (!r.ok) return failed(`requirement extraction failed: ${r.error}; add them by hand`);
-  const texts = validSentenceLabels(r.json, items);
-  if (!texts) return failed(REQUIREMENT_WARNING);
+  const batches = requirementBatches(items);
+  const refsOf = (list) => list.map((it) => it.ref).join(", ");
+  const texts = {};
+  const warnings = [];
+  const inputs = [];
+  for (const [n, batch] of batches.entries()) {
+    const input = requirementPrompt(batch);
+    inputs.push(input);
+    const r = await oneshot({ system: REQUIREMENT_SYSTEM, prompt: input });
+    if (!r.ok) {
+      // A usage limit will meet the next request too: it is not sent.
+      const lost = r.limited ? batches.slice(n).flat() : batch;
+      const of = batches.length > 1 ? ` for ${refsOf(lost)}` : "";
+      warnings.push(`requirement extraction failed${of}: ${r.error}; add them by hand`);
+      if (r.limited) break;
+      continue;
+    }
+    const labelled = validSentenceLabels(r.json, batch);
+    if (labelled) Object.assign(texts, labelled);
+    else {
+      warnings.push(
+        batches.length > 1
+          ? `model could not label requirement sentences of ${refsOf(batch)}; add them by hand`
+          : REQUIREMENT_WARNING,
+      );
+    }
+  }
+  const input = inputs.join("\n\n");
+  if (!Object.keys(texts).length) return { ...none, warnings, asked: true, input };
   return {
     comments: comments.map((c) =>
       texts[c.ref] ? { ...c, requirements: numberRequirements([], texts[c.ref]) } : c,
     ),
-    warnings: [],
+    warnings,
     asked: true,
     input,
-    requests: Object.fromEntries(items.map((it) => [it.ref, texts[it.ref].length])),
+    requests: Object.fromEntries(
+      items.filter((it) => texts[it.ref]).map((it) => [it.ref, texts[it.ref].length]),
+    ),
   };
 }
