@@ -27,6 +27,33 @@ import { normalizeParaText } from "./revision-classify.mjs";
 
 export const COUNT_TARGETS = ["section_words", "keywords", "figures", "tables", "section_order"];
 
+// The sections a rule can name, and the words that name each one, in a
+// guideline sentence as well as in a heading of the manuscript. This is the
+// one table: the guideline extractor (guideline-extract.mjs) reads it to find
+// a section in a sentence, and the heading patterns below are made from it.
+export const SECTION_TERMS = {
+  abstract: ["abstract", "summary"],
+  introduction: ["introduction", "background"],
+  methods: ["methods", "materials and methods", "material and methods", "experimental"],
+  results: ["results"],
+  discussion: ["discussion"],
+  conclusion: ["conclusion", "conclusions"],
+};
+
+// The heading pattern of each section: one of its words at the start of the
+// title, as a whole word, after an optional number ("2. Methods").
+const words = (terms) =>
+  [...terms]
+    .sort((a, b) => b.length - a.length)
+    .map((t) => t.replace(/ /g, "\\s+"))
+    .join("|");
+export const SECTION_PATTERNS = Object.fromEntries(
+  Object.entries(SECTION_TERMS).map(([name, terms]) => [
+    name,
+    `^(?:[\\d.]+\\s+)?(?:${words(terms)})\\b`,
+  ]),
+);
+
 const view = (p) => normalizeParaText(p.reviewed_text ?? p.text);
 
 export const wordCount = (text) => {
@@ -93,9 +120,17 @@ export function checkCountItem(item, paragraphs, { headings = [], profile = {} }
 
   if (c.target === "section_order") {
     if (!Array.isArray(c.order) || !c.order.length) return error("section_order needs an order");
-    const at = c.order.map((name) =>
-      sections.findIndex((s) => s.title.toLowerCase().includes(String(name).toLowerCase())),
-    );
+    // A name of SECTION_TERMS is found by its heading pattern, like the
+    // section of a word limit; any other name by its text in the title.
+    const at = c.order.map((name) => {
+      const key = String(name).toLowerCase();
+      const re = Object.hasOwn(SECTION_PATTERNS, key)
+        ? new RegExp(SECTION_PATTERNS[key], "i")
+        : null;
+      return sections.findIndex((s) =>
+        re ? re.test(s.title) : s.title.toLowerCase().includes(key),
+      );
+    });
     const missing = c.order.filter((_, i) => at[i] === -1);
     if (missing.length) return error(`no section: ${missing.join(", ")}`);
     const bad = at.findIndex((v, i) => i > 0 && v < at[i - 1]);

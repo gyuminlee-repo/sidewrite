@@ -19,7 +19,10 @@
 // the one-shot function of the chosen provider, and shows candidates to the
 // author before any of them enters the ledger.
 
-import { COUNT_TARGETS } from "./count-check.mjs";
+import { COUNT_TARGETS, SECTION_PATTERNS, SECTION_TERMS } from "./count-check.mjs";
+
+// The section names and their words live with the check that uses them.
+export { SECTION_PATTERNS, SECTION_TERMS };
 import { FETCH_TIMEOUT_MS, deadline } from "./fetch-timeout.mjs";
 
 export const GUIDELINE_SYSTEM =
@@ -57,17 +60,7 @@ export const FORMAT_WORDS = {
 export const GUIDELINE_WARNING =
   "model could not label the guideline sentences; add the rules by hand";
 
-// Section names the model may pick, and the heading pattern each one becomes
-// (a heading may carry a number: "1. Introduction").
-const HEAD = "^(?:[\\d.]+\\s+)?";
-export const SECTION_PATTERNS = {
-  abstract: `${HEAD}(?:abstract|summary)\\b`,
-  introduction: `${HEAD}(?:introduction|background)\\b`,
-  methods: `${HEAD}(?:materials?\\s+and\\s+methods|methods|experimental)\\b`,
-  results: `${HEAD}results\\b`,
-  discussion: `${HEAD}discussion\\b`,
-  conclusion: `${HEAD}conclusions?\\b`,
-};
+// Section names the model may pick (count-check.mjs has the table).
 const SECTIONS = Object.keys(SECTION_PATTERNS);
 const BOUNDED = COUNT_TARGETS.filter((t) => t !== "section_order");
 
@@ -141,16 +134,6 @@ function sentenceLabel(x) {
 // "250 characters"; "8 figures", not "6 panels"), and the sentence must say
 // in which direction the number limits it. Whatever is not found keeps the
 // sentence as a model-checked rule, with a warning.
-
-// The words that name each section in running text.
-export const SECTION_TERMS = {
-  abstract: ["abstract", "summary"],
-  introduction: ["introduction", "background"],
-  methods: ["methods", "materials and methods", "experimental"],
-  results: ["results"],
-  discussion: ["discussion"],
-  conclusion: ["conclusion", "conclusions"],
-};
 
 // When is a number confirmed as the limit of a section? The unit stands next
 // to the number and the direction right before or after it (below), so those
