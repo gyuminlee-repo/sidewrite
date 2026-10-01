@@ -1,0 +1,69 @@
+{
+  "today": {
+    "top_level": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "functions.request_user_input_async",
+      "clock.sleep"
+    ],
+    "nested_in_exec": [
+      "apply_patch",
+      "clock__curr_time",
+      "create_goal",
+      "exec_command",
+      "get_goal",
+      "list_mcp_resource_templates",
+      "list_mcp_resources",
+      "read_mcp_resource",
+      "request_plugin_install",
+      "update_goal",
+      "view_image",
+      "write_stdin"
+    ],
+    "tools_key": null,
+    "input_items": [
+      "additional_tools/developer",
+      "message/developer",
+      "message/developer",
+      "message/user",
+      "message/developer",
+      "message/user"
+    ]
+  },
+  "plan_set": {
+    "top_level": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "functions.request_user_input_async",
+      "clock.sleep"
+    ],
+    "nested_in_exec": ["apply_patch", "clock__curr_time", "create_goal", "get_goal", "update_goal"],
+    "tools_key": null,
+    "input_items": [
+      "additional_tools/developer",
+      "message/developer",
+      "message/developer",
+      "message/user",
+      "message/user"
+    ]
+  },
+  "final_set": {
+    "top_level": [
+      "functions.exec",
+      "functions.wait",
+      "functions.request_user_input",
+      "functions.request_user_input_async"
+    ],
+    "nested_in_exec": ["apply_patch", "clock__curr_time"],
+    "tools_key": null,
+    "input_items": [
+      "additional_tools/developer",
+      "message/developer",
+      "message/developer",
+      "message/user",
+      "message/user"
+    ]
+  }
+}

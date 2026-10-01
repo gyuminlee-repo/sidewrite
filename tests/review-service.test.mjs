@@ -7,6 +7,7 @@ import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 import { loadRevision, saveRevision } from "../daemon/revision-store.mjs";
 import { REQUIREMENT_SYSTEM } from "../daemon/review-split.mjs";
+import { ledgerReply } from "./fixtures/ledger-reply.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 
@@ -19,7 +20,7 @@ async function setup({ env = ENV, oneshot = null, callResult, callImpl = null, .
   const pushed = [];
   const calls = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
     callTool: async (name, args) => {
       calls.push([name, args]);
       if (callImpl) return callImpl(name, args, calls.length);
@@ -453,8 +454,24 @@ test("turnEnded pushes turn_done", async () => {
   const t = await setup();
   try {
     t.svc.turnEnded("k", { ref: "R1.1" });
-    assert.deepEqual(t.events.at(-1), { type: "review_event", event: "turn_done", ref: "R1.1" });
+    assert.deepEqual(t.events.at(-1), {
+      type: "review_event",
+      event: "turn_done",
+      ref: "R1.1",
+      ok: true,
+    });
     assert.equal(t.lines.at(-1), "[review] turn done R1.1");
+    // How the turn ended goes with turn_done itself: an error event sent
+    // before or after it is not what the pane's Propose all decides on.
+    t.svc.turnEnded("k", { ref: "R1.2" }, { ok: false, error: "Claude usage limit reached." });
+    assert.deepEqual(t.events.at(-1), {
+      type: "review_event",
+      event: "turn_done",
+      ref: "R1.2",
+      ok: false,
+      error: "Claude usage limit reached.",
+    });
+    assert.equal(t.lines.at(-1), "[review] turn done R1.2 failed: Claude usage limit reached.");
   } finally {
     await t.cleanup();
   }
@@ -947,7 +964,7 @@ test("an applying item left by a stopped daemon becomes outcome_unknown on load 
     assert.equal(stuck.state, "applying"); // this daemon is still applying it
 
     const next = createReviewService({
-      getContext: () => ({ activeDoc: t.doc }),
+      getContext: () => ({ activeDoc: t.doc, caps: ["target_hash"] }),
       callTool: async () => ({ ok: true }),
       pushTurn: () => {},
       log: () => {},
@@ -1002,10 +1019,10 @@ test("overlapping comments_backup requests write two files, neither overwritten"
 
 test("ledger_check stores an unsure LLM verdict on the item", async () => {
   const t = await setup({
-    oneshot: async () => ({
-      ok: true,
-      json: { violations: [], unsure: [{ paragraph_index: 3, reason: "cannot tell" }] },
-    }),
+    oneshot: async (req) =>
+      ledgerReply(req, [{ index: 3, text: "a" }], {
+        unsure: [{ paragraph_index: 3, reason: "cannot tell" }],
+      }),
   });
   try {
     await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
@@ -1033,13 +1050,17 @@ test("receipts: an LLM split, LLM ledger verdicts and requirement links land in 
         assert.equal(req.system, REQUIREMENT_SYSTEM);
         return { ok: true, json: { sentences: [{ ref: "R1.1", s: 1, type: "request" }] } };
       }
-      return {
-        ok: true,
-        json: {
+      return ledgerReply(
+        req,
+        [
+          { index: 3, text: "some hidden words" },
+          { index: 4, text: "maybe" },
+        ],
+        {
           violations: [{ paragraph_index: 3, quote: "hidden words", reason: "r" }],
           unsure: [{ paragraph_index: 4, reason: "?" }],
         },
-      };
+      );
     },
   });
   try {
@@ -1156,9 +1177,9 @@ test("ledger_check drops the result of a rule edited during the check; the next 
   let release;
   const gate = new Promise((r) => (release = r));
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       await gate;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1188,9 +1209,9 @@ test("ledger_check skips an item removed during the check and still saves the ot
   let release;
   const gate = new Promise((r) => (release = r));
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       await gate;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1218,15 +1239,14 @@ test("ledger_check: a stale check that ends after a newer one leaves the newer r
   const gate = new Promise((r) => (release = r));
   let n = 0;
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       if (++n === 1) {
         await gate;
-        return { ok: true, json: { violations: [], unsure: [] } };
+        return ledgerReply(req, []);
       }
-      return {
-        ok: true,
-        json: { violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }], unsure: [] },
-      };
+      return ledgerReply(req, [para(0, "a novel substrate")], {
+        violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }],
+      });
     },
   });
   try {
@@ -1260,13 +1280,12 @@ async function overlappingChecks(order) {
     oneshot: async (req) => {
       if (req.prompt.includes("novel")) {
         await opened.old;
-        return {
-          ok: true,
-          json: { violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }], unsure: [] },
-        };
+        return ledgerReply(req, [para(0, "a novel substrate")], {
+          violations: [{ paragraph_index: 0, quote: "novel", reason: "r" }],
+        });
       }
       await opened.fresh;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1311,9 +1330,9 @@ test("ledger_check and review_split answer with a job id at once and send the re
   let release;
   const gate = new Promise((r) => (release = r));
   const t = await setup({
-    oneshot: async () => {
+    oneshot: async (req) => {
       await gate;
-      return { ok: true, json: { violations: [], unsure: [] } };
+      return ledgerReply(req, []);
     },
   });
   try {
@@ -1625,6 +1644,291 @@ test("tracked-edit context: changes recorded after the last refresh are given wi
   }
 });
 
+// P15: the ledger as a JSON file next to the manuscript.
+test("ledger_export writes <stem>.ledger.json; ledger_import adds its rules and skips known ones", async () => {
+  const t = await setup();
+  try {
+    await t.ask("ledger_add", { item: NOVEL });
+    await t.ask("ledger_add", { item: IN_VITRO });
+    const x = await t.ask("ledger_export");
+    assert.deepEqual([x.ok, x.count, x.path], [true, 2, join(t.dir, "paper.ledger.json")]);
+    const file = JSON.parse(await readFile(x.path, "utf8"));
+    assert.equal(file.format, "manuscript-pane-ledger");
+    assert.deepEqual(
+      file.items.map((i) => Object.keys(i).sort()),
+      [
+        ["check", "kind", "scope", "text"],
+        ["check", "kind", "scope", "text"],
+      ],
+    );
+    assert.ok(t.lines.includes(`[review] ledger export path=${x.path} count=2`));
+
+    // Same rules again: nothing added.
+    const same = await t.ask("ledger_import", { doc: file });
+    assert.deepEqual([same.ok, same.added, same.skipped], [true, 0, 2]);
+    assert.ok(t.lines.includes("[review] ledger import added=0 skipped=2 mode=append"));
+
+    await t.ask("ledger_remove", { id: "L1" });
+    const back = await t.ask("ledger_import", { doc: file, mode: "append" });
+    assert.deepEqual([back.added, back.skipped], [1, 1]);
+    assert.deepEqual(
+      back.revision.ledger.map((i) => i.text),
+      [IN_VITRO.text, NOVEL.text],
+    );
+
+    const bad = await t.ask("ledger_import", { doc: { items: [{ kind: "forbid" }] } });
+    assert.equal(bad.ok, false);
+    assert.match(bad.error, /item 1/);
+    const none = await t.ask("ledger_import", { doc: null });
+    assert.match(none.error, /items array/);
+    assert.equal((await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).ledger.length, 2);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("ledger_suggest is a job: candidates from the review text, one receipt, nothing stored", async () => {
+  const { SUGGEST_SYSTEM } = await import("../daemon/ledger-suggest.mjs");
+  const systems = [];
+  const t = await setup({
+    oneshot: async (req) => {
+      systems.push(req.system);
+      return {
+        ok: true,
+        json: {
+          labels: [
+            { i: 0, type: "none" },
+            { i: 2, type: "instruction" },
+          ],
+        },
+      };
+    },
+    oneshotModel: "haiku",
+  });
+  try {
+    const text = 'Reviewer 1\nDo not use "novel".\nUse SI units throughout.';
+    let first = null;
+    await new Promise((resolve) =>
+      t.svc.handlers.ledger_suggest(
+        { type: "ledger_suggest", request_id: "q7", text },
+        (r) => ((first = r), resolve()),
+        "k",
+        "word",
+      ),
+    );
+    assert.deepEqual([first.accepted, typeof first.job_id], [true, "string"]);
+
+    const r = await t.ask("ledger_suggest", { text });
+    assert.deepEqual([r.ok, r.method], [true, "regex+llm"]);
+    assert.deepEqual(
+      r.candidates.map((c) => [c.kind, c.check.type, c.text]),
+      [
+        ["forbid", "regex", 'Do not use "novel".'],
+        ["instruction", "llm", "Use SI units throughout."],
+      ],
+    );
+    assert.deepEqual([...new Set(systems)], [SUGGEST_SYSTEM]);
+    assert.ok(t.lines.includes("[review] ledger suggest method=regex+llm candidates=2 warnings=0"));
+
+    await new Promise((res) => setTimeout(res, 20)); // the first job's receipt
+    const raw = await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8");
+    assert.equal(raw.includes("novel"), false, "no review text in the receipt");
+    const log = await readDecisions(t.dir);
+    assert.deepEqual(
+      log.map((x) => [x.kind, x.model, x.output.candidates]),
+      [
+        ["ledger_suggest", "haiku", 2],
+        ["ledger_suggest", "haiku", 2],
+      ],
+    );
+    assert.equal((await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).ledger.length, 0);
+
+    const empty = await t.ask("ledger_suggest", { text: "  " });
+    assert.deepEqual([empty.ok, /review text/.test(empty.error)], [false, true]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// P14: one-shot judgments go to the provider chosen in the pane (key "k").
+test("review_split uses the pane's one-shot and its model label", async () => {
+  const used = [];
+  const t = await setup({
+    oneshotJob: async (key) => ({
+      run: async () => (used.push(key), { ok: true, json: { lines: [] }, text: "{}" }),
+      model: `ollama:qwen3.5:9b@${key}`,
+    }),
+  });
+  try {
+    await t.ask("review_split", { text: "Reviewer 1\nOne comment only." });
+    assert.ok(used.includes("k"));
+    // The comment_split and requirement_extract receipts name the routed model.
+    const log = await readDecisions(t.dir);
+    assert.ok(log.length >= 1);
+    assert.ok(log.every((r) => r.model === "ollama:qwen3.5:9b@k"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("ledger_check and ledger_suggest use the pane's one-shot too; the default stays the constructor's", async () => {
+  const used = [];
+  const routed = async (req) => {
+    used.push(req.system.slice(0, 12));
+    return { ok: false, error: "routed provider is down" };
+  };
+  const t = await setup({
+    // The constructor's one-shot must not be asked once a route exists.
+    oneshot: async () => {
+      throw new Error("the default one-shot was used");
+    },
+    oneshotModel: "haiku",
+    oneshotJob: async (key) => ({
+      run: key === "k" ? routed : null,
+      model: `codex:gpt-6.1-sol@${key}`,
+    }),
+  });
+  try {
+    await t.ask("ledger_add", {
+      item: { kind: "instruction", text: "Use SI units", check: { type: "llm" } },
+    });
+    const check = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 1, text: "Ten feet.", reviewed_text: "Ten feet." }] },
+      full: true,
+    });
+    assert.equal(check.ok, true);
+    const suggest = await t.ask("ledger_suggest", { text: "Reviewer 1\nUse SI units throughout." });
+    assert.deepEqual([suggest.ok, suggest.method], [true, "regex"]);
+    assert.match(suggest.warnings.join(" "), /routed provider is down/);
+    assert.equal(used.length, 2, "one ledger check batch and one suggestion were routed");
+    const log = await readDecisions(t.dir);
+    assert.deepEqual([...new Set(log.map((r) => r.kind))].sort(), [
+      "ledger_check",
+      "ledger_suggest",
+    ]);
+    assert.ok(log.every((r) => r.model === "codex:gpt-6.1-sol@k"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Codex review of stage 2.5: the provider of a job is taken once, when the
+// job starts. A choice changed in the pane while the job runs applies to the
+// next job; every request and every receipt of this one is the first choice.
+test("a ledger check in several batches stays on the provider it started with, and its receipts say so", async () => {
+  let choice = "ollama:qwen3.5:9b";
+  const pins = [];
+  const calls = [];
+  const t = await setup({
+    oneshot: async () => {
+      throw new Error("the default one-shot was used");
+    },
+    // As oneshot-router.mjs pin(): the choice of this moment, kept by the handle.
+    oneshotJob: async () => {
+      const mine = choice;
+      pins.push(mine);
+      return {
+        model: mine,
+        run: async () => {
+          calls.push(mine);
+          choice = "codex:gpt-6.1-sol"; // the pane changes it while the job runs
+          return { ok: true, text: "{}", json: { violations: [] } };
+        },
+      };
+    },
+  });
+  try {
+    for (const text of ["Use SI units", "Write numbers below ten as words"]) {
+      await t.ask("ledger_add", { item: { kind: "instruction", text, check: { type: "llm" } } });
+    }
+    const paragraphs = Array.from({ length: 3 }, (_, i) => ({
+      index: i,
+      text: `Paragraph ${i} is ten feet long.`,
+      reviewed_text: `Paragraph ${i} is ten feet long.`,
+    }));
+    const check = await t.ask("ledger_check", { snapshot: { paragraphs }, full: true });
+    assert.equal(check.ok, true);
+    assert.equal(pins.length, 1, "the provider was resolved once for the whole job");
+    assert.ok(calls.length >= 2, `several requests in one job (${calls.length})`);
+    assert.deepEqual([...new Set(calls)], ["ollama:qwen3.5:9b"]);
+    const log = await readDecisions(t.dir);
+    assert.ok(log.length >= 2);
+    assert.deepEqual([...new Set(log.map((r) => r.model))], ["ollama:qwen3.5:9b"]);
+    // The next job starts with the choice as it is then.
+    await t.ask("ledger_check", { snapshot: { paragraphs }, full: true });
+    assert.deepEqual(pins, ["ollama:qwen3.5:9b", "codex:gpt-6.1-sol"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_split: the split and the requirement extraction after it run on one provider", async () => {
+  let choice = "ollama:qwen3.5:9b";
+  const pins = [];
+  const calls = [];
+  const t = await setup({
+    oneshotJob: async () => {
+      const mine = choice;
+      pins.push(mine);
+      return {
+        model: mine,
+        run: async (req) => {
+          calls.push(mine);
+          choice = "codex:gpt-6.1-sol";
+          // The split: both lines start a comment. The extraction then fails.
+          if (!req.prompt.includes("\nLines:\n")) return { ok: false, error: "the model is down" };
+          const lines = [1, 2].map((n) => ({ n, type: "comment_start" }));
+          return { ok: true, json: { lines }, text: "{}" };
+        },
+      };
+    },
+  });
+  try {
+    // No reviewer heading: the regex split fails and the model is asked, then
+    // the requirements of the comments are asked for.
+    await t.ask("review_split", { text: "The units are missing.\nThe figure is unclear." });
+    assert.equal(pins.length, 1);
+    assert.ok(calls.length >= 2, `split and extraction (${calls.length})`);
+    assert.deepEqual([...new Set(calls)], ["ollama:qwen3.5:9b"]);
+    const log = await readDecisions(t.dir);
+    assert.deepEqual([...new Set(log.map((r) => r.model))], ["ollama:qwen3.5:9b"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Codex review of stage 2.5: a review turn waits for the pane's confirmed
+// provider like a judgment does. Without one it fails before anything is
+// built or queued: no turn goes to a provider the pane did not confirm.
+test("review_propose asks the turn gate first; a refusal starts no turn and changes nothing", async () => {
+  let gate = async () => {
+    throw new Error(
+      "The stored provider for review turns cannot be used: Codex CLI is not available.",
+    );
+  };
+  const t = await setup({ turnGate: (key) => gate(key) });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const r = await t.ask("review_propose", { ref: "R1.1" });
+    assert.deepEqual(
+      [r.ok, r.error],
+      [false, "The stored provider for review turns cannot be used: Codex CLI is not available."],
+    );
+    assert.deepEqual(t.pushed, [], "no turn was queued");
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").status, "pending");
+    // Once the provider is confirmed the same request starts the turn.
+    const seen = [];
+    gate = async (key) => void seen.push(key);
+    const ok = await t.ask("review_propose", { ref: "R1.1" });
+    assert.equal(ok.started, true);
+    assert.deepEqual(seen, ["k"]);
+    assert.equal(t.pushed.length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // Codex review 14: a normal tracked edit Word applied while the connection
 // dropped left nothing in the file: the attempt was only in memory, no late
 // result came, and the refresh recovery read blocked exceptions only. The
@@ -1747,7 +2051,7 @@ test("a daemon that restarted reconciles the unanswered edit it finds in the fil
       await unansweredEdit(t);
       // A second service on the same folder: nothing of the first in memory.
       const svc2 = createReviewService({
-        getContext: () => ({ activeDoc: t.doc }),
+        getContext: () => ({ activeDoc: t.doc, caps: ["target_hash"] }),
         callTool: async () => ({ ok: true }),
         pushTurn: () => {},
         sendEvent: () => {},
@@ -1847,7 +2151,7 @@ test("an unanswered normal edit can be applied again from the Review tab (force)
 // answer of Word, a queued turn) must not read the context again: the pane
 // may be gone by then, or its document saved under another name.
 test("no handler reads the pane's document again after its first await", async () => {
-  const ctx = { activeDoc: null };
+  const ctx = { activeDoc: null, caps: ["target_hash"] };
   const hooks = { oneshot: null, call: null, push: null };
   const t = await setup({
     getContext: () => ({ ...ctx }),
@@ -1865,9 +2169,9 @@ test("no handler reads the pane's document again after its first await", async (
     await t.ask("ledger_add", { item: NOVEL });
 
     // ledger_check job: the pane goes away while the model answers.
-    hooks.oneshot = async () => {
+    hooks.oneshot = async (req) => {
       ctx.activeDoc = null;
-      return { ok: true, json: { violations: [] } };
+      return ledgerReply(req, []);
     };
     const checked = await t.ask("ledger_check", {
       ids: ["L1"],
@@ -2013,7 +2317,7 @@ test("review_split: the section of a comment reaches the requirement extraction 
       r.comments.map((c) => [c.ref, c.section, c.text, c.requirements.map((q) => q.text)]),
       [
         ["R1.1", "Abstract", "Shorten this section.", ["Shorten this section."]],
-        ["R1.2", "Methods", "Expand this section.", ["Expand this section."]],
+        ["R1.2", "Methods", "1. Expand this section.", ["Expand this section."]],
       ],
     );
     assert.match(prompt, /\[R1\.1 section\] Abstract\n\[R1\.1 s1\] Shorten this section\./);
@@ -2028,7 +2332,7 @@ test("review_split: the section of a comment reaches the requirement extraction 
     const preview = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
     assert.match(
       preview.prompt,
-      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\n<<<\nExpand this section\.\n>>>/,
+      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\n<<<\n1\. Expand this section\.\n>>>/,
     );
     assert.ok(
       t.lines.some((l) => /^\[review\] prompt R1\.2 .* section="Methods"/.test(l)),
@@ -2088,6 +2392,285 @@ test("review_save_comments: an empty section clears the label, a missing key kee
     assert.ok(!cleared.prompt.includes("Section of the review"), cleared.prompt);
     const kept = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
     assert.ok(kept.prompt.includes("Section of the review this comment is under: Methods"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// ---- journal profile: rationale language and split patterns --------------------
+
+test("review prompt takes the rationale language from the paper profile, then the env default", async () => {
+  const plain = await setup();
+  await plain.ask("review_save_comments", { comments: COMMENTS });
+  assert.match(
+    (await plain.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in English/,
+  );
+  await plain.cleanup();
+
+  const t = await setup({ env: { ...ENV, CC_OFFICE_RATIONALE_LANG: "French" } });
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  assert.match(
+    (await t.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in French/,
+  );
+  const path = join(t.dir, "paper.revision.json");
+  await saveRevision(path, {
+    ...(await loadRevision(path, t.doc)),
+    profile_overrides: { rationale_lang: "German" },
+  });
+  const p = (await t.ask("review_preview", { ref: "R1.1" })).prompt;
+  assert.match(p, /Write the rationale in German/);
+  assert.doesNotMatch(p, /Korean|French/);
+  // The turn that is queued carries the same language.
+  await t.ask("review_propose", { ref: "R1.1" });
+  assert.match(t.pushed[0].text, /Write the rationale in German/);
+  await t.cleanup();
+});
+
+test("the settings default sits between the profile and the env", async () => {
+  const t = await setup({
+    env: { ...ENV, CC_OFFICE_RATIONALE_LANG: "French" },
+    langDefault: () => "Korean",
+  });
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  assert.match(
+    (await t.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in Korean/,
+  );
+  await t.cleanup();
+});
+
+test("an unreadable profile falls back to the env default and says so", async () => {
+  const t = await setup({ env: { ...ENV, CC_OFFICE_RATIONALE_LANG: "French" } });
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  const path = join(t.dir, "paper.revision.json");
+  await saveRevision(path, { ...(await loadRevision(path, t.doc)), journal_profile: "missing" });
+  assert.match(
+    (await t.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in French/,
+  );
+  assert.ok(t.lines.some((l) => /\[review\] profile not loaded: No profile "missing"/.test(l)));
+  await t.cleanup();
+});
+
+test("review_split takes head patterns with a capture group from the paper profile", async () => {
+  const t = await setup();
+  const text =
+    "Gutachter 1\n\n1. Please state the unit.\n\nGutachter 2\n\n1. Please name the supplier.";
+  const refs = async (payload = {}) =>
+    (await t.ask("review_split", { text, ...payload })).comments.map((c) => c.ref);
+  // The built-in patterns do not know this heading: one reviewer.
+  assert.deepEqual(await refs(), ["R1.1", "R1.2"]);
+  await mkdir(join(t.dir, "journal_profiles"));
+  await writeFile(
+    join(t.dir, "journal_profiles", "mine.json"),
+    JSON.stringify({
+      name: "mine",
+      reviewer_head: "^Gutachter (\\d+)$",
+      comment_head: "^Comment \\d+ ",
+    }),
+  );
+  const path = join(t.dir, "paper.revision.json");
+  await saveRevision(path, { ...(await loadRevision(path, t.doc)), journal_profile: "mine" });
+  assert.deepEqual(await refs(), ["R1.1", "R2.1"]);
+  // Patterns sent with the request win over the profile.
+  assert.deepEqual(await refs({ patterns: {} }), ["R1.1", "R1.2"]);
+  await t.cleanup();
+});
+
+test("review_split still works when the document has no local path", async () => {
+  const lines = [];
+  const events = [];
+  const svc = createReviewService({
+    getContext: () => ({ activeDoc: null }),
+    callTool: async () => ({}),
+    pushTurn: () => {},
+    sendEvent: (key, e) => events.push(e),
+    log: (s) => lines.push(s),
+    env: ENV,
+  });
+  await svc.handlers.review_split(
+    { request_id: "q", text: "Reviewer #1\n\n1. Please state the unit." },
+    () => {},
+    "k",
+    "word",
+  );
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(
+    [events[0].result.ok, events[0].result.comments.map((c) => c.ref)],
+    [true, ["R1.1"]],
+  );
+});
+
+// ---- stage 3: a refresh marks saved responses stale (afterRefresh) --------------
+import { markStale, snapshotHash } from "../daemon/response-quotes.mjs";
+import { emptyRevision } from "../daemon/revision-store.mjs";
+
+const QUOTED = "The incubation temperature was held at 30 °C.";
+const STALE_SNAP = (
+  p1 = `Flasks were shaken. ${QUOTED} Samples were drawn daily.`,
+  p2 = "Growth was slow.",
+) => ({
+  paragraphs: [
+    { index: 0, id: "P0", text: p1, w_ins: 0, w_del: 0 },
+    { index: 1, id: "P1", text: p2, w_ins: 0, w_del: 0 },
+  ],
+  comments: [],
+});
+async function staleSetup(more = {}) {
+  const t = await setup({ afterRefresh: (rev, snap) => markStale(rev, snap), ...more });
+  await saveRevision(join(t.dir, "paper.revision.json"), {
+    ...emptyRevision(t.doc),
+    response_render: {
+      pdf_sha: "0".repeat(64),
+      snapshot_hash: snapshotHash(STALE_SNAP()),
+      at: "2026-01-01T00:00:00.000Z",
+      lines_indexed: 10,
+    },
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        changes: [],
+        response: {
+          text: "We now state the unit.",
+          citations: [
+            { kind: "revised", quote: QUOTED, paragraph_index: 0, section: null, change_ids: [] },
+          ],
+        },
+      },
+    ],
+  });
+  return t;
+}
+const staleOf = async (t) =>
+  (await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).comments[0].response.stale;
+
+test("review_refresh: a changed word in a quoted sentence marks the response stale and logs it", async () => {
+  const t = await staleSetup();
+  try {
+    const same = await t.ask("review_refresh", { snapshot: STALE_SNAP() });
+    assert.equal(same.ok, true, same.error);
+    assert.deepEqual(await staleOf(t), []);
+    assert.equal(
+      t.lines.some((l) => l.startsWith("[response] stale")),
+      false,
+    );
+
+    const r = await t.ask("review_refresh", {
+      snapshot: STALE_SNAP(
+        `Flasks were shaken. ${QUOTED.replace("held", "kept")} Samples were drawn daily.`,
+      ),
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.revision.comments[0].response.stale, ["quote_changed", "lines_old"]);
+    assert.deepEqual(await staleOf(t), ["quote_changed", "lines_old"]);
+    assert.ok(
+      t.lines.includes("[response] stale R1.1 quote_changed,lines_old"),
+      t.lines.join("\n"),
+    );
+    // The same state again is not logged again.
+    const n = t.lines.filter((l) => l.startsWith("[response] stale")).length;
+    await t.ask("review_refresh", {
+      snapshot: STALE_SNAP(
+        `Flasks were shaken. ${QUOTED.replace("held", "kept")} Samples were drawn daily.`,
+      ),
+    });
+    assert.equal(t.lines.filter((l) => l.startsWith("[response] stale")).length, n);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_refresh: a change in another paragraph makes only the line numbers old", async () => {
+  const t = await staleSetup();
+  try {
+    await t.ask("review_refresh", { snapshot: STALE_SNAP(undefined, "Growth was fast.") });
+    assert.deepEqual(await staleOf(t), ["lines_old"]);
+    assert.ok(t.lines.includes("[response] stale R1.1 lines_old"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_refresh without the hook leaves the responses alone", async () => {
+  const t = await staleSetup({ afterRefresh: null });
+  try {
+    await t.ask("review_refresh", { snapshot: STALE_SNAP(undefined, "Growth was fast.") });
+    assert.deepEqual(await staleOf(t), []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// A review_propose whose pane has stopped waiting (it says how long it waits
+// in wait_ms) must not start a turn when the gate lets it through later: the
+// author has seen that request fail.
+test("review_propose: a request the pane has given up starts no turn", async () => {
+  let clock = 1_000;
+  let gateTakes = 11_000;
+  const t = await setup({
+    clock: () => clock,
+    turnGate: async () => {
+      clock += gateTakes; // the provider was confirmed after this long
+    },
+  });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const late = await t.ask("review_propose", { ref: "R1.1", wait_ms: 10_000 });
+    assert.deepEqual(
+      [late.ok, late.error],
+      [
+        false,
+        "The task pane stopped waiting for this request after 10 s, so no turn was started. Press Propose changes again.",
+      ],
+    );
+    assert.deepEqual(t.pushed, [], "no turn was queued");
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").status, "pending");
+    // In time: the turn starts. A pane that sends no wait_ms is not held to one.
+    gateTakes = 9_000;
+    assert.equal((await t.ask("review_propose", { ref: "R1.1", wait_ms: 10_000 })).started, true);
+    gateTakes = 60_000;
+    assert.equal((await t.ask("review_propose", { ref: "R1.3" })).started, true);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// H4 with the job pin of stage 2.5: the second request for a batch whose
+// reply was in the wrong form goes to the provider and model the check
+// started with, also when the pane's choice changed in between.
+test("ledger_check: the retry of a malformed reply runs on the pinned provider of the job", async () => {
+  const asked = [];
+  let pins = 0;
+  const provider = (name, bad) => async (req) => {
+    asked.push(name);
+    return bad && asked.length === 1
+      ? { ok: true, json: { violations: [] } }
+      : ledgerReply(req, []);
+  };
+  const t = await setup({
+    // Each job pins the choice of its start; the choice changes after the first pin.
+    oneshotJob: async () =>
+      ++pins === 1
+        ? { run: provider("ollama:first", true), model: "ollama:first" }
+        : { run: provider("claude", false), model: "haiku" },
+  });
+  try {
+    await t.ask("ledger_add", { item: { kind: "instruction", text: "t", check: { type: "llm" } } });
+    const r = await t.ask("ledger_check", {
+      snapshot: { paragraphs: [{ index: 0, text: "A paragraph.", reviewed_text: null }] },
+    });
+    assert.equal(r.revision.ledger[0].status, "ok");
+    assert.deepEqual([pins, asked], [1, ["ollama:first", "ollama:first"]]);
+    const rows = (await readDecisions(t.dir)).filter((d) => d.kind === "ledger_check");
+    assert.deepEqual(
+      rows.map((d) => [d.model, d.output.verdict]),
+      [["ollama:first", "ok"]],
+    );
   } finally {
     await t.cleanup();
   }

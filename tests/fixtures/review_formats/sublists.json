@@ -54,7 +54,7 @@
       "text": "Reviewer 1:\nMajor comments\n1. Add a control.\nMinor comments\n1. Please add:\n1. the strain\n2. the medium",
       "refs": ["R1.1", "R1.2"],
       "texts": {
-        "R1.2": "Please add:\n1. the strain\n2. the medium"
+        "R1.2": "1. Please add:\n1. the strain\n2. the medium"
       },
       "sections": {
         "R1.1": "Major comments",

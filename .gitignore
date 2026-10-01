@@ -18,12 +18,16 @@ dist/
 # Office lock/owner temp files (~$foo.docx)
 ~$*
 
-# Stage-2 spike: PDFs rendered by office_spike_export_pdf
+# Rendered PDFs for line numbers (response letter)
 *.render.pdf
 
 # Review sidecars written next to a manuscript (only if a test manuscript sits here)
 tests/fixtures/*.revision.json
 tests/fixtures/*.decisions.jsonl
 tests/fixtures/*.comments_backup*.json
+tests/fixtures/*.response.*
 .codex-review-attempt
 __pycache__/
+
+# Words of the user's own that scripts/check-personal.sh also looks for
+.personal-patterns.local

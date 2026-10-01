@@ -1,8 +1,10 @@
 # Word acceptance run without hands
 
-`run-acceptance.mjs` runs the stage-2 Review tab acceptance procedure end to
-end: daemon, a separate Word process, the task pane clicks, the author's Word
-steps, and the feature_list verify commands.
+`run-acceptance.mjs` runs a Review tab acceptance procedure end to end:
+daemon, a separate Word process, the task pane clicks, the author's Word
+steps, and the feature_list verify commands. It has three flows: stage 2
+(`S2-18..S2-34`, the default), stage 2.5 (`--stage s25`, `S25-30..S25-41`)
+and stage 3 (`--stage s3`, `S3-30..S3-41`, the response letter).
 
 ## Prerequisites
 
@@ -44,17 +46,210 @@ copy of the test manuscript, its revision.json and comment backup, the Windows
 scripts (`tools/`), the machine-judged marker files (`ok/`, each with an
 `.evidence.json`) and `result.json` (every step with the pane texts read, the
 Word COM outcomes, the verify command exit codes and the cleanup record). The
-daemon log goes to `--log` (default `/tmp/daemon-s2-e2e.log`; a second
+daemon log goes to `--log` (default `/tmp/daemon-<stage>-e2e.log`; a second
 daemon started for the forbid-list knob writes `-knob.log`).
 
-Verify commands are rewritten before they run: `--plan-dir` becomes the run
+Verify commands are rewritten before they run (`rewriteVerify` in
+`judge.mjs`): `--plan-dir` (default `/tmp/<stage>-run`) becomes the run
 folder, `cd <--plan-repo> ` becomes this checkout, `--plan-log` (default
-`/tmp/daemon-s2.log`) and its `-knob.log` become this run's logs, `/tmp/s2-`
-markers become `ok/s2-`. Files of earlier runs are never read.
+`/tmp/daemon-<stage>.log`) and its `-knob.log` become this run's logs,
+`/tmp/<stage>-` markers and evidence files become `ok/<stage>-`. No marker
+path of a rewritten command is in `/tmp`, so a file left there by an earlier
+run or by hand cannot make it pass. When a run folder is reused
+(`--run-dir`), the `ok/<stage>-*.ok` and `ok/<stage>-*.evidence.json` files
+in it are removed at the start (`stale_markers_removed` in `result.json`).
+
+The stage is the prefix of the feature ids and of the markers, and it
+chooses the flow: `s2`, `s25` or `s3`. `--stage s25` sets it (the features
+then default to `S25-30..S25-41`); without it the stage is read from
+`--features` (default `S2-18..S2-34`). A range stays in one stage.
+
+Markers are written by the runner only (`marker(name, evidence)`): the
+evidence file always, the `.ok` file only when `evidence.pass` is true, and
+`pass` is computed by a pure function of `judge.mjs` from machine data (the
+texts read in the pane, revision.json, the daemon log, the answers of Word
+over COM, `pdftotext`). No marker is made by a person.
+
+## Stage 2.5
+
+```sh
+node scripts/e2e/run-acceptance.mjs --stage s25 \
+  --base-dir <folder on a Windows drive, as a WSL path> \
+  --playwright-core 'D:\path\to\node_modules\playwright-core' \
+  --feature-list <stage 2.5 feature_list.json> \
+  --plan-repo <repo path the feature_list commands cd into> \
+  --conditional S25-33,S25-34,S25-35,S25-36
+```
+
+The copy of the manuscript is `paper.docx`, so the files the feature list
+reads are `paper.decisions.jsonl` and `paper.ledger.json` in the run folder;
+`--plan-dir` and `--plan-log` default to `/tmp/s25-run` and
+`/tmp/daemon-s25.log`, the paths that list writes. Ollama must be running
+with a chat model (`--judgment-provider` names another provider for the
+judgments). The steps and what each feature is judged from:
+
+| Feature         | Steps                                                                                   | Evidence (`ok/`), marker only when it passes                                                                               |
+| --------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| S25-30          | `models`                                                                                | `s25-models`: a model outside sonnet, opus, haiku in the menu and `[models] source=sdk` in the log                         |
+| S25-31          | `providers`                                                                             | `s25-providers`: one entry per provider (`enabled`, `note` of the Judgments menu)                                          |
+| S25-32          | `select-provider oneshot=ollama`, `load-review-file`, `split`, `edit-draft`             | `s25-ollama-split`: Ollama selected, the split done, a receipt with `"model":"ollama:..."`                                 |
+| (no feature id) | daemon stopped and started again, `split` as soon as the pane is back                   | `s25-restart-split`: the stored provider restored, the split's judgments on it, no judgment or receipt of another provider |
+| S25-39          | `import-ledger` (fixture), `export-ledger`, `import-ledger` (the exported file)         | the step rows; the feature reads `paper.ledger.json` and the `[review] ledger import` log line                             |
+| S25-40          | `suggest-ledger` on `tests/fixtures/fake_review_rules.txt`, ticking "cell-free extract" | `s25-ledger-suggest`: the candidate ticked, added, and in the ledger                                                       |
+| S25-33          | `select-provider turn=codex`, `propose R1.1`                                            | `s25-codex-turn`: the turn started and ended with code 0, the endpoint was called, a change with its comment               |
+| S25-34          | `propose R1.3` (asks for a word rule L2 forbids)                                        | `s25-codex-guard`: `document_changes` = recorded changes that hold the word (0 to pass)                                    |
+| S25-36          | `propose-stop R1.4`                                                                     | `s25-cli-stop`: Stop pressed mid-turn, pane Ready, no `codex exec --json` process left                                     |
+| S25-35          | `select-provider turn=antigravity`, `propose R1.2`                                      | `s25-agy-turn`: as S25-33                                                                                                  |
+| S25-37          | `propose-all` (with Claude)                                                             | `s25-propose-all`: `overlaps`, `proposed`, `open_before`                                                                   |
+| S25-38          | Word COM deletes a sentence, `focus-refresh`                                            | `s25-focus-refresh`: the auto-refresh line changed and an outside change is listed                                         |
+| S25-41          | cleanup (Word quit, daemon stopped), then the verify commands                           | `s25-cleanup`: own Word gone, earlier Word processes alive, ports closed                                                   |
+
+When the pane does not offer Codex or Antigravity for review turns, the
+`select-provider turn=...` row is `SKIP`, no CLI turn is run, and the four
+evidence files carry `pass: false` with the pane's reason. With
+`--conditional` those features are then `SKIPPED-CONDITION-NOT-MET` (the log
+shows finished turns and no `[cli-turn] start`); without it they fail the
+run. The pane outputs these judgments were unit-tested with are written by
+hand in the form the driver returns: none was recorded from Word before the
+first stage 2.5 run.
+
+## Stage 3
+
+```sh
+node scripts/e2e/run-acceptance.mjs --stage s3 \
+  --base-dir <folder on a Windows drive, as a WSL path> \
+  --playwright-core 'D:\path\to\node_modules\playwright-core' \
+  --feature-list <stage 3 feature_list.json> \
+  --plan-repo <repo path the feature_list commands cd into>
+```
+
+The response letter (Response tab). More is needed than for stage 2:
+`pdftotext` (poppler-utils) and PyMuPDF (`python3 -c "import fitz"`) on the
+WSL side, the first as a second reader of the PDF Word renders, the second
+for the daemon's own line reader. The copy of the manuscript is
+`review_manuscript.docx` as in stage 2; `--plan-dir` and `--plan-log` default
+to `/tmp/s3-run` and `/tmp/daemon-s3.log`. The features default to
+`S3-30..S3-40`, checked while Word and the daemon are still up, and
+`--after-cleanup` (default `S3-41`) names the features whose verify command
+runs after the cleanup. `--letter` is the existing response letter that is
+read for its colours (default `tests/fixtures/prior_response.docx`).
+
+The review part is the stage 2 procedure up to the author's decisions in
+Word, with `S3_DECISIONS` (`judge.mjs`): the deletion asked for in R1.4 is
+accepted, so the letter cites a removal. The author's own pending insertion,
+the knob run, the comment cleanup, the mode 14 copy and the special
+character document are left out: a tracked change left pending is a warning
+of the letter check, and S3-34 asks for a check without one.
+
+The drafts are written by the judgment provider of the pane.
+`--judgment-provider <id>` chooses it (step `select-provider oneshot=<id>`);
+without the option the pane's own choice stays, which is Claude on a first
+run. `--provider` chooses the provider of the review turns as in stage 2.
+
+| Feature | Steps                                                                                                                                        | Evidence (`ok/`), marker only when it passes                                                                             |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| S3-30   | `open-response`                                                                                                                              | `s3-open`: `cards`, `verbatim` (each card's comment equals revision.json), `profile`                                     |
+| S3-31   | `load-letter`, then revision.json is read, `apply-proposal`                                                                                  | `s3-proposal`: the proposal rows, `before` (overrides while only proposed) and `after`                                   |
+| S3-32   | `response-decline` (R1.5, and every request no accepted change answers), `response-draft-all`                                                | none: the verify command reads revision.json and the daemon log                                                          |
+| S3-33   | `response-locate`, `pdftotext -layout` on the rendered PDF                                                                                   | `s3-lines`: `secondReader`, one row per cited sentence with the text of its start line                                   |
+| S3-34   | `response-check`                                                                                                                             | `s3-check`: `summary`, `checks`                                                                                          |
+| S3-35   | `response-export`, `tools/response_read.py` on the written letter                                                                            | `s3-export`: `body`, `revised` (the colours the reader finds), `path`                                                    |
+| S3-36   | Word COM `insert-paragraph`, `refresh` (Review tab), `open-response`, `response-locate`, `pdftotext`                                         | `s3-line-shift`: `lineShift` (`moved`, `kept`, `wrong`, `stale_shown`), `inserted_at`, `second`                          |
+| S3-37   | Word COM `replace-text` in a quoted sentence, `refresh`, `open-response`, `response-check`, `response-edit` (kept), `response-locate`, check | `s3-stale`: `stale_shown`, `failed_before`, `passed_after`, the daemon's `[response] stale` line                         |
+| S3-38   | `ledger-add` (response scope), `response-edit` (forbidden word), `response-export`, `response-edit` (put back), `response-check`             | `s3-ledger`: `ledger_fail`, `exported_while_failing` (the letter files and their times before and after), `passed_after` |
+| S3-40   | `response-export` (text), Word COM `open-check` on the letter, `response-export`, Word COM `close-other`                                     | `s3-open-check`: `opened`, `repaired`, `paragraphs_match` (Word's count and model.json), `first_path`, `second_path`     |
+| S3-39   | `response-set-lang` (German), `response-draft` R1.1, `preview` R1.1 (Review tab), `response-set-lang` (empty)                                | `s3-lang`: the language in the daemon's draft line and in the review prompt, `korean_found`                              |
+| S3-41   | cleanup (Word quit, daemon stopped), then its verify command                                                                                 | `s3-cleanup`: own Word gone, earlier Word processes alive, `ports_free`                                                  |
+
+What differs from a reading of the feature descriptions alone:
+
+- S3-37: the stale answer is cleared by saving it again (the author read it
+  and keeps it) and updating the line numbers, not by a refresh. A refresh
+  computes the citations anew, and the mark stays until the answer is written
+  again.
+- S3-38: the export is asked for right after the edit, while the button
+  still reads "Export letter (.docx)". The daemon finds the failure, writes
+  nothing, and the button then reads "Export anyway", which the run does not
+  press.
+- S3-40 runs before S3-39, so the letter that is opened in Word and the
+  export next to it are in the language of the checks that passed.
+- "R1.4 cites the removal" is a row of the table, `SKIP` when the model
+  answered R1.4 with another kind of change. No verify command reads it.
+
+A step that only reads or computes again (`open-response`, `response-locate`,
+`response-check`) is run a second time when it fails once (`retries` in
+`result.json`); a step that writes or asks a model is not. The flow has no
+fixed wait: every Response step waits for the message its own action ends
+with.
+
+`--provider <id>` (claude, codex, antigravity; stage 2 flow) chooses the
+provider of the review turns in the pane's Providers section right after the
+Review tab opened (step `select-provider turn=<id>`). A provider the pane
+does not offer for review turns is not chosen: the step fails with the text
+of its menu row, and the turns run with Claude. Known conditions for
+`--conditional` in stage 2.5: `S25-33`, `S25-34` (a Codex review turn
+started), `S25-35` (an Antigravity review turn started), `S25-36` (any CLI
+review turn started), each read from `[cli-turn] start provider=...`.
 
 Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
 `--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
 `--keep-on-fail` (leave Word and the daemon up after a failed step).
+
+## Pane steps
+
+`pane-driver.cjs <step> <args.json>` runs one step and prints one JSON line.
+Stage 2: `open-review`, `split`, `edit-draft`, `ledger-add`, `check-all`,
+`preview`, `propose`, `refresh`, `clean-tool`, `delete-all`, `view`.
+`split` and `suggest-ledger` wait for the message their own action ends with
+(`Split by ...`, `... candidate rule(s) by ...`) or for an error. The line
+can show other text first: the notice of a click held until the daemon has
+confirmed the stored provider, or the late result of an earlier action.
+Stage 2.5:
+
+| Step               | Args                                  | Does and returns                                                                                                                                |
+| ------------------ | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `models`           |                                       | the rows of the chat box's model menu once the daemon's list is in (`title`, `options`); a list that is late is asked for once more (`retried`) |
+| `propose-stop`     | `ref`, `after_ms`                     | Propose changes, then Stop while the turn runs; `stopped`, the pane view after it                                                               |
+| `providers`        |                                       | Setup tab; both menus (`id`, `text`, `enabled`, `note`), every provider row (state, status, policy, key note), message                          |
+| `select-provider`  | `role` (turn, oneshot), `id`, `model` | chooses it; `selected` is what the daemon accepted, `refused` the menu text of a provider that cannot be chosen                                 |
+| `load-review-file` | `path` (Windows)                      | review text from a .txt or .md file; `message`, `chars` in the paste box                                                                        |
+| `export-ledger`    |                                       | Export ledger; the message names `<stem>.ledger.json`                                                                                           |
+| `import-ledger`    | `path` (Windows)                      | Import ledger; `Added a ledger rule(s), skipped s ...`                                                                                          |
+| `suggest-ledger`   | `review_file`, `pick`, `add`          | candidates from the review text; ticks the ones holding a `pick` text, adds the ticked ones unless `add` is false                               |
+| `propose-all`      |                                       | Propose all until its Stop button is gone; `order` of the comments tried, the summary message                                                   |
+| `focus-refresh`    | `wait_ms`                             | dispatches `focus` on the pane window; `changed` is true when the auto-refresh line changed with no Refresh click                               |
+
+Stage 3 (Response tab). Each step returns what the tab shows: `message`,
+`next`, `profile`, `summary`, `checks`, `export_label`, `output`,
+`proposal_rows` and `cards` (`ref`, `comment`, `text`, `declined`, `stale`,
+`undecided`, `citations` with `line` and `quote`, `open_reqs`).
+
+| Step                 | Args                                                        | Does, and the message it waits for                                                       |
+| -------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `open-response`      |                                                             | shows the tab, presses Refresh from the manuscript; `Refreshed from the manuscript: ...` |
+| `response-view`      |                                                             | reads the tab, presses nothing                                                           |
+| `response-refresh`   |                                                             | Refresh from the manuscript                                                              |
+| `load-letter`        | `path` (Windows)                                            | reads an existing letter; `Read the letter: ...`; `rows` are the proposal lines          |
+| `apply-proposal`     |                                                             | Apply to this paper; `Applied to this paper: ...`                                        |
+| `response-set-lang`  | `lang`, `rationale_lang`                                    | the language form, Save for this paper; `Saved for this paper: profile ...`              |
+| `response-decline`   | `comments` (ref, reason), `open_requests`, `request_reason` | declines the comments, then every open request; `Declined ...`                           |
+| `response-draft`     | `ref`                                                       | Draft on one card; `Drafted <ref>.`                                                      |
+| `response-draft-all` |                                                             | Draft all missing; `Drafted n responses.`                                                |
+| `response-edit`      | `ref`, `text` or `prepend`                                  | fills the answer (or leaves it), Save; `Saved <ref>.`; `previous_text`                   |
+| `response-locate`    |                                                             | Update line numbers; `Line numbers updated: ...`                                         |
+| `response-check`     |                                                             | Run checks; `Checked: ...`                                                               |
+| `response-export`    | `format` (`text` for the plain-text files)                  | Export; `Exported...` or, while a check fails, `Not exported: ...`                       |
+
+`judge.mjs` holds the expected texts of these steps (`JUDGES`) and the
+evidence builders of the stage 2.5 markers (`modelsEvidence`,
+`providersEvidence`, `ollamaSplitEvidence`, `cliTurnEvidence`,
+`guardEvidence`, `stopEvidence`, `proposeAllEvidence`, `focusEvidence`,
+`suggestEvidence`, `cleanupEvidence`) and of the stage 3 markers
+(`openEvidence`, `proposalEvidence`, `secondReader`, `exportEvidence`,
+`lineShift`, `staleEvidence`, `ledgerEvidence`, `langEvidence`,
+`openCheckEvidence`).
+There is no step that registers the office tools with agy: the daemon
+registers them for the length of one agy review turn only.
 
 ## Resolved rationale comments
 
@@ -63,6 +258,23 @@ Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
   comment of each accepted or rejected change is resolved (row
   `word: rationale comments resolved`). The test manuscript is built in
   compatibility mode 15 for this; in mode 14 Word refuses to resolve.
+- A change next to another tracked change (row `word: R1.4 next to a pending
+revision`): before the author's steps the runner puts a tracked insertion
+  of the author (`Checked: `) at the start of the paragraph that holds the
+  R1.4 deletion and leaves it pending, then rejects R1.4. After the Refresh
+  R1.4 must read Rejected (not Pending) in revision.json and on its badge,
+  with its rationale comment resolved, while Word still lists the author's
+  insertion as a revision. The paragraph's revision mark total used to
+  decide, which kept such a change Pending.
+- Tracked special characters (row `special: tracked runs found in Word's
+paragraph text`, files under `special/`): `make_tracked_special.py` builds
+  a document whose tracked insertions and deletions hold a no-break hyphen,
+  a soft hyphen, a tab, a line break, a carriage return and symbols. It is
+  opened in a third Word of the run, the pane's own snapshot is read, and
+  every tracked run must be found in the paragraph text Word reports. This
+  is the measurement behind the character table in `trackedRuns`
+  (`taskpane/shared/review-view.js`). No model turn; `--skip-special` leaves
+  it out.
 - Mode-14 check (`mode-14:` rows, files under `mode14/` in the run folder,
   daemon log `-mode14.log`): after the main Word is closed, the runner
   builds a compatibility mode 14 copy with

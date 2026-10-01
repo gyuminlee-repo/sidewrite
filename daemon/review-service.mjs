@@ -6,17 +6,22 @@
 //   review_load, review_split, review_save_comments, review_set_status,
 //   review_set_requirements, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
-//   ledger_add, ledger_update, ledger_remove, ledger_check, comments_backup
+//   review_comment_text, review_comment_set,
+//   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
+//   ledger_import, ledger_suggest, comments_backup
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
-//     | "late_result_recorded" | "job_done", ... }
+//     | "late_result_recorded" | "stale_target" | "record_failed" | "job_done", ... }
+//   turn_done: { ref, ok, error? }. ok false: the turn ended on a usage limit,
+//   a refusal, an API error, an empty turn, a stop or a crash (error says which).
 // Jobs (JOB_TYPES): the reply is { ok: true, accepted: true, job_id } at once
 // and the result follows as { event: "job_done", job_id, result }, result
 // being what the reply would have held ({ ok: true, ... } or { ok: false,
 // error }). Their model calls can outlast any request timeout of the pane.
+// handler-wrap.mjs wraps both kinds.
 
-import { randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   localDocPath,
   revisionPathFor,
@@ -30,7 +35,9 @@ import {
   addChange,
   applyStates,
   addBlocked,
-  addUnknownEdit,
+  addAttempt,
+  setBlockedAttempt,
+  dropBlocked,
   takeBlocked,
   markBlockedUnknown,
   claimBlocked,
@@ -39,6 +46,9 @@ import {
   addLedgerItem,
   updateLedgerItem,
   removeLedgerItem,
+  ledgerExportDoc,
+  importLedgerItems,
+  sidecarPath,
   findComment,
   writeJsonAtomic,
   setRequirements,
@@ -46,6 +56,7 @@ import {
   addExternal,
   dismissExternal,
   markCommentsCleaned,
+  setChangeComment,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -55,10 +66,19 @@ import {
 } from "./revision-classify.mjs";
 import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
-import { checkLedgerIncremental } from "./ledger-check.mjs";
+import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
+import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
-import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
+import {
+  applyTrackedEdit,
+  narrowedAttempt,
+  formatRationaleComment,
+  TOOL_COMMENT_PREFIX,
+  TARGET_HASH_CAP,
+} from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
+import { wrapHandlers } from "./handler-wrap.mjs";
+import { effectiveProfile, rationaleLang, splitPatterns } from "./journal-profile.mjs";
 
 async function exists(p) {
   try {
@@ -75,6 +95,17 @@ async function exists(p) {
 // the paragraph. A pending deletion reads the same as one never applied, so
 // it stays unknown. Found ones become a recorded change (with the rationale
 // comment the snapshot holds, if any) and leave the blocked list.
+//
+// Two forms are looked for (Codex review of the recovery path): the call as
+// it was asked, and the narrower form the task pane applies when it can
+// (attempt.change.narrow; review-tools.mjs narrowedAttempt). A narrowed edit
+// that is still tracked leaves the old words of the full call in the
+// paragraph, which reads "rejected" for the full form. The full form is
+// tried first: it is what an accepted edit reads as either way. The narrowed
+// form counts, when pending, with its rationale comment in the document or,
+// for a replace, with its new and old words next to each other (Word's
+// tracked replace); its new words alone are too few to say anything. An
+// attempt is dropped as not applied only when every form reads rejected.
 export function resolveUnknownOverrides(rev, snapshot) {
   let next = rev;
   const resolved = [];
@@ -92,31 +123,36 @@ export function resolveUnknownOverrides(rev, snapshot) {
           !used.has(String(x.id)) &&
           normalizeParaText(x.content) === normalizeParaText(b.attempt.comment_text),
       );
-      const change = {
-        ...b.attempt.change,
-        word_comment_id: comment ? String(comment.id) : null,
-      };
-      const row = classifyChange(change, snapshot);
-      const p = paras.find((x) => x.index === row.paragraph_index);
-      // Plain containment: Word joins pending inserted and deleted text with
-      // no space, so a word-bounded match would miss it.
-      const newTextThere =
-        !!p && normalizeParaText(p.text).includes(normalizeParaText(change.text));
-      // Its rationale comment in the document settles a pending deletion too:
-      // the task pane adds the comment only after the edit.
-      const applied =
-        row.state === "accepted" ||
-        (row.state === "pending" && (!!comment || (change.kind !== "delete" && newTextThere)));
-      if (!applied) {
-        // A normal edit whose own range still reads the old form, with no
-        // rationale comment: not applied, nothing is left to wait for. An
-        // approved exception stays, so the author can decide again.
-        if (own && !comment && row.state === "rejected") {
+      const { narrow: _narrow, ...full } = b.attempt.change;
+      const judged = [full, narrowedAttempt(b.attempt.change)].filter(Boolean).map((form) => {
+        const change = { ...form, word_comment_id: comment ? String(comment.id) : null };
+        const row = classifyChange(change, snapshot);
+        const p = paras.find((x) => x.index === row.paragraph_index);
+        // Plain containment: Word joins pending inserted and deleted text with
+        // no space, so a word-bounded match would miss it.
+        const holds = (s) => !!p && normalizeParaText(p.text).includes(normalizeParaText(s));
+        const newTextThere = form.narrowed_from
+          ? change.kind === "replace" && holds(change.text + change.find)
+          : change.kind !== "delete" && holds(change.text);
+        // Its rationale comment in the document settles a pending deletion
+        // too: the task pane adds the comment only after the edit.
+        const applied =
+          row.state === "accepted" || (row.state === "pending" && (!!comment || newTextThere));
+        return { change, row, p, applied };
+      });
+      const hit = judged.find((j) => j.applied);
+      if (!hit) {
+        // A normal edit whose own range still reads the old form (in every
+        // form Word may have applied), with no rationale comment: not
+        // applied, nothing is left to wait for. An approved exception stays,
+        // so the author can decide again.
+        if (own && !comment && judged.every((j) => j.row.state === "rejected")) {
           next = takeBlocked(next, c.ref, b.id).revision;
           dropped.push({ ref: c.ref, blocked_id: b.id, tool_call_id: b.attempt.tool_call_id });
         }
         continue;
       }
+      const { change, row, p } = hit;
       const added = addChange(next, c.ref, {
         ...change,
         paragraph_index: row.paragraph_index,
@@ -138,6 +174,10 @@ export function resolveUnknownOverrides(rev, snapshot) {
   return { revision: next, resolved, dropped };
 }
 
+// Word comment ids of the rationale comments on record.
+const recordedCommentIds = (rev) =>
+  rev.comments.flatMap((c) => c.changes.map((ch) => ch.word_comment_id).filter(Boolean));
+
 // What a ledger check result depends on: the rule, not its last result.
 // review_save_comments: comments work still points at are not removed.
 export const keptWarning = (refs) =>
@@ -146,9 +186,17 @@ export const keptWarning = (refs) =>
 // Requests that may run model calls one after another (a split and its
 // requirement extraction; a ledger check of up to 20 batches per rule). The
 // regex-only path takes the same route: one reply shape per request type.
-const JOB_TYPES = new Set(["review_split", "ledger_check"]);
+const JOB_TYPES = new Set(["review_split", "ledger_check", "ledger_suggest"]);
 
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
+
+// The comments whose stale marks are not what they were, and not empty.
+function staleChanges(before, after) {
+  const was = new Map(before.comments.map((c) => [c.ref, (c.response?.stale ?? []).join(",")]));
+  return after.comments
+    .map((c) => ({ ref: c.ref, stale: c.response?.stale ?? [] }))
+    .filter((x) => x.stale.length && x.stale.join(",") !== was.get(x.ref));
+}
 
 export function createReviewService({
   getContext,
@@ -158,6 +206,26 @@ export function createReviewService({
   // Model names for decision receipts: the one-shot model, and the model of
   // the drafting session of a pane (getModel(key)). null when unknown.
   oneshotModel = null,
+  // P14: the one-shot of ONE JOB of a pane, when judgments go to the
+  // provider chosen in that pane (providers/oneshot-router.mjs pin):
+  // async (key) => { run, model }. A job (a split with its requirement
+  // extraction, a ledger check with all its batches, a suggestion) asks for
+  // it once, when it starts; every request of the job goes through `run`
+  // and every receipt carries `model`, so a provider changed in the pane
+  // while the job runs applies to the next job. The default is the two
+  // arguments above, for every pane.
+  oneshotJob = async () => ({ run: oneshot, model: oneshotModel }),
+  // P14: asked before a review turn is built or queued; it resolves when
+  // the pane's provider for review turns is confirmed and throws otherwise
+  // (providers/selection.mjs ready). The request then fails with that text.
+  turnGate = async () => {},
+  // Default language of the settings file, between the profile and the
+  // environment (journal-profile.mjs rationaleLang): () => string | null.
+  langDefault = null,
+  // (revision, snapshot) => revision, run in a refresh once the states of
+  // the changes are set (index.mjs: the stale marks of saved responses).
+  afterRefresh = null,
+  clock = Date.now,
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -261,6 +329,8 @@ export function createReviewService({
     };
     return {
       key,
+      // What the task pane said it can do, as of now (bridge.mjs caps).
+      caps: getContext(key)?.caps ?? [],
       get doc() {
         return need().doc;
       },
@@ -293,6 +363,65 @@ export function createReviewService({
     return applying.get(path);
   }
   const clearStale = (d, rev) => markStaleApplying(rev, activeFor(d));
+
+  // Changes Word applied whose save failed (onRecordFailed), by file:
+  // attempt id -> { ref, attempt_id, change }, the change exactly as onEdit
+  // was given it (narrowed or not, with its Word comment id). The attempt
+  // on file was written before the call and knows neither, so while this
+  // daemon runs the change is saved from here, in the next load or refresh
+  // of the file, and its attempt leaves the blocked list in the same save.
+  // A daemon that stopped has only the attempt (resolveUnknownOverrides).
+  const unsaved = new Map();
+  // In an update of the file. done: the entries to forget once it is saved.
+  function recordUnsaved(d, rev) {
+    let next = rev;
+    const done = [];
+    for (const h of unsaved.get(d.path)?.values() ?? []) {
+      // Its attempt is gone: settled some other way, nothing to add.
+      if (!findComment(next, h.ref)?.blocked.some((b) => b.id === h.attempt_id)) {
+        done.push({ ...h, saved: null });
+        continue;
+      }
+      const r = addChange(next, h.ref, h.change);
+      next = takeBlocked(r.revision, h.ref, h.attempt_id).revision;
+      done.push({ ...h, saved: r.change });
+    }
+    return { revision: next === rev ? null : next, done };
+  }
+  // After that update was saved.
+  async function unsavedDone(d, key, revision, done) {
+    for (const h of done) {
+      unsaved.get(d.path)?.delete(h.attempt_id);
+      if (!h.saved) {
+        log(`[review] applied result of ${h.attempt_id} not used: its attempt is not on file`);
+        continue;
+      }
+      log(
+        `[review] change recorded ${h.saved.id} kind=${h.saved.kind} comment=${h.saved.word_comment_id} from the applied result kept in memory (attempt ${h.attempt_id})`,
+      );
+      await linkReceipt(d, key, h.ref, findComment(revision, h.ref), h.saved);
+    }
+  }
+  // The requirement link of a recorded change, for the decision log.
+  const linkReceipt = (d, key, ref, comment, saved) =>
+    receipt(d, [
+      decisionRecord({
+        kind: "requirement_link",
+        input: {
+          comment: comment?.text ?? "",
+          ...(comment?.section && { section: comment.section }),
+          requirements: comment?.requirements ?? [],
+          find: saved.find,
+          text: saved.text,
+        },
+        model: getModel(key),
+        output: {
+          change_id: saved.id,
+          comment_ref: ref,
+          requirement_ids: saved.rationale?.requirement_ids ?? [],
+        },
+      }),
+    ]);
   const backupChains = new Map();
 
   // begin(): the handle of one tool call, taken before Word is called;
@@ -315,6 +444,7 @@ export function createReviewService({
           comment_text: [c?.section, c?.text ?? ""].filter((x) => x !== undefined).join("\n"),
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
+          comment_ids: recordedCommentIds(rev),
           recent_changes: since
             ? rev.comments
                 .flatMap((x) => x.changes)
@@ -323,7 +453,40 @@ export function createReviewService({
             : [],
         };
       },
-      onEdit: async ({ ref, change, at: d = at(key) }) => {
+      // A normal edit is written to the file before Word is called, as a
+      // blocked item no rule blocks (state applying, with the form it would
+      // have in the document). The stretch between "Word applied it" and
+      // "the change is saved" then always has it on file: a daemon that
+      // stops there leaves an item the next one takes as unanswered
+      // (clearStale) and a refresh settles. It joins `active` in the same
+      // step, like an override, so a load in between does not take it for a
+      // stale one. One more save per edit, in the chain of the file
+      // (withRevision): it is done before Word is called, and the save of
+      // the change is queued after it.
+      onAttempt: async ({ ref, args, attempt, at: d = at(key) }) => {
+        const active = activeFor(d);
+        let saved = null;
+        try {
+          await update(d, (rev) => {
+            const r = addAttempt(withComment(d, rev, ref), ref, { args, attempt });
+            saved = r.blocked;
+            active.add(applyingKey(ref, saved.id));
+            return r.revision;
+          });
+        } catch (e) {
+          if (saved) active.delete(applyingKey(ref, saved.id)); // added, then the save failed
+          throw e;
+        }
+        return { id: saved.id, end: () => active.delete(applyingKey(ref, saved.id)) };
+      },
+      // Word answered that the edit is not in the document.
+      onNotApplied: async ({ ref, attempt_id, at: d = at(key) }) => {
+        if (attempt_id) await update(d, (rev) => dropBlocked(rev, ref, attempt_id));
+      },
+      // attempt_id: the attempt (or the approved exception) this change
+      // settles. It leaves the blocked list in the save that adds the
+      // change: no reader of the file sees both, or neither.
+      onEdit: async ({ ref, change, attempt_id = null, at: d = at(key) }) => {
         let saved = null;
         let comment = null;
         await update(d, (rev) => {
@@ -331,70 +494,70 @@ export function createReviewService({
           const r = addChange(base, ref, change);
           saved = r.change;
           comment = findComment(base, ref);
-          return r.revision;
+          return (attempt_id && dropBlocked(r.revision, ref, attempt_id)) || r.revision;
         });
-        await receipt(d, [
-          decisionRecord({
-            kind: "requirement_link",
-            input: {
-              comment: comment?.text ?? "",
-              ...(comment?.section && { section: comment.section }),
-              requirements: comment?.requirements ?? [],
-              find: saved.find,
-              text: saved.text,
-            },
-            model: getModel(key),
-            output: {
-              change_id: saved.id,
-              comment_ref: ref,
-              requirement_ids: saved.rationale?.requirement_ids ?? [],
-            },
-          }),
-        ]);
+        await linkReceipt(d, key, ref, comment, saved);
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
         return saved;
       },
       // blocked_id: the approved exception the edit came from (its item is
-      // marked by review_override). A normal edit gets an item of its own
-      // in the file here, so a refresh or a restarted daemon can still find
+      // marked by review_override). attempt_id: the item a normal edit wrote
+      // before Word was called (onAttempt); it turns outcome_unknown here
+      // with the call id, so a refresh or a restarted daemon can still find
       // out whether Word applied it (Codex review 14).
       onOutcomeUnknown: async ({
         id,
         ref,
         record,
         attempt,
-        args,
+        attempt_id = null,
         blocked_id = null,
         at: d = at(key),
       }) => {
-        let own = false;
-        if (!blocked_id && attempt && args) {
-          let saved = null;
-          await update(d, (rev) => {
-            const r = addUnknownEdit(withComment(d, rev, ref), ref, { args, attempt });
-            saved = r.blocked;
-            return r.revision;
+        const own = !blocked_id && !!attempt_id;
+        if (own) blocked_id = attempt_id;
+        // Before the save below: a late answer is recorded even if it fails.
+        if (id) {
+          const timer = setTimeout(() => forgetLate(id), lateResultTtlMs);
+          timer.unref?.();
+          pendingLate.set(id, {
+            key,
+            at: d,
+            ref,
+            record,
+            blocked_id,
+            own,
+            timer,
+            release: hold(d, ref),
           });
-          blocked_id = saved.id;
-          own = true;
-          log(`[review] outcome unknown ${saved.id} kept for refresh id=${id}`);
-          sendEvent(key, { type: "review_event", event: "edit_blocked", ref, blocked: saved });
         }
-        if (!id) return;
-        const timer = setTimeout(() => forgetLate(id), lateResultTtlMs);
-        timer.unref?.();
-        pendingLate.set(id, {
-          key,
-          at: d,
-          ref,
-          record,
-          blocked_id,
-          own,
-          timer,
-          release: hold(d, ref),
-        });
+        if (!own) return;
+        const revision = await update(d, (rev) =>
+          markBlockedUnknown(rev, ref, attempt_id, attempt),
+        );
+        const saved = findComment(revision, ref).blocked.find((b) => b.id === attempt_id);
+        log(`[review] outcome unknown ${attempt_id} kept for refresh id=${id}`);
+        sendEvent(key, { type: "review_event", event: "edit_blocked", ref, blocked: saved });
       },
       holdRef: (ref, d = at(key)) => hold(d, ref),
+      // Does the task pane compare the paragraph before a tracked edit? One
+      // that does not say so in its hello is sent no edit.
+      paneChecksTarget: (d = at(key)) => d.caps.includes(TARGET_HASH_CAP),
+      // Word applied the edit and its record could not be saved. change: as
+      // it was applied; kept for the next load or refresh (recordUnsaved).
+      onRecordFailed: async ({ ref, attempt_id, change, at: d = at(key) }) => {
+        if (attempt_id && change) {
+          if (!unsaved.has(d.path)) unsaved.set(d.path, new Map());
+          unsaved.get(d.path).set(attempt_id, { ref, attempt_id, change });
+        }
+        sendEvent(key, { type: "review_event", event: "record_failed", ref, attempt_id });
+      },
+      // The task pane refused an edit because its paragraph is not as the
+      // snapshot here has it. The snapshot comes from the task pane only
+      // (review_refresh), so it is asked to refresh.
+      onStaleTarget: async ({ ref }) => {
+        sendEvent(key, { type: "review_event", event: "stale_target", ref });
+      },
       onBlocked: async ({ ref, args, blocked_by, at: d = at(key) }) => {
         let saved = null;
         await update(d, (rev) => {
@@ -427,27 +590,24 @@ export function createReviewService({
       log(`[review] late result dropped ${entry.id}: no pending tracked edit`);
       return null;
     }
+    // p.record saves the change and takes its item (p.blocked_id) out of
+    // the blocked list in one save (onEdit).
     const out = entry.ok ? await p.record(entry.result) : null;
     if (!out?.ok) {
+      // Applied, and the save of the change failed: the item stays
+      // outcome_unknown in the file for the next refresh.
+      if (out?.applied) {
+        log(`[review] late result applied, not recorded ${entry.id}: ${p.blocked_id} kept`);
+        return null;
+      }
       const why = entry.ok ? (out?.code ?? out?.message ?? "not applied") : entry.error;
       log(`[review] late result not applied ${entry.id}: ${why}`);
       // Word answered that the normal edit is not in the document.
-      if (p.own) {
-        await update(p.at, (rev) =>
-          findComment(rev, p.ref)?.blocked.some((b) => b.id === p.blocked_id)
-            ? takeBlocked(rev, p.ref, p.blocked_id).revision
-            : null,
-        );
-      }
+      if (p.own) await update(p.at, (rev) => dropBlocked(rev, p.ref, p.blocked_id));
       return null;
     }
     log(`[review] late result recorded ${entry.id}`);
     if (p.blocked_id) {
-      await update(p.at, (rev) =>
-        findComment(rev, p.ref)?.blocked.some((b) => b.id === p.blocked_id)
-          ? takeBlocked(rev, p.ref, p.blocked_id).revision
-          : null,
-      );
       log(
         `[review] ${p.own ? "edit" : "override"} ${p.blocked_id} applied late as ${out.change_id}`,
       );
@@ -462,23 +622,54 @@ export function createReviewService({
     return out;
   }
 
-  function turnEnded(key, turn) {
+  // outcome: { ok: true } or { ok: false, error } (index.mjs endTurnState).
+  // It goes with turn_done itself: the daemon sends the error event of a
+  // usage limit after turn_done, so the pane cannot pair the two by order.
+  function turnEnded(key, turn, outcome = { ok: true }) {
     turnHolds.get(key)?.();
     turnHolds.delete(key);
-    log(`[review] turn done ${turn.ref}`);
-    sendEvent(key, { type: "review_event", event: "turn_done", ref: turn.ref });
+    const failed = outcome?.ok === false;
+    const error = failed ? String(outcome.error ?? "The turn ended with an error.") : null;
+    log(`[review] turn done ${turn.ref}${failed ? ` failed: ${error}` : ""}`);
+    sendEvent(key, {
+      type: "review_event",
+      event: "turn_done",
+      ref: turn.ref,
+      ok: !failed,
+      ...(failed ? { error } : {}),
+    });
   }
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";
+
+  // The journal profile of the paper (journal-profile.mjs). A profile that
+  // cannot be read does not stop a review: the language falls back to the
+  // settings and environment default, the split to its built-in patterns.
+  async function profileOf(d, rev) {
+    const settingsDefault = langDefault?.() ?? null;
+    try {
+      const { profile } = await effectiveProfile(rev, {
+        docDir: dirname(d.doc),
+        env,
+        settingsDefault,
+      });
+      return profile;
+    } catch (e) {
+      log(`[review] profile not loaded: ${e?.message ?? e}`);
+      return { rationale_lang: rationaleLang({}, { env, settingsDefault }) };
+    }
+  }
 
   async function buildFor(d, ref, paragraphs) {
     const rev = await load(d);
     const comment = findComment(rev, ref);
     if (!comment) throw new Error(`No reviewer comment ${ref}. Save the comment list first.`);
+    const profile = await profileOf(d, rev);
     const built = buildReviewPrompt({
       comment,
       paragraphs: Array.isArray(paragraphs) ? paragraphs : [],
       ledger: rev.ledger,
+      lang: profile.rationale_lang,
       includeForbid: includeForbid(),
     });
     return { rev, comment, built };
@@ -488,27 +679,48 @@ export function createReviewService({
     async review_load(msg, key) {
       const d = at(key);
       const { path } = d;
-      return { path, revision: await update(d, (rev) => clearStale(d, rev)) };
+      let done = [];
+      const revision = await update(d, (rev) => {
+        const r = recordUnsaved(d, rev);
+        done = r.done;
+        return clearStale(d, r.revision ?? rev) ?? r.revision;
+      });
+      await unsavedDone(d, key, revision, done);
+      return { path, revision };
     },
     async review_split(msg, key) {
       const d = at(key);
       const text = String(msg.text ?? "");
       // A receipt only when the model was asked (a regex split is no LLM decision).
+      // Provider and model of this job, for the split and the extraction after it.
+      const job = await oneshotJob(key);
+      const shot = job.run;
+      const shotModel = job.model;
       let asked = false;
       const ask =
-        oneshot &&
+        shot &&
         ((req) => {
           asked = true;
-          return oneshot(req);
+          return shot(req);
         });
-      const r = await splitReview(text, { patterns: msg.patterns, oneshot: ask });
+      // Head patterns: the request's own, else those of the paper profile.
+      // A document without a local path has no profile.
+      let patterns = msg.patterns;
+      if (!patterns) {
+        try {
+          patterns = splitPatterns(await profileOf(d, await load(d)));
+        } catch {
+          patterns = undefined;
+        }
+      }
+      const r = await splitReview(text, { patterns, oneshot: ask });
       const records = [];
       if (asked) {
         records.push(
           decisionRecord({
             kind: "comment_split",
             input: text,
-            model: oneshotModel,
+            model: shotModel,
             output: {
               method: r.method,
               refs: r.comments.map((c) => c.ref),
@@ -520,13 +732,13 @@ export function createReviewService({
       }
       // L5: once the comments are known, whichever split made them. A save of
       // the edited list does not come here, so it never runs again on it.
-      const x = await extractRequirements(r.comments, { oneshot });
+      const x = await extractRequirements(r.comments, { oneshot: shot });
       if (x.asked) {
         records.push(
           decisionRecord({
             kind: "requirement_extract",
             input: x.input,
-            model: oneshotModel,
+            model: shotModel,
             output: { requests: x.requests },
           }),
         );
@@ -567,8 +779,36 @@ export function createReviewService({
       return { prompt: built.text };
     },
     async review_propose(msg, key, host) {
+      const asked = clock();
+      await turnGate(key);
+      // The pane waits wait_ms for this answer and then shows the request as
+      // failed. A turn started after that would run behind the author's
+      // back, so a request that was held longer starts nothing.
+      const waitMs = Number(msg.wait_ms);
+      if (waitMs > 0 && clock() - asked >= waitMs) {
+        throw new Error(
+          `The task pane stopped waiting for this request after ${Math.round(waitMs / 1000)} s, so no turn was started. Press Propose changes again.`,
+        );
+      }
       const d = at(key);
-      const { built, comment } = await buildFor(d, msg.ref, msg.paragraphs);
+      const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs);
+      // A turn in which no edit can be applied is not started: every
+      // office_tracked_edit of it would be refused (review-tools.mjs
+      // applyTrackedEdit: TaskPaneOutdated, ForbidRuleBroken), the turn
+      // would be spent, and a "Propose all" run would spend one for every
+      // comment after it. As the answer of this request the refusal is
+      // shown by a task pane of any age and ends its run.
+      if (!d.caps.includes(TARGET_HASH_CAP)) {
+        throw new Error(
+          "This task pane is older than the daemon and does not check the paragraph before an edit, so no change would be applied. Reload the task pane (close and reopen it), then propose again.",
+        );
+      }
+      const broken = brokenForbidRules(rev.ledger);
+      if (broken.length) {
+        throw new Error(
+          `Forbidden rule(s) ${broken.map((b) => b.id).join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}), so no change would be applied. Fix or remove the rule in the Instruction ledger, then propose again.`,
+        );
+      }
       pushTurn(key, host, built.text, { ref: msg.ref });
       turnHolds.get(key)?.();
       turnHolds.set(
@@ -596,7 +836,13 @@ export function createReviewService({
       let external = [];
       let resolved = [];
       let dropped = [];
-      const revision = await update(d, (old) => {
+      let stale = [];
+      let done = [];
+      const revision = await update(d, (file) => {
+        // What this daemon knows Word applied goes in first, as it was applied.
+        const u = recordUnsaved(d, file);
+        done = u.done;
+        const old = u.revision ?? file;
         const r0 = resolveUnknownOverrides(clearStale(d, old) ?? old, snapshot);
         const rev = r0.revision;
         resolved = r0.resolved;
@@ -616,8 +862,12 @@ export function createReviewService({
           next = r.revision;
           external = r.added;
         }
+        next = afterRefresh?.(next, snapshot) ?? next;
+        stale = staleChanges(old, next);
         return setSnapshot(next, texts, new Date(), snapshotIds(snapshot));
       });
+      await unsavedDone(d, key, revision, done);
+      for (const x of stale) log(`[response] stale ${x.ref} ${x.stale.join(",")}`);
       for (const x of resolved) {
         forgetLate(x.tool_call_id);
         log(
@@ -663,6 +913,44 @@ export function createReviewService({
       log(`[review] comments cleaned ids=${ids.length}`);
       return { revision };
     },
+    // A change Word applied without its rationale comment (comment_missing)
+    // gets it later, from the Review tab ("Add rationale comment"): this
+    // gives the text the comment would have had and where the change is,
+    // the task pane anchors the comment (tools-word.js addChangeComment),
+    // and review_comment_set records its id. No text of the manuscript is
+    // changed on this way.
+    async review_comment_text(msg, key) {
+      const d = at(key);
+      const rev = await load(d);
+      const ch = findComment(rev, msg.ref)?.changes.find((x) => x.id === msg.change_id);
+      if (!ch) throw new Error(`No change ${msg.change_id} under ${msg.ref}`);
+      if (ch.word_comment_id != null) {
+        throw new Error(`${ch.id} already has its rationale comment.`);
+      }
+      return {
+        change_id: ch.id,
+        // As applyTrackedEdit composed it for the edit (the stored rationale
+        // holds the note of an approved exception; lost facts on the last line).
+        comment_text: formatRationaleComment(msg.ref, ch.rationale, { lost: ch.lost_facts }),
+        // The task pane reuses none of these for this change.
+        known_comment_ids: recordedCommentIds(rev),
+        change: {
+          kind: ch.kind,
+          find: ch.find,
+          text: ch.text,
+          paragraph_id: ch.paragraph_id,
+          paragraph_index: ch.paragraph_index,
+        },
+      };
+    },
+    async review_comment_set(msg, key) {
+      const d = at(key);
+      const revision = await update(d, (rev) =>
+        setChangeComment(rev, msg.ref, msg.change_id, msg.word_comment_id),
+      );
+      log(`[review] comment added later ${msg.change_id} comment=${msg.word_comment_id}`);
+      return { revision };
+    },
     async review_override(msg, key) {
       const d = at(key);
       // Claimed inside the revision chain: an overlapping override of the
@@ -687,13 +975,23 @@ export function createReviewService({
         if (blocked) active.delete(held); // claimed, then the save failed
         throw e;
       }
-      const restore = () => update(d, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state));
+      // Back to the state and the attempt it had before this try.
+      const restore = () =>
+        update(d, (x) => releaseBlocked(x, msg.ref, blocked.id, blocked.state, blocked.attempt));
       try {
         const base = trackedEditDeps(key, d);
         let attempt = null;
         const deps = {
           ...base,
           call: (name, args) => callTool(name, args, key),
+          // The claimed item is the attempt: the form the edit would have in
+          // the document goes on it before Word is called, so a daemon that
+          // stops mid-call leaves an item a refresh can settle.
+          onAttempt: async (x) => {
+            await update(d, (rev) => setBlockedAttempt(rev, msg.ref, blocked.id, x.attempt));
+            return { id: blocked.id };
+          },
+          onNotApplied: async () => {}, // restore() below puts the item back
           onOutcomeUnknown: (x) => {
             attempt = x.attempt;
             return base.onOutcomeUnknown({ ...x, blocked_id: blocked.id });
@@ -718,12 +1016,27 @@ export function createReviewService({
           );
           return { applied: false, outcome_unknown: true, result: r, revision };
         }
+        // Word applied the edit and its record could not be saved, or the
+        // task pane sent no result at all: the edit is, or may be, in the
+        // document. Back to "blocked" would offer Allow exception again and
+        // a second press would apply it twice. The item turns
+        // outcome_unknown with the attempt written before the call, and a
+        // refresh records the change.
+        if (!r.ok && (r.applied === true || r.code === "EmptyResult")) {
+          log(`[review] override ${blocked.id} not recorded (${r.code}); kept for refresh`);
+          const revision = await update(d, (x) => {
+            const b = findComment(x, msg.ref)?.blocked.find((y) => y.id === blocked.id);
+            return b?.attempt ? markBlockedUnknown(x, msg.ref, blocked.id, b.attempt) : null;
+          });
+          return { applied: false, outcome_unknown: true, result: r, revision };
+        }
         if (!r.ok) {
           const revision = await restore();
           return { applied: false, result: r, revision };
         }
         log(`[review] override ${msg.blocked_id} approved for ${blocked.blocked_by.join(",")}`);
-        const revision = await update(d, (x) => takeBlocked(x, msg.ref, msg.blocked_id).revision);
+        // The save of the change took the item out of the blocked list (onEdit).
+        const revision = await update(d, (x) => dropBlocked(x, msg.ref, msg.blocked_id));
         return { applied: true, result: r, revision };
       } finally {
         active.delete(held);
@@ -750,6 +1063,73 @@ export function createReviewService({
       const d = at(key);
       return { revision: await update(d, (rev) => removeLedgerItem(rev, msg.id)) };
     },
+    // P15: rules only (no ids, no check results) to <stem>.ledger.json next
+    // to the manuscript; an older export of the same name is replaced.
+    async ledger_export(msg, key) {
+      const d = at(key);
+      const out = ledgerExportDoc(await load(d));
+      const path = sidecarPath(d.doc, ".ledger.json");
+      await writeJsonAtomic(path, out);
+      log(`[review] ledger export path=${path} count=${out.items.length}`);
+      return { path, count: out.items.length };
+    },
+    // msg.doc: the parsed file ({ items: [{ kind, text, scope, check }] }).
+    // msg.mode: "append" (default; known rules are skipped) or "replace".
+    async ledger_import(msg, key) {
+      const d = at(key);
+      const mode = msg.mode ?? "append";
+      let added = [];
+      let skipped = [];
+      const revision = await update(d, (rev) => {
+        const r = importLedgerItems(rev, msg.doc?.items, { mode });
+        added = r.added;
+        skipped = r.skipped;
+        return r.revision;
+      });
+      log(`[review] ledger import added=${added.length} skipped=${skipped.length} mode=${mode}`);
+      return {
+        added: added.length,
+        skipped: skipped.length,
+        added_ids: added.map((i) => i.id),
+        revision,
+      };
+    },
+    // P15: rule candidates from the review text (ledger-suggest.mjs). Nothing
+    // is stored: the author picks candidates in the pane, which sends them
+    // back through ledger_import.
+    async ledger_suggest(msg, key) {
+      const text = String(msg.text ?? "");
+      if (!text.trim()) throw new Error("Paste or load the review text first.");
+      const d = at(key); // before the model call: the receipt goes next to this document
+      const job = await oneshotJob(key);
+      const shotModel = job.model;
+      const r = await suggestLedger(text, { oneshot: job.run });
+      log(
+        `[review] ledger suggest method=${r.method} candidates=${r.candidates.length} warnings=${r.warnings.length}`,
+      );
+      // A receipt only when the model was asked; sentence numbers, no text.
+      if (r.asked) {
+        await receipt(d, [
+          decisionRecord({
+            kind: "ledger_suggest",
+            input: r.input,
+            model: shotModel,
+            output: {
+              method: r.method,
+              candidates: r.candidates.length,
+              labels: r.candidates.map((c) => ({
+                i: c.sentence_index,
+                kind: c.kind,
+                check: c.check.type,
+                why: c.why,
+              })),
+              warnings: r.warnings.length,
+            },
+          }),
+        ]);
+      }
+      return { candidates: r.candidates, method: r.method, warnings: r.warnings };
+    },
     async ledger_check(msg, key) {
       const d = at(key);
       // Taken on arrival, before the file read: a check that reads the file
@@ -767,15 +1147,18 @@ export function createReviewService({
       const paragraphs = msg.snapshot?.paragraphs ?? [];
       // L10: changed paragraphs only unless msg.full (the "Full check" button).
       const decisions = [];
+      // Every batch of this check runs on the provider and model of its start.
+      const job = await oneshotJob(key);
+      const shotModel = job.model;
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
-        oneshot,
+        oneshot: job.run,
         full: msg.full === true,
         onDecision: (x) =>
           decisions.push(
             decisionRecord({
               kind: "ledger_check",
               input: { instruction: x.instruction, paragraph: x.paragraph },
-              model: oneshotModel,
+              model: shotModel,
               output: {
                 item_id: x.item_id,
                 paragraph_index: x.paragraph_index,
@@ -875,44 +1258,6 @@ export function createReviewService({
     },
   };
 
-  const handlers = {};
-  for (const [type, fn] of Object.entries(impl)) {
-    if (JOB_TYPES.has(type)) {
-      // Returns once accepted; the job runs on and ends in job_done.
-      handlers[type] = async (msg, reply, key, host) => {
-        const job_id = randomUUID();
-        reply({
-          type: `${type}_result`,
-          request_id: msg.request_id,
-          ok: true,
-          accepted: true,
-          job_id,
-        });
-        const done = (result) =>
-          sendEvent(key, { type: "review_event", event: "job_done", job_id, result });
-        fn(msg, key, host)
-          .then(
-            (out) => done({ ok: true, ...out }),
-            (e) => done({ ok: false, error: e?.message ?? String(e) }),
-          )
-          // Nobody awaits the job: a failed send must not end the daemon.
-          .catch((e) => log(`[review] job_done not delivered: ${e?.message ?? e}`));
-      };
-      continue;
-    }
-    handlers[type] = async (msg, reply, key, host) => {
-      try {
-        const out = await fn(msg, key, host);
-        reply({ type: `${type}_result`, request_id: msg.request_id, ok: true, ...out });
-      } catch (e) {
-        reply({
-          type: `${type}_result`,
-          request_id: msg.request_id,
-          ok: false,
-          error: e?.message ?? String(e),
-        });
-      }
-    };
-  }
+  const handlers = wrapHandlers(impl, { jobTypes: JOB_TYPES, sendEvent, log });
   return { handlers, trackedEditDeps, turnEnded, lateToolResult };
 }

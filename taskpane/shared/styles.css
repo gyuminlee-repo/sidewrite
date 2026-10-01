@@ -1083,6 +1083,33 @@ body {
   flex: 1 1 100%;
 }
 
+/* ---- Providers (Setup tab) ----------------------------------------------- */
+.providers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+.provider-row {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.provider-name {
+  font-weight: 600;
+}
+.provider-off,
+.provider-policy,
+.provider-key-note {
+  color: var(--fg-muted);
+}
+.provider-policy,
+.provider-key-note {
+  display: block;
+}
+.provider-key {
+  margin-top: 4px;
+}
+
 /* ---- Review tab ---------------------------------------------------------- */
 .review-draft-row,
 .review-comment,
@@ -1198,4 +1225,56 @@ body {
   gap: 4px;
   align-items: center;
   margin: 2px 0;
+}
+
+/* ---- Response tab -------------------------------------------------------- */
+.response-next {
+  font-weight: 600;
+  margin: 4px 0 8px;
+}
+.response-card {
+  border-top: 1px solid var(--border, #ddd);
+  padding-top: 6px;
+  margin: 6px 0;
+}
+.response-card textarea,
+.response-card input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+}
+.response-comment,
+.response-citation-quote,
+.response-gloss {
+  font-size: 0.9em;
+  opacity: 0.85;
+  margin: 2px 0;
+}
+.response-stale,
+.response-undecided,
+.response-check-fail {
+  color: var(--status-err);
+}
+.response-check-warn,
+.response-gloss-missing,
+.response-declined {
+  color: var(--fg-muted);
+}
+.response-actions,
+.response-req,
+.response-decline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin: 4px 0;
+}
+.response-citation {
+  border-left: 2px solid var(--border, #ddd);
+  padding-left: 6px;
+  margin: 4px 0;
+}
+.response-proposal-row,
+.response-proposal-note {
+  display: block;
+  font-size: 0.9em;
 }

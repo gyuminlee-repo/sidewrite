@@ -282,6 +282,43 @@ test("invariantReport: one comment per change, rejected insertions excepted", ()
   assert.deepEqual([bad.ok, bad.unrecorded_comment_ids], [false, ["7"]]);
   const missing = view.invariantReport(rev, COMMENTS.slice(1));
   assert.deepEqual([missing.ok, missing.missing_comment], [false, ["R1.1-1"]]);
+  assert.deepEqual(missing.uncommented, []);
+  // A change the task pane applied without its rationale comment
+  // (comment_missing, no comment id): not a comment that went missing, and
+  // not ok either. Every change needs its rationale comment.
+  const bare = {
+    comments: [
+      {
+        ref: "R1.1",
+        changes: [
+          { id: "R1.1-1", kind: "replace", state: "pending", word_comment_id: "3" },
+          {
+            id: "R1.1-2",
+            kind: "replace",
+            state: "pending",
+            word_comment_id: null,
+            comment_missing: "CommentInsertFailed",
+          },
+        ],
+      },
+    ],
+  };
+  const u = view.invariantReport(bare, [{ id: "3", content: "[R1.1] a / b / c" }]);
+  assert.deepEqual(
+    [u.ok, u.missing_comment, u.uncommented, u.unrecorded_comment_ids],
+    [false, [], ["R1.1-2"], []],
+  );
+  assert.equal(
+    view.invariantText(u),
+    " (MISMATCH: no rationale comment on R1.1-2: applied in Word, the comment could not be added)",
+  );
+  assert.equal(view.invariantText(missing), " (MISMATCH: missing R1.1-1, unrecorded -)");
+  assert.equal(view.invariantText(r), ".");
+  const both = view.invariantReport(bare, []);
+  assert.equal(
+    view.invariantText(both),
+    " (MISMATCH: missing R1.1-1, unrecorded -; no rationale comment on R1.1-2: applied in Word, the comment could not be added)",
+  );
 });
 
 test("ledgerItemFromForm builds regex and llm items and rejects bad input", () => {
@@ -480,6 +517,25 @@ test("L7 pendingDecisions gathers blocked edits, unchecked ledger items and open
     unanswered.blocked.map((x) => x.text),
     ['R1.3 edit with no answer from Word: "the medium"'],
   );
+  // The same edit while Word still works on it (on file from before the
+  // call, state applying): nothing to decide yet. An exception being
+  // applied (a rule in blocked_by) stays listed.
+  const row = (id, state, blocked_by) => ({ id, args: { replace: "x" }, blocked_by, state });
+  const running = [
+    row("R1.3-b3", "applying", []),
+    row("R1.3-b4", "applying", ["L1"]),
+    row("R1.3-b5", "outcome_unknown", []),
+  ];
+  assert.deepEqual(running.map(view.inFlightEdit), [true, false, false]);
+  assert.deepEqual(
+    view
+      .pendingDecisions({
+        comments: [{ ref: "R1.3", requirements: [], changes: [], blocked: running }],
+        ledger: [],
+      })
+      .blocked.map((x) => x.id),
+    ["R1.3-b4", "R1.3-b5"],
+  );
 });
 
 test("ledgerStatusText names the stage that checks a non-manuscript item", () => {
@@ -488,6 +544,12 @@ test("ledgerStatusText names the stage that checks a non-manuscript item", () =>
     "2 violation(s)",
   );
   assert.equal(view.ledgerStatusText({ status: "ok" }), "ok");
+  // A check that failed (a model reply that could not be used, a regex that
+  // does not compile) passed nothing.
+  assert.equal(
+    view.ledgerStatusText({ status: "error" }),
+    "check failed: nothing counts as passed",
+  );
   assert.equal(
     view.ledgerStatusText({ status: "skipped", scope: "response" }),
     "Checked at the response stage",
@@ -541,8 +603,8 @@ test("a change applied without its rationale comment: warning flag and an invari
   };
   const r = view.invariantReport(rev, [{ id: "1", content: "[R1.1] a / b / c" }]);
   assert.deepEqual(
-    [r.ok, r.changes, r.expected_comments, r.tool_comments, r.missing_comment],
-    [false, 2, 2, 1, ["R1.3-1"]],
+    [r.ok, r.changes, r.expected_comments, r.tool_comments, r.missing_comment, r.uncommented],
+    [false, 2, 2, 1, [], ["R1.3-1"]],
   );
   assert.deepEqual(
     view.commentsToResolve([{ change_id: "R1.3-1", state: "accepted" }], rev, []),
@@ -598,6 +660,124 @@ test("invariantReport: a change whose comment the cleanup removed expects no com
   assert.deepEqual([lost.ok, lost.missing_comment], [false, ["R1.6-2"]]);
 });
 
+test("review file: txt and md, BOM and CRLF removed, size and type checked", () => {
+  assert.deepEqual(view.reviewTextFromFile({ name: "r.txt", size: 10, text: "\uFEFFa\r\nb" }), {
+    ok: true,
+    text: "a\nb",
+  });
+  assert.equal(view.reviewTextFromFile({ name: "r.MD", size: 1, text: "x" }).ok, true);
+  assert.match(
+    view.reviewTextFromFile({ name: "r.docx", size: 1, text: "" }).error,
+    /\.txt or \.md/,
+  );
+  assert.match(view.reviewTextFromFile({ name: "r.txt", size: 3_000_000, text: "" }).error, /2 MB/);
+  assert.match(view.reviewTextFromFile({ name: "r.txt", size: 0, text: "  " }).error, /empty/);
+});
+
+test("ledger file: JSON with an items array, anything else is an error message", () => {
+  const item = { kind: "forbid", text: "no novel", check: { type: "llm" } };
+  const ok = view.ledgerImportFromJson(JSON.stringify({ note: "n", items: [item] }));
+  assert.deepEqual(ok, { ok: true, doc: { items: [item] }, count: 1 });
+  assert.match(view.ledgerImportFromJson("{ nope").error, /not JSON/);
+  assert.match(view.ledgerImportFromJson("[1]").error, /items/);
+  assert.match(view.ledgerImportFromJson('{"items":{}}').error, /items/);
+  assert.match(view.ledgerImportFromJson('{"items":[]}').error, /no items/);
+});
+
+test("ledger candidates: label says what the check does; the rule drops the candidate fields", () => {
+  const c = {
+    kind: "forbid",
+    text: 'Do not use "novel".',
+    scope: "manuscript",
+    check: { type: "regex", pattern: "novel", flags: "i", expect: "absent" },
+    why: "forbid cue",
+    sentence_index: 1,
+    picked: true,
+  };
+  assert.equal(view.candidateLabel(c), 'Forbidden, must not match /novel/i: Do not use "novel".');
+  assert.equal(
+    view.candidateLabel({ kind: "instruction", text: "Use SI units.", check: { type: "llm" } }),
+    "Instruction, LLM check: Use SI units.",
+  );
+  assert.match(
+    view.candidateLabel({ ...c, kind: "instruction", check: { ...c.check, expect: "present" } }),
+    /^Instruction, must keep \/novel\/i/,
+  );
+  assert.deepEqual(Object.keys(view.candidateRule(c)), ["kind", "text", "scope", "check"]);
+});
+
+// Codex review 16: which text of a paragraph is still a tracked change, run
+// by run, read from the paragraph OOXML the snapshot already fetches.
+test("trackedRuns lists the tracked insertions and deletions of the document part, with their place", () => {
+  const part = (name, body) =>
+    `<pkg:part pkg:name="${name}"><pkg:xmlData>${body}</pkg:xmlData></pkg:part>`;
+  const pkg = (...parts) => `<pkg:package>${parts.join("")}</pkg:package>`;
+  const r = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const ins = (t, id = 1) => `<w:ins w:id="${id}" w:author="A">${r(t)}</w:ins>`;
+  const del = (t, id = 2) =>
+    `<w:del w:id="${id}" w:author="A"><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:del>`;
+  const p = (...xs) => `<w:body><w:p>${xs.join("")}</w:p></w:body>`;
+  const doc = (...xs) => pkg(part("/word/document.xml", p(...xs)));
+
+  assert.deepEqual(view.trackedRuns(doc(r("Plain text only."))), []);
+  // "Cells grew [ins: well ][del: slowly ]on glucose."
+  assert.deepEqual(
+    view.trackedRuns(doc(r("Cells grew "), ins("well "), del("slowly "), r("on glucose."))),
+    [
+      { kind: "ins", text: "well ", start: 11, marks: 1 },
+      { kind: "del", text: "slowly ", start: 16, marks: 1 },
+    ],
+  );
+  // Word splits one insertion into several runs: one entry.
+  assert.deepEqual(
+    view.trackedRuns(
+      doc(r("A "), `<w:ins w:id="1">${r("new")}${r(" word")}</w:ins>`, ins(" here", 3), r(".")),
+    ),
+    [{ kind: "ins", text: "new word here", start: 2, marks: 2 }],
+  );
+  // The same inserted text twice: two entries, by place.
+  assert.deepEqual(
+    view.trackedRuns(doc(r("One "), ins("(n = 3) "), r("and two "), ins("(n = 3) ", 5), r("."))),
+    [
+      { kind: "ins", text: "(n = 3) ", start: 4, marks: 1 },
+      { kind: "ins", text: "(n = 3) ", start: 20, marks: 1 },
+    ],
+  );
+  // Only the document part: the tracked body of a rationale comment, a
+  // style, a header do not count. Entities are decoded. w:delText and
+  // w:instrText are no w:del / w:ins; a self-closing mark (an inserted
+  // paragraph mark in rPr) wraps no text. A deleted insertion is a deletion.
+  const tricky =
+    r("A &amp; B ") +
+    "<w:r><w:instrText>PAGE</w:instrText></w:r>" +
+    '<w:r><w:rPr><w:ins w:id="9"/></w:rPr><w:t>kept</w:t></w:r>' +
+    `<w:ins w:id="4"><w:del w:id="5"><w:r><w:delText>gone</w:delText></w:r></w:del></w:ins>` +
+    "<w:r><w:t/></w:r>" +
+    ins(" &lt;x&gt;", 6);
+  assert.deepEqual(
+    view.trackedRuns(
+      pkg(
+        part("/word/comments.xml", `<w:comment>${ins("tracked comment body")}</w:comment>`),
+        part("/word/document.xml", p(tricky)),
+        part("/word/styles.xml", del("x")),
+      ),
+    ),
+    [
+      { kind: "del", text: "gone", start: 10, marks: 1 },
+      // The w:ins around the deletion gave no inserted text of its own.
+      { kind: "ins", text: "", start: 14, marks: 1 },
+      { kind: "ins", text: " <x>", start: 14, marks: 1 },
+    ],
+  );
+  // Whitespace before a run is counted as the daemon reads the paragraph:
+  // collapsed, and without the comment anchor character.
+  assert.deepEqual(view.trackedRuns(doc(r("\u0005 A   B\t"), ins("C"))), [
+    { kind: "ins", text: "C", start: 4, marks: 1 },
+  ]);
+  assert.deepEqual(view.trackedRuns(null), []);
+  assert.deepEqual(view.trackedRuns("<w:p><w:r><w:t>bare</w:t></w:r></w:p>"), []);
+});
+
 test("an open requirement of a comment under a section names the section", () => {
   const d = view.pendingDecisions({
     comments: [
@@ -623,5 +803,183 @@ test("an open requirement of a comment under a section names the section", () =>
       "R1.1 (Abstract) q1 has no change: Shorten this section.",
       "R1.2 q1 has no change: Add units.",
     ],
+  );
+});
+
+// Codex review of the follow-up: a tracked run with <w:noBreakHyphen/> lost
+// that character ("non-linear" read "nonlinear"), could not be found in the
+// paragraph text and was dropped, so a pending insertion read accepted.
+// Expected texts are what Word returned for Paragraph.text on 2026-10-01
+// (Word 16, document of scripts/e2e/make_tracked_special.py, read through
+// collectReviewSnapshot): no-break hyphen U+001E, soft hyphen U+001F, tab
+// U+0009, line break U+000B, carriage return U+000D, a w:sym of any font "(".
+test("trackedRuns keeps the run elements that are text without being w:t, as Word's paragraph text has them", () => {
+  const doc = (kind, content) => {
+    const tag = kind === "ins" ? "w:t" : "w:delText";
+    const body = content
+      .replaceAll("<T>", `<${tag} xml:space="preserve">`)
+      .replaceAll("</T>", `</${tag}>`);
+    return (
+      '<pkg:package><pkg:part pkg:name="/word/document.xml"><pkg:xmlData><w:body><w:p>' +
+      '<w:r><w:t xml:space="preserve">Before </w:t></w:r>' +
+      `<w:${kind} w:id="1"><w:r><w:rPr><w:b/></w:rPr>${body}</w:r></w:${kind}>` +
+      '<w:r><w:t xml:space="preserve"> after.</w:t></w:r>' +
+      "</w:p></w:body></pkg:xmlData></pkg:part></pkg:package>"
+    );
+  };
+  const SYM = '<w:sym w:font="Symbol" w:char="F061"/>';
+  const cases = [
+    ["ins", "<T>plain words</T>", "plain words"],
+    ["ins", "<T>non</T><w:noBreakHyphen/><T>linear </T>", "non\u001elinear "],
+    ["ins", "<T>micro</T><w:softHyphen/><T>scope</T>", "micro\u001fscope"],
+    ["ins", "<T>left</T><w:tab/><T>right</T>", "left\tright"],
+    [
+      "ins",
+      '<T>left</T><w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/><T>right</T>',
+      "left\tright",
+    ],
+    ["ins", "<T>first</T><w:br/><T>second</T>", "first\u000bsecond"],
+    ["ins", '<T>first</T><w:br w:type="textWrapping"/><T>second</T>', "first\u000bsecond"],
+    ["ins", "<T>one</T><w:cr/><T>two</T>", "one\rtwo"],
+    ["ins", `<T>alpha </T>${SYM}<T> end</T>`, "alpha ( end"],
+    ["ins", '<T>mark </T><w:sym w:font="Wingdings" w:char="F0FC"/>', "mark ("],
+    ["ins", "<T>a &amp; b  &lt;c&gt; </T>", "a & b  <c> "],
+    ["ins", "<w:noBreakHyphen/>", "\u001e"],
+    ["ins", "<w:instrText>PAGE</w:instrText><T>kept</T>", "kept"],
+    ["del", "<T>non</T><w:noBreakHyphen/><T>linear</T>", "non\u001elinear"],
+    ["del", "<T>micro</T><w:softHyphen/><T>scope</T>", "micro\u001fscope"],
+    ["del", "<T>left</T><w:tab/><T>right</T>", "left\tright"],
+    ["del", `<T>alpha </T>${SYM}<T> end</T>`, "alpha ( end"],
+    ["del", "<w:delInstrText>PAGE</w:delInstrText><T>gone</T>", "gone"],
+  ];
+  for (const [kind, content, text] of cases) {
+    assert.deepEqual(
+      view.trackedRuns(doc(kind, content)),
+      [{ kind, text, start: 7, marks: 1 }],
+      content,
+    );
+  }
+  console.log(`tracked run element corpus: ${cases.length} snippets`);
+
+  // marks: how many w:ins / w:del elements an entry stands for. Two
+  // neighbouring insertions are one entry of two marks; a tracked element
+  // from which no text was read is an entry with empty text, so the daemon
+  // knows something tracked is there that it cannot place.
+  const two =
+    '<pkg:package><pkg:part pkg:name="/word/document.xml"><pkg:xmlData><w:p>' +
+    '<w:ins w:id="1"><w:r><w:t>one</w:t></w:r></w:ins><w:ins w:id="2"><w:r><w:t> two</w:t></w:r></w:ins>' +
+    "<w:r><w:t> plain </w:t></w:r>" +
+    '<w:ins w:id="3"><w:r><w:drawing/></w:r></w:ins>' +
+    '<w:del w:id="4"><w:r><w:delText>gone</w:delText></w:r></w:del>' +
+    "</w:p></pkg:xmlData></pkg:part></pkg:package>";
+  assert.deepEqual(view.trackedRuns(two), [
+    { kind: "ins", text: "one two", start: 0, marks: 2 },
+    { kind: "ins", text: "", start: 14, marks: 1 },
+    { kind: "del", text: "gone", start: 14, marks: 1 },
+  ]);
+});
+
+test("doneBlockers: what is still open when a comment is marked Done", () => {
+  const c = (changes, requirements = []) => ({ ref: "R1.1", requirements, changes });
+  const change = (state, ids = []) => ({ state, rationale: { requirement_ids: ids } });
+  // Everything decided and answered, no ledger violation: nothing to ask.
+  assert.deepEqual(
+    view.doneBlockers(c([change("accepted", ["q1"])], [{ id: "q1", text: "a" }]), [
+      { id: "L1", status: "clean", violation_count: 0 },
+      { id: "L2", status: "skipped", violation_count: 0 },
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    view.doneBlockers(c([change("rejected"), change("user_edited")]), undefined),
+    [],
+  );
+  // The wording of the open-requirement case is the one the tab always had.
+  assert.deepEqual(view.doneBlockers(c([], [{ id: "q1", text: "state the unit" }]), []), [
+    'q1 "state the unit" has no change',
+  ]);
+  // Changes not decided in Word, and confirmed ledger rules with violations.
+  assert.deepEqual(
+    view.doneBlockers(
+      c([change("pending"), change("pending"), change("unlocated")], [{ id: "q1", text: "a" }]),
+      [
+        { id: "L1", status: "violations", violation_count: 2 },
+        { id: "L2", status: "clean", violation_count: 0 },
+        { id: "L3", status: "violations", violation_count: 1 },
+      ],
+    ),
+    [
+      'q1 "a" has no change',
+      "3 changes are not decided in Word (2 pending, 1 not found)",
+      "the ledger check has violations (L1: 2, L3: 1)",
+    ],
+  );
+  assert.deepEqual(view.doneBlockers(c([change("unlocated")]), []), [
+    "1 change is not decided in Word (1 not found)",
+  ]);
+});
+
+test("doneBlockers: a change without its rationale comment and an edit Word did not answer are open too", () => {
+  const done = (more) => ({
+    ref: "R1.1",
+    requirements: [],
+    changes: [{ id: "R1.1-1", state: "accepted", word_comment_id: "7", rationale: {} }],
+    blocked: [],
+    ...more,
+  });
+  assert.deepEqual(view.doneBlockers(done({}), []), []);
+  // Applied in Word, the comment could not be added (invariantReport.uncommented).
+  const bare = {
+    state: "accepted",
+    word_comment_id: null,
+    comment_missing: "2026-01-01T00:00:00Z",
+    rationale: {},
+  };
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        changes: [
+          { id: "R1.1-1", ...bare },
+          { id: "R1.1-2", ...bare },
+        ],
+      }),
+      [],
+    ),
+    ["2 changes have no rationale comment in Word (R1.1-1, R1.1-2)"],
+  );
+  assert.deepEqual(view.doneBlockers(done({ changes: [{ id: "R1.1-1", ...bare }] }), []), [
+    "1 change has no rationale comment in Word (R1.1-1)",
+  ]);
+  // A comment that was there and was cleaned away on purpose is not that.
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        changes: [
+          {
+            id: "R1.1-1",
+            state: "accepted",
+            word_comment_id: "7",
+            comment_missing: "x",
+            rationale: {},
+          },
+        ],
+      }),
+      [],
+    ),
+    [],
+  );
+  // Sent to Word and not answered: it may be in the document with no record.
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        blocked: [
+          { id: "B1", state: "outcome_unknown", blocked_by: [] },
+          { id: "B2", state: "blocked", blocked_by: ["L2"] },
+          { id: "B3", state: "applying", blocked_by: [] },
+        ],
+      }),
+      [],
+    ),
+    ["1 edit got no answer from Word and may be applied (B1)"],
   );
 });

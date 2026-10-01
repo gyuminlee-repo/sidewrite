@@ -84,10 +84,13 @@ export function locateParagraph(change, snapshot) {
 // (L = left, R = right, D = change.find, I = change.text):
 //   replace  pending L+I+D+R (Word shows inserted then deleted text),
 //            accepted L+I+R, rejected L+D+R
-//   insert   L+I+R present (pending while revision marks remain, else
+//   insert   L+I+R present (pending while I is a tracked insertion, else
 //            accepted), L+R present: rejected
-//   delete   L+D+R present (pending while marks remain, else rejected),
-//            L+R present: accepted
+//   delete   L+D+R present (pending while D is a tracked deletion, else
+//            rejected), L+R present: accepted
+// "Tracked" is read from the paragraph's tracked runs when the snapshot
+// has them (placedRuns); a snapshot without them falls back to the
+// paragraph's revision mark total.
 // A sibling change can alter the context words, so the check is repeated
 // with fewer context words (3, 2, 1, 0) until one form alone matches, once
 // and on word boundaries (boundedMatches). For a
@@ -155,13 +158,92 @@ export function boundedMatches(text, form) {
   return out;
 }
 
-function classifyByContext(change, t, revisions) {
+// The tracked runs of a snapshot paragraph (p.tracked, from the task pane:
+// [{ kind: "ins" | "del", text, start, marks }]) as ranges of its normalized
+// text t: { runs: [{ kind, start, end }], short: { ins, del } }. A run is
+// placed where its text occurs nearest to the start it reports (Word's
+// paragraph text and the OOXML text can differ by a character or two).
+// short[kind] is true when the list cannot be trusted to hold every tracked
+// run of that kind: a run whose text is not in t (or that has no text), or
+// whose text is in t twice equally near its start, was left out, or the paragraph has more revision marks of that kind (w_ins,
+// w_del, counted on their own) than the placed runs stand for. A change of
+// that kind is then never read as "not tracked" (Codex review of the
+// follow-up: a run that lost a no-break hyphen was dropped and its pending
+// insertion read accepted).
+// null: the snapshot has no per-run list (an older task pane).
+export function placedRuns(p, t) {
+  if (!Array.isArray(p?.tracked)) return null;
+  const runs = [];
+  const marks = { ins: 0, del: 0 };
+  const short = { ins: false, del: false };
+  for (const run of p.tracked) {
+    const whole = collapse(run.text);
+    const text = whole.trim();
+    // run.start is the length of the collapsed, start-trimmed text before the
+    // run (review-view.js:109-113 place()), the coordinates of t. The space a
+    // run opens with is one character of t, unless the text before it ends
+    // with a space (the two are one) or the run opens the paragraph (trimmed).
+    const lead = whole.startsWith(" ") && run.start > 0 && t[run.start - 1] !== " " ? 1 : 0;
+    const want = run.start + lead;
+    let best = -1;
+    let tie = false;
+    if (text) {
+      for (let i = t.indexOf(text); i !== -1; i = t.indexOf(text, i + 1)) {
+        const d = Math.abs(i - want) - Math.abs(best - want);
+        if (best === -1 || d < 0) {
+          best = i;
+          tie = false;
+        } else if (d === 0) tie = true;
+      }
+    }
+    if (best === -1 || tie) {
+      if (run.kind in short) short[run.kind] = true;
+      continue;
+    }
+    runs.push({ kind: run.kind, start: best, end: best + text.length });
+    marks[run.kind] += run.marks ?? 1;
+  }
+  if ((p.w_ins ?? 0) > marks.ins) short.ins = true;
+  if ((p.w_del ?? 0) > marks.del) short.del = true;
+  return { runs, short };
+}
+
+// placed: placedRuns of the paragraph, or null. With it, a pure insertion or
+// deletion is pending while its OWN text is tracked, or while the list is
+// short for its kind (then nothing proves it is not); without it the
+// paragraph's revision mark total decides (revisions), which reads an
+// accepted change pending while any sibling is (Codex review 16).
+function classifyByContext(change, t, revisions, placed = null) {
   const { left, right } = change.context;
   const I = collapse(change.text);
   const D = collapse(change.find);
   // Exactly one bounded match: a form found several times says nothing
   // about which occurrence is this change.
   const has = (form) => boundedMatches(t, normalizeParaText(form)).length === 1;
+  // Is the middle part of the form L + own + R (found once) still tracked?
+  // With context words (L or R) the match is the place of the change. With
+  // none, the form is the change's own text alone and its one bounded match
+  // is not known to be the change: "s" inserted after "control" and still
+  // tracked, the words around it rewritten ("Our controls were assessed over
+  // 5 s."), matches only the unit "s" at the end, where nothing is tracked,
+  // and read accepted. So without context a tracked run of the same kind
+  // that holds the change's text anywhere in the paragraph counts as its
+  // own: the two cannot be told apart, and the change stays pending. A run
+  // of other text, or of the other kind, does not hold it back.
+  const ownTracked = (kind, L, own, R) => {
+    if (!placed) return revisions > 0;
+    if (placed.short[kind]) return true;
+    const form = normalizeParaText(L + own + R);
+    const at = boundedMatches(t, form)[0];
+    const a = at + collapse(L).trimStart().length;
+    const b = at + form.length - collapse(R).trimEnd().length;
+    const noContext = !collapse(L).trim() && !collapse(R).trim();
+    return placed.runs.some(
+      (r) =>
+        r.kind === kind &&
+        ((r.start < b && r.end > a) || (noContext && t.slice(r.start, r.end).includes(form))),
+    );
+  };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
     const R = headWords(right, k);
@@ -179,12 +261,12 @@ function classifyByContext(change, t, revisions) {
     } else if (change.kind === "insert") {
       const a = has(L + I + R);
       const b = has(L + R);
-      if (a && !b) return revisions > 0 ? "pending" : "accepted";
+      if (a && !b) return ownTracked("ins", L, I, R) ? "pending" : "accepted";
       if (b && !a) return "rejected";
     } else {
       const a = has(L + R);
       const b = has(L + D + R);
-      if (b && !a) return revisions > 0 ? "pending" : "rejected";
+      if (b && !a) return ownTracked("del", L, D, R) ? "pending" : "rejected";
       if (a && !b) return "accepted";
     }
   }
@@ -235,7 +317,7 @@ export function classifyChange(change, snapshot) {
   // recorded before context existed, or no single form matched, fall
   // through to the whole-paragraph rule below.
   if (change.context) {
-    const state = classifyByContext(change, t, revisions);
+    const state = classifyByContext(change, t, revisions, placedRuns(p, t));
     if (state) return out(state);
   }
   if (revisions > 0) {

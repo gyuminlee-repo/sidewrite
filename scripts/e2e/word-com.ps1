@@ -8,8 +8,18 @@
 #   state           comments (with done = resolved) and revisions of the document
 #   apply           -PlanJson <file>: accept or reject the tracked changes of
 #                   each rationale comment, optionally edit one inserted word
+#   hand-insert     -PlanJson <file> -ChangeId <id> -Text <s>: a tracked
+#                   insertion by the author at the start of the paragraph
+#                   that holds this change, left pending
 #   delete-text     -Text <s>: delete its first occurrence, track changes off
 #   add-comment     -Text <s> [-Paragraph <n>]: a comment by the Word user
+#   insert-paragraph -Text <s> -Paragraph <n>: a new paragraph with this text
+#                   in front of paragraph n (1-based), track changes off
+#   replace-text    -Text <s> -With <s>: replace its first occurrence, track
+#                   changes off
+#   open-check      -Other <path>: open another document read-only in the same
+#                   Word, without repair, and leave it open; its paragraph count
+#   close-other     -Other <path>: close that document without saving
 #   quit            -AllowDir <dir> -ExpectPid <n>: close without saving when
 #                   every open document is under AllowDir; else refused =
 #                   "foreign_documents" and nothing is closed
@@ -18,6 +28,9 @@ param(
   [Parameter(Mandatory = $true)][string]$Action,
   [string]$PlanJson,
   [string]$Text,
+  [string]$ChangeId,
+  [string]$With,
+  [string]$Other,
   [int]$Paragraph = 2,
   [string]$AllowDir,
   [int]$ExpectPid = 0
@@ -133,6 +146,20 @@ switch ($Action) {
     }
     Out ([ordered]@{ ok = (@($results | Where-Object { $_.error }).Count -eq 0); results = $results })
   }
+  "hand-insert" {
+    $plan = Get-Content -Raw -Encoding UTF8 $PlanJson | ConvertFrom-Json
+    $op = @($plan.ops | Where-Object { $_.change_id -eq $ChangeId }) | Select-Object -First 1
+    if (-not $op) { Out ([ordered]@{ ok = $false; error = "no plan op $ChangeId" }); break }
+    $want = Norm $op.comment_text
+    $c = @(CommentList | Where-Object { $_.text -eq $want }) | Select-Object -First 1
+    if (-not $c) { Out ([ordered]@{ ok = $false; error = "rationale comment not found" }); break }
+    $para = $c.com.Scope.Paragraphs.Item(1).Range
+    $was = $d.TrackRevisions
+    $d.TrackRevisions = $true
+    try { $d.Range($para.Start, $para.Start).InsertBefore($Text) } finally { $d.TrackRevisions = $was }
+    $inPara = @(RevList | Where-Object { $_.start -ge $para.Start -and $_.end -le $c.com.Scope.Paragraphs.Item(1).Range.End })
+    Out ([ordered]@{ ok = $true; change_id = $ChangeId; inserted = $Text; revisions_in_paragraph = $inPara.Count })
+  }
   "delete-text" {
     $r = $d.Content
     $f = $r.Find
@@ -152,6 +179,50 @@ switch ($Action) {
     $anchor = $words.Item(1)
     $c = $d.Comments.Add($anchor, $Text)
     Out ([ordered]@{ ok = $true; anchor = $anchor.Text; author = $c.Author; comments = $d.Comments.Count })
+  }
+  "insert-paragraph" {
+    if ($Paragraph -lt 1 -or $Paragraph -gt $d.Paragraphs.Count) { Out ([ordered]@{ ok = $false; error = "no paragraph $Paragraph" }); break }
+    $next = Norm ($d.Paragraphs.Item($Paragraph).Range.Text)
+    WithTrackingOff {
+      $d.Paragraphs.Item($Paragraph).Range.InsertParagraphBefore()
+      $d.Paragraphs.Item($Paragraph).Range.InsertBefore($Text)
+    }
+    Out ([ordered]@{ ok = $true; paragraph = $Paragraph; text = (Norm ($d.Paragraphs.Item($Paragraph).Range.Text)); next_text = $next; paragraphs = $d.Paragraphs.Count })
+  }
+  "replace-text" {
+    $r = $d.Content
+    $f = $r.Find
+    $f.ClearFormatting()
+    $f.MatchCase = $true
+    $f.Forward = $true
+    $f.Wrap = 0
+    if (-not $f.Execute($Text)) { Out ([ordered]@{ ok = $false; error = "text not found" }); break }
+    $old = $r.Text
+    WithTrackingOff { $r.Text = $With }
+    Out ([ordered]@{ ok = $true; replaced = $old; with = $With })
+  }
+  "open-check" {
+    $app = $d.Application
+    $alerts = $app.DisplayAlerts
+    $m = [Type]::Missing
+    try {
+      # No dialog: a file Word would have to repair fails here instead.
+      $app.DisplayAlerts = 0
+      # FileName, ConfirmConversions, ReadOnly, AddToRecentFiles, ..., Visible, OpenAndRepair
+      $o = $app.Documents.Open($Other, $false, $true, $false, $m, $m, $m, $m, $m, $m, $m, $true, $false)
+      Out ([ordered]@{ ok = $true; opened = $true; repaired = $false; paragraphs = $o.Paragraphs.Count; path = $o.FullName; read_only = [bool]$o.ReadOnly })
+    } catch {
+      Out ([ordered]@{ ok = $false; opened = $false; error = $_.Exception.Message })
+    } finally {
+      $app.DisplayAlerts = $alerts
+    }
+  }
+  "close-other" {
+    $closed = $false
+    foreach ($x in $d.Application.Documents) {
+      if ((Norm $x.FullName) -eq (Norm $Other)) { $x.Close($false); $closed = $true; break }
+    }
+    Out ([ordered]@{ ok = $closed; closed = $closed; path = $Other })
   }
   "quit" {
     $app = $d.Application

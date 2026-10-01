@@ -1,8 +1,11 @@
-/* global Word */
+/* global Word, Office */
+import { bytesToBase64 } from "./response-view.js";
 import {
   normalizeParaText,
+  paragraphHash,
   computeAfterText,
   countRevisionMarks,
+  trackedRuns,
   isToolComment,
   planBackupDelete,
 } from "./review-view.js";
@@ -42,18 +45,28 @@ async function getParagraphsWithIds(context) {
   // so every later `p.text` read throws "property 'text' is not available."
   // changeTrackingMode is a document-level scalar, not a paragraph property —
   // safe to piggyback on the same sync, no scalar-refresh issue.
-  try {
-    context.document.load("changeTrackingMode");
-    paragraphs.load(
-      "items/text, items/style, items/uniqueLocalId, items/listItemOrNullObject/listString",
-    );
-    await context.sync();
-    if (paragraphs.items.length > 0 && !paragraphs.items[0].uniqueLocalId) {
-      throw new Error("uniqueLocalId not populated");
+  // styleBuiltIn and outlineLevel say what a heading is in a Word of any
+  // language (the style NAME is localized: a Korean Word does not call the
+  // built-in style "Heading 1"). Asked for first; a Word that cannot load them gets the load it
+  // always got, and headings are then found by name only (paragraphLevel).
+  const WITH_IDS =
+    "items/text, items/style, items/uniqueLocalId, items/listItemOrNullObject/listString";
+  for (const props of [`${WITH_IDS}, items/styleBuiltIn, items/outlineLevel`, WITH_IDS]) {
+    try {
+      context.document.load("changeTrackingMode");
+      paragraphs.load(props);
+      await context.sync();
+      if (paragraphs.items.length > 0 && !paragraphs.items[0].uniqueLocalId) {
+        throw new Error("uniqueLocalId not populated");
+      }
+      const trackChangesOn = String(context.document.changeTrackingMode) !== "Off";
+      if (props !== WITH_IDS) noteLevels(paragraphs.items);
+      return { paragraphs, idMode: "uniqueLocalId", trackChangesOn };
+    } catch {
+      // the next, smaller load
     }
-    const trackChangesOn = String(context.document.changeTrackingMode) !== "Off";
-    return { paragraphs, idMode: "uniqueLocalId", trackChangesOn };
-  } catch {
+  }
+  {
     context.document.load("changeTrackingMode");
     paragraphs.load("items/text, items/style");
     await context.sync();
@@ -211,10 +224,37 @@ function headingLevel(style) {
   // Many organizations use prefixed style names like "Acme-Heading 2" or
   // "Firm-Heading-1" — we want to recognize those as headings too, not just
   // Word's built-in "Heading 1" / "Heading 2".
+  // A style NAME is in the language of Word: this is the last resort of
+  // paragraphLevel, never the first test.
   if (!style) return null;
   const m = /heading[\s_-]*(\d)/i.exec(style);
   return m ? parseInt(m[1], 10) : null;
 }
+
+// Heading levels read from what Word reports in any language, by paragraph
+// object (set by getParagraphsWithIds when the two properties were loaded).
+const LEVELS = new WeakMap();
+const outlineOf = (p) => {
+  const n = Number(p.outlineLevel);
+  return Number.isInteger(n) && n >= 1 && n <= 9 ? n : null;
+};
+function noteLevels(items) {
+  // An outline level tells a heading only when some paragraph has none
+  // (body text). Were it 1 to 9 for every paragraph, it would say nothing.
+  const outlineTells = items.some((p) => outlineOf(p) === null);
+  for (const p of items) {
+    const builtIn = /^Heading([1-9])$/.exec(String(p.styleBuiltIn ?? ""));
+    const level = builtIn ? Number(builtIn[1]) : outlineTells ? outlineOf(p) : null;
+    LEVELS.set(p, level);
+  }
+}
+// The heading level of a paragraph, or null: the built-in style id, then the
+// outline level, then the style name.
+function paragraphLevel(p) {
+  return LEVELS.get(p) ?? headingLevel(p.style);
+}
+// The same for an item of snapshotParagraphs.
+const levelOf = (item) => item.level ?? null;
 
 // Build the "view" the agent sees: list of {id, style, text, [number]}.
 // `number` is the user-facing paragraph number (Word's rendered list string,
@@ -224,22 +264,23 @@ function snapshotParagraphs(paragraphs, idMode) {
   return paragraphs.items.map((p, i) => {
     const text = p.text;
     const number = listNumberOf(p, text);
-    return {
+    const item = {
       index: i,
       id: getId(p, i, idMode),
       style: p.style,
       text,
       ...(number ? { number } : {}),
     };
+    // Not part of the view the agent sees.
+    Object.defineProperty(item, "level", { value: paragraphLevel(p), enumerable: false });
+    return item;
   });
 }
 
 // Find the index of a heading paragraph by case-insensitive exact text match.
 function findHeadingIndex(snapshot, headingText) {
   const target = headingText.trim().toLowerCase();
-  return snapshot.findIndex(
-    (p) => headingLevel(p.style) !== null && p.text.trim().toLowerCase() === target,
-  );
+  return snapshot.findIndex((p) => levelOf(p) !== null && p.text.trim().toLowerCase() === target);
 }
 
 // Find the canonical body paragraph for the section that contains the
@@ -271,7 +312,7 @@ function findBodyReferenceIndex(snapshot, fromIdx) {
   // Step 1: find the section's heading by walking backward.
   let sectionStart = -1;
   for (let i = fromIdx - 1; i >= 0; i--) {
-    if (snapshot[i] && headingLevel(snapshot[i].style) !== null) {
+    if (snapshot[i] && levelOf(snapshot[i]) !== null) {
       sectionStart = i;
       break;
     }
@@ -282,14 +323,14 @@ function findBodyReferenceIndex(snapshot, fromIdx) {
   if (sectionStart !== -1) {
     for (let i = sectionStart + 1; i < snapshot.length; i++) {
       if (!snapshot[i]) continue;
-      if (headingLevel(snapshot[i].style) !== null) break;
+      if (levelOf(snapshot[i]) !== null) break;
       return { idx: i, inSection: true };
     }
   }
 
   // Step 3: doc-wide fallback — style name only, NOT a format-clone source.
   for (let i = 0; i < snapshot.length; i++) {
-    if (snapshot[i] && headingLevel(snapshot[i].style) === null) {
+    if (snapshot[i] && levelOf(snapshot[i]) === null) {
       return { idx: i, inSection: false };
     }
   }
@@ -358,9 +399,9 @@ function applyParagraphFormat(targetPara, fmt) {
 // Find the end of a section starting at headingIdx (exclusive): next paragraph
 // with a heading style of same-or-higher rank (i.e. lower or equal level).
 function findSectionEnd(snapshot, headingIdx) {
-  const startLevel = headingLevel(snapshot[headingIdx].style);
+  const startLevel = levelOf(snapshot[headingIdx]);
   for (let i = headingIdx + 1; i < snapshot.length; i++) {
-    const lvl = headingLevel(snapshot[i].style);
+    const lvl = levelOf(snapshot[i]);
     if (lvl !== null && lvl <= startLevel) return i;
   }
   return snapshot.length;
@@ -1298,7 +1339,7 @@ export async function toolGetOutline() {
     const outline = [];
     for (let i = 0; i < paragraphs.items.length; i++) {
       const p = paragraphs.items[i];
-      const level = headingLevel(p.style);
+      const level = paragraphLevel(p);
       if (level > 0) {
         outline.push({ id: getId(p, i, idMode), level, text: p.text.trim() });
       }
@@ -1520,11 +1561,37 @@ export async function toolHeaderFooter({ which, text }) {
 // inserted range is removed by reject).
 // ---------------------------------------------------------------------------
 
+// Capabilities this task pane reports in its hello (taskpane.js sendHello).
+// target_hash: toolTrackedEdit compares the paragraph with
+// expected_before_hash before it edits. The daemon sends office_tracked_edit
+// only to a pane that names it (review-tools.mjs TARGET_HASH_CAP): a pane
+// loaded before the daemon was updated would apply the edit unchecked.
+export const PANE_CAPS = ["target_hash"];
+
 // Tool: office_tracked_edit. Always tracked, whatever the
 // track-changes mode setting (taskpane.js dispatches it without writeArgs()).
 // narrow ({ find, replace }, from daemon/edit-facts.mjs narrowEdit, L3): the
 // changed words only. Used when narrow.find occurs exactly once inside the
 // located hit; otherwise the full find/replace. The result says which.
+// expected_before_hash: paragraphHash of the paragraph the daemon judged the
+// edit on (forbid list, lost facts). The paragraph this function is about to
+// edit is hashed the same way right before the edit, and when the two differ
+// nothing is changed (StaleTarget): the author changed the paragraph after
+// the daemon read it, so the edit was judged on a text that is gone.
+// What is hashed: the REVIEWED text of the paragraph (getReviewedText
+// current: pending tracked changes counted as accepted), normalized. That is
+// the text the daemon has: its snapshot is collectReviewSnapshot's
+// reviewed_text, and it puts its own recorded changes in as accepted
+// (review-tools.mjs currentTexts). The raw paragraph.text still holds
+// tracked-deleted words, so it differs from the daemon's text after the
+// first edit of a paragraph, and it does not show a tracked deletion the
+// author made next to the edit. A Word without getReviewedText gives the raw
+// text, as it does in the snapshot. The paragraph compared is the one the
+// hit is in, wherever it now stands: one that moved with its text unchanged
+// passes, and so does a twin with the same text.
+// No hash (the daemon could not tell the paragraph, so it judged none) is
+// refused as well. expected_paragraph ({ index, id }: where the daemon saw
+// the paragraph) only goes into the message.
 export async function toolTrackedEdit({
   find,
   replace,
@@ -1532,6 +1599,9 @@ export async function toolTrackedEdit({
   paragraph_hint,
   narrow,
   comment_text,
+  expected_before_hash,
+  expected_paragraph,
+  known_comment_ids,
 }) {
   if (typeof find !== "string" || !find) throw new Error("`find` is required");
   if (find.length > 255) throw new Error("`find` exceeds the 255-character limit of Word search");
@@ -1601,6 +1671,24 @@ export async function toolTrackedEdit({
     }
 
     return await withTrackChanges(context, true, async () => {
+      // The last read before the edit, in this Word.run: the next batch
+      // that changes the document is the edit itself.
+      para.load("text");
+      const reviewed = await getReviewedTextBatch(context, [para.getRange("Whole")]);
+      const now = paragraphHash(reviewed ? reviewed[0] : para.text);
+      const sent = typeof expected_before_hash === "string" && expected_before_hash !== "";
+      if (!sent || now !== expected_before_hash) {
+        const seen = expected_paragraph ? ` (read at index ${expected_paragraph.index})` : "";
+        return {
+          ok: false,
+          code: "StaleTarget",
+          paragraph_index: paragraphIndex,
+          paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
+          message: sent
+            ? `The paragraph of "${find}" changed since it was read${seen}; nothing was changed`
+            : `The paragraph of "${find}" was not checked before the edit; nothing was changed`,
+        };
+      }
       const inserted = isInsert
         ? hit.insertText(insert_after, Word.InsertLocation.after)
         : target.insertText(editReplace, Word.InsertLocation.replace);
@@ -1616,8 +1704,12 @@ export async function toolTrackedEdit({
         before,
         after: computed.after,
         narrowed,
+        // The paragraph was compared with expected_before_hash. The daemon
+        // flags an applied result without this (an older task pane).
+        target_checked: true,
       };
-      return await afterEditApplied(applied, async () => {
+      // The range the comment of this edit goes on, or undefined.
+      const anchorOf = async (at) => {
         let anchor;
         if (isInsert) {
           anchor = inserted;
@@ -1635,6 +1727,7 @@ export async function toolTrackedEdit({
             await context.sync();
           }
           if (again.items.length > 1 && editReplace) {
+            at("anchor_compare");
             const where = again.items.map((r) => r.compareLocationWith(inserted));
             await context.sync();
             anchor = again.items.find(
@@ -1644,6 +1737,20 @@ export async function toolTrackedEdit({
             anchor = again.items[0];
           }
         }
+        return anchor;
+      };
+      // The comment the edit may have got although its sync threw: looked
+      // for before the second try, so that try adds no second comment.
+      // It is this edit's only when it lies where this edit puts its comment
+      // (the same anchor), not on another change with the same rationale.
+      const commentThere = async () => {
+        const anchor = await anchorOf(() => {});
+        return anchor
+          ? existingComment(context, para, comment_text, [anchor], known_comment_ids)
+          : null;
+      };
+      return await afterEditApplied(applied, commentThere, async (at) => {
+        const anchor = await anchorOf(at);
         if (!anchor) {
           return {
             ok: false,
@@ -1652,6 +1759,7 @@ export async function toolTrackedEdit({
             message: "Edit applied but no range to anchor the comment",
           };
         }
+        at("insert_comment");
         const c = anchor.insertComment(comment_text);
         c.load("id");
         await context.sync();
@@ -1661,23 +1769,186 @@ export async function toolTrackedEdit({
   });
 }
 
-// The steps after a tracked edit is in the document (anchor search, comment
-// insert and its sync). step() returns { ok, ... } without the edit fields;
-// `applied` holds them (paragraph_index, paragraph_id, before, after,
-// narrowed), which the daemon records the change from. A throw becomes the
-// partial result CommentInsertFailed, applied:true, like CommentAnchorMissing.
-export async function afterEditApplied(applied, step) {
-  try {
-    return { ...(await step()), ...applied };
-  } catch (e) {
-    return {
-      ok: false,
-      code: "CommentInsertFailed",
-      applied: true,
-      message: `Edit applied but the rationale comment could not be added: ${e?.message ?? e}`,
-      ...applied,
+// Review tab, "Add rationale comment": the comment of a change that was
+// applied without one (the comment step of toolTrackedEdit failed twice).
+// kind, find, text, paragraph_id, paragraph_index: the change as the daemon
+// recorded it; comment_text: the text its comment would have had.
+// The anchor, as in toolTrackedEdit: for a replace or a deletion the old
+// words (find), which are still in the paragraph while the change is
+// pending and are the place a comment survives accept and reject; when they
+// are gone (the change was accepted), the new words (text) of a replace. A
+// pure insertion: its own words. The anchor must be the only such place in
+// the paragraph; otherwise no comment is added (CommentAnchorMissing). A
+// comment with this text that is already on the paragraph is returned as it
+// is, when it lies on those words and the daemon does not have it on another
+// change (existingComment), is returned as it is (existed: true), so a
+// second press adds no second comment. Nothing of the document text is
+// changed.
+export async function addChangeComment({
+  kind,
+  find,
+  text,
+  paragraph_id,
+  paragraph_index,
+  comment_text,
+  known_comment_ids,
+}) {
+  if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const k =
+      idMode === "uniqueLocalId" && paragraph_id
+        ? findIndexById(paragraphs, paragraph_id, idMode)
+        : Number.isInteger(paragraph_index) && paragraph_index < paragraphs.items.length
+          ? paragraph_index
+          : -1;
+    if (k === -1) {
+      return {
+        ok: false,
+        code: "ParagraphNotFound",
+        message: "The paragraph of the change was not found",
+      };
+    }
+    const para = paragraphs.items[k];
+
+    const hitsOf = async (q) => {
+      if (typeof q !== "string" || !q.trim() || q.length > 255) return [];
+      const found = para.search(q, { matchCase: true });
+      found.load("items");
+      await context.sync();
+      return found.items;
     };
+    const news = kind === "delete" ? [] : await hitsOf(text);
+    let olds = kind === "insert" ? [] : await hitsOf(find);
+    // The old words inside the new ones ("degrees" in "degrees Celsius")
+    // are not the old words.
+    if (olds.length && news.length === 1) {
+      const where = olds.map((r) => r.compareLocationWith(news[0]));
+      await context.sync();
+      olds = olds.filter(
+        (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
+      );
+    }
+    const anchor =
+      olds.length === 1 ? olds[0] : olds.length === 0 && news.length === 1 ? news[0] : null;
+    if (!anchor) {
+      return {
+        ok: false,
+        code: "CommentAnchorMissing",
+        message:
+          "The words of the change are not in its paragraph exactly once; no place for the comment",
+      };
+    }
+    // A comment with this text that lies on the words of this change is its
+    // comment already (a second press, or an insert whose sync threw).
+    const mine = () =>
+      existingComment(context, para, comment_text, [anchor, ...news], known_comment_ids);
+    const there = await mine();
+    if (there) return { ...there, existed: true };
+    const insert = async () => {
+      const c = anchor.insertComment(comment_text);
+      c.load("id");
+      await context.sync();
+      return { ok: true, word_comment_id: c.id, existed: false };
+    };
+    try {
+      return await insert();
+    } catch {
+      // Once more, as in afterEditApplied: the comment may be there after all.
+      const now = await mine();
+      return now ? { ...now, existed: true } : await insert();
+    }
+  });
+}
+
+// The comment of THIS change that is already in the paragraph, as { ok,
+// word_comment_id }, or null. The text alone does not say whose it is: two
+// changes of one reviewer comment in one paragraph can carry the same
+// rationale. So a comment counts only when
+//   - its text is comment_text,
+//   - the daemon does not have it on another change (taken: the comment ids
+//     on record, known_comment_ids of the call), and
+//   - its range overlaps one of `places`, the ranges of this change (the
+//     anchor an edit puts its comment on; the anchor and the new words of a
+//     later add).
+// A comment whose place cannot be told (no place given) is not reused: a
+// second comment on one change shows as an unrecorded tool comment at the
+// next refresh, a shared one would stay unnoticed.
+const APART = ["Before", "After", "AdjacentBefore", "AdjacentAfter", "Unrelated"];
+async function existingComment(context, para, comment_text, places, taken) {
+  const comments = para.getComments();
+  comments.load("items/id, items/content");
+  await context.sync();
+  const want = normalizeParaText(comment_text);
+  const skip = new Set((taken ?? []).map(String));
+  const same = comments.items.filter(
+    (x) => normalizeParaText(x.content) === want && !skip.has(String(x.id)),
+  );
+  const at = (places ?? []).filter(Boolean);
+  if (!same.length || !at.length) return null;
+  const where = same.map((c) => {
+    const r = c.getRange();
+    return at.map((place) => r.compareLocationWith(place));
+  });
+  await context.sync();
+  const k = where.findIndex((ws) => ws.some((w) => !APART.includes(w.value)));
+  return k === -1 ? null : { ok: true, word_comment_id: same[k].id };
+}
+
+// What goes to the daemon log about a failed comment step: the step, the
+// Office error code and place, and the message of the error. Word's errors
+// name no text of the document; the statement lists of debugInfo, which can
+// (a search string, the comment text), are left out.
+function commentError(e, step) {
+  return {
+    step,
+    code: e?.code ?? e?.debugInfo?.code ?? null,
+    location: e?.debugInfo?.errorLocation ?? null,
+    message: String(e?.message ?? e).slice(0, 200),
+  };
+}
+
+// The steps after a tracked edit is in the document (anchor search, comment
+// insert and its sync). step(at) returns { ok, ... } without the edit fields
+// and names the part it is in with at(name); `applied` holds the edit fields
+// (paragraph_index, paragraph_id, before, after, narrowed), which the daemon
+// records the change from.
+// Word's comment insert fails now and then on an edit it accepts the next
+// time (the s25 acceptance run: the same edit, one run without its comment,
+// the next with it). So a step that threw is tried once more. Before the
+// second try found() looks for the comment in the document: a sync can
+// throw after Word did the insert, and a second insert would then leave two
+// comments on one change. Two throws become the partial result
+// CommentInsertFailed, applied:true, like CommentAnchorMissing. Each throw is
+// described in comment_errors (commentError), with comment_attempts, also
+// when the second try worked: the daemon logs them.
+export async function afterEditApplied(applied, found, step) {
+  const errors = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let where = "anchor_search";
+    try {
+      if (attempt === 2) where = "find_existing";
+      const there = attempt === 2 ? await found() : null;
+      where = "anchor_search";
+      const r = there ?? (await step((name) => (where = name)));
+      return {
+        ...r,
+        ...applied,
+        ...(errors.length ? { comment_attempts: attempt, comment_errors: errors } : {}),
+      };
+    } catch (e) {
+      errors.push(commentError(e, where));
+    }
   }
+  return {
+    ok: false,
+    code: "CommentInsertFailed",
+    applied: true,
+    message: `Edit applied but the rationale comment could not be added: ${errors.at(-1).message}`,
+    comment_attempts: 2,
+    comment_errors: errors,
+    ...applied,
+  };
 }
 
 function isoOrNull(d) {
@@ -1721,6 +1992,8 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
         text: p.text,
         reviewed_text: reviewed ? reviewed[i] : null,
         ...countRevisionMarks(oox[i].value),
+        // Which text is still tracked, run by run (revision-classify.mjs).
+        tracked: trackedRuns(oox[i].value),
       })),
       comments: probes.map(({ c, r, ps }, n) => {
         const first = ps.items[0];
@@ -1848,5 +2121,73 @@ export async function deleteToolComments() {
     for (const c of left.items) after[isToolComment(c.content) ? "tool" : "user"] += 1;
     const still = new Set(left.items.map((c) => String(c.id)));
     return { before, after, deleted_ids: doomed.filter((id) => !still.has(id)) };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Response letter: the rendered PDF and the heading list
+// ---------------------------------------------------------------------------
+
+const RENDER_PDF_SLICE_SIZE = 4 * 1024 * 1024;
+
+function officeAsync(fn) {
+  return new Promise((resolve, reject) => {
+    fn((res) => {
+      if (res.status === Office.AsyncResultStatus.Failed) reject(res.error);
+      else resolve(res.value);
+    });
+  });
+}
+
+// The open document as Word renders it to PDF, margin line numbers included.
+// A function of the pane, not an agent tool: the bytes go to the daemon for
+// the line numbers and never into a model context. Throws what Word reports.
+// The caller checks the size (response-view.js pdfTooLarge) before sending.
+export async function exportRenderPdf() {
+  const file = await officeAsync((cb) =>
+    Office.context.document.getFileAsync(
+      Office.FileType.Pdf,
+      { sliceSize: RENDER_PDF_SLICE_SIZE },
+      cb,
+    ),
+  );
+  try {
+    const parts = [];
+    let total = 0;
+    for (let i = 0; i < file.sliceCount; i++) {
+      const slice = await officeAsync((cb) => file.getSliceAsync(i, cb));
+      const bytes = slice.data instanceof Uint8Array ? slice.data : Uint8Array.from(slice.data);
+      parts.push(bytes);
+      total += bytes.length;
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      all.set(p, off);
+      off += p.length;
+    }
+    return { pdf_base64: bytesToBase64(all), byte_length: total, slice_count: file.sliceCount };
+  } finally {
+    try {
+      await officeAsync((cb) => file.closeAsync(cb));
+    } catch {
+      /* a close failure must not hide the export result */
+    }
+  }
+}
+
+// The headings of the document: [{ index, level, text }], index being the
+// paragraph index of collectReviewSnapshot (the snapshot has no styles).
+// Same rule as toolGetOutline.
+export async function collectHeadings() {
+  return await Word.run(async (context) => {
+    const { paragraphs } = await getParagraphsWithIds(context);
+    const out = [];
+    paragraphs.items.forEach((p, index) => {
+      const level = paragraphLevel(p);
+      const text = p.text.trim();
+      if (level > 0 && text) out.push({ index, level, text });
+    });
+    return out;
   });
 }

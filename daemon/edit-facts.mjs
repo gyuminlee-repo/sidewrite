@@ -122,7 +122,16 @@ export function factPresent(fact, text) {
   const key = canon(fact);
   if (!key) return true;
   const re = new RegExp(String.raw`(?<![${WORD}]|\d[.,])${escapeRe(key)}(?![${WORD}]|[.,]\d)`, "u");
-  return re.test(canon(text));
+  // Also the text as written: canon() folds a unit written out ("degrees
+  // Celsius") into its sign, and the word itself would then seem gone.
+  return (
+    re.test(canon(text)) ||
+    re.test(
+      String(text ?? "")
+        .toLowerCase()
+        .replace(/\s+/g, " "),
+    )
+  );
 }
 
 // L1. Facts of the deleted text that the replacement does not keep.

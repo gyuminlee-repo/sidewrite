@@ -14,8 +14,10 @@ Usage: embed_taskpane.py --manifest manifests/word.xml --src in.docx --out out.d
 """
 
 import argparse
+import os
 import re
 import sys
+import tempfile
 import uuid
 import zipfile
 
@@ -85,22 +87,50 @@ def add_content_types(ct):
     return ct
 
 
+def same_file(a, b):
+    """Is b the file a, by whatever name: another spelling of the path, a
+    symlink, or a hard link. b need not exist."""
+    if os.path.realpath(a) == os.path.realpath(b):
+        return True
+    return os.path.exists(b) and os.path.samefile(a, b)
+
+
 def embed(src, out, addin_id, version):
+    # Opening the output for writing truncates it: it must not be the source.
+    if same_file(src, out):
+        raise ValueError(f"--out is the source file ({src}); the source is never written")
     with zipfile.ZipFile(src) as zin:
         names = zin.namelist()
         if any(n.startswith("word/webextensions/") for n in names):
             raise ValueError(f"{src} already has webextension parts")
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
-            for n in names:
-                data = zin.read(n)
-                if n == "_rels/.rels":
-                    data = add_root_rel(data.decode("utf-8")).encode("utf-8")
-                elif n == "[Content_Types].xml":
-                    data = add_content_types(data.decode("utf-8")).encode("utf-8")
-                zout.writestr(zin.getinfo(n), data)
-            zout.writestr(WE_PART, webextension_xml(addin_id, version, str(uuid.uuid4()).upper()))
-            zout.writestr(TP_PART, taskpanes_xml())
-            zout.writestr(TP_RELS, TP_RELS_XML)
+        # Written next to the output and renamed onto it when complete, so a
+        # failure leaves the output as it was (or absent), never cut short.
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(os.path.abspath(out)), prefix=".embed-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "wb") as f, zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zout:
+                for n in names:
+                    data = zin.read(n)
+                    if n == "_rels/.rels":
+                        data = add_root_rel(data.decode("utf-8")).encode("utf-8")
+                    elif n == "[Content_Types].xml":
+                        data = add_content_types(data.decode("utf-8")).encode("utf-8")
+                    zout.writestr(zin.getinfo(n), data)
+                zout.writestr(
+                    WE_PART, webextension_xml(addin_id, version, str(uuid.uuid4()).upper())
+                )
+                zout.writestr(TP_PART, taskpanes_xml())
+                zout.writestr(TP_RELS, TP_RELS_XML)
+            # mkstemp makes the file private; give it the mode a plain write has.
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(tmp, 0o666 & ~umask)
+            os.replace(tmp, out)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
 
 
 def main(argv=None):
@@ -109,7 +139,7 @@ def main(argv=None):
     ap.add_argument("--src", required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    if a.src == a.out:
+    if same_file(a.src, a.out):
         ap.error("--out must differ from --src (the source is never written)")
     with open(a.manifest, encoding="utf-8") as f:
         addin_id, version = manifest_id_version(f.read())

@@ -271,3 +271,67 @@ test("L8 not empty: tool calls, text, no stats, an answer, an error subtype", ()
     assert.notEqual(turnCompleteEvents(result, null, stats)[0].subtype, "empty");
   }
 });
+
+// The outcome a review turn_done carries (review-service.mjs turnEnded): the
+// pane's "Propose all" reads it there, not from the order of the events.
+test("turnOutcome: ok for a plain turn_complete; the error text of a limit, refusal, API error or empty turn", async () => {
+  const { turnOutcome } = await import("../daemon/limit-detect.mjs");
+  assert.deepEqual(turnOutcome(turnCompleteEvents({ subtype: "success", result: "done" }, null)), {
+    ok: true,
+  });
+  const limit = turnOutcome(
+    turnCompleteEvents(
+      { subtype: "success" },
+      { limited: true, kind: "limit", text: "Resets 5pm." },
+    ),
+  );
+  assert.deepEqual(limit, {
+    ok: false,
+    error: "Claude usage limit reached. Resets 5pm.",
+    subtype: "usage_limit",
+  });
+  const refusal = turnOutcome(
+    turnCompleteEvents({ subtype: "success" }, { limited: true, kind: "refusal", text: "" }),
+  );
+  assert.deepEqual([refusal.ok, refusal.subtype], [false, "refusal"]);
+  const empty = turnOutcome(
+    turnCompleteEvents({ subtype: "success", result: "" }, null, { text: 0, tool_use: 0 }),
+  );
+  assert.deepEqual([empty.ok, empty.subtype], [false, "empty"]);
+  assert.deepEqual(turnOutcome([]), { ok: true });
+});
+
+// F4: the SDK's error results (SDKResultError.subtype in sdk.d.ts) send no
+// error event, so the subtype itself has to fail the turn.
+test("turnOutcome: every error subtype of an SDK result is a failed turn with a readable reason", async () => {
+  const { turnOutcome } = await import("../daemon/limit-detect.mjs");
+  const cases = {
+    error_max_turns: /maximum number of turns/,
+    error_during_execution: /error while it ran: tool crashed; second/,
+    error_max_budget_usd: /spending limit/,
+    error_max_structured_output_retries: /structured output/,
+    error_something_new: /ended with error_something_new/,
+  };
+  for (const [subtype, reason] of Object.entries(cases)) {
+    const result = { type: "result", subtype, is_error: true, errors: ["tool crashed", "second"] };
+    const out = turnOutcome(turnCompleteEvents(result, null), result);
+    assert.equal(out.ok, false, subtype);
+    assert.equal(out.subtype, subtype);
+    assert.match(out.error, reason, subtype);
+  }
+  // No errors list: still a failure with a reason.
+  const bare = { type: "result", subtype: "error_during_execution" };
+  assert.match(turnOutcome(turnCompleteEvents(bare, null), bare).error, /error while it ran\.$/);
+  // A success stays ok with or without the result; an error event still wins.
+  const good = { type: "result", subtype: "success", result: "done" };
+  assert.deepEqual(turnOutcome(turnCompleteEvents(good, null), good), { ok: true });
+  const limited = turnOutcome(
+    turnCompleteEvents({ subtype: "error_max_turns" }, { limited: true, kind: "limit", text: "" }),
+    { subtype: "error_max_turns" },
+  );
+  assert.deepEqual([limited.ok, limited.subtype], [false, "usage_limit"]);
+  // The events alone are enough: the subtype is on turn_complete.
+  assert.equal(turnOutcome([{ event: "turn_complete", subtype: "error_max_turns" }]).ok, false);
+  assert.equal(turnOutcome([{ event: "turn_complete", subtype: "stream_ended" }]).ok, true);
+  assert.equal(turnOutcome([{ event: "turn_complete" }]).ok, true);
+});
