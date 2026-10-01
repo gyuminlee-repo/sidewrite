@@ -106,8 +106,21 @@ const turnBusy = (page) =>
   });
 
 const steps = {
+  // The tab buttons get their click handlers when taskpane.js has run, which
+  // can be after the page is reachable over CDP: a click before that does
+  // nothing and every later step would wait on a hidden tab. Click until the
+  // Review tab is the one shown.
   async "open-review"(page) {
-    await page.click('button.tab[data-tab="review"]');
+    await page.waitForFunction(
+      () => {
+        const shown = () =>
+          document.querySelector('.tab-content[data-tab="review"]')?.hidden === false;
+        if (!shown()) document.querySelector('button.tab[data-tab="review"]')?.click();
+        return shown();
+      },
+      null,
+      { timeout: 60_000, polling: 500 },
+    );
     await page.waitForFunction(
       () => document.getElementById("review-file").textContent.startsWith("Review file:"),
       null,
