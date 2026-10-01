@@ -28,6 +28,15 @@ import {
 import { createReviewService } from "./review-service.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
 import { createModelCache, resolveModelChoice } from "./model-list.mjs";
+import { createKeyStore } from "./providers/keys.mjs";
+import { probeAll, createProbeCache } from "./providers/probe.mjs";
+import { createOneshotRouter } from "./providers/oneshot-router.mjs";
+import { createProviderSelection, providersListReply } from "./providers/selection.mjs";
+import { chatOneshot } from "./providers/openai-compat.mjs";
+import { codexOneshot } from "./providers/codex.mjs";
+import { agyOneshot } from "./providers/agy.mjs";
+import { createMcpHttp } from "./mcp-http.mjs";
+import { createCliTurns } from "./cli-turns.mjs";
 import {
   buildQueryOptions,
   formatUsageLine,
@@ -139,7 +148,27 @@ function sendError(req, res, status, headline, requestedPath) {
   }
 }
 
+// The office tools for a CLI provider's review turn (mcp-http.mjs), set
+// once the review service exists (below). Until then /mcp/ is not served.
+let mcpHttp = null;
+
 const http = createServer(async (req, res) => {
+  // /mcp/<route> first: it has its own checks (loopback peer and Host, no
+  // Origin, the route's bearer token) and takes no part in the CORS and
+  // OPTIONS handling of the task pane files below.
+  const mcpPath = (req.url || "/").split("?")[0];
+  if (mcpPath.startsWith("/mcp/")) {
+    try {
+      if (mcpHttp && (await mcpHttp.handle(req, res, mcpPath))) return;
+    } catch (e) {
+      console.warn("[mcp-http] request failed:", e?.message ?? e);
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+      return;
+    }
+    res.writeHead(404).end();
+    return;
+  }
   // Restrictive CORS: only the taskpane's same origin (HTTP_ORIGIN) gets the
   // Access-Control-Allow-Origin header. Other origins (malicious web pages
   // running in a regular browser tab) hit a no-CORS-header response and the
@@ -481,6 +510,7 @@ function onPaneClose(key) {
   explicitWorkspaceKeys.delete(key);
   loopRestartByKey.delete(key);
   modelByKey.delete(key);
+  selection.drop(key);
   startQueue.delete(key);
 }
 
@@ -514,6 +544,24 @@ async function ensureLoopForMessage(key, host) {
 // ---------------------------------------------------------------------------
 // Review tab (C1/C3). Lambdas reach `bridge` lazily: it is created below.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Providers (P14): which one each pane uses, the keys of the key tier, the
+// availability probe and the routing of judgments.
+// ---------------------------------------------------------------------------
+const selection = createProviderSelection();
+const providerKeys = createKeyStore({ log: console.log });
+const probeCache = createProbeCache({
+  probe: () => probeAll({ claudeModels: () => modelCache.get(), keys: providerKeys }),
+});
+const oneshotRouter = createOneshotRouter({
+  claude: makeOneshot(),
+  codex: (req) => codexOneshot(req),
+  antigravity: (req) => agyOneshot(req),
+  http: (req) => chatOneshot(req),
+  keys: providerKeys,
+  getChoice: (key) => selection.choiceFor(key, "oneshot"),
+});
+
 const review = createReviewService({
   getContext: (key) => bridge.getContext(key),
   callTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key),
@@ -523,19 +571,55 @@ const review = createReviewService({
         "The agent is still working on the previous message. Wait until it is Ready.",
       );
     }
+    // The provider the pane chose for review turns (set_provider checked it
+    // against the probe). Claude: the pane's Agent SDK session, as before.
+    const choice = selection.choiceFor(key, "turn");
     turnBusy.add(key);
     reviewTurnByKey.set(key, turn);
-    // Same order as the user_message path in the bridge: schedule the loop,
-    // then queue the message it will consume.
-    ensureLoopForMessage(key, host).catch((e) =>
-      console.warn("[review] could not start the agent loop:", e.message),
-    );
-    bridge.pushUserMessage(text, key);
+    if (choice.id === "claude") {
+      // Same order as the user_message path in the bridge: schedule the loop,
+      // then queue the message it will consume.
+      ensureLoopForMessage(key, host).catch((e) =>
+        console.warn("[review] could not start the agent loop:", e.message),
+      );
+      bridge.pushUserMessage(text, key);
+      return;
+    }
+    // A CLI has no separate system prompt: the host instructions go in front.
+    buildSystemPromptAppend(host)
+      .then((append) => cliTurns.start(key, host, `${append}\n\n${text}`, choice, turn))
+      .catch((e) => {
+        const error = e?.message ?? String(e);
+        bridge.sendAssistantEvent({ event: "error", error }, key);
+        bridge.sendAssistantEvent({ event: "turn_complete", subtype: "error" }, key);
+        endTurnState(key, { ok: false, error });
+      });
   },
   oneshot: makeOneshot(),
   oneshotModel: ONESHOT_MODEL,
-  getModel: (key) => modelArgFor(key),
+  // Judgments go to the provider the pane chose (default: Claude, haiku).
+  oneshotFor: (key) => oneshotRouter.forKey(key),
+  oneshotModelFor: (key) => oneshotRouter.modelLabel(key),
+  getModel: (key) => {
+    const t = selection.choiceFor(key, "turn");
+    return t.id === "claude" ? modelArgFor(key) : `${t.id}:${t.model ?? "default"}`;
+  },
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
+});
+
+// Review turns of a CLI provider: the MCP endpoint they call and their
+// runner. A route is open only while its turn runs (cli-turns.mjs).
+mcpHttp = createMcpHttp({
+  bridge: { callTaskpaneTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key) },
+  getReviewTurn: (key) => reviewTurnByKey.get(key) ?? null,
+  trackedEditDeps: (key) => review.trackedEditDeps(key),
+});
+const cliTurns = createCliTurns({
+  mcpHttp,
+  baseUrl: HTTP_ORIGIN,
+  sendText: (text, key) => bridge.sendAssistantText(text, key),
+  sendEvent: (event, key) => bridge.sendAssistantEvent(event, key),
+  endTurn: (key, outcome) => endTurnState(key, outcome),
 });
 
 // Clear per-turn state when a turn ends for any reason. outcome: how it
@@ -662,6 +746,11 @@ const bridge = createBridge({
       // flag the session interrupted) emits turn_complete interrupted so
       // the taskpane flips to Ready and auto-restarts a resuming loop.
       // Every other pane's loop is untouched.
+      // A CLI provider's review turn first: it is not an SDK session.
+      if (cliTurns.stop(key)) {
+        reply({ type: "stop_agent_result", ok: true, request_id: msg.request_id });
+        return;
+      }
       const s = sessionFor(key);
       if (s) {
         s.interrupted = true;
@@ -688,6 +777,50 @@ const bridge = createBridge({
           error: e.message,
           request_id: msg.request_id,
         });
+      }
+    },
+    // ---- providers (P14). No reply, log line or error text holds a key. ----
+    providers_list: async (msg, reply, key) => {
+      const rows = await probeCache.get({ refresh: !!msg.refresh });
+      console.log(
+        `[providers] list available=${rows
+          .filter((r) => r.available)
+          .map((r) => r.id)
+          .join(",")} turn_ready=${rows
+          .filter((r) => r.turn_ready)
+          .map((r) => r.id)
+          .join(",")}`,
+      );
+      reply({
+        type: "providers_list_result",
+        ok: true,
+        request_id: msg.request_id,
+        ...providersListReply(rows, selection.get(key)),
+      });
+    },
+    provider_set_key: async (msg, reply, key) => {
+      const done = (body) =>
+        reply({ type: "provider_set_key_result", request_id: msg.request_id, ...body });
+      try {
+        await providerKeys.set(String(msg.id ?? ""), { key: msg.key, base_url: msg.base_url });
+        const rows = await probeCache.get({ refresh: true });
+        done({ ok: true, ...providersListReply(rows, selection.get(key)) });
+      } catch (e) {
+        done({ ok: false, error: e?.message ?? String(e) });
+      }
+    },
+    set_provider: async (msg, reply, key) => {
+      const done = (body) =>
+        reply({ type: "set_provider_result", request_id: msg.request_id, ...body });
+      try {
+        const rows = await probeCache.get();
+        const chosen = selection.set(key, msg.role, { id: msg.id, model: msg.model }, rows);
+        console.log(
+          `[providers] set role=${msg.role} id=${msg.id} model=${msg.model ?? "default"} (key bound)`,
+        );
+        done({ ok: true, selection: chosen });
+      } catch (e) {
+        done({ ok: false, error: e?.message ?? String(e), selection: selection.get(key) });
       }
     },
     models_list: async (msg, reply) => {
@@ -1412,7 +1545,14 @@ if (process.send) {
 }
 
 // Keep process alive even when nothing is happening.
-process.on("SIGINT", () => {
+// A running CLI review turn is stopped first: that also takes the turn's
+// office entry (route and token) out of the agy settings.
+function shutdown() {
   console.log("\n[daemon] Shutting down");
-  process.exit(0);
-});
+  const bye = () => process.exit(0);
+  const limit = setTimeout(bye, 8_000);
+  limit.unref?.();
+  cliTurns.shutdown().then(bye, bye);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
