@@ -293,13 +293,16 @@ test("service: Word applied, the record cannot be saved: the attempt stays and t
       w.events.map((e) => [e.event, e.ref, e.attempt_id]),
       [["record_failed", "R1.1", "R1.1-b1"]],
     );
+    // A daemon started after that has the attempt only (the daemon that got
+    // Word's answer saves the change itself at its next load: see below).
     // Nothing runs it any more: on load it reads like an unanswered edit.
-    c = (await w.ask("review_load")).revision.comments[0];
+    const d2 = service(w.dir);
+    c = (await d2.ask("review_load")).revision.comments[0];
     assert.deepEqual(
       c.blocked.map((b) => b.state),
       ["outcome_unknown"],
     );
-    const done = await w.ask("review_refresh", {
+    const done = await d2.ask("review_refresh", {
       snapshot: snap(AFTER, [{ id: "12", paragraph_index: 1, content: COMMENT }]),
     });
     c = done.revision.comments[0];
@@ -679,6 +682,114 @@ test("service: after a restart a narrowed edit in the document is not read as a 
     await d2.ask("review_load");
     const c = (await d2.ask("review_refresh", { snapshot: untouched() })).revision.comments[0];
     assert.deepEqual([c.changes.length, c.blocked.length], [0, 0]);
+  } finally {
+    await w.cleanup();
+  }
+});
+
+// Which of the two forms a refresh records, for a daemon that has the
+// attempt only. The full call is looked for first; the narrower one counts
+// without its comment only as Word's tracked replace (new words, then old).
+test("service: after a restart the form found in the document is the one recorded", async () => {
+  const para = (text, tracked) => ({
+    paragraphs: [
+      { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0, tracked: [] },
+      {
+        index: 1,
+        id: "p1",
+        text,
+        w_ins: tracked.filter((r) => r.kind === "ins").length,
+        w_del: tracked.filter((r) => r.kind === "del").length,
+        tracked,
+      },
+    ],
+    comments: [],
+  });
+  const settle = async (w, snapshot) => {
+    const d2 = service(w.dir);
+    await d2.ask("review_load");
+    return (await d2.ask("review_refresh", { snapshot })).revision.comments[0];
+  };
+
+  // Word could not narrow and replaced the whole find; no comment. The old
+  // words are tracked as deleted after the new ones: the full replace, and
+  // not "the deletion of carefully was accepted".
+  let w = await narrowedUnsaved();
+  try {
+    const c = await settle(
+      w,
+      para("Cells grew on the substrategrew carefully on the substrate at 30 C.", [
+        { kind: "ins", text: "grew on the substrate", start: 6, marks: 1 },
+        { kind: "del", text: "grew carefully on the substrate", start: 27, marks: 1 },
+      ]),
+    );
+    assert.deepEqual([c.changes.length, c.blocked.length], [1, 0], JSON.stringify(c));
+    assert.deepEqual(
+      [c.changes[0].kind, c.changes[0].find, c.changes[0].narrowed_from, c.changes[0].state],
+      ["replace", EDIT2.find, null, "pending"],
+    );
+  } finally {
+    await w.cleanup();
+  }
+
+  // A narrowed replace, still tracked, without its comment: "°C" next to the
+  // deleted "degrees" is Word's tracked replace of exactly those words.
+  const B3 = "It was held at 30 degrees for 5 days.";
+  const EDIT3 = {
+    comment_ref: "R1.1",
+    find: "held at 30 degrees for",
+    replace: "held at 30 °C for",
+    rationale: R,
+  };
+  const unsaved3 = async () => {
+    const x = await world(async () => ({
+      ...NARROWED,
+      before: B3,
+      after: "It was held at 30 °C for 5 days.",
+    }));
+    await x.ask("review_refresh", { snapshot: para(B3, []) });
+    saves.length = 0;
+    failSave = (n) => n === 2;
+    const r = await x.edit(EDIT3);
+    assert.equal(r.code, "AppliedNotRecorded", JSON.stringify(r));
+    assert.deepEqual(x.calls[0][1].narrow, { find: "degrees", replace: "°C" });
+    failSave = () => false;
+    return x;
+  };
+  w = await unsaved3();
+  try {
+    const c = await settle(
+      w,
+      para("It was held at 30 °Cdegrees for 5 days.", [
+        { kind: "ins", text: "°C", start: 18, marks: 1 },
+        { kind: "del", text: "degrees", start: 20, marks: 1 },
+      ]),
+    );
+    assert.deepEqual([c.changes.length, c.blocked.length], [1, 0], JSON.stringify(c));
+    assert.deepEqual(
+      [c.changes[0].kind, c.changes[0].find, c.changes[0].text, c.changes[0].narrowed_from],
+      ["replace", "degrees", "°C", { find: EDIT3.find, text: EDIT3.replace }],
+    );
+    assert.deepEqual(
+      [c.changes[0].comment_missing, c.changes[0].state],
+      ["CommentNotFound", "pending"],
+    );
+  } finally {
+    await w.cleanup();
+  }
+
+  // "°C" somewhere else in the paragraph, the old words in place and another
+  // tracked change of the author's: the new words alone say nothing, and
+  // both forms read the old words in their place. Not recorded.
+  w = await unsaved3();
+  try {
+    const c = await settle(
+      w,
+      para("It was held at 30 degrees for 5 days, not at 4 °C as before.", [
+        { kind: "ins", text: "as before", start: 50, marks: 1 },
+      ]),
+    );
+    assert.deepEqual([c.changes.length, c.blocked.map((b) => b.state)], [0, []], JSON.stringify(c));
   } finally {
     await w.cleanup();
   }

@@ -152,7 +152,7 @@ function fail(message, extra = {}) {
 //         onAttempt({ref, args, attempt}) -> {id, end()}, onEdit({ref, change, attempt_id}),
 //         onNotApplied({ref, attempt_id}), onBlocked({ref, args, blocked_by}),
 //         onOutcomeUnknown({id, ref, record, attempt, attempt_id}),
-//         onRecordFailed({ref, attempt_id}), onStaleTarget({ref}),
+//         onRecordFailed({ref, attempt_id, change}), onStaleTarget({ref}),
 //         paneChecksTarget() -> boolean, holdRef(ref) -> release, log }
 // onAttempt: called before Word, with the edit and the form it would have in
 // the document; it writes them to the review file and returns the id of
@@ -283,6 +283,10 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       override_of: excepted,
       lost_facts: lost,
       unsourced_terms: unsourced,
+      // The narrower form the task pane applies when it can (L3). Word's
+      // answer says which one went in; when that answer is never saved, a
+      // refresh looks for both (narrowedAttempt).
+      ...(narrow ? { narrow } : {}),
     }),
   });
   // A task pane that does not compare the paragraph before the edit (it was
@@ -358,15 +362,18 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
       unsourced,
       find: args.find,
       commentMissing,
-    });
-    if (out.code === "AppliedNotRecorded") {
+      // change: the change as Word applied it (narrowed or not, with its
+      // comment id). The attempt on file was written before the call and
+      // does not know either, so the change is handed over for a later save.
       // The task pane is told (its status line). The call is over first, so
       // the attempt reads as unowned when the pane loads the file again.
-      pre?.end?.();
-      await Promise.resolve(
-        deps.onRecordFailed?.({ ref: turn.ref, attempt_id: attemptId, at }),
-      ).catch(() => {});
-    }
+      onFailed: async (change) => {
+        pre?.end?.();
+        await Promise.resolve(
+          deps.onRecordFailed?.({ ref: turn.ref, attempt_id: attemptId, change, at }),
+        ).catch(() => {});
+      },
+    });
     return out;
   };
 
@@ -528,6 +535,30 @@ export function unknownAttempt(texts, target, ids, change) {
   };
 }
 
+// The narrower form of an attempt (attempt.change.narrow), as recordApplied
+// records an edit the task pane narrowed: the cut find and replacement, the
+// words around the cut range, and the full call under narrowed_from. null
+// when the attempt has none, or its place in `before` cannot be told.
+export function narrowedAttempt(change) {
+  const n = change?.narrow;
+  if (change?.kind !== "replace" || typeof n?.find !== "string" || !n.find) return null;
+  const context = changeContext(change.before, change.find, {
+    kind: change.kind,
+    narrowFind: n.find,
+  });
+  if (!context) return null;
+  const { narrow, ...rest } = change;
+  const text = String(narrow.replace ?? "");
+  return {
+    ...rest,
+    kind: text === "" ? "delete" : "replace",
+    find: narrow.find,
+    text,
+    narrowed_from: { find: change.find, text: change.text },
+    context,
+  };
+}
+
 // Is the paragraph text `before` there more than once?
 const hasTwin = (texts, before) => {
   const b = normalizeParaText(before);
@@ -553,6 +584,7 @@ async function recordApplied(
     unsourced,
     find,
     commentMissing,
+    onFailed,
   },
 ) {
   // The task pane reports whether it could apply the narrowed range (the cut
@@ -590,6 +622,7 @@ async function recordApplied(
     // an error would read as "not applied" and invite a second apply. The
     // attempt written before the call stays; a refresh records the change.
     deps.log?.(`[review] applied, record failed ${attemptId ?? ref}: ${e?.message ?? e}`);
+    await onFailed?.(change);
     return {
       ok: false,
       applied: true,

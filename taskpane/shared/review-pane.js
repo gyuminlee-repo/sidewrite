@@ -1137,15 +1137,27 @@ export function initReviewPane({
           .catch((e) => say(e.message, true))
           .finally(render);
       } else if (msg.event === "record_failed") {
-        // The load turns the attempt into an unanswered edit in the list.
+        // The load turns the attempt into an unanswered edit in the list,
+        // or, when the daemon could save the change this time, into the
+        // change (its attempt is then gone from the list).
         load()
-          .catch(() => {})
-          .finally(() => {
+          .then(
+            () => true,
+            () => false,
+          )
+          .then((loaded) => {
             render();
-            say(
-              `${msg.ref}: the edit was applied in Word but saving its record failed; press Refresh status to match them again.`,
-              true,
-            );
+            const left = (state.revision?.comments ?? [])
+              .find((c) => c.ref === msg.ref)
+              ?.blocked?.some((b) => b.id === msg.attempt_id);
+            if (loaded && !left) {
+              say(`${msg.ref}: the edit was applied in Word; its record is saved now.`);
+            } else {
+              say(
+                `${msg.ref}: the edit was applied in Word but saving its record failed; press Refresh status to match them again.`,
+                true,
+              );
+            }
           });
       } else if (msg.event === "stale_target") {
         // A tracked edit was refused: its paragraph is no longer as the

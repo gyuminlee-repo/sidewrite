@@ -70,6 +70,7 @@ import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
+  narrowedAttempt,
   formatRationaleComment,
   TOOL_COMMENT_PREFIX,
   TARGET_HASH_CAP,
@@ -91,6 +92,17 @@ async function exists(p) {
 // the paragraph. A pending deletion reads the same as one never applied, so
 // it stays unknown. Found ones become a recorded change (with the rationale
 // comment the snapshot holds, if any) and leave the blocked list.
+//
+// Two forms are looked for (Codex review of the recovery path): the call as
+// it was asked, and the narrower form the task pane applies when it can
+// (attempt.change.narrow; review-tools.mjs narrowedAttempt). A narrowed edit
+// that is still tracked leaves the old words of the full call in the
+// paragraph, which reads "rejected" for the full form. The full form is
+// tried first: it is what an accepted edit reads as either way. The narrowed
+// form counts, when pending, with its rationale comment in the document or,
+// for a replace, with its new and old words next to each other (Word's
+// tracked replace); its new words alone are too few to say anything. An
+// attempt is dropped as not applied only when every form reads rejected.
 export function resolveUnknownOverrides(rev, snapshot) {
   let next = rev;
   const resolved = [];
@@ -108,31 +120,36 @@ export function resolveUnknownOverrides(rev, snapshot) {
           !used.has(String(x.id)) &&
           normalizeParaText(x.content) === normalizeParaText(b.attempt.comment_text),
       );
-      const change = {
-        ...b.attempt.change,
-        word_comment_id: comment ? String(comment.id) : null,
-      };
-      const row = classifyChange(change, snapshot);
-      const p = paras.find((x) => x.index === row.paragraph_index);
-      // Plain containment: Word joins pending inserted and deleted text with
-      // no space, so a word-bounded match would miss it.
-      const newTextThere =
-        !!p && normalizeParaText(p.text).includes(normalizeParaText(change.text));
-      // Its rationale comment in the document settles a pending deletion too:
-      // the task pane adds the comment only after the edit.
-      const applied =
-        row.state === "accepted" ||
-        (row.state === "pending" && (!!comment || (change.kind !== "delete" && newTextThere)));
-      if (!applied) {
-        // A normal edit whose own range still reads the old form, with no
-        // rationale comment: not applied, nothing is left to wait for. An
-        // approved exception stays, so the author can decide again.
-        if (own && !comment && row.state === "rejected") {
+      const { narrow: _narrow, ...full } = b.attempt.change;
+      const judged = [full, narrowedAttempt(b.attempt.change)].filter(Boolean).map((form) => {
+        const change = { ...form, word_comment_id: comment ? String(comment.id) : null };
+        const row = classifyChange(change, snapshot);
+        const p = paras.find((x) => x.index === row.paragraph_index);
+        // Plain containment: Word joins pending inserted and deleted text with
+        // no space, so a word-bounded match would miss it.
+        const holds = (s) => !!p && normalizeParaText(p.text).includes(normalizeParaText(s));
+        const newTextThere = form.narrowed_from
+          ? change.kind === "replace" && holds(change.text + change.find)
+          : change.kind !== "delete" && holds(change.text);
+        // Its rationale comment in the document settles a pending deletion
+        // too: the task pane adds the comment only after the edit.
+        const applied =
+          row.state === "accepted" || (row.state === "pending" && (!!comment || newTextThere));
+        return { change, row, p, applied };
+      });
+      const hit = judged.find((j) => j.applied);
+      if (!hit) {
+        // A normal edit whose own range still reads the old form (in every
+        // form Word may have applied), with no rationale comment: not
+        // applied, nothing is left to wait for. An approved exception stays,
+        // so the author can decide again.
+        if (own && !comment && judged.every((j) => j.row.state === "rejected")) {
           next = takeBlocked(next, c.ref, b.id).revision;
           dropped.push({ ref: c.ref, blocked_id: b.id, tool_call_id: b.attempt.tool_call_id });
         }
         continue;
       }
+      const { change, row, p } = hit;
       const added = addChange(next, c.ref, {
         ...change,
         paragraph_index: row.paragraph_index,
@@ -328,6 +345,65 @@ export function createReviewService({
     return applying.get(path);
   }
   const clearStale = (d, rev) => markStaleApplying(rev, activeFor(d));
+
+  // Changes Word applied whose save failed (onRecordFailed), by file:
+  // attempt id -> { ref, attempt_id, change }, the change exactly as onEdit
+  // was given it (narrowed or not, with its Word comment id). The attempt
+  // on file was written before the call and knows neither, so while this
+  // daemon runs the change is saved from here, in the next load or refresh
+  // of the file, and its attempt leaves the blocked list in the same save.
+  // A daemon that stopped has only the attempt (resolveUnknownOverrides).
+  const unsaved = new Map();
+  // In an update of the file. done: the entries to forget once it is saved.
+  function recordUnsaved(d, rev) {
+    let next = rev;
+    const done = [];
+    for (const h of unsaved.get(d.path)?.values() ?? []) {
+      // Its attempt is gone: settled some other way, nothing to add.
+      if (!findComment(next, h.ref)?.blocked.some((b) => b.id === h.attempt_id)) {
+        done.push({ ...h, saved: null });
+        continue;
+      }
+      const r = addChange(next, h.ref, h.change);
+      next = takeBlocked(r.revision, h.ref, h.attempt_id).revision;
+      done.push({ ...h, saved: r.change });
+    }
+    return { revision: next === rev ? null : next, done };
+  }
+  // After that update was saved.
+  async function unsavedDone(d, key, revision, done) {
+    for (const h of done) {
+      unsaved.get(d.path)?.delete(h.attempt_id);
+      if (!h.saved) {
+        log(`[review] applied result of ${h.attempt_id} not used: its attempt is not on file`);
+        continue;
+      }
+      log(
+        `[review] change recorded ${h.saved.id} kind=${h.saved.kind} comment=${h.saved.word_comment_id} from the applied result kept in memory (attempt ${h.attempt_id})`,
+      );
+      await linkReceipt(d, key, h.ref, findComment(revision, h.ref), h.saved);
+    }
+  }
+  // The requirement link of a recorded change, for the decision log.
+  const linkReceipt = (d, key, ref, comment, saved) =>
+    receipt(d, [
+      decisionRecord({
+        kind: "requirement_link",
+        input: {
+          comment: comment?.text ?? "",
+          ...(comment?.section && { section: comment.section }),
+          requirements: comment?.requirements ?? [],
+          find: saved.find,
+          text: saved.text,
+        },
+        model: getModel(key),
+        output: {
+          change_id: saved.id,
+          comment_ref: ref,
+          requirement_ids: saved.rationale?.requirement_ids ?? [],
+        },
+      }),
+    ]);
   const backupChains = new Map();
 
   // begin(): the handle of one tool call, taken before Word is called;
@@ -402,24 +478,7 @@ export function createReviewService({
           comment = findComment(base, ref);
           return (attempt_id && dropBlocked(r.revision, ref, attempt_id)) || r.revision;
         });
-        await receipt(d, [
-          decisionRecord({
-            kind: "requirement_link",
-            input: {
-              comment: comment?.text ?? "",
-              ...(comment?.section && { section: comment.section }),
-              requirements: comment?.requirements ?? [],
-              find: saved.find,
-              text: saved.text,
-            },
-            model: getModel(key),
-            output: {
-              change_id: saved.id,
-              comment_ref: ref,
-              requirement_ids: saved.rationale?.requirement_ids ?? [],
-            },
-          }),
-        ]);
+        await linkReceipt(d, key, ref, comment, saved);
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
         return saved;
       },
@@ -466,8 +525,13 @@ export function createReviewService({
       // Does the task pane compare the paragraph before a tracked edit? One
       // that does not say so in its hello is sent no edit.
       paneChecksTarget: (d = at(key)) => d.caps.includes(TARGET_HASH_CAP),
-      // Word applied the edit and its record could not be saved.
-      onRecordFailed: async ({ ref, attempt_id }) => {
+      // Word applied the edit and its record could not be saved. change: as
+      // it was applied; kept for the next load or refresh (recordUnsaved).
+      onRecordFailed: async ({ ref, attempt_id, change, at: d = at(key) }) => {
+        if (attempt_id && change) {
+          if (!unsaved.has(d.path)) unsaved.set(d.path, new Map());
+          unsaved.get(d.path).set(attempt_id, { ref, attempt_id, change });
+        }
         sendEvent(key, { type: "review_event", event: "record_failed", ref, attempt_id });
       },
       // The task pane refused an edit because its paragraph is not as the
@@ -577,7 +641,14 @@ export function createReviewService({
     async review_load(msg, key) {
       const d = at(key);
       const { path } = d;
-      return { path, revision: await update(d, (rev) => clearStale(d, rev)) };
+      let done = [];
+      const revision = await update(d, (rev) => {
+        const r = recordUnsaved(d, rev);
+        done = r.done;
+        return clearStale(d, r.revision ?? rev) ?? r.revision;
+      });
+      await unsavedDone(d, key, revision, done);
+      return { path, revision };
     },
     async review_split(msg, key) {
       const d = at(key);
@@ -707,7 +778,12 @@ export function createReviewService({
       let external = [];
       let resolved = [];
       let dropped = [];
-      const revision = await update(d, (old) => {
+      let done = [];
+      const revision = await update(d, (file) => {
+        // What this daemon knows Word applied goes in first, as it was applied.
+        const u = recordUnsaved(d, file);
+        done = u.done;
+        const old = u.revision ?? file;
         const r0 = resolveUnknownOverrides(clearStale(d, old) ?? old, snapshot);
         const rev = r0.revision;
         resolved = r0.resolved;
@@ -729,6 +805,7 @@ export function createReviewService({
         }
         return setSnapshot(next, texts, new Date(), snapshotIds(snapshot));
       });
+      await unsavedDone(d, key, revision, done);
       for (const x of resolved) {
         forgetLate(x.tool_call_id);
         log(

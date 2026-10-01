@@ -1727,7 +1727,7 @@ test("stale_target refreshes the status with the document as it is now; a runnin
     type: "review_event",
     event: "record_failed",
     ref: "R1.1",
-    attempt_id: "R1.1-b3",
+    attempt_id: "R1.1-b2",
   });
   await settle();
   const m = t.$("review-message");
@@ -1737,6 +1737,16 @@ test("stale_target refreshes the status with the document as it is now; a runnin
   );
   assert.equal(m.hidden, false);
   assert.equal(loads(), before + 1, "the list is loaded again");
+  // The load found the attempt gone: the daemon saved the change with it.
+  t.pane.onEvent({
+    type: "review_event",
+    event: "record_failed",
+    ref: "R1.1",
+    attempt_id: "R1.1-b3",
+  });
+  await settle();
+  assert.equal(m.textContent, "R1.1: the edit was applied in Word; its record is saved now.");
+  assert.equal(loads(), before + 2);
 });
 
 // Codex review of stage 2.5: right after a reconnect the daemon has not yet
