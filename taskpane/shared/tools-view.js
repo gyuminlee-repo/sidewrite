@@ -2,11 +2,13 @@
 
 // What a selection request was about, as the head of its answer.
 const QUOTE_CHARS = 80;
-export function selectionHead(kind, text, r) {
+// ran: what the request really ran on, as the pane knows it ("Claude · Opus
+// 5.5"); without it, the model label of the answer.
+export function selectionHead(kind, text, r, ran = null) {
   const flat = String(text).replace(/\s+/g, " ").trim();
   const quote = flat.length > QUOTE_CHARS ? `${flat.slice(0, QUOTE_CHARS)}...` : flat;
   const what = kind === "translate" ? `Translation into ${r.lang}` : "Answer";
-  return `${what} (${r.model}) for: "${quote}"`;
+  return `${what} (${ran ?? r.model}) for: "${quote}"`;
 }
 
 // How a rule candidate will be checked, in words.

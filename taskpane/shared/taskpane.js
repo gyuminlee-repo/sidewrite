@@ -47,6 +47,7 @@ import { initReviewPane } from "./review-pane.js";
 import { initResponsePane } from "./response-pane.js";
 import { initToolsPane } from "./tools-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
+import { modelLabel, modelLineText } from "./model-line.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
 import {
@@ -174,6 +175,42 @@ let accountModels = null; // models_list of the daemon, once it answered
 let defaultModel = null;
 // The model of edits, for the chat box, Setup and the status: one value.
 const editsModel = () => editsModelValue(settings?.model, defaultModel);
+
+// What each kind of work last ran on (model-line.js): edits from the
+// session_init of the daemon (the model the CLI says the session runs on),
+// writing and judgments from its model_used events (one per request sent).
+const modelUsed = { turn: null, writing: null, oneshot: null };
+// What the next request of each kind will use: the menus of Setup. A Claude
+// choice without a model is the daemon's default of that kind.
+function modelChoices() {
+  const sel = providersPane?.selection() ?? {};
+  const of = (role, claudeDefault) => {
+    const c = sel[role] ?? { id: "claude", model: null };
+    return { provider: c.id, model: c.model ?? (c.id === "claude" ? claudeDefault : null) };
+  };
+  return {
+    turn: { provider: sel.turn?.id ?? "claude", model: editsModel() },
+    writing: of("writing", defaultModel || "opus"),
+    oneshot: of("oneshot", "haiku"),
+  };
+}
+// The line above the tabs' content (Word pane): always what really ran.
+function renderModelLine() {
+  const $line = document.getElementById("models-line");
+  if (!$line) return;
+  const choice = modelChoices();
+  $line.textContent = modelLineText(
+    Object.fromEntries(
+      Object.keys(modelUsed).map((role) => [role, { used: modelUsed[role], choice: choice[role] }]),
+    ),
+    accountModels,
+  );
+}
+// For the result line of a job: what its kind of work last ran on, or null.
+function usedLabel(role) {
+  const u = modelUsed[role];
+  return u ? modelLabel({ provider: u.provider, model: u.ran ?? u.asked }, accountModels) : null;
+}
 
 function shortModelName(idOrAlias) {
   return modelDisplayName(idOrAlias, accountModels);
@@ -825,6 +862,9 @@ async function handleServerMessage(msg) {
         appendEvent(`Session ${msg.session_id?.slice(0, 8)}… (${msg.model})`);
         // Authoritative: this is the model the SDK actually started with.
         liveModel = msg.model || liveModel;
+        // asked: the model the daemon gave the session; model: the one it runs on.
+        modelUsed.turn = { provider: "claude", asked: msg.asked ?? null, ran: msg.model ?? null };
+        renderModelLine();
         pendingModelShort = null;
         renderConnection();
       } else if (msg.event === "cwd_changed") {
@@ -843,6 +883,19 @@ async function handleServerMessage(msg) {
 
     case "tool_call":
       runOfficeTool(msg);
+      break;
+
+    case "model_used":
+      // A writing or judgment request was sent: what it asked for and ran on.
+      if (msg.role in modelUsed) {
+        modelUsed[msg.role] = {
+          provider: msg.provider,
+          asked: msg.asked ?? null,
+          ran: msg.ran ?? null,
+          ok: msg.ok,
+        };
+        renderModelLine();
+      }
       break;
 
     case "review_event":
@@ -1259,6 +1312,7 @@ Office.onReady((info) => {
   if (HOST === "word") {
     reviewPane = initReviewPane({
       sendRequest,
+      usedLabel,
       isTurnInFlight: () => turn.inFlight,
       providersReady: () => providersPane?.whenRestored() ?? null,
       // Called before review_propose is sent; the returned release ends
@@ -1287,12 +1341,14 @@ Office.onReady((info) => {
     // Response tab: the response letter. It reads Word and never writes to it.
     responsePane = initResponsePane({
       sendRequest,
+      usedLabel,
       providersReady: () => providersPane?.whenRestored() ?? null,
       word: { collectReviewSnapshot, collectHeadings, exportRenderPdf },
     });
     // Tools tab: it reads Word and never writes to it.
     toolsPane = initToolsPane({
       sendRequest,
+      usedLabel,
       providersReady: () => providersPane?.whenRestored() ?? null,
       settings,
       saveSettings,
@@ -1313,6 +1369,8 @@ Office.onReady((info) => {
       sendRequest,
       settings,
       saveSettings,
+      // Whatever the menus show changed: so did what the next request will use.
+      onRender: renderModelLine,
       // The model of edits is the chat box's: Setup shows and changes it here.
       editsModel: {
         get: editsModel,
@@ -1391,6 +1449,12 @@ function setActiveTab(tabName) {
     loadWorkspaceSection();
   }
 }
+
+// The line that says what runs: a click goes to where it is chosen.
+document.getElementById("models-line")?.addEventListener("click", () => {
+  setActiveTab("setup");
+  document.getElementById("providers-root")?.scrollIntoView();
+});
 
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));

@@ -35,7 +35,14 @@ function el(tag, { text, cls, ...props } = {}, kids = []) {
   return e;
 }
 
-export function initProvidersPane({ sendRequest, settings, saveSettings, editsModel = null }) {
+export function initProvidersPane({
+  sendRequest,
+  settings,
+  saveSettings,
+  editsModel = null,
+  // Called after every draw of the menus.
+  onRender = () => {},
+}) {
   let list = [];
   // What the menus show: the choice the daemon confirmed, or the stored one
   // it refused (the notes then say so).
@@ -149,6 +156,7 @@ export function initProvidersPane({ sendRequest, settings, saveSettings, editsMo
     renderList();
     // The choices the daemon accepted, readable by the acceptance driver.
     $("providers-root").setAttribute("data-selection", JSON.stringify(sel));
+    onRender();
   }
 
   // Send one choice. A refusal is shown and nothing changes.

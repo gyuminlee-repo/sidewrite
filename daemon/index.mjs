@@ -576,6 +576,8 @@ const oneshotRouter = createOneshotRouter({
   // the account, a judgment the cheap one.
   claudeDefault: (role) =>
     role === "writing" ? bestClaudeModel(modelCache.current()) : ONESHOT_MODEL,
+  // What each request really ran on, for the line of the pane that says so.
+  onUsed: (key, used) => bridge.sendToTaskpane({ type: "model_used", ...used }, key),
   log: console.log,
 });
 
@@ -1453,7 +1455,11 @@ function handleAgentMessage(msg, session) {
   switch (msg.type) {
     case "system": {
       if (msg.subtype === "init") {
-        console.log(`[agent] init session ${msg.session_id} (model: ${msg.model})`);
+        // asked: the model query() was given; model: the one the CLI runs.
+        // effort: what the CLI will send (the SDK's default; none is set here).
+        console.log(
+          `[agent] init session ${msg.session_id} (model: ${msg.model}) asked=${session?.model ?? "-"} effort=${msg.effort ?? "-"}`,
+        );
         try {
           const tn = Array.isArray(msg.tools) ? msg.tools : Object.keys(msg.tools ?? {});
           diag(
@@ -1469,6 +1475,7 @@ function handleAgentMessage(msg, session) {
             event: "session_init",
             session_id: msg.session_id,
             model: msg.model,
+            asked: session?.model ?? null,
           },
           session?.key,
         );

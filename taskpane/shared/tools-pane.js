@@ -31,6 +31,9 @@ export function initToolsPane({
   // () => the request that confirms the stored providers while it is under
   // way (providers-pane.js whenRestored), else null.
   providersReady = () => null,
+  // (role) => what the last request of that kind of work really ran on
+  // ("Claude · Opus 5.5"), or null when the pane does not know (taskpane.js).
+  usedLabel = () => null,
 }) {
   const root = document.getElementById("tools-root");
   if (!root) return { onEvent() {}, reload: async () => {} }; // Excel pane: no Tools tab
@@ -157,7 +160,10 @@ export function initToolsPane({
     if (!r.ok) throw new Error(r.error || "The request failed.");
     say("");
     $("tools-selection").replaceChildren(
-      el("div", { class: "review-reqs-line", text: selectionHead(kind, text, r) }),
+      el("div", {
+        class: "review-reqs-line",
+        text: selectionHead(kind, text, r, usedLabel("writing")),
+      }),
       el("div", { class: "review-preview", text: r.text }),
     );
   }

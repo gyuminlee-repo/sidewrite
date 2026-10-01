@@ -848,7 +848,7 @@ const steps = {
     await responseCard(page, a.ref)
       .locator("button", { hasText: /^Draft$/ })
       .click();
-    await waitResponse(page, TURN_TIMEOUT, `^Drafted ${escapeRe(a.ref)}\\.`);
+    await waitResponse(page, TURN_TIMEOUT, `^Drafted ${escapeRe(a.ref)}( with .+?)?\\.( |$)`);
     return responseView(page);
   },
 
@@ -857,7 +857,7 @@ const steps = {
     await clearResponse(page);
     await page.click("#response-draft-all");
     const limit = TURN_TIMEOUT * Math.max(1, cards);
-    await waitResponse(page, limit, "^(Drafted \\d+ responses?\\.$|Nothing to draft)");
+    await waitResponse(page, limit, "^(Drafted \\d+ responses?( with .+?)?\\.$|Nothing to draft)");
     return responseView(page);
   },
 

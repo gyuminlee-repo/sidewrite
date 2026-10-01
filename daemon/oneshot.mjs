@@ -2,8 +2,9 @@
 // comment splitting, LLM ledger checks, and (stage 4, P3) translation and
 // questions. No resume, no tools, no MCP, no settings, not persisted.
 //
-// Returns { ok, text, json?, error?, limited? } and never throws, so callers
-// can show a plain message in the task pane.
+// Returns { ok, text, json?, error?, limited?, model_ran? } and never throws,
+// so callers can show a plain message in the task pane. model_ran: the model
+// the CLI says the run is on (its init message), when it says so.
 
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { tmpdir } from "node:os";
@@ -68,6 +69,9 @@ export async function runOneshot(
   const timer = setTimeout(() => abortController.abort(), timeoutMs);
   let limited = null;
   let result = null;
+  let ran = null;
+  // Every answer carries the model the run was on, when the CLI named it.
+  const out = (r) => (ran ? { ...r, model_ran: ran } : r);
   try {
     for await (const msg of queryFn({
       prompt,
@@ -75,15 +79,18 @@ export async function runOneshot(
     })) {
       const lim = detectUsageLimit(msg);
       if (lim.limited && !limited) limited = lim;
+      if (msg?.type === "system" && msg.subtype === "init" && typeof msg.model === "string") {
+        ran = msg.model;
+      }
       if (msg?.type === "result") result = msg;
     }
   } catch (e) {
     const aborted = abortController.signal.aborted || e?.name === "AbortError";
-    return {
+    return out({
       ok: false,
       error: aborted ? `timed out after ${timeoutMs} ms` : String(e?.message ?? e),
       limited,
-    };
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -92,21 +99,21 @@ export async function runOneshot(
       limited.kind === "refusal"
         ? "The model declined this request."
         : "Claude usage limit reached.";
-    return { ok: false, error: `${what} ${limited.text}`.trim(), limited };
+    return out({ ok: false, error: `${what} ${limited.text}`.trim(), limited });
   }
-  if (!result) return { ok: false, error: "no result message" };
+  if (!result) return out({ ok: false, error: "no result message" });
   if (result.subtype !== "success" || result.is_error) {
     const detail = String(result.result ?? (result.errors ?? []).join("; ")).slice(0, 300);
-    return {
+    return out({
       ok: false,
       error: `one-shot ended with ${result.subtype}${result.is_error ? " (is_error)" : ""}: ${detail}`,
-    };
+    });
   }
   const text = String(result.result ?? "");
-  if (!expectJson) return { ok: true, text };
+  if (!expectJson) return out({ ok: true, text });
   const json = parseJsonReply(text);
-  if (json === undefined) return { ok: false, error: "reply was not JSON", text };
-  return { ok: true, text, json };
+  if (json === undefined) return out({ ok: false, error: "reply was not JSON", text });
+  return out({ ok: true, text, json });
 }
 
 export function makeOneshot(deps = {}) {

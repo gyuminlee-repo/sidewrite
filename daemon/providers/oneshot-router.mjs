@@ -34,6 +34,10 @@ export function createOneshotRouter({
   getChoice,
   // The Claude model of a role when the pane's choice names none.
   claudeDefault = () => CLAUDE_DEFAULT_MODEL,
+  // (key, { role, provider, asked, ran, ok }) after every request that was
+  // sent: asked is the model the request named (null: the provider's own
+  // default), ran the one the provider says it ran on (null: it does not say).
+  onUsed = () => {},
   log = () => {},
 }) {
   async function send(choice, req, claudeModel) {
@@ -94,17 +98,27 @@ export function createOneshotRouter({
       provider === "claude"
         ? (choice?.model ?? claudeModel)
         : `${provider}:${choice.model ?? "default"}`;
+    const asked = provider === "claude" ? (choice?.model ?? claudeModel) : (choice.model ?? null);
+    let last = null;
     return {
       role,
       provider,
       model,
+      // What the last request of this job ran on, or null before the first.
+      used: () => last,
       run(req) {
         // One line per request, with no text of it.
         log(`[providers] ${what} provider=${provider} model=${model}`);
-        return send(choice, req, claudeModel).then(
-          (r) => r,
-          (e) => ({ ok: false, error: String(e?.message ?? e) }),
-        );
+        return send(choice, req, claudeModel)
+          .then(
+            (r) => r,
+            (e) => ({ ok: false, error: String(e?.message ?? e) }),
+          )
+          .then((r) => {
+            last = { role, provider, asked, ran: r?.model_ran ?? null, ok: r?.ok === true };
+            onUsed(key, last);
+            return r;
+          });
       },
     };
   }

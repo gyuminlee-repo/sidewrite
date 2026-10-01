@@ -173,9 +173,19 @@ export function createAuxService({
     if (!text) throw new Error(`${what} failed: ${r.error ?? "empty answer"}`);
     return text;
   }
+  // The receipt of a selection request, next to a saved document: the
+  // model and sizes, no text. A document that is not saved has no place for
+  // one; a receipt that cannot be written does not fail the answer.
+  async function selectionReceipt(key, kind, input, model, output) {
+    const doc = localDocPath(getContext(key)?.activeDoc, env);
+    if (!doc) return;
+    await appendDecisions(decisionsPathFor(doc), [
+      decisionRecord({ kind, input, model, output }),
+    ]).then(undefined, (e) => log(`[tools] decision log failed: ${e?.message ?? e}`));
+  }
 
   const impl = {
-    // The selected text in another language. Nothing is written anywhere.
+    // The selected text in another language. Only a receipt is written.
     async selection_translate(msg, key) {
       const text = selectedText(msg);
       const lang = String(msg.lang ?? "").trim();
@@ -183,10 +193,14 @@ export function createAuxService({
       const job = await modelFor(key, "translating", proseModel);
       const out = await prose(job, buildGlossPrompt(text, lang), "translation");
       log(`[tools] selection_translate chars=${text.length} lang=${lang} model=${job.model}`);
+      await selectionReceipt(key, "selection_translate", text, job.model, {
+        lang,
+        chars: text.length,
+      });
       return { text: out, lang, model: job.model };
     },
 
-    // An answer to a question about the selected text. Nothing is written.
+    // An answer to a question about the selected text. Only a receipt is written.
     async selection_ask(msg, key) {
       const text = selectedText(msg);
       const question = String(msg.question ?? "").trim();
@@ -194,6 +208,9 @@ export function createAuxService({
       const job = await modelFor(key, "answering", proseModel);
       const out = await prose(job, buildAskPrompt(text, question), "the answer");
       log(`[tools] selection_ask chars=${text.length} model=${job.model}`);
+      await selectionReceipt(key, "selection_ask", `${text}\n${question}`, job.model, {
+        chars: text.length,
+      });
       return { text: out, model: job.model };
     },
 

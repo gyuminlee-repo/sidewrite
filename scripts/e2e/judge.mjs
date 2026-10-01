@@ -1197,9 +1197,12 @@ export const JUDGES = {
         .join(",")} | open requests ${open.length}`,
     };
   },
+  // The line may name what the draft ran on: "Drafted R1.1 with Claude · Opus 5.5."
   "response-draft": (r, ctx = {}) => ({
-    pass: !r.message_error && (r.message ?? "").startsWith(`Drafted ${ctx.ref}.`),
-    expect: `Drafted ${ctx.ref}.`,
+    pass:
+      !r.message_error &&
+      new RegExp(`^Drafted ${escapeRe(ctx.ref)}( with .+?)?\\.( |$)`).test(r.message ?? ""),
+    expect: `Drafted ${ctx.ref}. (or: Drafted ${ctx.ref} with <provider and model>.)`,
     got: r.message,
   }),
   "response-draft-all": (r) => {
@@ -1207,7 +1210,7 @@ export const JUDGES = {
     return {
       pass:
         !r.message_error &&
-        /^(Drafted \d+ responses?\.|Nothing to draft)/.test(r.message ?? "") &&
+        /^(Drafted \d+ responses?( with .+?)?\.( |$)|Nothing to draft)/.test(r.message ?? "") &&
         missing.length === 0,
       expect: "Drafted n responses. (every comment answered or declined)",
       got: `${r.message} | without an answer: ${missing.map((c) => c.ref).join(",") || "-"}`,
