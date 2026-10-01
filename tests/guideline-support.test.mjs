@@ -669,3 +669,74 @@ test("the negations and the words of advice are lists the code reads; each one w
     );
   }
 });
+
+// ---- figures and tables counted together, named before the number
+//
+// "The total number of figures and tables must not exceed 8." is one limit
+// for both, not a limit of 8 for each.
+
+const EACH = [
+  ["The number of figures must not exceed 8.", { target: "figures", max: 8 }],
+  [
+    "The number of figures must not exceed 8, and the number of tables must not exceed 3.",
+    { target: "figures", max: 8 },
+  ],
+  [
+    "The number of figures must not exceed 8, and the number of tables must not exceed 3.",
+    { target: "tables", max: 3 },
+  ],
+  [
+    "Figures and tables are numbered; the number of figures must not exceed 8.",
+    { target: "figures", max: 8 },
+  ],
+  [
+    "The number of figures must not exceed 8; figures and tables go to the end.",
+    { target: "figures", max: 8 },
+  ],
+  // "tablespoons" holds "tables", but not as a word.
+  ["The number of figures and tablespoons must not exceed 8.", { target: "figures", max: 8 }],
+];
+
+const TOGETHER = {
+  "a total of both, read as figures": [
+    "The total number of figures and tables must not exceed 8.",
+    { target: "figures", max: 8 },
+  ],
+  "a total of both, read as tables": [
+    "The total number of figures and tables must not exceed 8.",
+    { target: "tables", max: 8 },
+  ],
+  "tables named first": [
+    "The number of tables and figures must not exceed 8.",
+    { target: "figures", max: 8 },
+  ],
+  "joined by plus": [
+    "Figures plus tables: the total must not exceed 8.",
+    { target: "figures", max: 8 },
+  ],
+  "joined by and of": [
+    "The combined number of figures and of tables must not exceed 8.",
+    { target: "tables", max: 8 },
+  ],
+  "joined by a slash": ["Figures/tables must not exceed 8.", { target: "figures", max: 8 }],
+  "joined by or": ["The number of figures or tables is at most 8.", { target: "tables", max: 8 }],
+};
+
+test("figures and tables together: at least five cases the code must accept and five it must not", () => {
+  assert.ok(EACH.length >= 5 && Object.keys(TOGETHER).length >= 5);
+});
+
+for (const [sentence, rule] of EACH) {
+  test(`a limit of its own stands: ${JSON.stringify(rule)} in ${JSON.stringify(sentence)}`, () => {
+    assert.deepEqual(one(sentence, rule).warnings, []);
+    assert.equal(kind(sentence, rule), "count");
+  });
+}
+
+for (const [name, [sentence, rule]] of Object.entries(TOGETHER)) {
+  test(`no count rule from figures and tables together, ${name}`, () => {
+    const r = one(sentence, rule);
+    assert.deepEqual(r.candidates[0].check, { type: "llm" });
+    assert.match(r.warnings[0], /^s1: the sentence counts figures and tables together/);
+  });
+}

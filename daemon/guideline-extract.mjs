@@ -344,6 +344,11 @@ function sectionsInClause(span, spans, mentions, lower) {
   return [...new Set(inside.map((x) => x.section))];
 }
 
+// Figures and tables named as one group: "figures and tables", "tables or
+// figures", "figures/tables", "figures plus tables", "figures and of tables".
+const PAIR =
+  /(?<![a-z])(?:figures?|tables?)\s*(?:and|or|plus|&|\/)\s*(?:(?:of|the)\s+)*(?:figures?|tables?)(?![a-z])/g;
+
 // Does the number at `span` count the target's unit? "together" when figures
 // and tables are counted as one.
 function countsUnit(target, span, lower) {
@@ -360,9 +365,19 @@ function countsUnit(target, span, lower) {
   }
   // "a 250-word limit"
   if (new RegExp(`^-(?:${alt(unit.singular)})(?![a-z])`).test(after)) return true;
-  // "The number of figures must not exceed 8."
-  const named = wholeWord([...unit.plural, ...unit.singular]).test(lower.slice(0, span.start));
-  return named && /^\s*(?:[.;,)\]]|$)/.test(after);
+  // "The number of figures must not exceed 8.": the last naming of the unit
+  // before the number. When that naming is one half of "figures and tables"
+  // (PAIR), the number counts both together.
+  if (!/^\s*(?:[.;,)\]]|$)/.test(after)) return false;
+  const before = lower.slice(0, span.start);
+  const named = [
+    ...before.matchAll(new RegExp(wholeWord([...unit.plural, ...unit.singular]).source, "g")),
+  ].pop();
+  if (!named) return false;
+  const paired = [...before.matchAll(PAIR)].some(
+    (m) => named.index >= m.index && named.index < m.index + m[0].length,
+  );
+  return paired && (target === "figures" || target === "tables") ? "together" : true;
 }
 
 // [lower, upper] of every range the sentence writes, as the two number spans:
