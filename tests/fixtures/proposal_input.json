@@ -1,0 +1,39 @@
+{
+  "comment": {
+    "ref": "R1.2",
+    "reviewer": 1,
+    "section": "Materials and Methods",
+    "text": "The incubation temperature is given as \"30 degrees\" without a unit, and the Methods call the preparation a \"cell-free extract\" although centrifugation alone does not remove every cell. Please state the unit and call it a clarified lysate. Also say at which wavelength growth was followed.",
+    "requirements": [
+      { "id": "q1", "text": "state the unit of the incubation temperature" },
+      { "id": "q2", "text": "call the preparation a clarified lysate" },
+      { "id": "q3", "text": "say at which wavelength growth was followed" }
+    ]
+  },
+  "snapshot": {
+    "paragraphs": [
+      "2. Materials and Methods",
+      "An invented strain was grown in shaken flasks at 30 degrees for 48 hours. Growth was followed by optical density.",
+      "Cells were collected by centrifugation at 8,000 g for 10 minutes, and the cell-free extract was kept on ice. The cell-free extract was used within two hours.",
+      "Optical density was read at 600 nm in a plate reader every 30 minutes.",
+      "3. Findings",
+      "The invented strain reached a plateau after 36 hours in every flask."
+    ],
+    "ids": null
+  },
+  "ledger": [
+    {
+      "id": "L1",
+      "kind": "instruction",
+      "text": "Write temperatures with the degree sign and C, for example 30 °C",
+      "scope": "manuscript"
+    },
+    {
+      "id": "L2",
+      "kind": "forbid",
+      "text": "Do not call the approach or the substrate novel",
+      "scope": "manuscript"
+    }
+  ],
+  "lang": "Korean"
+}
