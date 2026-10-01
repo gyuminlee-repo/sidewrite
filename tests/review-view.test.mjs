@@ -581,3 +581,17 @@ test("invariantReport: a change whose comment the cleanup removed expects no com
   const lost = view.invariantReport(rev, []);
   assert.deepEqual([lost.ok, lost.missing_comment], [false, ["R1.6-2"]]);
 });
+
+test("review file: txt and md, BOM and CRLF removed, size and type checked", () => {
+  assert.deepEqual(view.reviewTextFromFile({ name: "r.txt", size: 10, text: "﻿a\r\nb" }), {
+    ok: true,
+    text: "a\nb",
+  });
+  assert.equal(view.reviewTextFromFile({ name: "r.MD", size: 1, text: "x" }).ok, true);
+  assert.match(
+    view.reviewTextFromFile({ name: "r.docx", size: 1, text: "" }).error,
+    /\.txt or \.md/,
+  );
+  assert.match(view.reviewTextFromFile({ name: "r.txt", size: 3_000_000, text: "" }).error, /2 MB/);
+  assert.match(view.reviewTextFromFile({ name: "r.txt", size: 0, text: "  " }).error, /empty/);
+});

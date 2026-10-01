@@ -25,6 +25,8 @@ import {
   pendingDecisions,
   reviewerOfRef,
   progressText,
+  reviewTextFromFile,
+  REVIEW_FILE_MAX_BYTES,
 } from "./review-view.js";
 
 const UNKNOWN_HINT =
@@ -610,6 +612,26 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     }
   }
 
+  // P15: the review text from a .txt or .md file instead of a paste. The
+  // file is read in the pane (File.text()); the daemon is not involved.
+  $("review-load-file").addEventListener("click", () => $("review-file-input").click());
+  $("review-file-input").addEventListener(
+    "change",
+    guard(async () => {
+      const input = $("review-file-input");
+      const f = input.files?.[0];
+      if (!f) return;
+      const r = reviewTextFromFile({
+        name: f.name,
+        size: f.size,
+        text: f.size > REVIEW_FILE_MAX_BYTES ? "" : await f.text(),
+      });
+      input.value = ""; // the same file can be picked again
+      if (!r.ok) throw new Error(r.error);
+      $("review-input").value = r.text;
+      say(`Loaded ${f.name}. Split into comments next.`);
+    }),
+  );
   $("review-split").addEventListener(
     "click",
     guard(async () => {

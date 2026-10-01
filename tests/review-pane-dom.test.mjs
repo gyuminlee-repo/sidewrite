@@ -851,3 +851,28 @@ test("split draft rows, the paste box and the ledger form survive a re-render", 
   assert.equal(t.$("ledger-text").value, "Never write data shows");
   assert.equal(t.$("ledger-pattern").value, "data shows");
 });
+
+// P15: listeners of a non-click event on a fake element.
+async function fire(node, ev) {
+  for (const fn of node.listeners[ev] ?? []) await fn();
+}
+
+test("Load review from file fills the paste box; a wrong type only shows an error", async () => {
+  const t = await setup({ revision: { comments: [], ledger: [] } });
+  const input = t.$("review-file-input");
+  let opened = 0;
+  input.addEventListener("click", () => (opened += 1));
+  await t.$("review-load-file").click();
+  assert.equal(opened, 1, "the button opens the file picker");
+
+  input.files = [{ name: "review.txt", size: 20, text: async () => "﻿Reviewer 1\r\nOne." }];
+  await fire(input, "change");
+  assert.equal(t.$("review-input").value, "Reviewer 1\nOne.");
+  assert.match(t.$("review-message").textContent, /Loaded review\.txt/);
+
+  input.files = [{ name: "review.docx", size: 20, text: async () => "PK" }];
+  await fire(input, "change");
+  assert.equal(t.$("review-input").value, "Reviewer 1\nOne.", "the box is left as it was");
+  assert.match(t.$("review-message").textContent, /\.txt or \.md/);
+  assert.equal(t.requests.filter((r) => r.type !== "review_load").length, 0, "no daemon request");
+});

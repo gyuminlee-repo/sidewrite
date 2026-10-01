@@ -432,3 +432,23 @@ export function progressText({ ref, startedAt, now = Date.now(), comments = [] }
   const open = comments.filter((c) => c.status !== "done").length;
   return `${ref} running ${clock}. ${open} of ${comments.length} comments not done.`;
 }
+
+// ---- P15: review text from a file --------------------------------------------
+
+export const REVIEW_FILE_MAX_BYTES = 2 * 1024 * 1024;
+
+// A picked review file ({ name, size, text }) as text for the paste box:
+// .txt or .md only, at most 2 MB, BOM removed, line ends as \n.
+export function reviewTextFromFile({ name, size, text }) {
+  if (!/\.(txt|md)$/i.test(String(name ?? ""))) {
+    return { ok: false, error: `${name}: choose a .txt or .md file.` };
+  }
+  if (size > REVIEW_FILE_MAX_BYTES) {
+    return { ok: false, error: `${name} is larger than 2 MB.` };
+  }
+  const t = String(text ?? "")
+    .replace(/^﻿/, "")
+    .replace(/\r\n?/g, "\n");
+  if (!t.trim()) return { ok: false, error: `${name} is empty.` };
+  return { ok: true, text: t };
+}

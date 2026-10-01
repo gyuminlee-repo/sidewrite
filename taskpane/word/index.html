@@ -107,6 +107,15 @@
         <div class="setup-section">
           <h3>1. Reviewer comments</h3>
           <textarea id="review-input" rows="6" placeholder="Paste the full review here"></textarea>
+          <input
+            type="file"
+            id="review-file-input"
+            accept=".txt,.md,text/plain,text/markdown"
+            hidden
+          />
+          <button type="button" class="btn-secondary btn-small" id="review-load-file">
+            Load review from file
+          </button>
           <button type="button" class="btn-primary btn-small" id="review-split">
             Split into comments
           </button>
