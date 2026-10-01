@@ -46,16 +46,26 @@ node --check daemon/index.mjs taskpane/shared/taskpane.js app/main.mjs
 - `daemon/transcript.mjs` — replay reconstruction from the SDK `.jsonl`
 - `daemon/system-paths.mjs` — OS-managed `$HOME` children deny-list
 - `daemon/diag.mjs` — opt-in `[diag]` logger (`CC_OFFICE_DEBUG=1`)
+- `daemon/review-service.mjs`, `revision-store.mjs`, `revision-classify.mjs`: Review tab: comments, tracked changes and their states in `<manuscript>.revision.json`
+- `daemon/handler-wrap.mjs`: request and job wrapper shared by the review and response services
+- `daemon/journal-profile.mjs`: journal profile lookup, per-paper overrides, language defaults (`profiles/README.md`)
+- `daemon/response-service.mjs`: Response tab requests: drafts, line numbers, checks, export
+- `daemon/response-quotes.mjs`, `response-lines.mjs`, `response-check.mjs`, `response-model.mjs`, `response-prompt.mjs`, `output-name.mjs`: what a response cites, line ranges from the rendered PDF, the checks, the letter paragraphs, the draft prompt, names for output files
+- `tools/response_docx.py`, `response_read.py`, `response_verify.py`, `scripts/pdf-line-map.py`: Python tools the daemon runs: write, read and verify the letter, read margin line numbers
 - `daemon/system-prompt.md` + `system-prompt-word.md` / `system-prompt-excel.md` — shared + per-host system-prompt append
 - `app/main.mjs` — Electron menu-bar shell + daemon lifecycle
 - `app/sideload.mjs` — macOS/Windows add-in install/uninstall
 - `taskpane/shared/taskpane.js` — host-aware taskpane (Word + Excel branches)
 - `taskpane/shared/tools-word.js`, `tools-excel.js` — Office.js tool implementations
 - `taskpane/shared/paths.js` — pure path helpers (URL/Windows/POSIX)
+- `taskpane/shared/review-pane.js`, `review-view.js`: Review tab glue and its pure helpers
+- `taskpane/shared/response-pane.js`, `response-view.js`: Response tab glue and its pure helpers
 - `taskpane/shared/styles.css` — taskpane styles
 - `taskpane/word/index.html`, `taskpane/excel/index.html` — per-host entry points
 - `manifests/word.xml`, `manifests/excel.xml` — Office Add-in manifests
 - `examples/{word,excel}-demo/` — ready-to-run demo workspaces
+- `scripts/check-personal.sh`: fails when a tracked file holds a personal value; your own words go in the untracked `.personal-patterns.local`
+- `scripts/e2e/`: hands-free Word acceptance runner (`scripts/e2e/README.md`)
 
 ## Where to read more
 

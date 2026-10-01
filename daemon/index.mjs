@@ -26,6 +26,8 @@ import {
   noteMessage,
 } from "./limit-detect.mjs";
 import { createReviewService } from "./review-service.mjs";
+import { createResponseService } from "./response-service.mjs";
+import { markStale } from "./response-quotes.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
 import { createModelCache, modelChange, resolveModelChoice } from "./model-list.mjs";
 import { createKeyStore } from "./providers/keys.mjs";
@@ -613,6 +615,18 @@ const review = createReviewService({
     return t.id === "claude" ? modelArgFor(key) : `${t.id}:${t.model ?? "default"}`;
   },
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
+  // The answers of the response letter that a change of the manuscript made
+  // out of date (same rule as the Response tab).
+  afterRefresh: (rev, snap) => markStale(rev, snap),
+});
+
+// Response tab (C2): the response letter. Drafts and LLM checks go through
+// the same router as the judgments of the review: the provider and model the
+// pane chose, fixed for each job, and nothing when the pane confirmed none.
+const response = createResponseService({
+  getContext: (key) => bridge.getContext(key),
+  oneshotJob: (key, options) => oneshotRouter.pin(key, options),
+  sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
 });
 
 // Review turns of a CLI provider: the MCP endpoint they call and their
@@ -659,6 +673,7 @@ const bridge = createBridge({
   onLateToolResult: (e) => review.lateToolResult(e.key, e),
   extraHandlers: {
     ...review.handlers,
+    ...response.handlers,
     pick_path: async (msg, reply) => {
       try {
         const result = await pickPathFromMain({

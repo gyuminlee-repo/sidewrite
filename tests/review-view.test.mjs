@@ -878,3 +878,108 @@ test("trackedRuns keeps the run elements that are text without being w:t, as Wor
     { kind: "del", text: "gone", start: 14, marks: 1 },
   ]);
 });
+
+test("doneBlockers: what is still open when a comment is marked Done", () => {
+  const c = (changes, requirements = []) => ({ ref: "R1.1", requirements, changes });
+  const change = (state, ids = []) => ({ state, rationale: { requirement_ids: ids } });
+  // Everything decided and answered, no ledger violation: nothing to ask.
+  assert.deepEqual(
+    view.doneBlockers(c([change("accepted", ["q1"])], [{ id: "q1", text: "a" }]), [
+      { id: "L1", status: "clean", violation_count: 0 },
+      { id: "L2", status: "skipped", violation_count: 0 },
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    view.doneBlockers(c([change("rejected"), change("user_edited")]), undefined),
+    [],
+  );
+  // The wording of the open-requirement case is the one the tab always had.
+  assert.deepEqual(view.doneBlockers(c([], [{ id: "q1", text: "state the unit" }]), []), [
+    'q1 "state the unit" has no change',
+  ]);
+  // Changes not decided in Word, and confirmed ledger rules with violations.
+  assert.deepEqual(
+    view.doneBlockers(
+      c([change("pending"), change("pending"), change("unlocated")], [{ id: "q1", text: "a" }]),
+      [
+        { id: "L1", status: "violations", violation_count: 2 },
+        { id: "L2", status: "clean", violation_count: 0 },
+        { id: "L3", status: "violations", violation_count: 1 },
+      ],
+    ),
+    [
+      'q1 "a" has no change',
+      "3 changes are not decided in Word (2 pending, 1 not found)",
+      "the ledger check has violations (L1: 2, L3: 1)",
+    ],
+  );
+  assert.deepEqual(view.doneBlockers(c([change("unlocated")]), []), [
+    "1 change is not decided in Word (1 not found)",
+  ]);
+});
+
+test("doneBlockers: a change without its rationale comment and an edit Word did not answer are open too", () => {
+  const done = (more) => ({
+    ref: "R1.1",
+    requirements: [],
+    changes: [{ id: "R1.1-1", state: "accepted", word_comment_id: "7", rationale: {} }],
+    blocked: [],
+    ...more,
+  });
+  assert.deepEqual(view.doneBlockers(done({}), []), []);
+  // Applied in Word, the comment could not be added (invariantReport.uncommented).
+  const bare = {
+    state: "accepted",
+    word_comment_id: null,
+    comment_missing: "2026-01-01T00:00:00Z",
+    rationale: {},
+  };
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        changes: [
+          { id: "R1.1-1", ...bare },
+          { id: "R1.1-2", ...bare },
+        ],
+      }),
+      [],
+    ),
+    ["2 changes have no rationale comment in Word (R1.1-1, R1.1-2)"],
+  );
+  assert.deepEqual(view.doneBlockers(done({ changes: [{ id: "R1.1-1", ...bare }] }), []), [
+    "1 change has no rationale comment in Word (R1.1-1)",
+  ]);
+  // A comment that was there and was cleaned away on purpose is not that.
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        changes: [
+          {
+            id: "R1.1-1",
+            state: "accepted",
+            word_comment_id: "7",
+            comment_missing: "x",
+            rationale: {},
+          },
+        ],
+      }),
+      [],
+    ),
+    [],
+  );
+  // Sent to Word and not answered: it may be in the document with no record.
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        blocked: [
+          { id: "B1", state: "outcome_unknown", blocked_by: [] },
+          { id: "B2", state: "blocked", blocked_by: ["L2"] },
+          { id: "B3", state: "applying", blocked_by: [] },
+        ],
+      }),
+      [],
+    ),
+    ["1 edit got no answer from Word and may be applied (B1)"],
+  );
+});

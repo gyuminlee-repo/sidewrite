@@ -191,3 +191,34 @@ test("pin: a choice that cannot be resolved sends nothing anywhere and every req
   assert.equal(lines.join("\n").includes("secret manuscript"), false);
   assert.ok(lines.every((l) => l.startsWith("[providers] judgment refused: ")));
 });
+
+// Stage 3: a response draft is prose, so its job asks for a stronger Claude
+// model than the judgment default. That is a default only.
+test("a job may name the Claude model used when the pane names none; a choice is never replaced", async () => {
+  const { router, calls } = make({
+    c: { id: "claude", model: "opus" },
+    n: { id: "claude", model: null },
+    o: { id: "ollama", model: "qwen3.5:9b" },
+  });
+  const req = { system: "S", prompt: "P", model: "from-the-request" };
+  const labels = [];
+  for (const key of ["z", "n", "c", "o"]) {
+    const job = await router.pin(key, { claudeModel: "sonnet" });
+    labels.push(job.model);
+    await job.run(req);
+  }
+  assert.deepEqual(labels, ["sonnet", "sonnet", "opus", "ollama:qwen3.5:9b"]);
+  assert.deepEqual(
+    calls.map(([id, o]) => [id, o.model]),
+    [
+      ["claude", "sonnet"],
+      ["claude", "sonnet"],
+      ["claude", "opus"],
+      ["http", "qwen3.5:9b"],
+    ],
+  );
+  // Without the option nothing changes, and a model in the request is not used.
+  const plain = await router.pin("z");
+  await plain.run(req);
+  assert.deepEqual([plain.model, calls.at(-1)[1].model], ["haiku", "haiku"]);
+});

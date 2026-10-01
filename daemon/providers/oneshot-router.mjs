@@ -4,7 +4,7 @@
 // or null for the default (Claude, haiku). It may be async, and it may throw
 // when the pane has no confirmed choice (selection.mjs ready()).
 //
-// pin(key) resolves the choice ONCE and gives { provider, model, run }: the
+// pin(key, { claudeModel }?) resolves the choice ONCE and gives { provider, model, run }: the
 // handle of one job (a split with its requirement extraction, a ledger check
 // with all its batches). Every run(req) of the handle goes to that provider
 // and model, and `model` is the label its decision receipts carry
@@ -31,9 +31,9 @@ export function createOneshotRouter({
   getChoice,
   log = () => {},
 }) {
-  async function send(choice, req) {
+  async function send(choice, req, claudeModel) {
     if (!choice || choice.id === "claude") {
-      return claude({ ...req, model: choice?.model ?? CLAUDE_DEFAULT_MODEL });
+      return claude({ ...req, model: choice?.model ?? claudeModel });
     }
     const preset = presetById(choice.id);
     if (!preset) return { ok: false, error: `Unknown provider ${choice.id}` };
@@ -68,7 +68,10 @@ export function createOneshotRouter({
     });
   }
 
-  async function pin(key) {
+  // claudeModel: the Claude model of this job when the pane's choice names
+  // none (a response draft asks for a stronger one than a judgment). It is a
+  // default only: a model or another provider chosen in the pane stays.
+  async function pin(key, { claudeModel = CLAUDE_DEFAULT_MODEL } = {}) {
     let choice;
     try {
       choice = (await getChoice(key)) ?? null;
@@ -82,7 +85,7 @@ export function createOneshotRouter({
     const provider = choice?.id ?? "claude";
     const model =
       provider === "claude"
-        ? (choice?.model ?? CLAUDE_DEFAULT_MODEL)
+        ? (choice?.model ?? claudeModel)
         : `${provider}:${choice.model ?? "default"}`;
     return {
       provider,
@@ -90,7 +93,7 @@ export function createOneshotRouter({
       run(req) {
         // One line per request, with no text of it.
         log(`[providers] judgment provider=${provider} model=${model}`);
-        return send(choice, req).then(
+        return send(choice, req, claudeModel).then(
           (r) => r,
           (e) => ({ ok: false, error: String(e?.message ?? e) }),
         );

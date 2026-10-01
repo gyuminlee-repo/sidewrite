@@ -2397,6 +2397,214 @@ test("review_save_comments: an empty section clears the label, a missing key kee
   }
 });
 
+// ---- journal profile: rationale language and split patterns --------------------
+
+test("review prompt takes the rationale language from the paper profile, then the env default", async () => {
+  const plain = await setup();
+  await plain.ask("review_save_comments", { comments: COMMENTS });
+  assert.match(
+    (await plain.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in English/,
+  );
+  await plain.cleanup();
+
+  const t = await setup({ env: { ...ENV, CC_OFFICE_RATIONALE_LANG: "French" } });
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  assert.match(
+    (await t.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in French/,
+  );
+  const path = join(t.dir, "paper.revision.json");
+  await saveRevision(path, {
+    ...(await loadRevision(path, t.doc)),
+    profile_overrides: { rationale_lang: "German" },
+  });
+  const p = (await t.ask("review_preview", { ref: "R1.1" })).prompt;
+  assert.match(p, /Write the rationale in German/);
+  assert.doesNotMatch(p, /Korean|French/);
+  // The turn that is queued carries the same language.
+  await t.ask("review_propose", { ref: "R1.1" });
+  assert.match(t.pushed[0].text, /Write the rationale in German/);
+  await t.cleanup();
+});
+
+test("the settings default sits between the profile and the env", async () => {
+  const t = await setup({
+    env: { ...ENV, CC_OFFICE_RATIONALE_LANG: "French" },
+    langDefault: () => "Korean",
+  });
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  assert.match(
+    (await t.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in Korean/,
+  );
+  await t.cleanup();
+});
+
+test("an unreadable profile falls back to the env default and says so", async () => {
+  const t = await setup({ env: { ...ENV, CC_OFFICE_RATIONALE_LANG: "French" } });
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  const path = join(t.dir, "paper.revision.json");
+  await saveRevision(path, { ...(await loadRevision(path, t.doc)), journal_profile: "missing" });
+  assert.match(
+    (await t.ask("review_preview", { ref: "R1.1" })).prompt,
+    /Write the rationale in French/,
+  );
+  assert.ok(t.lines.some((l) => /\[review\] profile not loaded: No profile "missing"/.test(l)));
+  await t.cleanup();
+});
+
+test("review_split takes head patterns with a capture group from the paper profile", async () => {
+  const t = await setup();
+  const text =
+    "Gutachter 1\n\n1. Please state the unit.\n\nGutachter 2\n\n1. Please name the supplier.";
+  const refs = async (payload = {}) =>
+    (await t.ask("review_split", { text, ...payload })).comments.map((c) => c.ref);
+  // The built-in patterns do not know this heading: one reviewer.
+  assert.deepEqual(await refs(), ["R1.1", "R1.2"]);
+  await mkdir(join(t.dir, "journal_profiles"));
+  await writeFile(
+    join(t.dir, "journal_profiles", "mine.json"),
+    JSON.stringify({
+      name: "mine",
+      reviewer_head: "^Gutachter (\\d+)$",
+      comment_head: "^Comment \\d+ ",
+    }),
+  );
+  const path = join(t.dir, "paper.revision.json");
+  await saveRevision(path, { ...(await loadRevision(path, t.doc)), journal_profile: "mine" });
+  assert.deepEqual(await refs(), ["R1.1", "R2.1"]);
+  // Patterns sent with the request win over the profile.
+  assert.deepEqual(await refs({ patterns: {} }), ["R1.1", "R1.2"]);
+  await t.cleanup();
+});
+
+test("review_split still works when the document has no local path", async () => {
+  const lines = [];
+  const events = [];
+  const svc = createReviewService({
+    getContext: () => ({ activeDoc: null }),
+    callTool: async () => ({}),
+    pushTurn: () => {},
+    sendEvent: (key, e) => events.push(e),
+    log: (s) => lines.push(s),
+    env: ENV,
+  });
+  await svc.handlers.review_split(
+    { request_id: "q", text: "Reviewer #1\n\n1. Please state the unit." },
+    () => {},
+    "k",
+    "word",
+  );
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(
+    [events[0].result.ok, events[0].result.comments.map((c) => c.ref)],
+    [true, ["R1.1"]],
+  );
+});
+
+// ---- stage 3: a refresh marks saved responses stale (afterRefresh) --------------
+import { markStale, snapshotHash } from "../daemon/response-quotes.mjs";
+import { emptyRevision } from "../daemon/revision-store.mjs";
+
+const QUOTED = "The incubation temperature was held at 30 °C.";
+const STALE_SNAP = (
+  p1 = `Flasks were shaken. ${QUOTED} Samples were drawn daily.`,
+  p2 = "Growth was slow.",
+) => ({
+  paragraphs: [
+    { index: 0, id: "P0", text: p1, w_ins: 0, w_del: 0 },
+    { index: 1, id: "P1", text: p2, w_ins: 0, w_del: 0 },
+  ],
+  comments: [],
+});
+async function staleSetup(more = {}) {
+  const t = await setup({ afterRefresh: (rev, snap) => markStale(rev, snap), ...more });
+  await saveRevision(join(t.dir, "paper.revision.json"), {
+    ...emptyRevision(t.doc),
+    response_render: {
+      pdf_sha: "0".repeat(64),
+      snapshot_hash: snapshotHash(STALE_SNAP()),
+      at: "2026-01-01T00:00:00.000Z",
+      lines_indexed: 10,
+    },
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        changes: [],
+        response: {
+          text: "We now state the unit.",
+          citations: [
+            { kind: "revised", quote: QUOTED, paragraph_index: 0, section: null, change_ids: [] },
+          ],
+        },
+      },
+    ],
+  });
+  return t;
+}
+const staleOf = async (t) =>
+  (await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).comments[0].response.stale;
+
+test("review_refresh: a changed word in a quoted sentence marks the response stale and logs it", async () => {
+  const t = await staleSetup();
+  try {
+    const same = await t.ask("review_refresh", { snapshot: STALE_SNAP() });
+    assert.equal(same.ok, true, same.error);
+    assert.deepEqual(await staleOf(t), []);
+    assert.equal(
+      t.lines.some((l) => l.startsWith("[response] stale")),
+      false,
+    );
+
+    const r = await t.ask("review_refresh", {
+      snapshot: STALE_SNAP(
+        `Flasks were shaken. ${QUOTED.replace("held", "kept")} Samples were drawn daily.`,
+      ),
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.revision.comments[0].response.stale, ["quote_changed", "lines_old"]);
+    assert.deepEqual(await staleOf(t), ["quote_changed", "lines_old"]);
+    assert.ok(
+      t.lines.includes("[response] stale R1.1 quote_changed,lines_old"),
+      t.lines.join("\n"),
+    );
+    // The same state again is not logged again.
+    const n = t.lines.filter((l) => l.startsWith("[response] stale")).length;
+    await t.ask("review_refresh", {
+      snapshot: STALE_SNAP(
+        `Flasks were shaken. ${QUOTED.replace("held", "kept")} Samples were drawn daily.`,
+      ),
+    });
+    assert.equal(t.lines.filter((l) => l.startsWith("[response] stale")).length, n);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_refresh: a change in another paragraph makes only the line numbers old", async () => {
+  const t = await staleSetup();
+  try {
+    await t.ask("review_refresh", { snapshot: STALE_SNAP(undefined, "Growth was fast.") });
+    assert.deepEqual(await staleOf(t), ["lines_old"]);
+    assert.ok(t.lines.includes("[response] stale R1.1 lines_old"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_refresh without the hook leaves the responses alone", async () => {
+  const t = await staleSetup({ afterRefresh: null });
+  try {
+    await t.ask("review_refresh", { snapshot: STALE_SNAP(undefined, "Growth was fast.") });
+    assert.deepEqual(await staleOf(t), []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // A review_propose whose pane has stopped waiting (it says how long it waits
 // in wait_ms) must not start a turn when the gate lets it through later: the
 // author has seen that request fail.

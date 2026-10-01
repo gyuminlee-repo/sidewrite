@@ -1,4 +1,5 @@
-/* global Word */
+/* global Word, Office */
+import { bytesToBase64 } from "./response-view.js";
 import {
   normalizeParaText,
   paragraphHash,
@@ -44,18 +45,28 @@ async function getParagraphsWithIds(context) {
   // so every later `p.text` read throws "property 'text' is not available."
   // changeTrackingMode is a document-level scalar, not a paragraph property —
   // safe to piggyback on the same sync, no scalar-refresh issue.
-  try {
-    context.document.load("changeTrackingMode");
-    paragraphs.load(
-      "items/text, items/style, items/uniqueLocalId, items/listItemOrNullObject/listString",
-    );
-    await context.sync();
-    if (paragraphs.items.length > 0 && !paragraphs.items[0].uniqueLocalId) {
-      throw new Error("uniqueLocalId not populated");
+  // styleBuiltIn and outlineLevel say what a heading is in a Word of any
+  // language (the style NAME is localized: a Korean Word does not call the
+  // built-in style "Heading 1"). Asked for first; a Word that cannot load them gets the load it
+  // always got, and headings are then found by name only (paragraphLevel).
+  const WITH_IDS =
+    "items/text, items/style, items/uniqueLocalId, items/listItemOrNullObject/listString";
+  for (const props of [`${WITH_IDS}, items/styleBuiltIn, items/outlineLevel`, WITH_IDS]) {
+    try {
+      context.document.load("changeTrackingMode");
+      paragraphs.load(props);
+      await context.sync();
+      if (paragraphs.items.length > 0 && !paragraphs.items[0].uniqueLocalId) {
+        throw new Error("uniqueLocalId not populated");
+      }
+      const trackChangesOn = String(context.document.changeTrackingMode) !== "Off";
+      if (props !== WITH_IDS) noteLevels(paragraphs.items);
+      return { paragraphs, idMode: "uniqueLocalId", trackChangesOn };
+    } catch {
+      // the next, smaller load
     }
-    const trackChangesOn = String(context.document.changeTrackingMode) !== "Off";
-    return { paragraphs, idMode: "uniqueLocalId", trackChangesOn };
-  } catch {
+  }
+  {
     context.document.load("changeTrackingMode");
     paragraphs.load("items/text, items/style");
     await context.sync();
@@ -213,10 +224,37 @@ function headingLevel(style) {
   // Many organizations use prefixed style names like "Acme-Heading 2" or
   // "Firm-Heading-1" — we want to recognize those as headings too, not just
   // Word's built-in "Heading 1" / "Heading 2".
+  // A style NAME is in the language of Word: this is the last resort of
+  // paragraphLevel, never the first test.
   if (!style) return null;
   const m = /heading[\s_-]*(\d)/i.exec(style);
   return m ? parseInt(m[1], 10) : null;
 }
+
+// Heading levels read from what Word reports in any language, by paragraph
+// object (set by getParagraphsWithIds when the two properties were loaded).
+const LEVELS = new WeakMap();
+const outlineOf = (p) => {
+  const n = Number(p.outlineLevel);
+  return Number.isInteger(n) && n >= 1 && n <= 9 ? n : null;
+};
+function noteLevels(items) {
+  // An outline level tells a heading only when some paragraph has none
+  // (body text). Were it 1 to 9 for every paragraph, it would say nothing.
+  const outlineTells = items.some((p) => outlineOf(p) === null);
+  for (const p of items) {
+    const builtIn = /^Heading([1-9])$/.exec(String(p.styleBuiltIn ?? ""));
+    const level = builtIn ? Number(builtIn[1]) : outlineTells ? outlineOf(p) : null;
+    LEVELS.set(p, level);
+  }
+}
+// The heading level of a paragraph, or null: the built-in style id, then the
+// outline level, then the style name.
+function paragraphLevel(p) {
+  return LEVELS.get(p) ?? headingLevel(p.style);
+}
+// The same for an item of snapshotParagraphs.
+const levelOf = (item) => item.level ?? null;
 
 // Build the "view" the agent sees: list of {id, style, text, [number]}.
 // `number` is the user-facing paragraph number (Word's rendered list string,
@@ -226,22 +264,23 @@ function snapshotParagraphs(paragraphs, idMode) {
   return paragraphs.items.map((p, i) => {
     const text = p.text;
     const number = listNumberOf(p, text);
-    return {
+    const item = {
       index: i,
       id: getId(p, i, idMode),
       style: p.style,
       text,
       ...(number ? { number } : {}),
     };
+    // Not part of the view the agent sees.
+    Object.defineProperty(item, "level", { value: paragraphLevel(p), enumerable: false });
+    return item;
   });
 }
 
 // Find the index of a heading paragraph by case-insensitive exact text match.
 function findHeadingIndex(snapshot, headingText) {
   const target = headingText.trim().toLowerCase();
-  return snapshot.findIndex(
-    (p) => headingLevel(p.style) !== null && p.text.trim().toLowerCase() === target,
-  );
+  return snapshot.findIndex((p) => levelOf(p) !== null && p.text.trim().toLowerCase() === target);
 }
 
 // Find the canonical body paragraph for the section that contains the
@@ -273,7 +312,7 @@ function findBodyReferenceIndex(snapshot, fromIdx) {
   // Step 1: find the section's heading by walking backward.
   let sectionStart = -1;
   for (let i = fromIdx - 1; i >= 0; i--) {
-    if (snapshot[i] && headingLevel(snapshot[i].style) !== null) {
+    if (snapshot[i] && levelOf(snapshot[i]) !== null) {
       sectionStart = i;
       break;
     }
@@ -284,14 +323,14 @@ function findBodyReferenceIndex(snapshot, fromIdx) {
   if (sectionStart !== -1) {
     for (let i = sectionStart + 1; i < snapshot.length; i++) {
       if (!snapshot[i]) continue;
-      if (headingLevel(snapshot[i].style) !== null) break;
+      if (levelOf(snapshot[i]) !== null) break;
       return { idx: i, inSection: true };
     }
   }
 
   // Step 3: doc-wide fallback — style name only, NOT a format-clone source.
   for (let i = 0; i < snapshot.length; i++) {
-    if (snapshot[i] && headingLevel(snapshot[i].style) === null) {
+    if (snapshot[i] && levelOf(snapshot[i]) === null) {
       return { idx: i, inSection: false };
     }
   }
@@ -360,9 +399,9 @@ function applyParagraphFormat(targetPara, fmt) {
 // Find the end of a section starting at headingIdx (exclusive): next paragraph
 // with a heading style of same-or-higher rank (i.e. lower or equal level).
 function findSectionEnd(snapshot, headingIdx) {
-  const startLevel = headingLevel(snapshot[headingIdx].style);
+  const startLevel = levelOf(snapshot[headingIdx]);
   for (let i = headingIdx + 1; i < snapshot.length; i++) {
-    const lvl = headingLevel(snapshot[i].style);
+    const lvl = levelOf(snapshot[i]);
     if (lvl !== null && lvl <= startLevel) return i;
   }
   return snapshot.length;
@@ -1300,7 +1339,7 @@ export async function toolGetOutline() {
     const outline = [];
     for (let i = 0; i < paragraphs.items.length; i++) {
       const p = paragraphs.items[i];
-      const level = headingLevel(p.style);
+      const level = paragraphLevel(p);
       if (level > 0) {
         outline.push({ id: getId(p, i, idMode), level, text: p.text.trim() });
       }
@@ -2082,5 +2121,73 @@ export async function deleteToolComments() {
     for (const c of left.items) after[isToolComment(c.content) ? "tool" : "user"] += 1;
     const still = new Set(left.items.map((c) => String(c.id)));
     return { before, after, deleted_ids: doomed.filter((id) => !still.has(id)) };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Response letter: the rendered PDF and the heading list
+// ---------------------------------------------------------------------------
+
+const RENDER_PDF_SLICE_SIZE = 4 * 1024 * 1024;
+
+function officeAsync(fn) {
+  return new Promise((resolve, reject) => {
+    fn((res) => {
+      if (res.status === Office.AsyncResultStatus.Failed) reject(res.error);
+      else resolve(res.value);
+    });
+  });
+}
+
+// The open document as Word renders it to PDF, margin line numbers included.
+// A function of the pane, not an agent tool: the bytes go to the daemon for
+// the line numbers and never into a model context. Throws what Word reports.
+// The caller checks the size (response-view.js pdfTooLarge) before sending.
+export async function exportRenderPdf() {
+  const file = await officeAsync((cb) =>
+    Office.context.document.getFileAsync(
+      Office.FileType.Pdf,
+      { sliceSize: RENDER_PDF_SLICE_SIZE },
+      cb,
+    ),
+  );
+  try {
+    const parts = [];
+    let total = 0;
+    for (let i = 0; i < file.sliceCount; i++) {
+      const slice = await officeAsync((cb) => file.getSliceAsync(i, cb));
+      const bytes = slice.data instanceof Uint8Array ? slice.data : Uint8Array.from(slice.data);
+      parts.push(bytes);
+      total += bytes.length;
+    }
+    const all = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      all.set(p, off);
+      off += p.length;
+    }
+    return { pdf_base64: bytesToBase64(all), byte_length: total, slice_count: file.sliceCount };
+  } finally {
+    try {
+      await officeAsync((cb) => file.closeAsync(cb));
+    } catch {
+      /* a close failure must not hide the export result */
+    }
+  }
+}
+
+// The headings of the document: [{ index, level, text }], index being the
+// paragraph index of collectReviewSnapshot (the snapshot has no styles).
+// Same rule as toolGetOutline.
+export async function collectHeadings() {
+  return await Word.run(async (context) => {
+    const { paragraphs } = await getParagraphsWithIds(context);
+    const out = [];
+    paragraphs.items.forEach((p, index) => {
+      const level = paragraphLevel(p);
+      const text = p.text.trim();
+      if (level > 0 && text) out.push({ index, level, text });
+    });
+    return out;
   });
 }

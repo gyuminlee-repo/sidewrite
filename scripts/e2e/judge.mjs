@@ -111,6 +111,10 @@ export const stageOf = (spec) => featureIds(spec)[0].split("-")[0].toLowerCase()
 
 const noSlash = (p) => String(p).replace(/\/+$/, "");
 
+// Where the markers and evidence of a stage are: the feature lists name them
+// /tmp/<stage>-*, a run keeps them in its own ok folder.
+export const markerMap = (stage, okDir) => ({ [`/tmp/${stage}-`]: `${noSlash(okDir)}/${stage}-` });
+
 // A verify command of a feature list as this run must run it:
 //   /tmp/<prefix>-*   markers and evidence   -> <runDir>/ok/<prefix>-*
 //   planDir           the folder the list names -> runDir
@@ -126,7 +130,7 @@ export function rewriteVerify(
   if (!/^s\d+$/.test(String(prefix))) {
     throw new Error(`rewriteVerify needs a stage prefix like s25, not ${prefix}`);
   }
-  const map = { [`/tmp/${prefix}-`]: `${noSlash(runDir)}/ok/${prefix}-` };
+  const map = markerMap(prefix, `${noSlash(runDir)}/ok`);
   if (planDir) map[noSlash(planDir)] = noSlash(runDir);
   if (planRepo && repo) map[`cd ${noSlash(planRepo)} `] = `cd ${repo} `;
   if (planLog && log) map[planLog] = log;
@@ -332,15 +336,18 @@ export function proposeAllEvidence({ message, log }) {
 
 // What a run uses when --features is not given.
 export function defaultFeatures(stage) {
-  const known = { s2: "S2-18..S2-34", s25: "S25-30..S25-41" };
+  // Stage 3: S3-41 is checked after the cleanup (--after-cleanup).
+  const known = { s2: "S2-18..S2-34", s25: "S25-30..S25-41", s3: "S3-30..S3-40" };
   if (!known[stage])
     throw new Error(`no default feature range for stage ${stage}: give --features`);
   return known[stage];
 }
 
 // The name of the manuscript copy in the run folder. The stage 2.5 feature
-// list reads paper.decisions.jsonl and paper.ledger.json next to it.
-export const docStem = (stage) => (stage === "s2" ? "review_manuscript" : "paper");
+// list reads paper.decisions.jsonl and paper.ledger.json next to it; the
+// stage 3 list reads review_manuscript.revision.json and the letter files.
+export const docStem = (stage) =>
+  stage === "s2" || stage === "s3" ? "review_manuscript" : "paper";
 
 const ALIASES = new Set(["sonnet", "opus", "haiku", "default"]);
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -544,6 +551,239 @@ export function cleanupEvidence({ cleanup, listening }) {
     left_running: cleanup?.left_running ?? [],
     daemon_error: cleanup?.daemon_error ?? null,
     listening,
+    ports_free: listening === 0,
+  };
+}
+
+// ---- Stage 3 (run-acceptance.mjs mainS3): the response letter ----
+// Each builder returns the evidence written next to a marker
+// (`ok/s3-<name>.evidence.json`; the `.ok` file only when pass is true), from
+// what the pane showed, revision.json, the daemon log, Word over COM and
+// `pdftotext`. The keys are the ones the stage 3 feature list reads.
+
+// The author's decisions of the stage 3 run. As stage 2, but the deletion
+// asked for in R1.4 is accepted (the letter then cites a removal) and nothing
+// is left pending: a pending tracked change is a warning of the letter check.
+export const S3_DECISIONS = {
+  "R1.1": "accept",
+  "R1.2": "reject",
+  "R1.3": ["accept_edit", "accept"],
+  "R1.4": "accept",
+};
+
+// S3-30. view: the Response tab; revision: revision.json. The comment of a
+// card is the reviewer's text, character for character.
+export function openEvidence(view, revision) {
+  const cards = view?.cards ?? [];
+  const comments = revision?.comments ?? [];
+  const verbatim =
+    cards.length === comments.length &&
+    cards.every((c, i) => c.ref === comments[i].ref && c.comment === comments[i].text);
+  const profile = view?.profile ?? null;
+  return {
+    pass: cards.length > 0 && verbatim && profile === "generic",
+    cards: cards.length,
+    verbatim,
+    profile,
+  };
+}
+
+// S3-31. rows: the proposal lines of the pane after the letter was read;
+// before: profile_overrides of revision.json at that moment (nothing saved
+// yet); after: the same once "Apply to this paper" was pressed.
+export function proposalEvidence({ rows, before, after }) {
+  const counted = (colour) =>
+    (rows ?? []).some((r) => new RegExp(`-> ${colour} \\(\\d+ paragraphs?\\)`).test(r));
+  return {
+    pass:
+      Object.keys(before ?? {}).length === 0 &&
+      counted("C00000") &&
+      counted("0070C0") &&
+      after?.colors?.response_body === "C00000" &&
+      after?.colors?.response_revised === "0070C0",
+    before: before ?? null,
+    after: after ?? null,
+    rows: rows ?? [],
+  };
+}
+
+// Text as two readers of one PDF can agree on it: compatibility forms
+// (ligatures) folded, and no spaces or hyphens, which a line break adds.
+const squeeze = (s) =>
+  String(s ?? "")
+    .normalize("NFKC")
+    .replace(/[\s\-­‐‑]/g, "");
+
+// S3-33. A second reader of the rendered PDF. layout: `pdftotext -layout`
+// text; a numbered line is "<up to 3 spaces><n><spaces><text>", and a line
+// without a number (a page number, a running head, a blank line, a form
+// feed) is not manuscript text. citations: [{ id, quote, start, end?,
+// match_count }] with the line range the daemon read (PyMuPDF).
+//
+// The lines from `start` on are joined, as long as their numbers go on
+// without a gap. A citation agrees when the whole quote is in that text and
+// begins inside the start line: at its end, however short the piece (the
+// last word of the line), or anywhere in it. A quote that begins on the next
+// line does not agree, and neither does one whose text is not all there.
+// With `end`, the last character of the quote must be on that line.
+export function secondReader(layout, citations) {
+  const lines = new Map();
+  for (const raw of String(layout ?? "").split(/\n|\f/)) {
+    const m = /^\s{0,3}(\d+)\s+(.*)$/.exec(raw);
+    if (m && !lines.has(Number(m[1]))) lines.set(Number(m[1]), m[2].trim());
+  }
+  const rows = (citations ?? []).map((c) => {
+    const line_text = lines.get(c.start) ?? "";
+    const quote = squeeze(c.quote);
+    const head = squeeze(line_text).length;
+    // The joined text and where each line ends in it.
+    let text = "";
+    const ends = [];
+    for (let n = c.start; lines.has(n) && text.length < head + quote.length; n++) {
+      text += squeeze(lines.get(n));
+      ends.push([n, text.length]);
+    }
+    let agrees = false;
+    for (
+      let at = text.indexOf(quote);
+      quote && at !== -1 && at < head;
+      at = text.indexOf(quote, at + 1)
+    ) {
+      const last = at + quote.length - 1;
+      const endLine = ends.find(([, upTo]) => last < upTo)?.[0];
+      if (c.end == null || endLine === c.end) agrees = true;
+    }
+    return { id: c.id, start: c.start, line_text, agrees };
+  });
+  const unique = (citations ?? []).every((c) => c.match_count === 1);
+  const second_reader_agrees = rows.length > 0 && rows.every((r) => r.agrees);
+  return { pass: unique && second_reader_agrees, unique, second_reader_agrees, rows };
+}
+
+// S3-35. step: the export step of the pane; read: tools/response_read.py on
+// the written letter (the colours it finds and the roles it gives them);
+// exists: the docx is there.
+export function exportEvidence(step, read, path, exists) {
+  const body = read?.overrides?.colors?.response_body ?? null;
+  const revised = read?.overrides?.colors?.response_revised ?? null;
+  const colours = Object.keys(read?.evidence?.colors ?? {}).sort();
+  return {
+    pass:
+      exists === true &&
+      /^Exported/.test(step?.output ?? "") &&
+      !!body &&
+      !!revised &&
+      colours.length === 2 &&
+      colours.includes(body) &&
+      colours.includes(revised),
+    body,
+    revised,
+    path,
+    colours,
+  };
+}
+
+// S3-36. Where the one-line paragraph goes: in front of the paragraph of the
+// lowest citation, when a citation of another paragraph stays above it.
+// citations: [{ start, paragraph_index }]. null when no such place exists.
+export function insertTarget(citations) {
+  const sorted = [...(citations ?? [])].sort((a, b) => a.start - b.start);
+  const last = sorted.at(-1);
+  if (!last || !sorted.some((c) => c.paragraph_index < last.paragraph_index)) return null;
+  return last.paragraph_index;
+}
+
+// S3-36. before, after: [{ id, start }] of the citations before the paragraph
+// was inserted and after the line numbers were read again; insertedAtLine:
+// the line number of the inserted paragraph in the new PDF. A citation at or
+// below that line moved by exactly one, one above it did not move.
+export function lineShift(before, after, insertedAtLine, staleShown) {
+  const by = new Map((after ?? []).map((c) => [c.id, c.start]));
+  const moved = [];
+  const kept = [];
+  const wrong = [];
+  for (const c of before ?? []) {
+    const want = c.start >= insertedAtLine ? 1 : 0;
+    const d = by.get(c.id) - c.start;
+    (d !== want || !Number.isFinite(insertedAtLine) ? wrong : want ? moved : kept).push(c.id);
+  }
+  return {
+    pass: wrong.length === 0 && moved.length > 0 && kept.length > 0 && staleShown === true,
+    moved,
+    kept,
+    wrong,
+    stale_shown: staleShown === true,
+  };
+}
+
+const passed = (view) => /^All checks passed/.test(view?.summary ?? "");
+
+// S3-37. before: the Response tab after a quoted sentence of `ref` was edited
+// in Word and the checks ran; after: once the answer was saved again and the
+// line numbers updated.
+export function staleEvidence(before, after, ref) {
+  const stale = before?.cards?.find((c) => c.ref === ref)?.stale ?? "";
+  const stale_shown = stale.includes("Quote changed in the manuscript");
+  const failed_before = (before?.checks ?? []).some((l) => l.startsWith(`FAIL ${ref} stale:`));
+  const passed_after = passed(after);
+  return {
+    pass: stale_shown && failed_before && passed_after,
+    stale_shown,
+    failed_before,
+    passed_after,
+  };
+}
+
+// S3-38. failing: the Response tab after an export was asked for with a
+// forbidden expression in an answer; exportedWhileFailing: a letter file was
+// written or changed by that; after: the checks once the answer was put back.
+export function ledgerEvidence(failing, exportedWhileFailing, after) {
+  const ledger_fail = (failing?.checks ?? []).filter((l) => /^FAIL \S+ ledger: /.test(l)).length;
+  const passed_after = passed(after);
+  return {
+    pass:
+      ledger_fail > 0 &&
+      failing?.export_label === "Export anyway" &&
+      exportedWhileFailing === false &&
+      passed_after,
+    ledger_fail,
+    exported_while_failing: exportedWhileFailing,
+    passed_after,
+  };
+}
+
+// S3-39. logLine: the daemon's "[response] draft <ref> lang=..." line of the
+// draft; previewPrompt: the review prompt the Review tab previews; lang: the
+// language set in the Response tab.
+export function langEvidence(logLine, previewPrompt, lang) {
+  const response_prompt_lang = / lang=(\S+)/.exec(String(logLine ?? ""))?.[1] ?? null;
+  const rationale_prompt_lang =
+    /Write the rationale in ([^:]+):/.exec(String(previewPrompt ?? ""))?.[1] ?? null;
+  const korean_found = /Korean/.test(`${logLine ?? ""}\n${previewPrompt ?? ""}`);
+  return {
+    pass: response_prompt_lang === lang && rationale_prompt_lang === lang && !korean_found,
+    response_prompt_lang,
+    rationale_prompt_lang,
+    korean_found,
+  };
+}
+
+// S3-40. com: word-com.ps1 open-check on the first letter; modelParagraphs:
+// the paragraphs of its model.json; firstPath, secondPath: the letter that is
+// open in Word and the one an export wrote meanwhile.
+export function openCheckEvidence(com, modelParagraphs, firstPath, secondPath) {
+  const opened = com?.ok === true;
+  const repaired = com?.repaired === true;
+  const paragraphs_match = opened && com.paragraphs === modelParagraphs;
+  return {
+    pass: opened && !repaired && paragraphs_match && !!secondPath && secondPath !== firstPath,
+    opened,
+    repaired,
+    paragraphs_match,
+    first_path: firstPath,
+    second_path: secondPath ?? null,
+    paragraphs: com?.paragraphs ?? null,
+    model_paragraphs: modelParagraphs,
   };
 }
 
@@ -803,6 +1043,103 @@ export const JUDGES = {
     pass: r.changed === true && /^Auto-refreshed /.test(r.after ?? ""),
     expect: "Auto-refreshed <time>: ... (no Refresh click)",
     got: r.after || "(the auto-refresh line did not change)",
+  }),
+  // ---- stage 3 steps (Response tab) ----
+  "open-response": (r) => ({
+    pass:
+      !r.message_error &&
+      /^Refreshed from the manuscript: \d+ comments?\.$/.test(r.message ?? "") &&
+      (r.cards ?? []).length > 0,
+    expect: "Refreshed from the manuscript: n comments. (one card per comment)",
+    got: `${r.message} | cards ${(r.cards ?? []).map((c) => c.ref).join(",")} | profile ${r.profile}`,
+  }),
+  "load-letter": (r) => ({
+    pass: /^Read the letter: /.test(r.message ?? "") && (r.rows ?? []).length > 0,
+    expect: "Read the letter: n settings differ ... (proposal rows listed, nothing saved)",
+    got: `${r.message} | ${(r.rows ?? []).join(" | ")}`,
+  }),
+  "apply-proposal": (r) => ({
+    pass: !r.message_error && /^Applied to this paper: /.test(r.message ?? ""),
+    expect: "Applied to this paper: n settings, m earlier answers kept for drafting.",
+    got: r.message,
+  }),
+  "response-set-lang": (r) => ({
+    pass: !r.message_error && /^Saved for this paper: profile /.test(r.message ?? ""),
+    expect: "Saved for this paper: profile <name>.",
+    got: r.message,
+  }),
+  // ctx.comments: the refs declined as a whole. No open request is left on any card.
+  "response-decline": (r, ctx = {}) => {
+    const cards = r.cards ?? [];
+    const declined = (ctx.comments ?? []).every(
+      (ref) => !!cards.find((c) => c.ref === ref)?.declined,
+    );
+    const open = cards.flatMap((c) => c.open_reqs ?? []);
+    return {
+      pass: !r.message_error && declined && open.length === 0,
+      expect: `${(ctx.comments ?? []).join(", ")} declined with a reason; no request left open`,
+      got: `${r.message} | declined ${cards
+        .filter((c) => c.declined)
+        .map((c) => c.ref)
+        .join(",")} | open requests ${open.length}`,
+    };
+  },
+  "response-draft": (r, ctx = {}) => ({
+    pass: !r.message_error && (r.message ?? "").startsWith(`Drafted ${ctx.ref}.`),
+    expect: `Drafted ${ctx.ref}.`,
+    got: r.message,
+  }),
+  "response-draft-all": (r) => {
+    const missing = (r.cards ?? []).filter((c) => !c.declined && !String(c.text ?? "").trim());
+    return {
+      pass:
+        !r.message_error &&
+        /^(Drafted \d+ responses?\.|Nothing to draft)/.test(r.message ?? "") &&
+        missing.length === 0,
+      expect: "Drafted n responses. (every comment answered or declined)",
+      got: `${r.message} | without an answer: ${missing.map((c) => c.ref).join(",") || "-"}`,
+    };
+  },
+  "response-edit": (r) => ({
+    pass: !r.message_error && /^Saved \S+\.$/.test(r.message ?? ""),
+    expect: "Saved <ref>.",
+    got: r.message,
+  }),
+  "response-refresh": (r) => ({
+    pass: !r.message_error && /^Refreshed from the manuscript: /.test(r.message ?? ""),
+    expect: "Refreshed from the manuscript: n comments.",
+    got: r.message,
+  }),
+  "response-locate": (r) => {
+    const m = /^Line numbers updated: (\d+)\/(\d+) quotes located\.$/.exec(r.message ?? "");
+    return {
+      pass: !r.message_error && !!m && m[1] === m[2] && Number(m[2]) > 0,
+      expect: "Line numbers updated: n/n quotes located.",
+      got: r.message,
+    };
+  },
+  // No failure and no warning.
+  "response-check": (r) => ({
+    pass: r.summary === "All checks passed",
+    expect: "All checks passed",
+    got: `${r.summary} | ${(r.checks ?? []).join(" | ")}`,
+  }),
+  // After S3-34: no failure. A warning does not fail the step (an answer
+  // that was edited or drafted again may differ from the one before it).
+  "response-check-no-fail": (r) => ({
+    pass: /^All checks passed/.test(r.summary ?? ""),
+    expect: "All checks passed (warnings allowed)",
+    got: `${r.summary} | ${(r.checks ?? []).join(" | ")}`,
+  }),
+  "response-export": (r) => ({
+    pass: !r.message_error && /^Exported/.test(r.output ?? ""),
+    expect: "Exported: <path>",
+    got: r.output || r.message,
+  }),
+  "response-export-text": (r) => ({
+    pass: !r.message_error && /^Exported/.test(r.output ?? ""),
+    expect: "Exported: <stem>.response.R1.txt ...",
+    got: r.output || r.message,
   }),
 };
 

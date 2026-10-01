@@ -76,8 +76,12 @@ const waits = firstArgs("waitForFunction");
 const reads = firstArgs("page.evaluate").filter((t) => !t.includes("import("));
 
 test("the source scan finds the wait conditions and the reads of the driver", () => {
-  assert.ok(waits.length >= 15, `wait conditions: ${waits.length}`);
-  assert.ok(reads.length >= 5, `reads: ${reads.length}`);
+  assert.ok(waits.length >= 19, `wait conditions: ${waits.length}`);
+  assert.ok(reads.length >= 10, `reads: ${reads.length}`);
+  // The Response tab steps are among them: the tab shown and its message
+  // line; clearing the line, reading the tab, opening the folded section.
+  const ofResponse = (list) => list.filter((t) => /response/.test(t)).length;
+  assert.deepEqual([ofResponse(waits), ofResponse(reads)], [2, 3]);
   for (const t of [...waits, ...reads]) assert.match(t, /=>/, t.slice(0, 60));
   // No read of an element that may not be there yet.
   assert.deepEqual(src.match(/getElementById\("[^"]+"\)\.(?!\s*$)/g) ?? [], []);
@@ -117,18 +121,37 @@ test("the elements are there: the conditions decide on them", () => {
     const on = (t) => !!bind(text, fakeDocument({ "review-file": el(t) }))();
     assert.deepEqual([on(""), on("Review file: /m/paper.revision.json")], [false, true]);
   }
-  // The message line of a step: empty waits, a text ends the wait.
+  // The message line of a step (of the Review tab, of the Response tab):
+  // empty waits, a text ends the wait.
+  assert.equal(only("pattern").length, 2);
   for (const text of only("pattern")) {
+    const id = /getElementById\("([a-z]+-message)"\)/.exec(text)[1];
+    // The Response steps always name the message they wait for.
     const on = (t, pattern, error = false) =>
       !!bind(
         text,
-        fakeDocument({ "review-message": el(t, { classList: { contains: () => error } }) }),
-      )(pattern);
+        fakeDocument({ [id]: el(t, { classList: { contains: () => error } }) }),
+      )(pattern ?? (id === "response-message" ? "." : null));
     assert.deepEqual(
       [on("", null), on("Saved.", null), on("Waiting...", "^Saved"), on("Saved.", "^Saved")],
       [false, true, false, true],
     );
     assert.equal(on("Failed", "^Saved", true), true, "an error line ends the wait");
+  }
+  // The Response tab is the one shown (the condition clicks its button until it is).
+  for (const text of only('.tab-content[data-tab="response"]')) {
+    const on = (hidden) =>
+      !!bind(
+        text,
+        fakeDocument(
+          {},
+          {
+            '.tab-content[data-tab="response"]': [el("", { hidden })],
+            'button.tab[data-tab="response"]': [el()],
+          },
+        ),
+      )();
+    assert.deepEqual([on(true), on(false)], [false, true]);
   }
   // The providers list is drawn, or its message says why not.
   for (const text of only("#providers-list .provider-row")) {
@@ -184,4 +207,64 @@ test("the elements are there: the conditions decide on them", () => {
       [false, true, true],
     );
   }
+});
+
+// The reads of the Response tab on a pane whose elements are there.
+test("the Response tab is read as the pane shows it", async () => {
+  const read = reads.find((t) => t.includes('"response-summary"'));
+  assert.ok(read, "the read of the Response tab");
+  const card = {
+    getAttribute: (k) => (k === "data-ref" ? "R1.1" : null),
+    querySelector: (sel) =>
+      ({
+        ".response-comment": el("Use  Celsius.\n"),
+        "textarea.response-text": { value: "Done." },
+        ".response-stale": el("Quote changed in the manuscript"),
+      })[sel] ?? null,
+    querySelectorAll: (sel) =>
+      sel === ".response-req:not(.response-req-declined) > span" ? [el(" q2 open ")] : [],
+  };
+  const doc = fakeDocument(
+    {
+      "response-message": el("Checked: 1 failed", { classList: { contains: () => true } }),
+      "response-profile": { value: "generic" },
+      "response-summary": el("1 failed"),
+      "response-export": el(" Export anyway "),
+    },
+    {
+      "#response-checks .response-check-row": [el("FAIL R1.1 stale: quote_changed")],
+      "#response-comments .response-card": [card],
+    },
+  );
+  const v = await bind(read, doc)();
+  assert.deepEqual(
+    [v.message, v.message_error, v.profile, v.summary, v.export_label, v.checks],
+    [
+      "Checked: 1 failed",
+      true,
+      "generic",
+      "1 failed",
+      "Export anyway",
+      ["FAIL R1.1 stale: quote_changed"],
+    ],
+  );
+  // The comment is read as it is; the other texts with their spaces folded.
+  assert.deepEqual(v.cards, [
+    {
+      ref: "R1.1",
+      comment: "Use  Celsius.\n",
+      text: "Done.",
+      declined: "",
+      stale: "Quote changed in the manuscript",
+      undecided: "",
+      citations: [],
+      open_reqs: ["q2 open"],
+    },
+  ]);
+  // Nothing there yet: an empty view, no throw.
+  const empty = await bind(read, fakeDocument())();
+  assert.deepEqual(
+    [empty.message, empty.message_error, empty.profile, empty.cards],
+    ["", false, "", []],
+  );
 });

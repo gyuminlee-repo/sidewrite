@@ -18,9 +18,10 @@
 // and the result follows as { event: "job_done", job_id, result }, result
 // being what the reply would have held ({ ok: true, ... } or { ok: false,
 // error }). Their model calls can outlast any request timeout of the pane.
+// handler-wrap.mjs wraps both kinds.
 
-import { randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   localDocPath,
   revisionPathFor,
@@ -76,6 +77,8 @@ import {
   TARGET_HASH_CAP,
 } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
+import { wrapHandlers } from "./handler-wrap.mjs";
+import { effectiveProfile, rationaleLang, splitPatterns } from "./journal-profile.mjs";
 
 async function exists(p) {
   try {
@@ -187,6 +190,14 @@ const JOB_TYPES = new Set(["review_split", "ledger_check", "ledger_suggest"]);
 
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
 
+// The comments whose stale marks are not what they were, and not empty.
+function staleChanges(before, after) {
+  const was = new Map(before.comments.map((c) => [c.ref, (c.response?.stale ?? []).join(",")]));
+  return after.comments
+    .map((c) => ({ ref: c.ref, stale: c.response?.stale ?? [] }))
+    .filter((x) => x.stale.length && x.stale.join(",") !== was.get(x.ref));
+}
+
 export function createReviewService({
   getContext,
   callTool,
@@ -208,6 +219,12 @@ export function createReviewService({
   // the pane's provider for review turns is confirmed and throws otherwise
   // (providers/selection.mjs ready). The request then fails with that text.
   turnGate = async () => {},
+  // Default language of the settings file, between the profile and the
+  // environment (journal-profile.mjs rationaleLang): () => string | null.
+  langDefault = null,
+  // (revision, snapshot) => revision, run in a refresh once the states of
+  // the changes are set (index.mjs: the stale marks of saved responses).
+  afterRefresh = null,
   clock = Date.now,
   getModel = () => null,
   sendEvent = () => {},
@@ -625,14 +642,34 @@ export function createReviewService({
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";
 
+  // The journal profile of the paper (journal-profile.mjs). A profile that
+  // cannot be read does not stop a review: the language falls back to the
+  // settings and environment default, the split to its built-in patterns.
+  async function profileOf(d, rev) {
+    const settingsDefault = langDefault?.() ?? null;
+    try {
+      const { profile } = await effectiveProfile(rev, {
+        docDir: dirname(d.doc),
+        env,
+        settingsDefault,
+      });
+      return profile;
+    } catch (e) {
+      log(`[review] profile not loaded: ${e?.message ?? e}`);
+      return { rationale_lang: rationaleLang({}, { env, settingsDefault }) };
+    }
+  }
+
   async function buildFor(d, ref, paragraphs) {
     const rev = await load(d);
     const comment = findComment(rev, ref);
     if (!comment) throw new Error(`No reviewer comment ${ref}. Save the comment list first.`);
+    const profile = await profileOf(d, rev);
     const built = buildReviewPrompt({
       comment,
       paragraphs: Array.isArray(paragraphs) ? paragraphs : [],
       ledger: rev.ledger,
+      lang: profile.rationale_lang,
       includeForbid: includeForbid(),
     });
     return { rev, comment, built };
@@ -666,7 +703,17 @@ export function createReviewService({
           asked = true;
           return shot(req);
         });
-      const r = await splitReview(text, { patterns: msg.patterns, oneshot: ask });
+      // Head patterns: the request's own, else those of the paper profile.
+      // A document without a local path has no profile.
+      let patterns = msg.patterns;
+      if (!patterns) {
+        try {
+          patterns = splitPatterns(await profileOf(d, await load(d)));
+        } catch {
+          patterns = undefined;
+        }
+      }
+      const r = await splitReview(text, { patterns, oneshot: ask });
       const records = [];
       if (asked) {
         records.push(
@@ -789,6 +836,7 @@ export function createReviewService({
       let external = [];
       let resolved = [];
       let dropped = [];
+      let stale = [];
       let done = [];
       const revision = await update(d, (file) => {
         // What this daemon knows Word applied goes in first, as it was applied.
@@ -814,9 +862,12 @@ export function createReviewService({
           next = r.revision;
           external = r.added;
         }
+        next = afterRefresh?.(next, snapshot) ?? next;
+        stale = staleChanges(old, next);
         return setSnapshot(next, texts, new Date(), snapshotIds(snapshot));
       });
       await unsavedDone(d, key, revision, done);
+      for (const x of stale) log(`[response] stale ${x.ref} ${x.stale.join(",")}`);
       for (const x of resolved) {
         forgetLate(x.tool_call_id);
         log(
@@ -1207,44 +1258,6 @@ export function createReviewService({
     },
   };
 
-  const handlers = {};
-  for (const [type, fn] of Object.entries(impl)) {
-    if (JOB_TYPES.has(type)) {
-      // Returns once accepted; the job runs on and ends in job_done.
-      handlers[type] = async (msg, reply, key, host) => {
-        const job_id = randomUUID();
-        reply({
-          type: `${type}_result`,
-          request_id: msg.request_id,
-          ok: true,
-          accepted: true,
-          job_id,
-        });
-        const done = (result) =>
-          sendEvent(key, { type: "review_event", event: "job_done", job_id, result });
-        fn(msg, key, host)
-          .then(
-            (out) => done({ ok: true, ...out }),
-            (e) => done({ ok: false, error: e?.message ?? String(e) }),
-          )
-          // Nobody awaits the job: a failed send must not end the daemon.
-          .catch((e) => log(`[review] job_done not delivered: ${e?.message ?? e}`));
-      };
-      continue;
-    }
-    handlers[type] = async (msg, reply, key, host) => {
-      try {
-        const out = await fn(msg, key, host);
-        reply({ type: `${type}_result`, request_id: msg.request_id, ok: true, ...out });
-      } catch (e) {
-        reply({
-          type: `${type}_result`,
-          request_id: msg.request_id,
-          ok: false,
-          error: e?.message ?? String(e),
-        });
-      }
-    };
-  }
+  const handlers = wrapHandlers(impl, { jobTypes: JOB_TYPES, sendEvent, log });
   return { handlers, trackedEditDeps, turnEnded, lateToolResult };
 }

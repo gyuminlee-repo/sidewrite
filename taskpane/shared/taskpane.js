@@ -37,9 +37,12 @@ import {
   readAllComments,
   deleteBackedUpComments,
   deleteToolComments,
+  collectHeadings,
+  exportRenderPdf,
   addChangeComment,
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
+import { initResponsePane } from "./response-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
@@ -131,6 +134,7 @@ let assistantTurnElem = null;
 let attachSelection = true;
 
 let reviewPane = null; // Review tab controller (Word), set in Office.onReady
+let responsePane = null; // Response tab controller (Word), set in Office.onReady
 let providersPane = null; // Providers section of the Setup tab, set in Office.onReady
 
 function setComposerDisabled(disabled) {
@@ -744,6 +748,7 @@ async function handleServerMessage(msg) {
       setAgentStatus("idle", "Ready");
       refreshWorkspaceFromDaemon();
       reviewPane?.reload();
+      responsePane?.reload();
       loadModelMenu();
       providersPane?.reload();
       break;
@@ -803,6 +808,10 @@ async function handleServerMessage(msg) {
 
     case "review_event":
       reviewPane?.onEvent(msg);
+      break;
+
+    case "response_event":
+      responsePane?.onEvent(msg);
       break;
 
     case "pong":
@@ -1231,6 +1240,12 @@ Office.onReady((info) => {
         listComments: () => toolListComments(),
         resolveComment: (id) => toolResolveComment({ comment_id: id, resolved: true }),
       },
+    });
+    // Response tab: the response letter. It reads Word and never writes to it.
+    responsePane = initResponsePane({
+      sendRequest,
+      providersReady: () => providersPane?.whenRestored() ?? null,
+      word: { collectReviewSnapshot, collectHeadings, exportRenderPdf },
     });
   }
 

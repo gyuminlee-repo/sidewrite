@@ -123,7 +123,7 @@ export const trackedEditShape = {
         ),
     })
     .describe(
-      "Korean by default. Facts from the manuscript or the review only; say so when inferring.",
+      "In the language the prompt asks for. Facts from the manuscript or the review only; say so when inferring.",
     ),
 };
 

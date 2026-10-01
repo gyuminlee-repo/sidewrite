@@ -175,3 +175,11 @@ test("startsSentence finds the phrase in the snapshot and reads what is before i
   assert.equal(startsSentence("were grown", texts), false);
   assert.equal(startsSentence("not in the text", texts), false);
 });
+
+test("factPresent: a unit word is found in a text that writes the unit out", () => {
+  // canon() folds "degrees Celsius" to one unit sign; the word itself is
+  // still in the text.
+  assert.equal(factPresent("Celsius", "held at 30 degrees Celsius"), true);
+  assert.equal(factPresent("Celsius", "held at 30 degrees"), false);
+  assert.deepEqual(lostFacts("the unit as degrees Celsius", "now 30 degrees Celsius"), []);
+});

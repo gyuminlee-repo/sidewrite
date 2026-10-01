@@ -72,6 +72,27 @@ test("judgments and review turns wait for the pane's confirmed provider; hello s
   assert.match(code, /selection\.restore\(\s*key,/);
 });
 
+// Stage 3: the response letter service.
+test("the response service is wired to the same one-shot router and its handlers reach the bridge", () => {
+  const at = code.indexOf("const response = createResponseService({");
+  assert.ok(at > 0);
+  const block = code.slice(at, code.indexOf("});", at));
+  assert.match(block, /getContext: \(key\) => bridge\.getContext\(key\)/);
+  // The job handle of the pane's provider; the service names its Claude default.
+  assert.match(block, /oneshotJob: \(key, options\) => oneshotRouter\.pin\(key, options\)/);
+  assert.match(block, /sendEvent: \(key, obj\) => bridge\.sendToTaskpane\(obj, key\)/);
+  // No runner of its own: a draft never goes around the pane's choice.
+  assert.equal(/makeOneshot|runOneshot|ONESHOT_MODEL/.test(block), false);
+  assert.match(code, /\.\.\.review\.handlers,\s*\.\.\.response\.handlers,/);
+});
+
+test("a Review refresh marks saved responses stale with the rule of the Response tab", () => {
+  const at = code.indexOf("const review = createReviewService({");
+  const block = code.slice(at, code.indexOf("\n});", at));
+  assert.match(block, /afterRefresh: \(rev, snap\) => markStale\(rev, snap\)/);
+  assert.match(code, /import \{ markStale \} from "\.\/response-quotes\.mjs";/);
+});
+
 test("set_model: the list as it was before the wait decides whether a running session follows", () => {
   const at = code.indexOf("set_model: async");
   const body = code.slice(at, at + 1200);
