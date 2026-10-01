@@ -1,0 +1,861 @@
+// A proposal turn (daemon/proposal-turns.mjs): one request to a provider
+// without tools, then every proposal checked and applied through the same
+// office_tracked_edit path as a Claude turn. The provider and Word are
+// stand-ins; the review service and its review file are real (a temp
+// folder). Invented text.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createReviewService } from "../daemon/review-service.mjs";
+import { createProposalTurns } from "../daemon/proposal-turns.mjs";
+import { PROPOSAL_JSON_SCHEMA } from "../daemon/proposal.mjs";
+import { applyTrackedEdit } from "../daemon/review-tools.mjs";
+import {
+  loadRevision,
+  revisionPathFor,
+  setSnapshot,
+  withRevision,
+} from "../daemon/revision-store.mjs";
+
+const ENV = { CC_OFFICE_WSL_PATHS: "0" };
+const PARAGRAPHS = [
+  "Methods",
+  "Cells were grown at 30 degrees for two days.",
+  "The cell-free extract was kept on ice.",
+  "Growth was followed by optical density.",
+];
+const COMMENT = {
+  ref: "R1.1",
+  reviewer: 1,
+  text: "State the unit, name the lysate, and say how growth was followed.",
+  requirements: ["state the unit"], // numbered q1 by the review file
+};
+const P = (over = {}) => ({
+  paragraph_id: "p1",
+  find: "30 degrees",
+  op: "replace",
+  text: "30 °C",
+  what: "단위를 적었다",
+  why: "리뷰어 요청",
+  addresses: "단위",
+  requirement_ids: ["q1"],
+  ...over,
+});
+const THREE = [
+  P(),
+  P({
+    paragraph_id: "p2",
+    find: "cell-free extract",
+    text: "clarified lysate",
+    requirement_ids: [],
+  }),
+  P({
+    paragraph_id: "p3",
+    find: "optical density",
+    op: "insert_after",
+    text: " at 600 nm",
+    requirement_ids: [],
+  }),
+];
+const reply = (proposals, note = "") => ({
+  ok: true,
+  text: JSON.stringify({ proposals, note }),
+  json: { proposals, note },
+});
+const CODEX = { id: "codex", model: "gpt-6.1-sol" };
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+};
+
+// keys: the panes; each has a document of its own in one temp folder.
+async function setup({
+  generate = async () => reply(THREE),
+  word = null,
+  keys = ["k"],
+  ledger = [],
+  over = {},
+  depsOver = null,
+} = {}) {
+  const dir = await mkdtemp(join(tmpdir(), "proposal-turns-"));
+  const docs = Object.fromEntries(keys.map((k) => [k, join(dir, `${k}.docx`)]));
+  const service = []; // review_event objects of the review service
+  const lines = [];
+  const svc = createReviewService({
+    getContext: (key) => ({ activeDoc: docs[key], caps: ["target_hash"] }),
+    callTool: null,
+    pushTurn: () => {},
+    sendEvent: (key, obj) => service.push([key, obj]),
+    log: (s) => lines.push(s),
+    env: ENV,
+  });
+  const ask = (key, type, payload = {}) =>
+    new Promise((resolve) =>
+      svc.handlers[type]({ type, request_id: "q", ...payload }, resolve, key, "word"),
+    );
+  const PAST = new Date(Date.now() - 60_000);
+  for (const key of keys) {
+    await ask(key, "review_save_comments", { comments: [COMMENT] });
+    for (const item of ledger) await ask(key, "ledger_add", { item });
+    await withRevision(revisionPathFor(docs[key]), docs[key], (rev) =>
+      setSnapshot(rev, PARAGRAPHS, PAST),
+    );
+  }
+  const out = []; // what the task pane is sent, in order
+  const ended = [];
+  const waiters = [];
+  const asked = []; // requests to the provider
+  const wordCalls = [];
+  const applied = []; // arguments applyTrackedEdit was called with
+  let n = 0;
+  const turns = createProposalTurns({
+    handleFor: (choice) => ({
+      provider: choice.id,
+      model: `${choice.id}:${choice.model}`,
+      run: (req) => (asked.push(req), generate(req, asked.length)),
+    }),
+    trackedEditDeps: depsOver
+      ? (key, d) => depsOver(svc.trackedEditDeps(key, d))
+      : svc.trackedEditDeps,
+    call: async (name, args, key) => {
+      wordCalls.push([key, name, args]);
+      n += 1;
+      if (word) return word(args, n, key);
+      return {
+        ok: true,
+        word_comment_id: 100 + n,
+        paragraph_index: args.expected_paragraph?.index ?? null,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      };
+    },
+    applyEdit: (...a) => (applied.push(a), applyTrackedEdit(...a)),
+    sendText: (text, key) => out.push([key, "text", text]),
+    sendEvent: (e, key) => out.push([key, e.event, e]),
+    endTurn: (key, outcome) => {
+      ended.push([key, outcome]);
+      waiters.splice(0).forEach((w) => w());
+    },
+    log: (s) => lines.push(s),
+    ...over,
+  });
+  const at = (key) => svc.trackedEditDeps(key).begin();
+  const start = (key = "k", source = {}, choice = CODEX) =>
+    turns.start(key, "word", { ref: "R1.1" }, { at: at(key), selected: [], choice, ...source });
+  const turnEnded = (count = 1) =>
+    new Promise((resolve) => {
+      const check = () => (ended.length >= count ? resolve() : waiters.push(check));
+      check();
+    });
+  const texts = (key = "k") => out.filter((o) => o[0] === key && o[1] === "text").map((o) => o[2]);
+  const events = (key = "k") => out.filter((o) => o[0] === key && o[1] !== "text").map((o) => o[1]);
+  const revision = (key = "k") => loadRevision(revisionPathFor(docs[key]), docs[key]);
+  const decisions = async (key = "k") =>
+    (await readFile(join(dir, `${key}.decisions.jsonl`), "utf8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+  const batch = async (key = "k") =>
+    (await decisions(key)).filter((d) => d.kind === "proposal_batch");
+  return {
+    dir,
+    docs,
+    svc,
+    turns,
+    start,
+    turnEnded,
+    out,
+    ended,
+    asked,
+    wordCalls,
+    applied,
+    service,
+    lines,
+    texts,
+    events,
+    revision,
+    decisions,
+    batch,
+    cleanup: () => rm(dir, { recursive: true, force: true }),
+  };
+}
+
+test("three proposals are applied in order; the pane sees the same events as in a Claude turn", async () => {
+  const t = await setup();
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.deepEqual(t.ended, [["k", { ok: true }]]);
+    assert.deepEqual(t.events(), [
+      "tool_use_announce",
+      "tool_use_announce",
+      "tool_use_announce",
+      "turn_complete",
+    ]);
+    assert.deepEqual(t.out.at(-1)[2], { event: "turn_complete", subtype: "success" });
+    const announced = t.out.filter((o) => o[1] === "tool_use_announce").map((o) => o[2]);
+    assert.deepEqual(
+      announced.map((e) => [e.tool, e.input.find, e.input.comment_ref, e.input.paragraph_hint]),
+      [
+        ["mcp__office__office_tracked_edit", "30 degrees", "R1.1", "p1"],
+        ["mcp__office__office_tracked_edit", "cell-free extract", "R1.1", "p2"],
+        ["mcp__office__office_tracked_edit", "optical density", "R1.1", "p3"],
+      ],
+    );
+    assert.deepEqual(
+      t.wordCalls.map((c) => [c[1], c[2].find, c[2].expected_paragraph.index]),
+      [
+        ["office_tracked_edit", "30 degrees", 1],
+        ["office_tracked_edit", "cell-free extract", 2],
+        ["office_tracked_edit", "optical density", 3],
+      ],
+    );
+    assert.equal(t.wordCalls[2][2].insert_after, " at 600 nm");
+    const rev = await t.revision();
+    assert.deepEqual(
+      rev.comments[0].changes.map((c) => [c.id, c.kind]),
+      [
+        ["R1.1-1", "replace"],
+        ["R1.1-2", "replace"],
+        ["R1.1-3", "insert"],
+      ],
+    );
+    assert.deepEqual(
+      t.service.map((s) => s[1].event),
+      ["change_recorded", "change_recorded", "change_recorded"],
+    );
+    assert.deepEqual(t.texts(), ["3 proposals received.\n", "3 proposals: 3 applied.\n"]);
+    // One request, with the system text, the reply form and a signal.
+    assert.equal(t.asked.length, 1);
+    assert.deepEqual(t.asked[0].schema, PROPOSAL_JSON_SCHEMA);
+    assert.ok(t.asked[0].system.includes("Reply with one JSON object"));
+    assert.ok(t.asked[0].prompt.includes("[p1] Cells were grown at 30 degrees for two days."));
+    assert.ok(t.asked[0].signal instanceof AbortSignal);
+    assert.equal(t.turns.running("k"), false);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("no override ever reaches applyTrackedEdit, and the arguments are the daemon's own", async () => {
+  const sneaky = THREE.map((p) => ({
+    ...p,
+    override: { blocked_by: ["L1"] },
+    comment_ref: "R9.9",
+    expected_before_hash: "x",
+  }));
+  const t = await setup({ generate: async () => reply(sneaky) });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.equal(t.applied.length, 3);
+    for (const call of t.applied) {
+      assert.equal(call.length, 3, "deps, args, turn: no fourth argument");
+      assert.deepEqual(
+        Object.keys(call[1]).sort(),
+        [
+          "comment_ref",
+          "find",
+          call[1].insert_after === undefined ? "replace" : "insert_after",
+          "paragraph_hint",
+          "rationale",
+        ].sort(),
+      );
+      assert.equal(call[1].comment_ref, "R1.1");
+      assert.deepEqual(call[2], { ref: "R1.1" });
+    }
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a proposal the forbid list blocks stops the turn: the next one is not sent to Word", async () => {
+  const NOVEL = {
+    kind: "forbid",
+    text: "novel 금지",
+    check: { type: "regex", pattern: String.raw`\bnovel\b`, flags: "i" },
+  };
+  const list = [THREE[0], { ...THREE[1], text: "novel lysate" }, THREE[2]];
+  const t = await setup({ generate: async () => reply(list), ledger: [NOVEL] });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.equal(t.wordCalls.length, 1, "P1 only");
+    assert.deepEqual(
+      t.service.map((s) => s[1].event),
+      ["change_recorded", "edit_blocked"],
+    );
+    assert.deepEqual(t.events(), [
+      "tool_use_announce",
+      "tool_use_announce",
+      "error",
+      "turn_complete",
+    ]);
+    assert.deepEqual(t.out.at(-1)[2], { event: "turn_complete", subtype: "error" });
+    const [, outcome] = t.ended[0];
+    assert.equal(outcome.ok, false);
+    assert.match(outcome.error, /^The turn stopped at P2 \(Blocked\)\. .*L1/);
+    assert.deepEqual(t.texts().slice(1), [
+      "P3 not applied: the turn stopped at P2 (Blocked).\n",
+      "3 proposals: 1 applied, 1 failed, 1 not applied.\n",
+    ]);
+    const [b] = await t.batch();
+    assert.deepEqual(
+      b.output.proposals.map((p) => [p.id, p.outcome, p.code]),
+      [
+        ["P1", "applied", null],
+        ["P2", "failed", "Blocked"],
+        ["P3", "not_applied", null],
+      ],
+    );
+    assert.equal(b.output.stopped_at, "P2");
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("StaleTarget, an unanswered call, a change that cannot be recorded and a missing comment each stop the turn", async () => {
+  const cases = [
+    {
+      code: "StaleTarget",
+      outcome: "failed",
+      word: (args, n) =>
+        n === 2
+          ? { ok: false, code: "StaleTarget", paragraph_index: 2 }
+          : {
+              ok: true,
+              word_comment_id: n,
+              paragraph_index: 1,
+              before: "b",
+              after: "a",
+              target_checked: true,
+            },
+      hint: /Press Refresh status, then propose again/,
+      events: ["change_recorded", "stale_target"],
+    },
+    {
+      code: "OutcomeUnknown",
+      outcome: "unknown",
+      word: (args, n) => {
+        if (n === 2) {
+          throw Object.assign(new Error("tool call timed out"), {
+            code: "ToolTimeout",
+            toolCallId: "c1",
+          });
+        }
+        return {
+          ok: true,
+          word_comment_id: n,
+          paragraph_index: 1,
+          before: "b",
+          after: "a",
+          target_checked: true,
+        };
+      },
+      hint: /may or may not be in the document/,
+      events: ["change_recorded", "edit_blocked"],
+    },
+    {
+      code: "CommentMissing",
+      outcome: "applied_no_comment",
+      word: (args, n) => ({
+        ok: n !== 2,
+        ...(n === 2 ? { applied: true, code: "CommentInsertFailed" } : {}),
+        word_comment_id: n === 2 ? null : n,
+        paragraph_index: n,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      }),
+      hint: /Add rationale comment/,
+      events: ["change_recorded", "change_recorded"],
+    },
+  ];
+  for (const c of cases) {
+    const t = await setup({ word: c.word });
+    try {
+      t.start();
+      await t.turnEnded();
+      assert.equal(t.wordCalls.length, 2, `${c.code}: P3 is not sent to Word`);
+      const [, outcome] = t.ended[0];
+      assert.equal(outcome.ok, false, c.code);
+      assert.ok(outcome.error.startsWith(`The turn stopped at P2 (${c.code}). `), outcome.error);
+      assert.match(outcome.error, c.hint);
+      assert.deepEqual(
+        t.service.map((s) => s[1].event),
+        c.events,
+        c.code,
+      );
+      const [b] = await t.batch();
+      assert.deepEqual(
+        b.output.proposals.map((p) => p.outcome),
+        ["applied", c.outcome, "not_applied"],
+        c.code,
+      );
+      assert.deepEqual([b.output.stopped_at, b.output.proposals[1].code], ["P2", c.code]);
+    } finally {
+      await t.cleanup();
+    }
+  }
+  // Word applied the edit and the review file could not be written.
+  let edits = 0;
+  const t = await setup({
+    depsOver: (deps) => ({
+      ...deps,
+      onEdit: async (a) => {
+        edits += 1;
+        if (edits === 2) throw new Error("disk full");
+        return deps.onEdit(a);
+      },
+    }),
+  });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.equal(t.wordCalls.length, 2);
+    assert.match(
+      t.ended[0][1].error,
+      /^The turn stopped at P2 \(AppliedNotRecorded\)\. .*Refresh status/,
+    );
+    assert.ok(t.service.some((s) => s[1].event === "record_failed"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a reply in the wrong form is asked for once more; twice wrong fails the turn with nothing applied", async () => {
+  const bad = { ok: true, text: "{}", json: { proposals: [{ find: "x" }] } };
+  const once = await setup({ generate: async (req, n) => (n === 1 ? bad : reply(THREE)) });
+  try {
+    once.start();
+    await once.turnEnded();
+    assert.equal(once.asked.length, 2);
+    assert.equal(once.asked[1].system, once.asked[0].system);
+    assert.ok(once.asked[1].prompt.startsWith(once.asked[0].prompt));
+    const added = once.asked[1].prompt.slice(once.asked[0].prompt.length);
+    assert.match(
+      added,
+      /^\n\nYour reply was not usable: proposals\.0\.paragraph_id: .*\. Reply again with only the JSON object\.$/,
+    );
+    assert.deepEqual(once.ended, [["k", { ok: true }]]);
+    assert.equal((await once.batch())[0].output.retried, true);
+  } finally {
+    await once.cleanup();
+  }
+  const twice = await setup({
+    generate: async (req, n) =>
+      n === 1 ? { ok: false, error: "reply was not JSON", text: "Sure! Here you go" } : bad,
+  });
+  try {
+    twice.start();
+    await twice.turnEnded();
+    assert.equal(twice.asked.length, 2, "one retry, not more");
+    assert.match(twice.asked[1].prompt, /Your reply was not usable: the reply was not JSON\./);
+    assert.equal(twice.wordCalls.length, 0);
+    assert.equal(twice.ended[0][1].ok, false);
+    assert.match(
+      twice.ended[0][1].error,
+      /^Codex CLI \(ChatGPT sign-in\) answered twice in a form that cannot be used \(proposals\.0\.paragraph_id: .*\)\. No change was made\.$/,
+    );
+    const [b] = await twice.batch();
+    assert.deepEqual([b.output.retried, b.output.proposals], [true, []]);
+  } finally {
+    await twice.cleanup();
+  }
+});
+
+test("a generation that used a tool, or failed, applies nothing", async () => {
+  const tool = await setup({
+    generate: async () => ({
+      ok: false,
+      tool_event: "codex_shell",
+      error:
+        "Codex CLI used a tool (codex_shell) in a run that must not use any. Its reply was discarded.",
+    }),
+  });
+  try {
+    tool.start();
+    await tool.turnEnded();
+    assert.equal(tool.asked.length, 1, "not asked again");
+    assert.equal(tool.wordCalls.length, 0);
+    assert.deepEqual(tool.ended[0][1], {
+      ok: false,
+      error:
+        "Codex CLI used a tool (codex_shell) in a run that must not use any. Its reply was discarded. No change was made.",
+    });
+    assert.deepEqual((await tool.batch())[0].output.tool_event, "codex_shell");
+  } finally {
+    await tool.cleanup();
+  }
+  const failed = await setup({
+    generate: async () => ({ ok: false, error: "codex exited 1: boom" }),
+  });
+  try {
+    failed.start();
+    await failed.turnEnded();
+    assert.equal(failed.asked.length, 1);
+    assert.deepEqual(failed.ended[0][1], {
+      ok: false,
+      error:
+        "Codex CLI (ChatGPT sign-in) gave no proposals (codex exited 1: boom). No change was made.",
+    });
+  } finally {
+    await failed.cleanup();
+  }
+});
+
+test("Stop works in every stage: before the request, while the provider answers, between proposals, while Word works", async () => {
+  const STOPPED = { ok: false, error: "The turn was stopped." };
+  const interrupted = (t) =>
+    assert.deepEqual(t.out.at(-1)[2], { event: "turn_complete", interrupted: true });
+
+  // 1. Right after start(), before anything was awaited.
+  const early = await setup();
+  try {
+    early.start();
+    assert.equal(early.turns.running("k"), true, "registered at once");
+    assert.equal(early.turns.stop("k"), true);
+    await early.turnEnded();
+    assert.deepEqual(early.ended, [["k", STOPPED]]);
+    assert.equal(early.asked.length, 0, "the provider was not asked");
+    interrupted(early);
+    assert.equal(early.turns.stop("k"), false, "nothing is running any more");
+    assert.equal((await early.batch()).length, 1, "a receipt all the same");
+  } finally {
+    await early.cleanup();
+  }
+
+  // 2. While the provider answers: its run is aborted.
+  const gate = deferred();
+  const during = await setup({
+    generate: (req) =>
+      new Promise((resolve) => {
+        gate.resolve();
+        req.signal.addEventListener("abort", () =>
+          resolve({ ok: false, aborted: true, error: "stopped" }),
+        );
+      }),
+  });
+  try {
+    during.start();
+    await gate.promise;
+    assert.equal(during.turns.stop("k"), true);
+    await during.turnEnded();
+    assert.deepEqual(during.ended, [["k", STOPPED]]);
+    assert.equal(during.wordCalls.length, 0);
+    interrupted(during);
+  } finally {
+    await during.cleanup();
+  }
+
+  // 3. Between two proposals: the first is applied and recorded, the second not started.
+  let between;
+  between = await setup({
+    word: (args, n) => {
+      if (n === 1) between.turns.stop("k");
+      return {
+        ok: true,
+        word_comment_id: n,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      };
+    },
+  });
+  try {
+    between.start();
+    await between.turnEnded();
+    assert.deepEqual(between.ended, [["k", STOPPED]]);
+    assert.equal(between.wordCalls.length, 1);
+    assert.equal((await between.revision()).comments[0].changes.length, 1);
+    interrupted(between);
+    const [b] = await between.batch();
+    assert.deepEqual(
+      b.output.proposals.map((p) => p.outcome),
+      ["applied", "not_applied", "not_applied"],
+    );
+    assert.equal(b.output.stopped_at, "P2");
+  } finally {
+    await between.cleanup();
+  }
+
+  // 4. While Word works: its answer is awaited and recorded, then the turn stops.
+  const inWord = deferred();
+  const answer = deferred();
+  const word = await setup({
+    word: async (args, n) => {
+      inWord.resolve();
+      await answer.promise;
+      return {
+        ok: true,
+        word_comment_id: n,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      };
+    },
+  });
+  try {
+    word.start();
+    await inWord.promise;
+    assert.equal(word.turns.stop("k"), true);
+    assert.equal(word.ended.length, 0, "the answer of Word is waited for");
+    answer.resolve();
+    await word.turnEnded();
+    assert.deepEqual(word.ended, [["k", STOPPED]]);
+    assert.deepEqual(
+      word.service.map((s) => s[1].event),
+      ["change_recorded"],
+    );
+    assert.equal(word.wordCalls.length, 1);
+    assert.equal(word.events().filter((e) => e === "tool_use_announce").length, 1);
+  } finally {
+    await word.cleanup();
+  }
+});
+
+test("a status refresh while the turn runs stops it: the proposals were made for another snapshot", async () => {
+  let t;
+  t = await setup({
+    word: async (args, n) => {
+      if (n === 1) {
+        await withRevision(revisionPathFor(t.docs.k), t.docs.k, (rev) =>
+          setSnapshot(rev, PARAGRAPHS, new Date()),
+        );
+      }
+      return {
+        ok: true,
+        word_comment_id: n,
+        paragraph_index: 1,
+        before: "b",
+        after: "a",
+        target_checked: true,
+      };
+    },
+  });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.equal(t.wordCalls.length, 1);
+    assert.match(
+      t.ended[0][1].error,
+      /^The turn stopped at P2 \(SnapshotChanged\)\. The status was refreshed while the turn ran\. Propose again\.$/,
+    );
+    const [b] = await t.batch();
+    assert.deepEqual(
+      b.output.proposals.map((p) => [p.outcome, p.code]),
+      [
+        ["applied", null],
+        ["failed", "SnapshotChanged"],
+        ["not_applied", null],
+      ],
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("refused proposals are named in the chat and do not stop the others; one made useless by an earlier edit is skipped", async () => {
+  const list = [
+    P(),
+    P({ paragraph_id: "p9" }), // not shown
+    P({ find: "Cells were grown at 30 degrees", text: "Cells grew at 30 degrees" }), // gone after P1
+    THREE[1],
+  ];
+  const t = await setup({ generate: async () => reply(list) });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.deepEqual(t.ended, [["k", { ok: true }]]);
+    assert.deepEqual(
+      t.wordCalls.map((c) => c[2].find),
+      ["30 degrees", "cell-free extract"],
+    );
+    assert.deepEqual(t.texts(), [
+      "4 proposals received.\n",
+      "P2 rejected (UnknownParagraph): paragraph p9.\n",
+      "P3 skipped (SupersededInTurn): paragraph p1.\n",
+      "4 proposals: 2 applied, 1 rejected, 1 skipped.\n",
+    ]);
+    assert.ok(t.lines.includes("[proposal] rejected ref=R1.1 id=P2 code=UnknownParagraph"));
+    const [b] = await t.batch();
+    assert.deepEqual(
+      b.output.proposals.map((p) => [p.id, p.outcome, p.code]),
+      [
+        ["P1", "applied", null],
+        ["P2", "rejected", "UnknownParagraph"],
+        ["P3", "skipped", "SupersededInTurn"],
+        ["P4", "applied", null],
+      ],
+    );
+    // A refused proposal leaves nothing in the review file.
+    assert.deepEqual((await t.revision()).comments[0].blocked, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("no proposals with a note is a turn that worked; proposals that all fail the checks is one that did not", async () => {
+  const none = await setup({
+    generate: async () => reply([], "Section 3 is not among the paragraphs."),
+  });
+  try {
+    none.start();
+    await none.turnEnded();
+    assert.deepEqual(none.ended, [["k", { ok: true }]]);
+    assert.deepEqual(none.texts(), [
+      "0 proposals received.\n",
+      "Section 3 is not among the paragraphs.\n",
+    ]);
+  } finally {
+    await none.cleanup();
+  }
+  const all = await setup({ generate: async () => reply([P({ find: "not there" })]) });
+  try {
+    all.start();
+    await all.turnEnded();
+    assert.deepEqual(all.ended, [["k", { ok: false, error: "No proposal could be placed." }]]);
+    assert.equal(all.wordCalls.length, 0);
+  } finally {
+    await all.cleanup();
+  }
+});
+
+test("the receipt: one proposal_batch line per turn, with ids and outcomes and no text of the manuscript or the reply", async () => {
+  const t = await setup();
+  try {
+    t.start();
+    await t.turnEnded();
+    const [b, ...more] = await t.batch();
+    assert.equal(more.length, 0);
+    assert.equal(b.model, "codex:gpt-6.1-sol");
+    assert.match(b.input_fingerprint, /^[0-9a-f]{64}$/);
+    assert.deepEqual(Object.keys(b.output).sort(), [
+      "proposals",
+      "ref",
+      "retried",
+      "snapshot_taken_at",
+      "stopped_at",
+      "turn_id",
+    ]);
+    assert.deepEqual(b.output.proposals[0], {
+      id: "P1",
+      paragraph_id: "p1",
+      op: "replace",
+      requirement_ids: ["q1"],
+      outcome: "applied",
+      code: null,
+      change_id: "R1.1-1",
+    });
+    const raw = await readFile(join(t.dir, "k.decisions.jsonl"), "utf8");
+    const line = raw.split("\n").find((l) => l.includes('"proposal_batch"'));
+    for (const secret of [
+      "30 degrees",
+      "30 °C",
+      "Cells were grown",
+      "clarified lysate",
+      "단위를 적었다",
+    ]) {
+      assert.equal(line.includes(secret), false, secret);
+    }
+    // The log of the turn holds ids, counts and codes only.
+    const log = t.lines.filter((l) => l.startsWith("[proposal]")).join("\n");
+    assert.match(
+      log,
+      /\[proposal\] prompt ref=R1\.1 provider=codex:gpt-6\.1-sol scope=manuscript paragraphs=4 chars=\d+/,
+    );
+    assert.match(
+      log,
+      /\[proposal\] done ref=R1\.1 proposals=3 applied=3 rejected=0 skipped=0 stopped_at=-/,
+    );
+    for (const secret of ["30 degrees", "Cells were grown"])
+      assert.equal(log.includes(secret), false);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a turn that cannot be built is refused before the provider is asked", async () => {
+  const t = await setup();
+  try {
+    // A provider with no budget for a proposal turn.
+    t.start("k", {}, { id: "ollama", model: "qwen3.5:9b" });
+    await t.turnEnded();
+    assert.deepEqual(t.ended[0][1], {
+      ok: false,
+      error: "Ollama (local) does not run proposal turns.",
+    });
+    // A selection the snapshot does not have.
+    t.start("k", { selected: [{ index: 40 }] });
+    await t.turnEnded(2);
+    assert.match(
+      t.ended[1][1].error,
+      /^The selected paragraphs are not in the last status refresh/,
+    );
+    // Only the selected paragraph is shown, and a proposal for another one is refused.
+    t.start("k", { selected: [{ index: 2, text: "ignored" }] });
+    await t.turnEnded(3);
+    assert.equal(t.asked.length, 1);
+    assert.ok(t.asked[0].prompt.endsWith("[p2] The cell-free extract was kept on ice."));
+    assert.deepEqual(
+      t.wordCalls.map((c) => c[2].find),
+      ["cell-free extract"],
+    );
+  } finally {
+    await t.cleanup();
+  }
+  // Too long for the provider: the count is said and nothing is sent.
+  const small = await setup({ over: { budgetOf: () => 500 } });
+  try {
+    small.start();
+    await small.turnEnded();
+    assert.equal(small.asked.length, 0);
+    assert.match(
+      small.ended[0][1].error,
+      /^The manuscript is too long for Codex CLI \(ChatGPT sign-in\) in one request \(\d+ characters; limit 500\)\. Select the paragraphs/,
+    );
+  } finally {
+    await small.cleanup();
+  }
+});
+
+test("two panes run side by side; a second turn on one pane is refused; shutdown stops and waits for all", async () => {
+  const t = await setup({
+    keys: ["k", "k2"],
+    generate: (req) =>
+      new Promise((resolve) => {
+        const stop = () => resolve({ ok: false, aborted: true, error: "stopped" });
+        if (req.signal.aborted) stop();
+        else req.signal.addEventListener("abort", stop);
+      }),
+  });
+  try {
+    t.start("k");
+    t.start("k2");
+    assert.deepEqual([t.turns.running("k"), t.turns.running("k2")], [true, true]);
+    await assert.rejects(t.start("k"), /already running/);
+    await assert.rejects(t.turns.start("k2", "word", {}, {}), /needs the comment/);
+    // Stopping one pane leaves the other running.
+    assert.equal(t.turns.stop("k"), true);
+    await t.turnEnded(1);
+    assert.deepEqual(
+      t.ended.map((e) => e[0]),
+      ["k"],
+    );
+    assert.equal(t.turns.running("k2"), true);
+    await t.turns.shutdown();
+    assert.deepEqual(
+      t.ended.map((e) => e[0]),
+      ["k", "k2"],
+    );
+    assert.equal(t.turns.running("k2"), false);
+  } finally {
+    await t.cleanup();
+  }
+});
