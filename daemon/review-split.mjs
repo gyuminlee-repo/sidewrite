@@ -88,6 +88,11 @@ const COMBINED_REST = /^(?:\s*$|\s*[:.)\-\u2013]|\s+["'(\u201C]?[A-Z0-9])/;
 // A rule line between the question blocks of a questionnaire letter.
 const SEPARATOR = /^\s*[*_=\-]{5,}\s*$/;
 
+// The label of a review round, alone on a line or as the text of a reviewer
+// head line ("Reviewer 1: Second round").
+const ROUND_LABEL =
+  /^(?:(?:first|second|third|fourth|fifth|1st|2nd|3rd|\d+th)\s+(?:round|review|revision)|(?:review\s+)?round\s*#?\s*\d+|revision\s*#?\s*\d+|R\d+\s+comments?|\d+\s*\uCC28\s*(?:\uC2EC\uC0AC|\uC218\uC815|\uB9AC\uBDF0|\uAC80\uD1A0)(?:\s*\uC758\uACAC)?)$/i;
+
 // A short label line of the reviewer's own ("Abstract:", "Methods:").
 const SHORT_LABEL = /^\s*([^\s:.!?,;][^:.!?,;]{0,38}):\s*$/;
 // The name of a manuscript part: a label also with no blank line before it.
@@ -169,8 +174,8 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // most 40 characters, no text under it), the longest other block of that
 // reviewer is the review and the answers are form text. A block with text
 // under its head line is a review, whatever its head-line text ("Reviewer 1:
-// First round"), so two rounds of a reviewer stay reviewer comments with
-// doubled refs and a warning. Form text: each run of form text (question, answers, the label between them)
+// First round"), so two rounds of a reviewer stay reviewer comments. Form
+// text: each run of form text (question, answers, the label between them)
 // is one editor comment with the answer lines as pasted. In such a letter a
 // rule line ("**********") ends a reviewer block and is dropped. Text under
 // an unnumbered reviewer label before the first numbered head is form text
@@ -197,7 +202,18 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // Major 1-3 and Minor 1-2 are R1.1 to R1.5. A head with no number (a line
 // head, a bullet, a paragraph) takes the next number. Numbers inside one
 // run are kept as written, so a doubled "Comment 1" gives a doubled ref and
-// a warning. R{reviewer}.0 is the text before the first comment of a
+// a warning. A later block of the same reviewer (a second round, or the
+// reviewer's head a second time) goes on from the reviewer's highest number:
+// round 2 after R1.1 and R1.2 starts at R1.3. Its comments carry the round
+// label as `section` ("Round 2" on a line of its own after the first
+// reviewer head, or as the text of the head line: "Reviewer 1: Second
+// round"), or "Block 2" where the letter gives none; a section inside the
+// block is joined to it ("Round 2 / Minor comments"). Where the ref differs
+// from the number as written, the written number stays in the comment text.
+// Text before the first comment of a later block is a comment of its own
+// with the next number. One warning per reviewer names the blocks. Blocks
+// opened by combined heads carry their own numbers and are left as written.
+// R{reviewer}.0 is the text before the first comment of the first block of a
 // reviewer with a head; without any reviewer head that text is dropped (and
 // named by the check). A reviewer block with no head of any kind is split
 // at blank lines when it has more than one paragraph (a weak split: it does
@@ -207,8 +223,10 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // - A sub-list after a colon whose last item has the next comment number and
 //   is written like the sub-items stays in its comment, also when it was
 //   meant as the next comment.
-// - A second review of the same reviewer (a later round) gives doubled refs
-//   and a warning; a "Round 2" line is body text.
+// - A "Round 1" line before the first reviewer head is part of the letter,
+//   so the first round carries no round label unless the head line has one.
+// - The same combined head twice ("Reviewer 1, Comment 1:" in two rounds)
+//   gives a doubled ref and a warning.
 // - In a questionnaire letter pasted without its rule lines, a question
 //   after the reviews ends up in the last comment of the last reviewer.
 // - A closing or footer after the last comment of a review without any
@@ -222,6 +240,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   let blocks;
   let forced; // line index -> comment number of a combined head
   let gone; // line indexes dropped as boilerplate
+  let rounds; // round labels taken off their lines
   const txt = (i) => fold(over[i]);
   const hasText = (idx) => idx.some((i) => over[i].trim());
 
@@ -231,6 +250,8 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     blocks = [];
     forced = new Map();
     gone = [];
+    rounds = [];
+    let round = null;
     let cur = { reviewer: 1, idx: [], headed: false };
     let top = 0;
     let reviewers = false;
@@ -245,6 +266,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       if (!(cur.anon && !hasText(cur.idx) && b.numbered)) blocks.push(cur);
       cur = b;
       if (!b.editor) {
+        if (round) b.round = round;
         reviewers = true;
         top = Math.max(top, b.reviewer);
       }
@@ -262,6 +284,16 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
         if (cur.headed && !cur.editor)
           open({ reviewer: 0, editor: true, form: true, first: true, idx: [i] });
         else cur.idx.push(i);
+        return;
+      }
+      // A round line after the first reviewer: the label of the blocks below.
+      const mark = line.trim().replace(/\s*[:\uFF1A]$/, "");
+      if (reviewers && !closed && ROUND_LABEL.test(fold(mark))) {
+        over[i] = "";
+        rounds.push(mark);
+        round = mark;
+        if (cur.headed && !cur.editor && !hasText(cur.idx)) cur.round = mark;
+        cur.idx.push(i);
         return;
       }
       const c = closed ? null : re.combined.exec(s);
@@ -430,7 +462,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
         }
       }
       if (!body) {
-        item = { n, restart, idx: [i] };
+        item = { n, restart, idx: [i], raw: over[i] };
         items.push(item);
         if (mode !== "line") over[i] = trimHead(over[i].slice(m[0].length));
       } else {
@@ -453,9 +485,39 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     return out;
   };
 
-  const labels = []; // section labels taken off their lines
+  const labels = [...rounds]; // section and round labels taken off their lines
+  const seen = new Map(); // reviewer -> blocks so far
+  const tops = new Map(); // reviewer -> highest comment number so far
   const blockRows = (b) => {
+    if (!b.editor && !hasText(b.idx)) return [];
     const base = b.editor ? { editor: true, late: !!b.late } : { reviewer: b.reviewer };
+    // A later block of a reviewer goes on from the reviewer's highest number.
+    // Its comments carry the round label, or "Block n" where the letter gives
+    // none. Combined heads carry their own numbers and make no later block.
+    const nth = b.editor ? 1 : (seen.get(b.reviewer) ?? 0) + 1;
+    if (!b.editor) seen.set(b.reviewer, nth);
+    const later = nth > 1 && !b.combined;
+    let round = b.round ?? null;
+    if (!b.editor && !b.combined && b.head !== undefined) {
+      const rest = over[b.head].trim();
+      if (ROUND_LABEL.test(fold(rest))) {
+        round = rest;
+        labels.push(rest);
+        over[b.head] = "";
+      }
+    }
+    if (later) {
+      round ??= `Block ${nth}`;
+      base.block = nth;
+    }
+    const sec = (label) => [round, label].filter(Boolean).join(" / ") || undefined;
+    const done = (rows) => {
+      if (!b.editor) {
+        tops.set(b.reviewer, Math.max(tops.get(b.reviewer) ?? 0, ...rows.map((r) => r.number)));
+      }
+      return rows;
+    };
+    let max = later ? (tops.get(b.reviewer) ?? 0) : 0;
     const parts = [{ idx: [] }];
     b.idx.forEach((i, k) => {
       const m = i === b.head ? null : re.section.exec(txt(i));
@@ -473,21 +535,22 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       // An editor block without heads: one comment per section.
       if (b.editor) return parts.map((p) => ({ ...base, kept: true, ...p }));
       const paras = parts.flatMap((p) =>
-        paragraphs(p.idx).map((idx) => ({ idx, section: p.section })),
+        paragraphs(p.idx).map((idx) => ({ idx, section: sec(p.section) })),
       );
       if (paras.length > 1)
-        return paras.map((p, k) => ({ ...base, number: k + 1, weak: true, ...p }));
+        return done(paras.map((p) => ({ ...base, number: ++max, weak: true, ...p })));
       if (!b.headed) return [];
-      return [{ ...base, number: 1, whole: true, idx: b.idx, section: paras[0]?.section }];
+      return done([
+        { ...base, number: ++max, whole: true, idx: b.idx, section: paras[0]?.section ?? sec() },
+      ]);
     }
     const out = [];
     const preamble = { ...base, number: 0, kept: true, idx: [] };
-    let max = 0;
     for (const p of parts) {
       const mode = modeOf(p);
       const { pre, items } = mode ? partItems(p.idx, mode) : { pre: p.idx, items: [] };
       if (hasText(pre)) {
-        if (out.length) out.push({ ...base, number: ++max, idx: pre, section: p.section });
+        if (out.length) out.push({ ...base, number: ++max, idx: pre, section: sec(p.section) });
         else {
           preamble.idx.push(...pre);
           preamble.section ??= p.section;
@@ -495,24 +558,32 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       }
       let off = null;
       for (const it of items) {
+        // In a later block the text before the first comment is a comment of
+        // its own, with the next number.
+        if (later && !out.length && !preamble.number && hasText(preamble.idx)) {
+          preamble.number = ++max;
+        }
         let number;
         if (it.n === null) number = ++max;
         else {
           if (off === null || it.restart) off = it.n <= max ? max - it.n + 1 : 0;
           number = it.n + off;
           max = Math.max(max, number);
+          // The number as written stays in the text where the ref differs.
+          if (later && number !== it.n && it.raw !== undefined) over[it.idx[0]] = it.raw;
         }
         const r = !b.headed && mode === "comment" ? R_MARK.exec(fold(lines[it.idx[0]])) : null;
         out.push({
           ...base,
           number,
           idx: it.idx,
-          section: p.section,
+          section: sec(p.section),
           ...(r && { reviewer: Number(r[1]) }),
         });
       }
     }
-    return b.headed ? [preamble, ...out] : out;
+    preamble.section = sec(preamble.section);
+    return done(b.headed ? [preamble, ...out] : out);
   };
 
   let editors = 0;
@@ -545,6 +616,21 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     over,
     labels,
     dropped: gone.sort((a, b) => a - b).map((i) => lines[i].trim()),
+    // Reviewers with more than one block: [{ reviewer, blocks, later: [{ block, refs }] }].
+    multi: [...seen]
+      .filter(([reviewer]) => rows.some((x) => x.block && x.reviewer === reviewer))
+      .map(([reviewer, blocks]) => ({
+        reviewer,
+        blocks,
+        later: [
+          ...new Set(rows.filter((x) => x.block && x.reviewer === reviewer).map((x) => x.block)),
+        ].map((block) => ({
+          block,
+          refs: rows
+            .filter((x) => x.block === block && x.reviewer === reviewer)
+            .map((x) => x.comment.ref),
+        })),
+      })),
   };
 }
 
@@ -577,6 +663,18 @@ const formWarnings = (refs) =>
         `Form text and short answers between the reviews are kept as ${refs.join(", ")}. Delete them if they ask for nothing.`,
       ]
     : [];
+
+// multi: reviewers with more than one block (splitBlocks).
+const blockWarnings = (multi) =>
+  multi.map(
+    ({ reviewer, blocks, later }) =>
+      `Reviewer ${reviewer} has ${blocks} blocks; numbering was continued: ${later
+        .map(
+          ({ block, refs }) =>
+            `block ${block} is ${refs.length > 1 ? `${refs[0]} to ${refs.at(-1)}` : refs[0]}`,
+        )
+        .join(", ")}.`,
+  );
 
 const droppedWarnings = (lines) =>
   lines.length
@@ -632,10 +730,10 @@ const quoteUnits = (units, max = 80) =>
 export function uncoveredText(text, comments, patterns) {
   const { over, labels } = splitBlocks(text, patterns);
   const texts = comments.map((c) => squash(c.text));
-  const sections = new Set(comments.map((c) => squash(c.section)));
+  const sections = comments.map((c) => squash(c.section));
   return [
     ...sentenceUnits(over.join("\n")).filter((u) => !texts.some((t) => t.includes(u))),
-    ...labels.filter((l) => !sections.has(squash(l))),
+    ...labels.filter((l) => !sections.some((x) => x.split(" / ").includes(squash(l)))),
   ];
 }
 
@@ -799,9 +897,11 @@ async function splitReviewInner(text, { patterns, oneshot } = {}) {
     weak,
     form,
     dropped,
+    multi,
   } = splitBlocks(text, patterns);
   const whole = [
     ...preservedWarnings(preserved, late),
+    ...blockWarnings(multi),
     ...formWarnings(form),
     ...unsplitWarnings(unsplit),
     ...weakWarnings(weak),
