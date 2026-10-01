@@ -282,6 +282,43 @@ test("invariantReport: one comment per change, rejected insertions excepted", ()
   assert.deepEqual([bad.ok, bad.unrecorded_comment_ids], [false, ["7"]]);
   const missing = view.invariantReport(rev, COMMENTS.slice(1));
   assert.deepEqual([missing.ok, missing.missing_comment], [false, ["R1.1-1"]]);
+  assert.deepEqual(missing.uncommented, []);
+  // A change the task pane applied without its rationale comment
+  // (comment_missing, no comment id): not a comment that went missing, and
+  // not ok either. Every change needs its rationale comment.
+  const bare = {
+    comments: [
+      {
+        ref: "R1.1",
+        changes: [
+          { id: "R1.1-1", kind: "replace", state: "pending", word_comment_id: "3" },
+          {
+            id: "R1.1-2",
+            kind: "replace",
+            state: "pending",
+            word_comment_id: null,
+            comment_missing: "CommentInsertFailed",
+          },
+        ],
+      },
+    ],
+  };
+  const u = view.invariantReport(bare, [{ id: "3", content: "[R1.1] a / b / c" }]);
+  assert.deepEqual(
+    [u.ok, u.missing_comment, u.uncommented, u.unrecorded_comment_ids],
+    [false, [], ["R1.1-2"], []],
+  );
+  assert.equal(
+    view.invariantText(u),
+    " (MISMATCH: no rationale comment on R1.1-2: applied in Word, the comment could not be added)",
+  );
+  assert.equal(view.invariantText(missing), " (MISMATCH: missing R1.1-1, unrecorded -)");
+  assert.equal(view.invariantText(r), ".");
+  const both = view.invariantReport(bare, []);
+  assert.equal(
+    view.invariantText(both),
+    " (MISMATCH: missing R1.1-1, unrecorded -; no rationale comment on R1.1-2: applied in Word, the comment could not be added)",
+  );
 });
 
 test("ledgerItemFromForm builds regex and llm items and rejects bad input", () => {

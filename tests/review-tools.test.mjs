@@ -735,3 +735,57 @@ test("a change records whether its paragraph had an identical twin when it was m
   assert.equal(await run([twin, "Middle.", twin], "U2"), true);
   assert.equal(await run(["Other.", "Middle.", twin], null), false);
 });
+
+// What Word answered when the rationale comment could not be added goes to
+// the daemon log (step, Office error code, where, message): the change is
+// recorded either way, and without this nothing says why the comment is
+// missing. No text of the manuscript is in it.
+test("comment errors of the task pane are logged: a failed comment, and one added on the second try", async () => {
+  const errors = [
+    {
+      step: "insert_comment",
+      code: "GeneralException",
+      location: "Range.insertComment",
+      message: "GeneralException",
+    },
+    {
+      step: "insert_comment",
+      code: "GeneralException",
+      location: null,
+      message: "GeneralException",
+    },
+  ];
+  let d = deps({
+    ok: false,
+    code: "CommentInsertFailed",
+    applied: true,
+    message: "Edit applied but the rationale comment could not be added: GeneralException",
+    comment_errors: errors,
+  });
+  let r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.deepEqual([r.ok, r.comment_missing], [true, "CommentInsertFailed"]);
+  assert.ok(d.lines.includes("[review] comment missing R1.1-1 code=CommentInsertFailed"));
+  assert.deepEqual(
+    d.lines.filter((l) => l.startsWith("[review] comment error")),
+    [
+      "[review] comment error R1.1-1 try=1 step=insert_comment word=GeneralException at=Range.insertComment msg=GeneralException",
+      "[review] comment error R1.1-1 try=2 step=insert_comment word=GeneralException at=- msg=GeneralException",
+    ],
+  );
+  assert.equal("comment_errors" in d.edits[0][1], false, "not stored on the change");
+  assert.equal("comment_errors" in r, false, "not sent to the model");
+
+  d = deps({ comment_attempts: 2, comment_errors: errors.slice(0, 1) });
+  r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.deepEqual([r.ok, r.comment_missing, r.word_comment_id], [true, undefined, "123"]);
+  assert.ok(d.lines.includes("[review] comment added on try 2 R1.1-1"));
+  assert.equal(d.lines.filter((l) => l.startsWith("[review] comment error")).length, 1);
+});

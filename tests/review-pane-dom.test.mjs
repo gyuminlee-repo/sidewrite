@@ -1769,3 +1769,47 @@ test("a Review action clicked while the stored provider is being confirmed waits
   await t.$("review-split").click();
   assert.equal(t.requests.filter((r) => r.type === "review_split").length, 2);
 });
+
+// The s25 acceptance run: a change Word applied without its rationale
+// comment ended a Propose all run as "the changes on record and the tool
+// comments in Word do not match (missing R1.1-1 ...)". It still ends the
+// run (every change needs its rationale comment), and says what happened.
+test("turn_done after a change applied without its rationale comment: the run ends and the line says so", async () => {
+  const change = {
+    id: "R1.1-1",
+    kind: "replace",
+    state: "pending",
+    find: "a",
+    text: "b",
+    word_comment_id: null,
+    comment_missing: "CommentInsertFailed",
+    rationale: { what: "w", why: "y", addresses: "a" },
+  };
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes: [change],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 1, unlocated: 0 };
+  const t = await setup({
+    revision,
+    respond: { review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }) },
+    word: { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) },
+  });
+  t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.1", ok: true });
+  await settle();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(
+    t.$("review-message").textContent,
+    "The turn for R1.1 ran and its record is saved, but R1.1-1 was applied in Word and its rationale comment could not be added; look at that change in Word, then press Refresh status.",
+  );
+});
