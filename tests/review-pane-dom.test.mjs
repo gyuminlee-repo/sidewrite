@@ -1810,6 +1810,87 @@ test("turn_done after a change applied without its rationale comment: the run en
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(
     t.$("review-message").textContent,
-    "The turn for R1.1 ran and its record is saved, but R1.1-1 was applied in Word and its rationale comment could not be added; look at that change in Word, then press Refresh status.",
+    "The turn for R1.1 ran and its record is saved, but R1.1-1 was applied in Word and its rationale comment could not be added; press Add rationale comment on that change, then Refresh status.",
   );
+});
+
+test("Add rationale comment: the text comes from the daemon, Word gets the comment, the daemon gets its id", async () => {
+  const change = {
+    id: "R1.1-1",
+    kind: "replace",
+    state: "pending",
+    find: "degrees",
+    text: "degrees Celsius",
+    paragraph_id: "U9",
+    paragraph_index: 9,
+    word_comment_id: null,
+    comment_missing: "CommentInsertFailed",
+    rationale: { what: "w", why: "y", addresses: "a" },
+  };
+  const withComment = { ...change, word_comment_id: "3" };
+  const rev = (changes) => ({
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [],
+        status: "in_progress",
+        changes,
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  });
+  const wordCalls = [];
+  let wordAnswer = { ok: true, word_comment_id: "77", existed: false };
+  const t = await setup({
+    revision: rev([change, withComment]),
+    respond: {
+      review_comment_text: (p) => ({
+        ok: true,
+        change_id: p.change_id,
+        comment_text: "[R1.1] w / y / a",
+        change: {
+          kind: "replace",
+          find: "degrees",
+          text: "degrees Celsius",
+          paragraph_id: "U9",
+          paragraph_index: 9,
+        },
+      }),
+      review_comment_set: () => ({
+        ok: true,
+        revision: rev([{ ...change, word_comment_id: "77", comment_missing: null }, withComment]),
+      }),
+    },
+    word: { addChangeComment: async (a) => (wordCalls.push(a), wordAnswer) },
+  });
+  const buttons = () =>
+    findAll(t.$("review-comments"), (n) => n.textContent === "Add rationale comment");
+  assert.equal(buttons().length, 1, "only on the change without a comment");
+  const sent = (type) => t.requests.filter((r) => r.type === type).map((r) => r.payload);
+
+  // Word has no place for it: said, and nothing is recorded.
+  wordAnswer = { ok: false, code: "CommentAnchorMissing", message: "no place for the comment" };
+  await buttons()[0].click();
+  assert.match(t.$("review-message").textContent, /no place for the comment/);
+  assert.deepEqual(sent("review_comment_set"), []);
+
+  wordAnswer = { ok: true, word_comment_id: "77", existed: false };
+  await buttons()[0].click();
+  assert.deepEqual(sent("review_comment_text").at(-1), { ref: "R1.1", change_id: "R1.1-1" });
+  assert.deepEqual(wordCalls.at(-1), {
+    kind: "replace",
+    find: "degrees",
+    text: "degrees Celsius",
+    paragraph_id: "U9",
+    paragraph_index: 9,
+    comment_text: "[R1.1] w / y / a",
+  });
+  assert.deepEqual(sent("review_comment_set"), [
+    { ref: "R1.1", change_id: "R1.1-1", word_comment_id: "77" },
+  ]);
+  assert.equal(t.$("review-message").textContent, "R1.1-1: rationale comment added.");
+  assert.equal(buttons().length, 0, "the change has its comment now");
 });
