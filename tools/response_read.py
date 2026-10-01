@@ -21,7 +21,7 @@ colour counts with the hex Word wrote in w:val. "auto" and a theme colour
 without a hex are "NONE". Highlight and shading are never text colours.
 
 propose() reads the colours, the location line frame and the earlier answers
-off the letter. It only proposes: nothing is saved here.
+off the letter (keys R<reviewer>.<n>, and E.<n> under an editor heading). It only proposes: nothing is saved here.
 
 Prints one JSON line. Exit 0, or 1 with {"ok": false, "error"} when the file
 is not a readable .docx.
@@ -246,13 +246,23 @@ def _number(match, fallback):
     return fallback
 
 
-def _blocks(paras, reviewer_rx, comment_rx):
-    """[{reviewer, n, paras}] : the paragraphs after each comment heading."""
+def _editor_head(label):
+    """A paragraph that is the editor label and nothing else ("Editor",
+    "Editor:", "Editor's comments")."""
+    return re.compile(r"^\s*%s(?:['\u2019]s)?(?:\s+comments?)?\s*:?\s*$" % re.escape(label), re.I)
+
+
+def _blocks(paras, reviewer_rx, comment_rx, editor_rx):
+    """[{reviewer, n, paras}] : the paragraphs after each comment heading.
+    Reviewer 0 is the editor; before any heading the reviewer is 1."""
     blocks, reviewer, count = [], 1, 0
     for p in paras:
+        if editor_rx.match(p["text"]):
+            reviewer, count = 0, 0
+            continue
         m = reviewer_rx.search(p["text"]) if reviewer_rx else None
         if m:
-            reviewer, count = _number(m, reviewer + 1), 0
+            reviewer, count = _number(m, max(reviewer, 0) + 1), 0
             continue
         m = comment_rx.search(p["text"]) if comment_rx else None
         if m:
@@ -293,7 +303,8 @@ def propose(paras, profile=None):
     notes = []
     reviewer_rx = _head(paras, profile.get("reviewer_head"), REVIEWER_HEADS)
     comment_rx = _head(paras, profile.get("comment_head"), COMMENT_HEADS)
-    blocks = _blocks(paras, reviewer_rx, comment_rx)
+    label = (profile.get("response_letter") or {}).get("editor_label") or "Editor"
+    blocks = _blocks(paras, reviewer_rx, comment_rx, _editor_head(str(label)))
     if not blocks:
         notes.append("no comment headings found: answers cannot be told apart")
     roles = [(b, _roles(b)) for b in blocks]
@@ -343,7 +354,7 @@ def propose(paras, profile=None):
         text = "\n".join(p["text"].strip() for role, p in rs if role == "response" and p["color"] == body)
         if not text:
             continue
-        key = "R%d.%d" % (b["reviewer"], b["n"])
+        key = "R%d.%d" % (b["reviewer"], b["n"]) if b["reviewer"] else "E.%d" % b["n"]
         if key in previous:
             notes.append("%s occurs twice; the first answer is kept" % key)
         else:

@@ -226,6 +226,29 @@ class ReadTest(unittest.TestCase):
         self.assertEqual(out["previous"], {})
         self.assertTrue(any("no coloured" in n for n in out["evidence"]["notes"]))
 
+    def test_an_editor_block_is_read_as_e_not_as_the_first_reviewer(self):
+        row = lambda text, color=None: {"kind": "x", "text": text, "color": color}  # noqa: E731
+        letter = {"paragraphs": [
+            row("Editor"), row("Comment 1"), row("Shorten the title."), row("The title is at the limit.", "C00000"),
+            row("Reviewer #1"), row("Comment 1"), row("State the unit."), row("We now state the unit.", "C00000")]}
+        rd.write_docx(letter, self.path)
+        ps = rr.paragraphs(self.path)
+        out = rr.propose(ps, {})
+        self.assertEqual(out["previous"], {"E.1": "The title is at the limit.", "R1.1": "We now state the unit."})
+        self.assertEqual(out["evidence"]["notes"], [])
+        # The label of the profile, when the letter uses another word.
+        letter["paragraphs"][0]["text"] = "Handling editor:"
+        rd.write_docx(letter, self.path)
+        ps = rr.paragraphs(self.path)
+        self.assertIn("R1.1 occurs twice; the first answer is kept", rr.propose(ps, {})["evidence"]["notes"])
+        out = rr.propose(ps, {"response_letter": {"editor_label": "Handling Editor"}})
+        self.assertEqual(sorted(out["previous"]), ["E.1", "R1.1"])
+        # A sentence that starts with the word is no heading.
+        letter["paragraphs"][0]["text"] = "Reviewer #2"
+        letter["paragraphs"][6]["text"] = "Editor comments on the unit were the same."
+        rd.write_docx(letter, self.path)
+        self.assertEqual(sorted(rr.propose(rr.paragraphs(self.path), {})["previous"]), ["R1.1", "R2.1"])
+
     def test_head_patterns_of_the_profile_are_used_when_they_fit_the_letter(self):
         letter = {"paragraphs": [
             {"kind": "x", "text": "Referee report 3", "color": None},
