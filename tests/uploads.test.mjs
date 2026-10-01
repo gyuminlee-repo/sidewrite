@@ -98,3 +98,33 @@ test("a file that cannot be written is an error, not a path", async () => {
   assert.deepEqual([r.ok, /EACCES/.test(r.error), "path" in r], [false, true, false]);
   assert.equal(uploads.pathOf("u"), null);
 });
+
+test("a finished upload that is sent again keeps its record: the same bytes succeed, other bytes are refused", async () => {
+  const dir = await newDir();
+  const uploads = createUploads({ dir });
+  const chunks = toChunks(data, 300);
+  const first = await send(uploads, "base-1", chunks);
+  assert.equal(first.ok, true);
+  // The answer to the last chunk was lost, so the pane sends the file again.
+  const begun = await uploads.accept({ upload_id: "base-1", ...chunks[0] });
+  assert.equal(begun.ok, true);
+  assert.equal(
+    uploads.pathOf("base-1"),
+    first.path,
+    "the record is gone while the file is sent again",
+  );
+  const again = await send(uploads, "base-1", chunks.slice(1));
+  assert.deepEqual(again, first);
+  assert.equal(uploads.pathOf("base-1"), first.path);
+  assert.ok((await readFile(first.path)).equals(data));
+  // Other bytes under the same id: an error that says so, and the first file and its record stay.
+  const other = await send(uploads, "base-1", toChunks(Buffer.from("something else"), 300));
+  assert.deepEqual([other.ok, /different content/.test(other.error)], [false, true]);
+  assert.equal(uploads.pathOf("base-1"), first.path);
+  assert.ok((await readFile(first.path)).equals(data));
+  // A second attempt that fails half way does not touch the record either.
+  await uploads.accept({ upload_id: "base-1", ...chunks[0] });
+  assert.equal((await uploads.accept({ upload_id: "base-1", ...chunks[2] })).ok, false);
+  assert.equal(uploads.pathOf("base-1"), first.path);
+  assert.deepEqual(await readdir(dir), ["base-1.docx"]);
+});
