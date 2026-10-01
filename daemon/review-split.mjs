@@ -201,6 +201,11 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 //
 // Refs. E.{k} for editor comments, k counting up in reading order.
 // R{reviewer}.{n} for reviewer comments: n is the number of the head.
+// The marker of a head is taken off the comment text when the ref carries
+// the number as written; wherever the ref differs from it (Minor "1." as
+// R1.4, a second round, numbers after text of a section, editor items after
+// the letter) the marker stays at the start of the text, as pasted, so the
+// comment can be found in the letter.
 // When the numbers start again (a new section, or "1." after "3." with no
 // section head), the part goes on from the highest number so far, so
 // Major 1-3 and Minor 1-2 are R1.1 to R1.5. A head with no number (a line
@@ -212,8 +217,7 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // label as `section` ("Round 2" on a line of its own after the first
 // reviewer head, or as the text of the head line: "Reviewer 1: Second
 // round"), or "Block 2" where the letter gives none; a section inside the
-// block is joined to it ("Round 2 / Minor comments"). Where the ref differs
-// from the number as written, the written number stays in the comment text.
+// block is joined to it ("Round 2 / Minor comments").
 // Text before the first comment of a later block is a comment of its own
 // with the next number. One warning per reviewer names the blocks. A later
 // block whose comments all keep their written numbers gets no "Block n"
@@ -621,8 +625,6 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
           if (off === null || it.restart) off = it.n <= max ? max - it.n + 1 : 0;
           number = it.n + off;
           max = Math.max(max, number);
-          // The number as written stays in the text where the ref differs.
-          if (later && number !== it.n && it.raw !== undefined) over[it.idx[0]] = it.raw;
         }
         const written = it.n !== null && number === it.n;
         const r = !b.headed && mode === "comment" ? R_MARK.exec(fold(lines[it.idx[0]])) : null;
@@ -631,6 +633,8 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
           number,
           idx: it.idx,
           written,
+          n: it.n,
+          raw: it.raw,
           section: sec(p.section),
           ...(r && { reviewer: Number(r[1]) }),
         });
@@ -640,24 +644,34 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   };
 
   let editors = 0;
+  const textOf = (idx) => trimHead(idx.map((i) => over[i]).join("\n")).trim();
   const rows = blocks
     .flatMap((b) =>
       (!b.headed && count > 1) || b.letter || b.form
         ? [{ editor: true, kept: !b.form, form: !!b.form, late: !!b.late, idx: b.idx }]
         : blockRows(b),
     )
-    .map((r) => ({ ...r, text: trimHead(r.idx.map((i) => over[i]).join("\n")).trim() }))
+    .map((r) => ({ ...r, text: textOf(r.idx) }))
     .filter((r) => r.text)
-    .map((r) => ({
-      ...r,
-      comment: {
-        ref: r.editor ? `E.${++editors}` : `R${r.reviewer}.${r.number}`,
-        reviewer: r.editor ? 0 : r.reviewer,
-        text: r.text,
-        requirements: [],
-        ...(r.section && { section: r.section }),
-      },
-    }));
+    .map((r) => {
+      const number = r.editor ? ++editors : r.number;
+      // The number as written stays at the start of the text wherever the
+      // ref differs from it (numbers that start again in a new section, in a
+      // later block, after text of a section, in an editor block after the
+      // letter), so the author can find the comment in the letter.
+      const shifted = r.n != null && r.raw !== undefined && r.n !== number;
+      if (shifted) over[r.idx[0]] = r.raw;
+      return {
+        ...r,
+        comment: {
+          ref: r.editor ? `E.${number}` : `R${r.reviewer}.${number}`,
+          reviewer: r.editor ? 0 : r.reviewer,
+          text: shifted ? textOf(r.idx) : r.text,
+          requirements: [],
+          ...(r.section && { section: r.section }),
+        },
+      };
+    });
   const refs = (key) => rows.filter((x) => x[key]).map((x) => x.comment.ref);
   return {
     comments: rows.map((x) => x.comment),
