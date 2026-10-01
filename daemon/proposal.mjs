@@ -261,6 +261,24 @@ export function checkProposal(p, { texts, ids, shown, requirements = [] }) {
   return null;
 }
 
+// Is the find of a proposal also in text that a recorded change deleted in
+// the paragraph it names? changes: the changes recorded since the snapshot
+// (their tracked deletions are still in the document until the author
+// accepts or rejects them). Word's search reads the paragraph with its
+// tracked changes, so it would find the text twice and answer Ambiguous
+// (taskpane/shared/tools-word.js toolTrackedEdit), where the checks above,
+// which read the reviewed text, find it once. Assumed from that code, not
+// yet measured in Word. Not covered: a find that lies across the edge of a
+// deletion, and tracked deletions older than the snapshot.
+export function inDeletedText(p, { shown, changes }) {
+  const at = shown.find((s) => s.id === p.paragraph_id);
+  const f = fold(p.find);
+  if (!at || !f.trim()) return false;
+  return (changes ?? []).some(
+    (ch) => ch.kind !== "insert" && ch.paragraph_index === at.index && fold(ch.find).includes(f),
+  );
+}
+
 // Every proposal of a reply: [{ id, proposal, code }], code null when it can
 // be applied. One refused proposal does not stop the others. Duplicate: the
 // same find in the same paragraph as a proposal before it that can be

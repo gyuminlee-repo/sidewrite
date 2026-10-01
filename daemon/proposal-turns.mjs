@@ -31,6 +31,7 @@ import {
   buildProposalPrompt,
   checkProposal,
   checkProposals,
+  inDeletedText,
   readProposalReply,
   toTrackedEditArgs,
 } from "./proposal.mjs";
@@ -75,6 +76,8 @@ const REFUSALS = {
   NoChange: "It changes nothing.",
   EmptyInsert: "It inserts nothing.",
   Duplicate: "A proposal before it changes the same text.",
+  FoundInDeletedText:
+    "Its text is also in text that a change before it deleted, where Word still finds it. Accept or reject that change in Word, press Refresh status, then propose again.",
   SupersededInTurn:
     "A change before it in this turn already changed that text. Propose again for what is left.",
 };
@@ -246,9 +249,17 @@ export function createProposalTurns({
         return stopAt(t, row, "failed", "SnapshotChanged", {});
       }
       // As the paragraphs read now, with the edits of this turn in them.
-      if (checkProposal(row.proposal, checkCtx(await deps.getReviewContext(ref, d)))) {
+      // Its text may also be in what an earlier change deleted, where Word
+      // still finds it: Word would answer Ambiguous and the turn would end.
+      const c = await deps.getReviewContext(ref, d);
+      const skip = checkProposal(row.proposal, checkCtx(c))
+        ? "SupersededInTurn"
+        : inDeletedText(row.proposal, { shown: built.shown, changes: c.recent_changes })
+          ? "FoundInDeletedText"
+          : null;
+      if (skip) {
         row.outcome = "skipped";
-        row.code = "SupersededInTurn";
+        row.code = skip;
         sendText(refusalLine(row, "skipped"), key);
         log(`[proposal] skipped ref=${ref} id=${row.id} code=${row.code}`);
         continue;
