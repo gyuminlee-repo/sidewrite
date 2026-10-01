@@ -1453,3 +1453,58 @@ test("models step: an unavailable list is asked for once more, after the daemon'
   const plain = modelsEvidence({ step: { ok: true, ...first }, log });
   assert.deepEqual([plain.pass, plain.retried], [true, false]);
 });
+
+// A run with --proposal-fixture: the replies of proposal turns come from a
+// file (daemon/proposal-fixture.mjs), to measure the stretch from the runner
+// to Word without a model. Its evidence is what happened, for a person to
+// read; pass only says that the turn came to an end.
+test("fixtureTurnEvidence: what a fixture turn did, from the log, the review file and Word", async () => {
+  const { fixtureTurnEvidence } = await import("../scripts/e2e/judge.mjs");
+  const log = [
+    "[proposal] prompt ref=R1.4 provider=fixture:f.json scope=manuscript paragraphs=20 chars=9000",
+    "[proposal] fixture reply ref=R1.4 proposals=3",
+    "[proposal] skipped ref=R1.4 id=P2 code=FoundInDeletedText",
+    "[proposal] done ref=R1.4 proposals=3 applied=2 rejected=0 skipped=1 stopped_at=- outcome=ok",
+    "[proposal] stopped ref=R1.5 id=P1 code=Ambiguous",
+    "",
+  ].join("\n");
+  const revision = {
+    comments: [{ ref: "R1.4", changes: [{ id: "R1.4-1" }, { id: "R1.4-2" }], blocked: [] }],
+  };
+  const word = { comments: [{ text: "[R1.4] a" }, { text: "[R1.4] b" }], revisions: [{}, {}, {}] };
+  const e = fixtureTurnEvidence({ ref: "R1.4", log, revision, word });
+  assert.deepEqual(e, {
+    pass: true,
+    ref: "R1.4",
+    started: true,
+    done: { proposals: 3, applied: 2, rejected: 0, skipped: 1, stopped_at: "-", outcome: "ok" },
+    skipped: [{ id: "P2", code: "FoundInDeletedText" }],
+    rejected: [],
+    stopped: [],
+    changes: 2,
+    attempts: 0,
+    word_comments: 2,
+    word_revisions: 3,
+  });
+  const stopped = fixtureTurnEvidence({
+    ref: "R1.5",
+    log:
+      log +
+      "[proposal] prompt ref=R1.5 provider=fixture:f.json scope=manuscript paragraphs=20 chars=9000\n" +
+      "[proposal] done ref=R1.5 proposals=1 applied=0 rejected=0 skipped=0 stopped_at=P1 outcome=error\n",
+    revision,
+    word,
+  });
+  assert.deepEqual(
+    [stopped.pass, stopped.stopped, stopped.done.outcome, stopped.changes],
+    [true, [{ id: "P1", code: "Ambiguous" }], "error", 0],
+  );
+  // A turn that never came to its end is no evidence.
+  assert.equal(fixtureTurnEvidence({ ref: "R1.2", log, revision, word }).pass, false);
+  // The fixture of the deleted-text measurement names comments of the fake review.
+  const { readFileSync } = await import("node:fs");
+  const fixture = JSON.parse(
+    readFileSync(new URL("./fixtures/proposal_fixture_deleted_text.json", import.meta.url), "utf8"),
+  );
+  assert.deepEqual(Object.keys(fixture), ["R1.2", "R1.5", "R1.4"]);
+});

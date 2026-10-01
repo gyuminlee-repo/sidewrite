@@ -1,0 +1,67 @@
+{
+  "R1.2": {
+    "proposals": [
+      {
+        "paragraph_contains": "was prepared by sonication",
+        "find": "cell-free extract",
+        "op": "replace",
+        "text": "clarified cell-free lysate",
+        "what": "fixture: renamed the preparation",
+        "why": "fixture: leaves a tracked deletion that holds the word cell-free",
+        "addresses": "fixture",
+        "requirement_ids": []
+      }
+    ],
+    "note": ""
+  },
+  "R1.5": {
+    "proposals": [
+      {
+        "paragraph_contains": "was prepared by sonication",
+        "find": "cell-free",
+        "op": "replace",
+        "text": "cell free",
+        "what": "fixture: a find that is once in the reviewed paragraph and once in the text deleted by the turn before",
+        "why": "fixture: shows whether Word's search counts tracked deletions",
+        "addresses": "fixture",
+        "requirement_ids": []
+      }
+    ],
+    "note": ""
+  },
+  "R1.4": {
+    "proposals": [
+      {
+        "paragraph_contains": "showed measurable activity",
+        "find": "cell-free extract",
+        "op": "replace",
+        "text": "clarified cell-free lysate",
+        "what": "fixture: first change of the turn",
+        "why": "fixture",
+        "addresses": "fixture",
+        "requirement_ids": []
+      },
+      {
+        "paragraph_contains": "showed measurable activity",
+        "find": "cell-free",
+        "op": "replace",
+        "text": "cell free",
+        "what": "fixture: its find is also in what the first change deleted",
+        "why": "fixture: the daemon passes it over (FoundInDeletedText)",
+        "addresses": "fixture",
+        "requirement_ids": []
+      },
+      {
+        "paragraph_contains": "showed measurable activity",
+        "find": "two hours",
+        "op": "replace",
+        "text": "2 h",
+        "what": "fixture: a change after the one passed over",
+        "why": "fixture: the turn goes on",
+        "addresses": "fixture",
+        "requirement_ids": []
+      }
+    ],
+    "note": ""
+  }
+}
