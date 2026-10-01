@@ -406,3 +406,45 @@ change mark, what stands in what, and where the change marks stand (around
 Exit code 0 when Word made both files, all five changes ran and the Word of
 the run is gone. The summary is `mathSummary` and `markRelations` in
 `word-math-probe-lib.mjs` (tests: `tests/word-math-probe.test.mjs`).
+
+## Replay of a real revision
+
+`replay.mjs` runs the Review tab on a copy of a real manuscript with its real
+review, and `replay-compare.py` puts the result next to what the authors did.
+Neither is part of the acceptance run and neither judges anything.
+
+```sh
+node scripts/e2e/replay.mjs \
+  --manuscript /path/to/before.docx --review /path/to/review.txt \
+  --base-dir /mnt/d/path/to/test-root \
+  --playwright-core 'D:\path\to\node_modules\playwright-core' \
+  [--model opus] [--judgment-model haiku] [--only R1.1,R2.3] \
+  [--instructions rules.txt] [--forbid forbid.txt] [--draft-responses] \
+  [--turn-minutes 10]
+
+python3 scripts/e2e/replay-compare.py \
+  --before /path/to/before.docx --after /path/to/submitted.docx \
+  --tool /mnt/d/path/to/test-root/replay-<time>/changes.json --out /path/to/out
+```
+
+The manuscript and the review are only read. The run folder
+`replay-<UTC time>` holds the copy (`manuscript.docx`, saved with its tracked
+changes and rationale comments), `manuscript.revision.json`,
+`manuscript.decisions.jsonl`, `changes.json` (per comment: requirements,
+changes with the paragraph before and after, rationale and state, the
+requirements no change names, how the turn ended, its time and model),
+`responses.json` with `--draft-responses`, `summary.txt`, `result.json` and
+`daemon.log`. The screen shows step names and counts, never text of the
+manuscript. One review turn per comment, in order; a turn that fails or runs
+longer than `--turn-minutes` is recorded and the next comment goes on. Word
+and the resident daemon are handled as in the acceptance run.
+
+`--instructions` and `--forbid` are text files with one rule per line (`#`
+starts a note); each line becomes a ledger rule the model checks.
+
+`replay-compare.py` uses the standard library only. It writes
+`reference_changes.json` (the paragraphs that differ between the two clean
+files: modified, deleted, inserted) and `compare.md` (counts, then the
+paragraphs changed by both, by the authors only, by the tool only, and the
+tool changes it could not place on a paragraph). Without `--tool` it writes
+the authors' side only.
