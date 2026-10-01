@@ -288,6 +288,23 @@ test("Save sends the text with the document as it is now", async () => {
     headings: HEADINGS,
   });
   assert.equal(t.message(), "Saved R1.2.");
+
+  // The daemon saved it with a mark: the manuscript changed under the answer.
+  const stale = revisionOf([
+    C1({ response: { text: "x", stale: ["quote_changed"], citations: [CITATION] } }),
+    C2(),
+  ]);
+  const u = await setup({
+    respond: {
+      response_save: () => ({ ok: true, revision: stale, warnings: ["Read it, then save again."] }),
+    },
+  });
+  await button(u.card("R1.1"), "Save").click();
+  assert.equal(u.message(), "Saved R1.1. Read it, then save again.");
+  assert.equal(
+    byClass(u.card("R1.1"), "response-stale")[0].textContent,
+    "Quote changed in the manuscript",
+  );
 });
 
 test("Draft all missing: only comments without an answer that are not declined, in order, and it stops at a failure", async () => {

@@ -281,6 +281,30 @@ export function staleReasons(comment, snapshot, render) {
 //     one the line numbers were read from
 // Run it after applyStates on the same snapshot. Both the Review refresh and
 // the Response tab mark with this function.
+//
+// Where quote_changed and change_state are taken off again (all in
+// response-service.mjs). The rule: only writing the answer again against the
+// citations as they are now clears them; the line numbers never do.
+//
+//   response_draft         cleared when what the draft was written from (the
+//                          quoted sentences, the changes and their states) is
+//                          still what is stored when it is saved; if another
+//                          request read a changed document in between, what
+//                          moved is marked instead
+//   response_save, text    with the document of the pane: cleared when the
+//                          citations the card showed still fit that document;
+//                          a shown sentence edited or a cited change taken
+//                          back since is marked instead (a card that showed
+//                          no citation has nothing to compare).
+//                          without the document: cleared, and the citations
+//                          are left as they were, so the next read of the
+//                          document judges the new text against them
+//   response_save, other   (declined, declined_requirements) not touched
+//   response_locate        not touched; it takes off lines_old only
+//   response_translate     not touched
+//   profile_set            not touched; a redraft in another language is a
+//                          response_draft like any other
+//   refresh (this fn)      kept; set when the saved citations no longer fit
 export const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
 export function markStale(rev, snapshot) {
   const next = structuredClone(rev);

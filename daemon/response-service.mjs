@@ -57,6 +57,7 @@ import {
   keepLines,
   markStale,
   snapshotHash,
+  staleReasons,
   viewText,
 } from "./response-quotes.mjs";
 import { applyLineResults, lineRequests, locate, savePdf } from "./response-lines.mjs";
@@ -218,11 +219,16 @@ export function createResponseService({
   }
 
   // The revision brought up to date with the document, saved, and its profile.
-  async function current(d, msg) {
+  // peek(rev, snapshot): called with the stored revision right before it is
+  // brought up to date.
+  async function current(d, msg, peek = null) {
     const { snapshot, headings, dropped } = docOf(msg);
     if (dropped) log(`[response] headings dropped=${dropped}`);
     const { profile } = await profileOf(d, await load(d));
-    const revision = await update(d, (rev) => refreshed(rev, snapshot, headings, profile));
+    const revision = await update(d, (rev) => {
+      peek?.(rev, snapshot);
+      return refreshed(rev, snapshot, headings, profile);
+    });
     return { snapshot, headings, dropped, profile, revision };
   }
   // What the pane found as headings, for a run that cites no section: how
@@ -524,7 +530,19 @@ export function createResponseService({
     async response_save(msg, key) {
       const d = at(key);
       const ref = msg.ref;
-      if (msg.snapshot !== undefined) await current(d, msg);
+      // The text was typed against the citations the card showed, and those
+      // are the stored ones. Where the document of this request no longer
+      // agrees with them (a shown sentence edited, a cited change taken
+      // back), the text is saved with that mark: the author reads it against
+      // the citations as they are now and saves again. A card that showed no
+      // citation gives nothing to compare.
+      let moved = [];
+      if (msg.snapshot !== undefined)
+        await current(d, msg, (rev, snapshot) => {
+          const shown = findComment(applyStates(rev, classifyRevision(rev, snapshot)), ref);
+          if (shown?.response?.citations?.length) moved = staleReasons(shown, snapshot, null);
+        });
+      const marked = "text" in msg && moved.length > 0;
       const revision = await update(d, (rev) => {
         const comment = findComment(rev, ref);
         if (!comment) throw new Error(`No reviewer comment ${ref}`);
@@ -541,7 +559,9 @@ export function createResponseService({
             next,
             ref,
             r.citations,
-            r.stale.filter((s) => s === "lines_old"),
+            STALE_ORDER.filter((s) =>
+              s === "lines_old" ? r.stale.includes(s) : moved.includes(s),
+            ),
           );
         }
         if ("declined" in msg) next = setDeclined(next, ref, msg.declined);
@@ -563,7 +583,15 @@ export function createResponseService({
         }
         return next;
       });
-      return { revision };
+      if (marked) log(`[response] save ${ref} input changed: ${moved.join(",")}`);
+      return {
+        revision,
+        warnings: marked
+          ? [
+              "The manuscript changed under this answer. Read it against the citations shown now, then save it again.",
+            ]
+          : [],
+      };
     },
 
     async response_draft(msg, key) {

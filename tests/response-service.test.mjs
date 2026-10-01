@@ -1025,6 +1025,96 @@ test("response_draft: a change decided while the model wrote marks the draft; a 
   await t2.cleanup();
 });
 
+// The marks quote_changed and change_state on every way an answer is saved.
+// What must hold: reading the line numbers again never makes an answer pass
+// that was written for another sentence.
+const EDITED_DOC = { snapshot: EDITED, headings: HEADINGS };
+const staleOf = (r) => r.revision.comments[0].response.stale;
+async function stillHeld(t, doc = EDITED_DOC) {
+  const located = await t.ask("response_locate", { ...doc, pdf_base64: PDF });
+  assert.deepEqual(staleOf(located), ["quote_changed"], "locate keeps the mark");
+  const checked = await t.ask("response_check", doc);
+  assert.deepEqual(
+    checked.checks.filter((x) => x.level === "fail").map((x) => x.id),
+    ["stale"],
+  );
+  const held = await t.ask("response_export", doc);
+  assert.equal(held.exported, false);
+}
+
+test("response_save: the sentence the card showed was edited before the save, so the answer is saved as out of date", async () => {
+  const t = await setup();
+  await ready(t); // the card shows the sentence with 30 °C
+  // The author edits the sentence in Word, then saves an answer typed before that.
+  let r = await t.ask("response_save", {
+    ref: "R1.1",
+    text: "The temperature is now given as 30 °C.",
+    ...EDITED_DOC,
+  });
+  assert.match(r.revision.comments[0].response.citations[0].quote, /held at 32 °C/);
+  assert.deepEqual(staleOf(r), ["quote_changed", "lines_old"]);
+  assert.match(r.warnings.join(" "), /manuscript changed under this answer/);
+  await stillHeld(t);
+  // Read against the sentence as it is now and saved again: the mark goes.
+  r = await t.ask("response_save", {
+    ref: "R1.1",
+    text: "The temperature is now given as 32 °C.",
+    ...EDITED_DOC,
+  });
+  assert.deepEqual([staleOf(r), r.warnings], [[], []]);
+  r = await t.ask("response_check", EDITED_DOC);
+  // (One warning is left: the number 30 of the earlier text is not in the new one.)
+  assert.deepEqual(
+    r.checks.map((x) => [x.id, x.level]),
+    [["lost_facts", "warn"]],
+  );
+  await t.cleanup();
+
+  // A cited change that was rejected before the save.
+  const u = await setup();
+  await ready(u);
+  const REJECTED = { snapshot: snapshotOf({ text: BEFORE }), headings: HEADINGS };
+  r = await u.ask("response_save", { ref: "R1.1", text: "We now state the unit.", ...REJECTED });
+  assert.deepEqual(r.revision.comments[0].response.citations, []);
+  assert.ok(staleOf(r).includes("change_state"), JSON.stringify(staleOf(r)));
+  await u.cleanup();
+
+  // The first answer to a comment, with no citation shown yet: nothing moved under it.
+  const v = await setup();
+  r = await v.ask("response_save", { ref: "R1.1", text: "We now state the unit.", ...WITH_DOC });
+  assert.deepEqual([staleOf(r), r.warnings], [[], []]);
+  await v.cleanup();
+});
+
+test("response_save without the document, and a redraft in another language: neither lets a stale answer pass", async () => {
+  // Saved without a snapshot: the citations are not touched, so the next
+  // read of the document marks the answer.
+  const t = await setup();
+  await ready(t);
+  let r = await t.ask("response_save", { ref: "R1.1", text: "The temperature is 30 °C." });
+  assert.deepEqual(staleOf(r), []);
+  assert.equal(r.revision.comments[0].response.citations[0].quote, QUOTE);
+  r = await t.ask("response_state", EDITED_DOC);
+  assert.deepEqual(staleOf(r), ["quote_changed", "lines_old"]);
+  await stillHeld(t);
+
+  // Changing the language of the letter does not touch the marks; the
+  // redraft that follows is a draft like any other, written for the
+  // sentence as it is now.
+  const m = model(draftOk);
+  const u = await setup({ job: m.job });
+  await ready(u);
+  await u.ask("response_state", EDITED_DOC);
+  r = await u.ask("profile_set", { overrides: { response_letter: { lang: "German" } } });
+  assert.deepEqual(staleOf(r), ["quote_changed", "lines_old"]);
+  await stillHeld(u);
+  r = await u.ask("response_draft", { ref: "R1.1", ...EDITED_DOC });
+  assert.match(m.requests[0].prompt, /Write in German\./);
+  assert.deepEqual(staleOf(r), []);
+  await u.cleanup();
+  await t.cleanup();
+});
+
 test("response_check: an LLM rule reads the reasons for declining too, as the letter prints them", async () => {
   const REASON = "The supplier was not recorded, sadly.";
   const paras = [

@@ -280,10 +280,16 @@ export function initResponsePane({
           "btn-primary btn-small",
         ),
         action("Save", async () => {
-          await ask("response_save", { ref: c.ref, text: text.value, ...(await docNow()) });
+          const r = await ask("response_save", {
+            ref: c.ref,
+            text: text.value,
+            ...(await docNow()),
+          });
           state.texts.delete(c.ref);
           changed();
-          say(`Saved ${c.ref}.`);
+          // A warning: the manuscript changed under the answer (it is marked).
+          const warnings = r.warnings ?? [];
+          say([`Saved ${c.ref}.`, ...warnings].join(" "), warnings.length > 0);
         }),
         // Of the answer as saved; the answer itself is not rewritten.
         untranslated &&
