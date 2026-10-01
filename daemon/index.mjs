@@ -407,13 +407,20 @@ async function sendTranscriptReplayTo(key, host, cwd) {
 // reaches `init`.
 const startQueue = new Map(); // key -> { running: boolean, latest: req | null }
 
-function scheduleSessionStart(cwd, sessionId, key, host, reason, { replay = true } = {}) {
+function scheduleSessionStart(
+  cwd,
+  sessionId,
+  key,
+  host,
+  reason,
+  { replay = true, keepQueued = false } = {},
+) {
   let q = startQueue.get(key);
   if (!q) {
     q = { running: false, latest: null };
     startQueue.set(key, q);
   }
-  q.latest = { cwd, resumeId: sessionId, host: host ?? null, reason, replay };
+  q.latest = { cwd, resumeId: sessionId, host: host ?? null, reason, replay, keepQueued };
   if (q.running) return; // the active runner will pick up `latest`
   q.running = true;
   setImmediate(() => runStartQueue(key));
@@ -433,6 +440,7 @@ async function runStartQueue(key) {
         key,
         host: req.host,
         replay: req.replay,
+        keepQueued: req.keepQueued,
       });
     } catch (err) {
       console.error(`[daemon] ${req.reason} session start failed:`, err?.message ?? err);
@@ -882,25 +890,28 @@ const bridge = createBridge({
       // Recorded before the list is awaited, so a first message sent
       // meanwhile does not start on "sonnet"; modelArgFor checks it again.
       if (prev === undefined) modelByKey.set(key, requested);
-      const before = modelCache.current();
+      const after = await modelCache.get();
+      // Read after the wait: a session a first message started meanwhile
+      // has recorded the model it runs on (session.model).
       const { model, restart } = modelChange({
-        prev,
         requested,
-        before,
-        after: await modelCache.get(),
+        after,
+        running: sessionFor(key)?.model ?? null,
       });
       modelByKey.set(key, model);
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
       // Relaunch when the model a session of this pane runs on is not the
       // one just decided: a later choice that differs, or, on the first
       // connect, a session that a message started while the list was awaited
-      // and whose model the list then replaced. restartSession itself no-ops
-      // when there is no session.
+      // and whose model the list then replaced. On the first connect the
+      // restart is not the user's: a first message no session has read yet
+      // stays for the new one (keepQueued).
       if (restart) {
         console.log(`[daemon] model changed → ${model} (key bound); restarting loop`);
-        restartSession(key, host, { reason: "model_changed" }).catch((err) =>
-          console.warn("[daemon] restart after model change failed:", err.message),
-        );
+        restartSession(key, host, {
+          reason: "model_changed",
+          keepQueued: prev === undefined,
+        }).catch((err) => console.warn("[daemon] restart after model change failed:", err.message));
       }
     },
     set_context: async (msg, reply, key, host) => {
@@ -1237,7 +1248,7 @@ function renderContextHeader(ctx) {
 async function startSessionForFolder(
   cwd,
   resumeSessionId = null,
-  { key = null, host = null, replay = true } = {},
+  { key = null, host = null, replay = true, keepQueued = false } = {},
 ) {
   // Only when actually superseding a live session for THIS pane: abort it
   // and drain its queue (same-pane restart: workspace switch, config
@@ -1250,8 +1261,10 @@ async function startSessionForFolder(
   const prior = sessionFor(key);
   if (prior) {
     prior.abortController.abort();
-    bridge.clearUserMessages(key);
-    endTurnState(key, { ok: false, error: "The session was restarted." });
+    // keepQueued (the model correction of the first connect): a message the
+    // prior session has not read stays in the queue, and its turn with it.
+    const kept = bridge.clearUserMessages(key, { keepQueued });
+    if (!kept) endTurnState(key, { ok: false, error: "The session was restarted." });
   }
 
   const abortController = new AbortController();
@@ -1314,6 +1327,9 @@ async function startSessionForFolder(
   const RATE_LIMIT_RE =
     /(usage limit|rate limit|daily limit|weekly limit|quota|too many requests|429|limit reached|limit will reset|resets? at|upgrade to|out of (?:credits|quota))/i;
 
+  // The model this session runs on, recorded where query() is given it:
+  // set_model compares it with the model it decides.
+  session.model = modelArgFor(key);
   // Fire-and-forget; index.mjs keeps running while the agent loop iterates.
   (async () => {
     try {
@@ -1327,7 +1343,7 @@ async function startSessionForFolder(
           disallowedTools: WORD_MCP_DISALLOWED,
           canUseTool: customPermissionHandler,
           // User-chosen model (composer dropdown); always explicit.
-          model: modelArgFor(key),
+          model: session.model,
           abortController,
           // Surface the SDK CLI's stderr in the daemon log and sniff it for
           // usage-limit phrasing (see RATE_LIMIT_RE above).
@@ -1447,7 +1463,7 @@ async function switchFolder(rawCwd, key, host = null) {
 // changes to CLAUDE.md, the drafting setup, or other config loaded at
 // session-init take effect without losing conversation history. No-op if
 // that pane has no live loop.
-async function restartSession(key, host, { reason = "config_changed" } = {}) {
+async function restartSession(key, host, { reason = "config_changed", keepQueued = false } = {}) {
   const s = sessionFor(key);
   if (!s) return;
   const { cwd, sessionId } = s;
@@ -1456,7 +1472,7 @@ async function restartSession(key, host, { reason = "config_changed" } = {}) {
   // Funnel through the serialized per-key queue (not a direct
   // startSessionForFolder) so a config/model restart coalesces with any
   // concurrent post-Stop / first-message start instead of racing it.
-  scheduleSessionStart(cwd, sessionId, key, host, reason, { replay: false });
+  scheduleSessionStart(cwd, sessionId, key, host, reason, { replay: false, keepQueued });
 }
 
 function handleAgentMessage(msg, session) {
