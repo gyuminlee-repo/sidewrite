@@ -765,6 +765,20 @@ export function createReviewService({
           );
           return { applied: false, outcome_unknown: true, result: r, revision };
         }
+        // Word applied the edit and its record could not be saved, or the
+        // task pane sent no result at all: the edit is, or may be, in the
+        // document. Back to "blocked" would offer Allow exception again and
+        // a second press would apply it twice. The item turns
+        // outcome_unknown with the attempt written before the call, and a
+        // refresh records the change.
+        if (!r.ok && (r.applied === true || r.code === "EmptyResult")) {
+          log(`[review] override ${blocked.id} not recorded (${r.code}); kept for refresh`);
+          const revision = await update(d, (x) => {
+            const b = findComment(x, msg.ref)?.blocked.find((y) => y.id === blocked.id);
+            return b?.attempt ? markBlockedUnknown(x, msg.ref, blocked.id, b.attempt) : null;
+          });
+          return { applied: false, outcome_unknown: true, result: r, revision };
+        }
         if (!r.ok) {
           const revision = await restore();
           return { applied: false, result: r, revision };

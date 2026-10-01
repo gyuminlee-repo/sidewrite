@@ -303,7 +303,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
   const record = async (r) => {
     // No result at all says nothing about the document: the attempt stays
     // and reads as unanswered once this call is over.
-    if (!r) return fail("empty result from the task pane");
+    if (!r) return fail("empty result from the task pane", { code: "EmptyResult" });
     // applied:true with ok:false: the task pane changed the document but could
     // not add the rationale comment (CommentAnchorMissing: no range to anchor
     // it; CommentInsertFailed: a step after the edit threw). The change is

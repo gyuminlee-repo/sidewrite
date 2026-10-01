@@ -456,6 +456,46 @@ test("service: an exception Word refuses goes back as it was, without the attemp
   }
 });
 
+// Back to "blocked" would offer Allow exception again for an edit that is
+// in the document: a second press would apply it twice.
+test("service: an exception Word applied whose record cannot be saved does not go back to blocked", async () => {
+  const w = await world();
+  try {
+    await w.ask("ledger_add", {
+      item: { kind: "forbid", text: "no medium", check: { type: "regex", pattern: "medium" } },
+    });
+    const blocked = await w.edit();
+    saves.length = 0;
+    failSave = (n) => n === 3; // 1: the claim, 2: its attempt, 3: the change
+    const r = await w.ask("review_override", { ref: "R1.1", blocked_id: blocked.blocked_id });
+    assert.deepEqual(
+      [r.ok, r.applied, r.outcome_unknown, r.result?.code],
+      [true, false, true, "AppliedNotRecorded"],
+      JSON.stringify(r),
+    );
+    const b = r.revision.comments[0].blocked[0];
+    assert.deepEqual(
+      [b.state, b.blocked_by, b.attempt?.change.after],
+      ["outcome_unknown", ["L1"], AFTER],
+    );
+    assert.equal(r.revision.comments[0].changes.length, 0);
+    const again = await w.ask("review_override", { ref: "R1.1", blocked_id: blocked.blocked_id });
+    assert.equal(again.ok, false);
+    assert.match(again.error, /Refresh status/);
+    assert.equal(w.calls.length, 1, "Word was called once");
+    const done = await w.ask("review_refresh", {
+      snapshot: snap(AFTER, [
+        { id: "12", paragraph_index: 1, content: "[R1.1] w / y (금지 규칙 L1 예외 승인) / a" },
+      ]),
+    });
+    const c = done.revision.comments[0];
+    assert.deepEqual([c.changes.length, c.blocked.length], [1, 0]);
+    assert.deepEqual([c.changes[0].override_of, c.changes[0].word_comment_id], [["L1"], "12"]);
+  } finally {
+    await w.cleanup();
+  }
+});
+
 async function until(fn, what, ms = 3000) {
   const end = Date.now() + ms;
   for (;;) {
