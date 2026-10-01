@@ -54,7 +54,7 @@ function findAll(node, pred, out = []) {
   return out;
 }
 
-async function setup({ revision, word = {}, respond = {} }) {
+async function setup({ revision, word = {}, respond = {}, providersReady }) {
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
   const requests = [];
@@ -68,6 +68,7 @@ async function setup({ revision, word = {}, respond = {} }) {
     word,
     onTurnStarted() {},
     isTurnInFlight: () => false,
+    providersReady,
   });
   await pane.reload();
   return { pane, requests, $: (id) => document.getElementById(id) };
@@ -1045,6 +1046,528 @@ test("split draft rows, the paste box and the ledger form survive a re-render", 
   assert.equal(t.$("ledger-pattern").value, "data shows");
 });
 
+// P15: listeners of a non-click event on a fake element.
+async function fire(node, ev) {
+  for (const fn of node.listeners[ev] ?? []) await fn();
+}
+
+test("Load review from file fills the paste box; a wrong type only shows an error", async () => {
+  const t = await setup({ revision: { comments: [], ledger: [] } });
+  const input = t.$("review-file-input");
+  let opened = 0;
+  input.addEventListener("click", () => (opened += 1));
+  await t.$("review-load-file").click();
+  assert.equal(opened, 1, "the button opens the file picker");
+
+  input.files = [{ name: "review.txt", size: 20, text: async () => "\uFEFFReviewer 1\r\nOne." }];
+  await fire(input, "change");
+  assert.equal(t.$("review-input").value, "Reviewer 1\nOne.");
+  assert.match(t.$("review-message").textContent, /Loaded review\.txt/);
+
+  input.files = [{ name: "review.docx", size: 20, text: async () => "PK" }];
+  await fire(input, "change");
+  assert.equal(t.$("review-input").value, "Reviewer 1\nOne.", "the box is left as it was");
+  assert.match(t.$("review-message").textContent, /\.txt or \.md/);
+  assert.equal(t.requests.filter((r) => r.type !== "review_load").length, 0, "no daemon request");
+});
+
+test("ledger: Export shows the file path; Import sends the items and reports added and skipped", async () => {
+  const revision = { comments: [], ledger: [] };
+  const item = { kind: "forbid", text: "no novel", scope: "manuscript", check: { type: "llm" } };
+  const t = await setup({
+    revision,
+    respond: {
+      ledger_export: () => ({ ok: true, path: "/m/paper.ledger.json", count: 2 }),
+      ledger_import: () => ({ ok: true, added: 1, skipped: 0, revision }),
+    },
+  });
+  await t.$("ledger-export").click();
+  assert.match(t.$("review-message").textContent, /2 ledger rule\(s\).*\/m\/paper\.ledger\.json/);
+
+  const input = t.$("ledger-file-input");
+  input.files = [{ name: "l.json", size: 50, text: async () => JSON.stringify({ items: [item] }) }];
+  await fire(input, "change");
+  assert.deepEqual(t.requests.find((r) => r.type === "ledger_import").payload, {
+    doc: { items: [item] },
+    mode: "append",
+  });
+  assert.match(t.$("review-message").textContent, /Added 1 ledger rule\(s\), skipped 0/);
+
+  input.files = [{ name: "l.json", size: 5, text: async () => "{ nope" }];
+  await fire(input, "change");
+  assert.match(t.$("review-message").textContent, /not JSON/);
+  assert.equal(t.requests.filter((r) => r.type === "ledger_import").length, 1);
+});
+
+test("ledger suggestions: a checklist from the review text; Add selected imports the ticked rules", async () => {
+  const revision = { comments: [], ledger: [] };
+  const cue = {
+    kind: "forbid",
+    text: 'Do not use "novel".',
+    scope: "manuscript",
+    check: { type: "regex", pattern: "novel", flags: "i", expect: "absent" },
+    why: "forbid cue",
+    sentence_index: 1,
+  };
+  const model = {
+    kind: "instruction",
+    text: "Use SI units throughout.",
+    scope: "manuscript",
+    check: { type: "llm" },
+    why: "model label",
+    sentence_index: 2,
+  };
+  let t = null;
+  t = await setup({
+    revision,
+    respond: {
+      ledger_suggest: () => {
+        queueMicrotask(() =>
+          t.pane.onEvent({
+            type: "review_event",
+            event: "job_done",
+            job_id: "j5",
+            result: { ok: true, method: "regex+llm", candidates: [cue, model], warnings: [] },
+          }),
+        );
+        return { ok: true, accepted: true, job_id: "j5" };
+      },
+      ledger_import: () => ({ ok: true, added: 2, skipped: 0, revision }),
+    },
+  });
+  t.$("review-input").value = "Reviewer 1 ...";
+  await t.$("ledger-suggest-review").click();
+  assert.equal(t.requests.find((r) => r.type === "ledger_suggest").payload.text, "Reviewer 1 ...");
+  const boxes = () => findAll(t.$("ledger-candidates"), (n) => n.attributes.type === "checkbox");
+  // A cue-based candidate starts ticked, a model label does not.
+  assert.deepEqual(
+    boxes().map((b) => b.checked),
+    [true, false],
+  );
+  assert.equal(t.$("ledger-candidates-actions").hidden, false);
+  assert.match(t.$("review-message").textContent, /2 candidate rule\(s\)/);
+
+  boxes()[1].checked = true;
+  await fire(boxes()[1], "change");
+  await t.$("ledger-candidates-add").click();
+  const strip = ({ kind, text, scope, check }) => ({ kind, text, scope, check });
+  assert.deepEqual(t.requests.find((r) => r.type === "ledger_import").payload, {
+    doc: { items: [strip(cue), strip(model)] },
+    mode: "append",
+  });
+  assert.equal(boxes().length, 0, "the list is cleared once added");
+  assert.equal(t.$("ledger-candidates-actions").hidden, true);
+});
+
+// P15 "Propose all": one review turn per open comment, the next one only
+// after the turn_done of the one before.
+async function proposeAllSetup() {
+  const { createTurnState } = await import("../taskpane/shared/turn-state.js");
+  globalThis.document = fakeDocument();
+  const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+  const c = (ref, status) => ({
+    ref,
+    reviewer: 1,
+    text: "State the unit.",
+    requirements: [],
+    status,
+    changes: [],
+    blocked: [],
+  });
+  const revision = {
+    comments: [
+      c("R1.1", "pending"),
+      c("R1.2", "done"),
+      c("R1.3", "pending"),
+      c("R2.1", "in_progress"),
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  let pane = null;
+  const turn = createTurnState({ getReviewPane: () => pane });
+  const proposals = [];
+  // fail[type] = "message": the next request of that type is refused, once.
+  const fail = {};
+  // doc.comments: the comments Word reports in the next snapshot.
+  const doc = { comments: [] };
+  const sendRequest = async (type, payload) => {
+    if (fail[type]) {
+      const error = fail[type];
+      delete fail[type];
+      return { ok: false, error };
+    }
+    if (type === "review_refresh") return { ok: true, rows: [], counts, external: [], revision };
+    if (type === "review_propose") {
+      proposals.push([payload.ref, payload.paragraphs.length]);
+      return { ok: true, started: true, ref: payload.ref, started_at: Date.now(), revision };
+    }
+    return { ok: true, revision, path: "/m/paper.revision.json" };
+  };
+  pane = initReviewPane({
+    sendRequest,
+    word: {
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: doc.comments }),
+      selectionParagraphs: async () => [{ index: 1, text: "selected" }],
+    },
+    onTurnStarted() {
+      const id = turn.begin();
+      return () => turn.endIf(id);
+    },
+    isTurnInFlight: () => turn.inFlight,
+  });
+  await pane.reload();
+  const $ = (id) => document.getElementById(id);
+  const wait = () => new Promise((r) => setTimeout(r, 5));
+  // What the daemon sends when the turn of `ref` ends: turn_done says how.
+  const endTurn = (ref, error = null) => {
+    turn.onAssistantEvent({ event: "turn_complete" });
+    pane.onEvent({
+      type: "review_event",
+      event: "turn_done",
+      ref,
+      ok: !error,
+      ...(error ? { error } : {}),
+    });
+  };
+  return { pane, turn, proposals, fail, doc, $, wait, endTurn };
+}
+
+test("Propose all sends the next review_propose only after turn_done; an error stops the queue", async () => {
+  const t = await proposeAllSetup();
+  try {
+    t.$("review-use-selection").checked = true; // not used by Propose all
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    assert.deepEqual(t.proposals, [["R1.1", 0]]);
+    assert.equal(t.$("review-propose-stop").hidden, false);
+    assert.equal(t.$("review-propose-all").disabled, true);
+    assert.match(t.$("review-progress").textContent, /^Propose all: 1\/3 R1\.1\. R1\.1 running/);
+    const cards = () =>
+      findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes").map(
+        (b) => b.disabled,
+      );
+    assert.deepEqual(cards(), [true, true, true, true]);
+
+    await t.wait();
+    assert.equal(t.proposals.length, 1, "no second turn while the first one runs");
+    await t.$("review-propose-all").click(); // a second press while it runs
+    assert.equal(t.proposals.length, 1);
+
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1", "R1.3"],
+      "the done comment R1.2 is skipped",
+    );
+    assert.equal(t.turn.inFlight, true);
+
+    t.endTurn("R1.3", "Claude usage limit reached.");
+    await all;
+    assert.equal(t.proposals.length, 2, "R2.1 is not started after the failure");
+    assert.match(
+      t.$("review-message").textContent,
+      /Propose all stopped at R1\.3: Claude usage limit reached\. 1 of 3 proposed\./,
+    );
+    assert.equal(t.$("review-propose-stop").hidden, true);
+    assert.equal(t.$("review-propose-all").disabled, false);
+    assert.equal(t.turn.inFlight, false);
+    assert.deepEqual(cards(), [false, false, false, false]);
+    assert.equal(t.$("review-progress").hidden, true);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+test("Propose all: Stop after this one lets the turn end and starts no other; a reconnect ends the wait", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    await t.$("review-propose-stop").click();
+    await t.wait();
+    assert.equal(t.proposals.length, 1);
+    t.endTurn("R1.1");
+    await all;
+    assert.equal(t.proposals.length, 1);
+    assert.match(t.$("review-message").textContent, /Propose all stopped before R1\.3\. 1 of 3/);
+
+    // A daemon restart never sends turn_done: welcome (reload) ends the wait.
+    const again = t.$("review-propose-all").click();
+    await t.wait();
+    assert.equal(t.proposals.length, 2);
+    t.turn.end(); // ws.onclose
+    await t.pane.reload();
+    await again;
+    assert.equal(t.proposals.length, 2);
+    assert.match(t.$("review-message").textContent, /stopped at R1\.1: The connection/);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// The usage-limit path of the daemon sends turn_complete, turn_done, then the
+// error event. turn_done says the turn failed, so the queue stops whenever
+// the error event comes: here after the refresh of turn_done has finished.
+test("Propose all: a failed turn_done stops the queue even when the error event comes late", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.endTurn("R1.1", "Claude usage limit reached.");
+    await all; // the refresh of turn_done is over, the run has ended
+    t.turn.onAssistantEvent({ event: "error", error: "Claude usage limit reached." });
+    await t.wait();
+    assert.equal(t.proposals.length, 1, "R1.3 is not started");
+    assert.match(
+      t.$("review-message").textContent,
+      /^Propose all stopped at R1\.1: Claude usage limit reached\. 0 of 3 proposed\./,
+    );
+    assert.equal(t.pane.onTurnError, undefined, "no timing-dependent error hook");
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// An error event alone decides nothing: the turn_done of that turn does.
+test("Propose all: an error event without a failed turn_done does not end the wait", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.turn.onAssistantEvent({ event: "error", error: "x" });
+    await t.wait();
+    assert.equal(t.proposals.length, 1);
+    assert.equal(t.$("review-propose-stop").hidden, false, "still waiting for turn_done");
+    t.endTurn("R1.1", "x");
+    await all;
+    assert.match(t.$("review-message").textContent, /stopped at R1\.1: x/);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// The turn ran, but the reload or the refresh that follows its turn_done
+// failed: the pane does not know the state of that comment, so the queue stops
+// there and does not count it. What the turn recorded is saved by the daemon;
+// the message says so and names the way out.
+const unchecked = (ref, error) =>
+  `The turn for ${ref} ran and its record is saved, but the status check after it failed (${error}); press Refresh status to check again.`;
+
+test("Propose all: every turn and its status check succeed", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    for (const ref of ["R1.1", "R1.3", "R2.1"]) {
+      await t.wait();
+      t.endTurn(ref);
+    }
+    await all;
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1", "R1.3", "R2.1"],
+    );
+    assert.equal(t.$("review-message").textContent, "Propose all: 3 of 3 proposed.");
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+test("Propose all: a failed reload after the last turn is not counted as proposed", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    for (const ref of ["R1.1", "R1.3"]) {
+      await t.wait();
+      t.endTurn(ref);
+    }
+    await t.wait();
+    t.fail.review_load = "revision file is locked";
+    t.endTurn("R2.1");
+    await all;
+    assert.equal(t.proposals.length, 3);
+    assert.equal(
+      t.$("review-message").textContent,
+      `Propose all stopped at R2.1: ${unchecked("R2.1", "revision file is locked")} R2.1 is not counted: 2 of 3 proposed.`,
+    );
+    assert.doesNotMatch(t.$("review-message").textContent, /lost|undone|discarded/i);
+    assert.equal(t.$("review-propose-all").disabled, false);
+    assert.equal(t.turn.inFlight, false);
+  } finally {
+    delete t.fail.review_load;
+    await t.pane.reload();
+  }
+});
+
+test("Propose all: a failed refresh after a turn in the middle starts no other turn", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.equal(t.proposals.length, 2);
+    // Once: the refresh before the turn of R2.1 would succeed.
+    t.fail.review_refresh = "Word is busy";
+    t.endTurn("R1.3");
+    // Not `await all`: a queue that went on would wait for the turn of R2.1.
+    await t.wait();
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1", "R1.3"],
+      "R2.1 is not started",
+    );
+    assert.equal(
+      t.$("review-message").textContent,
+      `Propose all stopped at R1.3: ${unchecked("R1.3", "Word is busy")} R1.3 is not counted: 1 of 3 proposed.`,
+    );
+    assert.equal(t.$("review-propose-stop").hidden, true);
+    assert.equal(t.turn.inFlight, false);
+    await all;
+  } finally {
+    delete t.fail.review_refresh;
+    await t.pane.reload();
+  }
+});
+
+// A turn that failed stops the queue with its own error, whether the status
+// check after it worked or not.
+test("Propose all: the error of a failed turn is the one shown when its status check fails too", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.fail.review_load = "revision file is locked";
+    t.endTurn("R1.1", "Claude usage limit reached.");
+    await all;
+    assert.equal(t.proposals.length, 1);
+    assert.equal(
+      t.$("review-message").textContent,
+      "Propose all stopped at R1.1: Claude usage limit reached. 0 of 3 proposed.",
+    );
+  } finally {
+    delete t.fail.review_load;
+    await t.pane.reload();
+  }
+});
+
+test("one Propose changes: a failed status check after the turn says what to do", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    assert.deepEqual(t.proposals, [["R1.1", 0]]);
+    t.fail.review_refresh = "Word is busy";
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.equal(t.$("review-message").textContent, unchecked("R1.1", "Word is busy"));
+  } finally {
+    delete t.fail.review_refresh;
+    await t.pane.reload();
+  }
+});
+
+// The status check worked and found that the changes on record and the tool
+// comments in Word do not match (an edit that was not recorded, or a
+// rationale comment that is gone). The next turn would start on that state:
+// the queue stops, as for a check that failed.
+const mismatched = (ref, missing, unrecorded) =>
+  `The turn for ${ref} ran and its record is saved, but the changes on record and the tool comments in Word do not match (missing ${missing}, unrecorded ${unrecorded}); check those in Word, then press Refresh status.`;
+
+test("Propose all: a mismatch found by the status check after a turn starts no other turn", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    // A tool comment in Word that no recorded change has.
+    t.doc.comments = [comment("70", "[R1.1] a / b / c")];
+    t.endTurn("R1.1");
+    // Not `await all`: a queue that went on would wait for the turn of R1.3.
+    await t.wait();
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1"],
+      "R1.3 is not started",
+    );
+    assert.equal(
+      t.$("review-message").textContent,
+      `Propose all stopped at R1.1: ${mismatched("R1.1", "-", "70")} R1.1 is not counted: 0 of 3 proposed.`,
+    );
+    assert.equal(t.turn.inFlight, false);
+    await all;
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+test("one Propose changes: a mismatch after the turn says what to do; Refresh status keeps its counts", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    t.doc.comments = [comment("70", "[R1.1] a / b / c")];
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.equal(t.$("review-message").textContent, mismatched("R1.1", "-", "70"));
+    await t.$("review-refresh").click();
+    assert.match(
+      t.$("review-message").textContent,
+      /^Accepted 0, .* found 1 \(MISMATCH: missing -, unrecorded 70\)$/,
+    );
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// P15: the status refreshes by itself when the pane gets the focus back and
+// when any turn ends, without touching the message line.
+test("auto refresh: focus and a turn end refresh quietly; not while there are no comments", async () => {
+  const listeners = {};
+  globalThis.window = { addEventListener: (ev, fn) => (listeners[ev] = fn) };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const wait = () => new Promise((r) => setTimeout(r, 5));
+  const refreshes = (t) => t.requests.filter((r) => r.type === "review_refresh").length;
+  const word = { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) };
+  try {
+    const revision = {
+      comments: [
+        { ref: "R1.1", reviewer: 1, text: "x", status: "pending", changes: [], blocked: [] },
+      ],
+      ledger: [],
+    };
+    const t = await setup({
+      revision,
+      word,
+      respond: {
+        review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+      },
+    });
+    t.$("review-message").textContent = "KEEP";
+    listeners.focus();
+    await wait();
+    assert.equal(refreshes(t), 1);
+    assert.equal(t.$("review-message").textContent, "KEEP", "the message line is not replaced");
+    assert.match(t.$("review-auto").textContent, /^Auto-refreshed .*Accepted 0, rejected 0/);
+    listeners.focus(); // again at once: too soon
+    await wait();
+    assert.equal(refreshes(t), 1);
+    assert.equal(t.pane.onAnyTurnEnded(), "started"); // a chat turn ended
+    await wait();
+    assert.equal(refreshes(t), 2);
+
+    const empty = await setup({ revision: { comments: [], ledger: [] }, word });
+    listeners.focus();
+    assert.equal(empty.pane.onAnyTurnEnded(), "busy");
+    await wait();
+    assert.equal(refreshes(empty), 0);
+  } finally {
+    delete globalThis.window;
+  }
+});
+
 // Codex review 14: a normal edit Word did not answer is kept in the file with
 // no forbid rule. It is no exception: no Allow button, only the re-apply.
 test("an unanswered normal edit: named as such, no Allow exception, re-apply with force", async () => {
@@ -1214,4 +1737,35 @@ test("stale_target refreshes the status with the document as it is now; a runnin
   );
   assert.equal(m.hidden, false);
   assert.equal(loads(), before + 1, "the list is loaded again");
+});
+
+// Codex review of stage 2.5: right after a reconnect the daemon has not yet
+// confirmed the provider the pane stored. A Review action clicked then is
+// held, with a line that says why, and sent once the daemon answered.
+test("a Review action clicked while the stored provider is being confirmed waits, then runs", async () => {
+  let confirm;
+  let pending = new Promise((r) => (confirm = r));
+  const t = await setup({
+    revision: { comments: [], ledger: [] },
+    providersReady: () => pending,
+    respond: {
+      review_split: () => ({ ok: false, error: "split was asked" }),
+    },
+  });
+  t.$("review-input").value = "Reviewer 1\nComment 1: Use SI units.";
+  const clicked = t.$("review-split").click();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(
+    t.$("review-message").textContent,
+    "Waiting for the daemon to confirm the stored provider choice...",
+  );
+  assert.equal(t.requests.filter((r) => r.type === "review_split").length, 0, "held, not sent");
+  pending = null; // the daemon answered
+  confirm();
+  await clicked;
+  assert.equal(t.requests.filter((r) => r.type === "review_split").length, 1);
+  assert.equal(t.$("review-message").textContent, "split was asked");
+  // Nothing to wait for: the next click goes straight through.
+  await t.$("review-split").click();
+  assert.equal(t.requests.filter((r) => r.type === "review_split").length, 2);
 });

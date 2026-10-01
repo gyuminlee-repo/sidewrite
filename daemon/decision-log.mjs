@@ -1,8 +1,8 @@
 // Decision receipts: one JSON line per LLM decision in
 // `<manuscript stem>.decisions.jsonl` next to the document
 // (revision-store.mjs decisionsPathFor). Kinds: comment_split,
-// requirement_extract, ledger_check, requirement_link. A later gold-set tool
-// reads the file; a person fills `expected` with the right answer.
+// requirement_extract, ledger_check, requirement_link, ledger_suggest. A later
+// gold-set tool reads the file; a person fills `expected` with the right answer.
 //
 // A record holds a sha256 fingerprint of the input, never the input text:
 // no manuscript or review words go into the file.

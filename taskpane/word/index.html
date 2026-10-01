@@ -97,6 +97,7 @@
       <div class="setup-content" id="review-root">
         <div id="review-message" hidden></div>
         <small id="review-file"></small>
+        <div><small id="review-auto"></small></div>
         <div id="review-progress" class="review-progress" hidden></div>
 
         <div class="setup-section">
@@ -107,6 +108,15 @@
         <div class="setup-section">
           <h3>1. Reviewer comments</h3>
           <textarea id="review-input" rows="6" placeholder="Paste the full review here"></textarea>
+          <input
+            type="file"
+            id="review-file-input"
+            accept=".txt,.md,text/plain,text/markdown"
+            hidden
+          />
+          <button type="button" class="btn-secondary btn-small" id="review-load-file">
+            Load review from file
+          </button>
           <button type="button" class="btn-primary btn-small" id="review-split">
             Split into comments
           </button>
@@ -126,6 +136,12 @@
           </label>
           <button type="button" class="btn-secondary btn-small" id="review-refresh">
             Refresh status
+          </button>
+          <button type="button" class="btn-primary btn-small" id="review-propose-all">
+            Propose all
+          </button>
+          <button type="button" class="btn-secondary btn-small" id="review-propose-stop" hidden>
+            Stop after this one
           </button>
           <div id="review-comments"></div>
           <pre id="review-preview" class="review-preview" hidden></pre>
@@ -172,6 +188,25 @@
           <button type="button" class="btn-secondary btn-small" id="review-check-full">
             Full check
           </button>
+          <button type="button" class="btn-secondary btn-small" id="ledger-export">
+            Export ledger
+          </button>
+          <input type="file" id="ledger-file-input" accept=".json,application/json" hidden />
+          <button type="button" class="btn-secondary btn-small" id="ledger-import">
+            Import ledger
+          </button>
+          <button type="button" class="btn-secondary btn-small" id="ledger-suggest-review">
+            Suggest rules from the review
+          </button>
+          <div id="ledger-candidates"></div>
+          <div id="ledger-candidates-actions" hidden>
+            <button type="button" class="btn-primary btn-small" id="ledger-candidates-add">
+              Add selected
+            </button>
+            <button type="button" class="btn-secondary btn-small" id="ledger-candidates-clear">
+              Discard suggestions
+            </button>
+          </div>
           <div id="review-violations"></div>
         </div>
 
@@ -222,6 +257,35 @@
             <button type="button" class="btn-primary btn-small add-context-file">+ Add file</button>
           </div>
           <div class="form-error" id="context-error" hidden></div>
+        </div>
+
+        <div class="setup-section" id="providers-root">
+          <h3>Providers</h3>
+          <p class="setup-help">
+            Which program proposes changes (review turns) and which one makes the short judgments
+            (splitting a review, checking requirements and the ledger). Only a provider that passed
+            its check can be chosen; the list below says why another cannot. API keys stay on this
+            computer, in the daemon's key file.
+          </p>
+          <div class="setting-row">
+            <div class="setting-text">
+              <div>Review turns</div>
+              <select id="provider-turn" class="setting-select"></select>
+              <select id="provider-turn-model" class="setting-select"></select>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-text">
+              <div>Judgments</div>
+              <select id="provider-oneshot" class="setting-select"></select>
+              <select id="provider-oneshot-model" class="setting-select"></select>
+            </div>
+          </div>
+          <div class="form-error" id="providers-message" hidden></div>
+          <div class="providers-list" id="providers-list"></div>
+          <button type="button" class="btn-secondary btn-small" id="providers-recheck">
+            Check again
+          </button>
         </div>
 
         <div class="setup-section">

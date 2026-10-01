@@ -26,7 +26,15 @@ import {
   inFlightEdit,
   reviewerOfRef,
   progressText,
+  reviewTextFromFile,
+  REVIEW_FILE_MAX_BYTES,
+  ledgerImportFromJson,
+  candidateRule,
+  candidateLabel,
+  queueRefs,
 } from "./review-view.js";
+import { createProposeQueue } from "./propose-queue.js";
+import { createAutoRefresh } from "./auto-refresh.js";
 
 const UNKNOWN_HINT =
   "Word did not answer; this exception may already be applied. Refresh status, then check the paragraph.";
@@ -37,8 +45,18 @@ const OVERRIDE_WAIT = 120_000;
 const CONNECTION_LOST =
   "The connection to the daemon was lost before the result came. Run it again.";
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
+// "Propose all": the longest wait for the end of one review turn.
+const TURN_WAIT_MS = 30 * 60_000;
 
-export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
+export function initReviewPane({
+  sendRequest,
+  word,
+  onTurnStarted,
+  isTurnInFlight,
+  // () => the request that confirms the stored providers while it is under
+  // way (providers-pane.js whenRestored), else null.
+  providersReady = () => null,
+}) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
   const $ = (id) => document.getElementById(id);
@@ -58,6 +76,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     timer: null,
     jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
+    candidates: [], // P15: ledger rule candidates of the last suggestion, each with `picked`
+    turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
+    queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
+    reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
   };
 
   function el(tag, props = {}, ...kids) {
@@ -109,6 +131,14 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     (fn) =>
     async (...a) => {
       try {
+        // Right after a (re)connect the daemon has not confirmed the stored
+        // provider yet: the action waits for that instead of being sent to a
+        // daemon that would have to guess.
+        const confirming = providersReady();
+        if (confirming) {
+          say("Waiting for the daemon to confirm the stored provider choice...");
+          await confirming;
+        }
         say("");
         await fn(...a);
       } catch (e) {
@@ -347,30 +377,16 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         text: "Propose changes",
       });
       proposeButtons.push(propose);
-      propose.disabled = isTurnInFlight();
+      propose.disabled = isTurnInFlight() || queue.running;
       // The turn is taken on the click, before the selection and refresh()
       // waits: a second click meanwhile is ignored (Codex review 8) and the
       // daemon, which queues the agent message before it answers, may send
       // turn_complete and turn_done before the answer (Codex review 7).
       // onTurnStarted returns a release that ends only this turn. The check
       // runs before guard() so an ignored click keeps the message line.
-      const run = guard(async (release) => {
-        let r;
-        try {
-          const paragraphs = await promptParagraphs();
-          // A fresh snapshot first: outside changes are caught before the turn
-          // (L4) and the new words of the turn are checked against it (L2).
-          await refresh();
-          const done = state.turnsDone;
-          r = await ask("review_propose", { ref: c.ref, paragraphs });
-          if (state.turnsDone === done && isTurnInFlight()) startProgress(c.ref, r.started_at);
-        } catch (e) {
-          release?.();
-          throw e;
-        }
-      });
+      const run = guard((release) => proposeRef(c.ref, release, true));
       propose.addEventListener("click", () => {
-        if (isTurnInFlight()) return;
+        if (isTurnInFlight() || queue.running) return;
         return run(
           onTurnStarted(`Review ${c.ref}: proposing changes (tracked, one comment per change)...`),
         );
@@ -498,6 +514,26 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       : "Add";
   }
 
+  // P15: candidate rules from the review text, one checkbox each.
+  function renderCandidates() {
+    const box = $("ledger-candidates");
+    box.replaceChildren();
+    for (const c of state.candidates) {
+      const tick = el("input", { type: "checkbox" });
+      tick.checked = c.picked;
+      tick.addEventListener("change", () => (c.picked = tick.checked));
+      box.append(
+        el(
+          "label",
+          { class: "review-ledger-item" },
+          tick,
+          el("span", { text: ` ${candidateLabel(c)}` }),
+        ),
+      );
+    }
+    $("ledger-candidates-actions").hidden = state.candidates.length === 0;
+  }
+
   // L7: everything that waits for the author in one box.
   function renderDecisions() {
     const d = pendingDecisions(state.revision);
@@ -546,13 +582,18 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     }
   }
 
-  // L9: elapsed time of the running turn and comments not done.
+  // L9: elapsed time of the running turn and comments not done. P15: the
+  // place in a "Propose all" run goes in front ("Propose all: 2/5 R1.2.").
   function showProgress() {
     const bar = $("review-progress");
-    bar.hidden = !state.turn;
-    if (state.turn) {
-      bar.textContent = progressText({ ...state.turn, comments: state.revision?.comments ?? [] });
-    }
+    bar.hidden = !state.turn && !state.queueNote;
+    if (bar.hidden) return;
+    bar.textContent = [
+      state.queueNote,
+      state.turn && progressText({ ...state.turn, comments: state.revision?.comments ?? [] }),
+    ]
+      .filter(Boolean)
+      .join(" ");
   }
   function startProgress(ref, startedAt) {
     state.turn = { ref, startedAt: startedAt ?? Date.now() };
@@ -571,6 +612,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     renderDraft();
     renderComments();
     renderLedger();
+    renderCandidates();
     renderDecisions();
     renderExternal();
     showProgress();
@@ -578,12 +620,113 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   }
 
   // ---- actions --------------------------------------------------------------
+  // Start the review turn of one comment. `release` (from onTurnStarted) ends
+  // the turn taken for it when the request fails.
+  // useSelection: send the paragraphs Preview prompt would show
+  // (promptParagraphs); Propose all sends none, a selection belongs to one
+  // comment.
+  async function proposeRef(ref, release, useSelection) {
+    state.reviewTurnOpen = true;
+    try {
+      const paragraphs = useSelection ? await promptParagraphs() : [];
+      // A fresh snapshot first: outside changes are caught before the turn
+      // (L4) and the new words of the turn are checked against it (L2).
+      await refresh();
+      const done = state.turnsDone;
+      const r = await ask("review_propose", { ref, paragraphs });
+      if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);
+      else if (state.turnsDone !== done) state.reviewTurnOpen = false; // its turn_done came first
+    } catch (e) {
+      state.reviewTurnOpen = false;
+      release?.();
+      throw e;
+    }
+  }
+
+  // ---- P15: Propose all -------------------------------------------------------
+  // A turn of the queue ends at its turn_done (after the reload and refresh
+  // that event starts), at a new connection (reload), or after TURN_WAIT_MS
+  // without either. turn_done says how the turn ended ({ ok, error }): a
+  // usage limit, a refusal, a stop or a crash ends the run, and so does a
+  // reload or refresh that fails after a turn that ran. The error event
+  // of the chat is not used: the daemon may send it after turn_done.
+  function waitTurn(ref) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(
+        () => endWait(ref, { ok: false, error: "No turn end after 30 minutes." }),
+        TURN_WAIT_MS,
+      );
+      timer.unref?.();
+      state.turnWaiters.set(ref, { resolve, timer });
+    });
+  }
+  function endWait(ref, result) {
+    const w = state.turnWaiters.get(ref);
+    if (!w) return;
+    state.turnWaiters.delete(ref);
+    clearTimeout(w.timer);
+    w.resolve(result);
+  }
+  function endAllWaits(error) {
+    for (const ref of [...state.turnWaiters.keys()]) endWait(ref, { ok: false, error });
+  }
+  const queue = createProposeQueue({
+    // The selection is not sent: it belongs to one comment, not to all.
+    async proposeOne(ref) {
+      if (isTurnInFlight()) return { ok: false, error: "Another turn is running." };
+      const release = onTurnStarted(`Review ${ref}: proposing changes (Propose all)...`);
+      const ended = waitTurn(ref); // before the request: turn_done may beat its answer
+      try {
+        await proposeRef(ref, release, false);
+      } catch (e) {
+        endWait(ref, { ok: false, error: e.message });
+      }
+      return ended;
+    },
+    onProgress({ index, total, ref }) {
+      state.queueNote = `Propose all: ${index + 1}/${total} ${ref}.`;
+      showProgress();
+    },
+  });
+  function showQueueButtons() {
+    $("review-propose-all").disabled = queue.running;
+    $("review-propose-stop").hidden = !queue.running;
+    for (const b of proposeButtons) b.disabled = isTurnInFlight() || queue.running;
+  }
+  // Not under guard(): the run outlasts many renders and keeps the message
+  // line of each refresh until its own summary.
+  $("review-propose-all").addEventListener("click", async () => {
+    if (queue.running || isTurnInFlight()) return;
+    const refs = queueRefs(state.revision);
+    if (!refs.length) return say("No open comment to propose changes for.", true);
+    const running = queue.run(refs);
+    showQueueButtons();
+    const r = await running;
+    state.queueNote = null;
+    const ok = r.done.filter((d) => d.ok).length;
+    const tail = `${ok} of ${refs.length} proposed.`;
+    const notCounted = r.done.at(-1)?.unchecked ? `${r.failed} is not counted: ` : "";
+    if (r.failed) say(`Propose all stopped at ${r.failed}: ${r.error} ${notCounted}${tail}`, true);
+    else if (r.stopped) say(`Propose all stopped before ${r.next}. ${tail}`);
+    else say(`Propose all: ${tail}`);
+    render();
+    showQueueButtons();
+  });
+  $("review-propose-stop").addEventListener("click", () => {
+    queue.stop();
+    say("Propose all stops after the comment that is running.");
+  });
+
   async function load() {
     const r = await ask("review_load");
     state.path = r.path;
   }
 
-  async function refresh() {
+  const refresh = () => refreshWith(say);
+  // report(text, bad): where the counts go. The message line for a refresh
+  // the author or a turn asked for, the small line for an automatic one.
+  // Returns the invariant report (review-view.js invariantReport).
+  async function refreshWith(report) {
     const snapshot = await word.collectReviewSnapshot();
     const r = await ask("review_refresh", { snapshot });
     // Word refuses Comment.resolved in a document in compatibility mode
@@ -602,7 +745,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     const outside = r.external?.length
       ? ` Outside changes: ${r.external.length} (list under Comments and changes).`
       : "";
-    say(
+    report(
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
         (inv.ok
@@ -614,6 +757,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
           : ""),
       !inv.ok,
     );
+    return inv; // turn_done: a mismatch ends a Propose all run
   }
 
   // L10: changed paragraphs only unless full.
@@ -641,6 +785,26 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     }
   }
 
+  // P15: the review text from a .txt or .md file instead of a paste. The
+  // file is read in the pane (File.text()); the daemon is not involved.
+  $("review-load-file").addEventListener("click", () => $("review-file-input").click());
+  $("review-file-input").addEventListener(
+    "change",
+    guard(async () => {
+      const input = $("review-file-input");
+      const f = input.files?.[0];
+      if (!f) return;
+      const r = reviewTextFromFile({
+        name: f.name,
+        size: f.size,
+        text: f.size > REVIEW_FILE_MAX_BYTES ? "" : await f.text(),
+      });
+      input.value = ""; // the same file can be picked again
+      if (!r.ok) throw new Error(r.error);
+      $("review-input").value = r.text;
+      say(`Loaded ${f.name}. Split into comments next.`);
+    }),
+  );
   $("review-split").addEventListener(
     "click",
     guard(async () => {
@@ -718,6 +882,65 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       $("ledger-pattern").value = "";
     }),
   );
+  // P15: the ledger as a JSON file. Export writes <stem>.ledger.json next to
+  // the manuscript (the daemon answers its path); Import adds the rules of a
+  // picked file that the ledger does not hold yet.
+  async function importLedger(doc) {
+    const r = await ask("ledger_import", { doc, mode: "append" });
+    say(`Added ${r.added} ledger rule(s), skipped ${r.skipped} already in the ledger.`);
+  }
+  $("ledger-export").addEventListener(
+    "click",
+    guard(async () => {
+      const r = await ask("ledger_export");
+      say(`Exported ${r.count} ledger rule(s) to ${r.path}`);
+    }),
+  );
+  $("ledger-import").addEventListener("click", () => $("ledger-file-input").click());
+  $("ledger-file-input").addEventListener(
+    "change",
+    guard(async () => {
+      const input = $("ledger-file-input");
+      const f = input.files?.[0];
+      if (!f) return;
+      const text = f.size > REVIEW_FILE_MAX_BYTES ? "" : await f.text();
+      input.value = "";
+      if (f.size > REVIEW_FILE_MAX_BYTES) throw new Error(`${f.name} is larger than 2 MB.`);
+      const r = ledgerImportFromJson(text);
+      if (!r.ok) throw new Error(r.error);
+      await importLedger(r.doc);
+    }),
+  );
+  // P15: rule candidates from the review text in the paste box. The daemon
+  // stores none of them; "Add selected" sends the ticked ones as an import.
+  $("ledger-suggest-review").addEventListener(
+    "click",
+    guard(async () => {
+      const r = await askJob("ledger_suggest", { text: $("review-input").value });
+      // A candidate from a cue in the text starts ticked; one only the model
+      // labelled waits for the author's tick.
+      state.candidates = r.candidates.map((c) => ({ ...c, picked: c.why !== "model label" }));
+      say(
+        `${r.candidates.length} candidate rule(s) by ${r.method}. Tick the ones to keep, then Add selected.` +
+          (r.warnings?.length ? ` ${r.warnings.join(" ")}` : ""),
+      );
+    }),
+  );
+  $("ledger-candidates-add").addEventListener(
+    "click",
+    guard(async () => {
+      const items = state.candidates.filter((c) => c.picked).map(candidateRule);
+      if (!items.length) throw new Error("Tick at least one candidate rule.");
+      await importLedger({ items });
+      state.candidates = [];
+    }),
+  );
+  $("ledger-candidates-clear").addEventListener(
+    "click",
+    guard(() => {
+      state.candidates = [];
+    }),
+  );
   // Tell the daemon which rationale comments the cleanup removed, so their
   // absence is not read as a reject or a missing comment (Codex review 7).
   async function markCleaned(ids) {
@@ -785,6 +1008,40 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     }),
   );
 
+  // ---- P15: automatic refresh ----------------------------------------------------
+  // After any turn of the pane and when the pane gets the focus back
+  // (auto-refresh.js). A review turn is left to its turn_done, which
+  // refreshes already. The result goes to the small line under the file
+  // name; the cards are rebuilt only when something changed, so a box the
+  // author is typing in keeps the focus.
+  const statusKey = () =>
+    JSON.stringify([state.revision?.comments, state.revision?.external, state.revision?.ledger]);
+  function autoNote(text, bad = false) {
+    const n = $("review-auto");
+    n.textContent = text;
+    n.classList.toggle("form-error", bad);
+  }
+  const auto = createAutoRefresh({
+    isBusy: () =>
+      isTurnInFlight() ||
+      queue.running ||
+      state.reviewTurnOpen ||
+      !state.revision?.comments?.length,
+    async run() {
+      const before = statusKey();
+      const at = new Date().toLocaleTimeString();
+      await refreshWith((text, bad) => autoNote(`Auto-refreshed ${at}: ${text}`, bad));
+      if (statusKey() !== before) render();
+    },
+    onError: (e) => autoNote(`Auto-refresh failed: ${e?.message ?? e}`, true),
+  });
+  if (typeof window !== "undefined") {
+    window.addEventListener?.("focus", () => auto.trigger("focus"));
+  }
+  document.addEventListener?.("visibilitychange", () => {
+    if (!document.hidden) auto.trigger("focus");
+  });
+
   render(); // loaded on "welcome" (taskpane.js calls reload once connected)
 
   return {
@@ -793,11 +1050,47 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         jobDone(msg);
       } else if (msg.event === "turn_done") {
         state.turnsDone += 1;
+        state.reviewTurnOpen = false;
         stopProgress();
+        // Propose all: the next comment may start only when this turn ran
+        // AND the reload and refresh after it worked AND the refresh found
+        // the recorded changes and the tool comments in Word to match. A
+        // turn that ran but whose state is not confirmed is not counted
+        // (unchecked) and ends the run; what it recorded is saved by the
+        // daemon.
+        const unchecked = (what) => {
+          const error = `The turn for ${msg.ref} ran and its record is saved, but ${what}`;
+          say(error, true);
+          return { ok: false, unchecked: true, error };
+        };
+        const failed =
+          msg.ok === false
+            ? { ok: false, error: msg.error || "The turn ended with an error." }
+            : null;
         load()
           .then(refresh)
-          .catch((e) => say(e.message, true))
-          .finally(render);
+          .then(
+            (inv) => {
+              if (failed) return failed;
+              if (inv.ok) return { ok: true };
+              return unchecked(
+                `the changes on record and the tool comments in Word do not match (missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"}); check those in Word, then press Refresh status.`,
+              );
+            },
+            (e) => {
+              if (failed) {
+                say(e.message, true);
+                return failed;
+              }
+              return unchecked(
+                `the status check after it failed (${e.message}); press Refresh status to check again.`,
+              );
+            },
+          )
+          .then((result) => {
+            render();
+            endWait(msg.ref, result);
+          });
       } else if (msg.event === "late_result_recorded") {
         // A tracked edit that timed out was applied after all and is now recorded.
         say(`${msg.ref}: an edit that timed out was applied; recorded as ${msg.change_id}.`);
@@ -830,12 +1123,21 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     },
     // Any turn of the pane (chat or review) started or ended.
     setTurnBusy(busy) {
-      for (const b of proposeButtons) b.disabled = busy;
+      for (const b of proposeButtons) b.disabled = busy || queue.running;
     },
+    // Any turn of the pane ended (taskpane.js, TURN_END_EVENTS).
+    onAnyTurnEnded: () => auto.trigger("turn"),
     // A new connection (welcome) means no turn of this pane is running any
     // more: a daemon restart never sends turn_done, so clear the progress line.
-    // Jobs of the old connection are ended with an error first.
+    // Jobs of the old connection are ended with an error first, and so is a
+    // "Propose all" run waiting for its turn.
     reload: () =>
-      (dropJobs(), stopProgress(), load()).catch((e) => say(e.message, true)).finally(render),
+      (dropJobs(),
+      endAllWaits(CONNECTION_LOST),
+      (state.reviewTurnOpen = false),
+      stopProgress(),
+      load())
+        .catch((e) => say(e.message, true))
+        .finally(render),
   };
 }

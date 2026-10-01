@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n  user (/home/user/.codex/config.toml): `features.child_agents_md` is ignored."}}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n  user (/home/user/.codex/config.toml): `features.child_agents_md` is ignored."}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"NONE"}}
+{"type":"item.started","item":{"id":"item_3","type":"mcp_tool_call","server":"office","tool":"office_tracked_edit","arguments":{"comment_ref":"R1.1","find":"30 degrees","replace":"30 °C","rationale":{"what":"unit","why":"reviewer asked","addresses":"R1.1 unit"}},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"mcp_tool_call","server":"office","tool":"office_tracked_edit","arguments":{"comment_ref":"R1.1","find":"30 degrees","replace":"30 °C","rationale":{"what":"unit","why":"reviewer asked","addresses":"R1.1 unit"}},"result":null,"error":{"message":"MCP tool call requires approval, but approval policy is never"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"실행 불가: `office_read_paragraphs` 도구가 노출되지 않았고, `office_tracked_edit` 호출은 승인 필요 상태라 현재 승인 정책에서 차단되었습니다."}}
+{"type":"turn.completed","usage":{"input_tokens":163259,"cached_input_tokens":103296,"cache_write_input_tokens":0,"output_tokens":676,"reasoning_output_tokens":467}}

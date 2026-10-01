@@ -1,0 +1,5 @@
+Fake review for software testing: a request that reads as a rule for the whole manuscript. It refers to tests/fixtures/review_manuscript.docx, an invented manuscript. No real study, journal, or person is involved.
+
+Reviewer #1: Comments to the Author
+
+Comment 1: Please do not use the term "cell-free extract" anywhere in the manuscript.

@@ -623,6 +623,52 @@ test("invariantReport: a change whose comment the cleanup removed expects no com
   assert.deepEqual([lost.ok, lost.missing_comment], [false, ["R1.6-2"]]);
 });
 
+test("review file: txt and md, BOM and CRLF removed, size and type checked", () => {
+  assert.deepEqual(view.reviewTextFromFile({ name: "r.txt", size: 10, text: "\uFEFFa\r\nb" }), {
+    ok: true,
+    text: "a\nb",
+  });
+  assert.equal(view.reviewTextFromFile({ name: "r.MD", size: 1, text: "x" }).ok, true);
+  assert.match(
+    view.reviewTextFromFile({ name: "r.docx", size: 1, text: "" }).error,
+    /\.txt or \.md/,
+  );
+  assert.match(view.reviewTextFromFile({ name: "r.txt", size: 3_000_000, text: "" }).error, /2 MB/);
+  assert.match(view.reviewTextFromFile({ name: "r.txt", size: 0, text: "  " }).error, /empty/);
+});
+
+test("ledger file: JSON with an items array, anything else is an error message", () => {
+  const item = { kind: "forbid", text: "no novel", check: { type: "llm" } };
+  const ok = view.ledgerImportFromJson(JSON.stringify({ note: "n", items: [item] }));
+  assert.deepEqual(ok, { ok: true, doc: { items: [item] }, count: 1 });
+  assert.match(view.ledgerImportFromJson("{ nope").error, /not JSON/);
+  assert.match(view.ledgerImportFromJson("[1]").error, /items/);
+  assert.match(view.ledgerImportFromJson('{"items":{}}').error, /items/);
+  assert.match(view.ledgerImportFromJson('{"items":[]}').error, /no items/);
+});
+
+test("ledger candidates: label says what the check does; the rule drops the candidate fields", () => {
+  const c = {
+    kind: "forbid",
+    text: 'Do not use "novel".',
+    scope: "manuscript",
+    check: { type: "regex", pattern: "novel", flags: "i", expect: "absent" },
+    why: "forbid cue",
+    sentence_index: 1,
+    picked: true,
+  };
+  assert.equal(view.candidateLabel(c), 'Forbidden, must not match /novel/i: Do not use "novel".');
+  assert.equal(
+    view.candidateLabel({ kind: "instruction", text: "Use SI units.", check: { type: "llm" } }),
+    "Instruction, LLM check: Use SI units.",
+  );
+  assert.match(
+    view.candidateLabel({ ...c, kind: "instruction", check: { ...c.check, expect: "present" } }),
+    /^Instruction, must keep \/novel\/i/,
+  );
+  assert.deepEqual(Object.keys(view.candidateRule(c)), ["kind", "text", "scope", "check"]);
+});
+
 // Codex review 16: which text of a paragraph is still a tracked change, run
 // by run, read from the paragraph OOXML the snapshot already fetches.
 test("trackedRuns lists the tracked insertions and deletions of the document part, with their place", () => {
