@@ -2415,3 +2415,51 @@ test("after a turn the line names the requests still open; the card shows the st
     await t.pane.reload();
   }
 });
+
+// The term a change took out is still in other paragraphs of the last
+// status refresh: the card of the comment says where.
+test("a comment card names the places where a term its changes took out is still present", async () => {
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "The claim is not supported.",
+        requirements: [],
+        status: "in_progress",
+        changes: [
+          {
+            id: "R1.1-1",
+            word_comment_id: "w1",
+            state: "pending",
+            kind: "replace",
+            find: "is essential for",
+            text: "was associated with",
+            narrowed_from: null,
+            before: "Gene A is essential for growth.",
+            after: "Gene A was associated with growth.",
+            rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+          },
+        ],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+    snapshot: {
+      taken_at: "2026-01-01T00:00:00Z",
+      paragraphs: [
+        "Gene A is essential.",
+        "Gene A was associated with growth.",
+        "An essential gene.",
+      ],
+      ids: null,
+    },
+  };
+  const t = await setup({ revision });
+  const lines = findAll(t.$("review-comments"), (n) => n.attributes.class === "review-residue").map(
+    (n) => n.textContent,
+  );
+  assert.deepEqual(lines, [
+    '"essential" (taken out by R1.1-1) is still present in 2 other places: p0, p2.',
+  ]);
+});
