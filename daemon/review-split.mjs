@@ -205,7 +205,8 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // the number as written; wherever the ref differs from it (Minor "1." as
 // R1.4, a second round, numbers after text of a section, editor items after
 // the letter) the marker stays at the start of the text, as pasted, so the
-// comment can be found in the letter.
+// comment can be found in the letter. For a combined head that is the whole
+// head ("Reviewer 1 Comment 1: ...").
 // When the numbers start again (a new section, or "1." after "3." with no
 // section head), the part goes on from the highest number so far, so
 // Major 1-3 and Minor 1-2 are R1.1 to R1.5. A head with no number (a line
@@ -255,7 +256,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
   const lines = sourceLines(text);
   let over;
   let blocks;
-  let forced; // line index -> comment number of a combined head
+  let forced; // line index -> { n, raw }: comment number and line of a combined head
   let gone; // line indexes dropped as boilerplate
   let rounds; // round labels taken off their lines
   const txt = (i) => fold(over[i]);
@@ -321,7 +322,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       const who = c && reviewerNumber(both[0]);
       if (who && /^\d+$/.test(both[1] ?? "") && COMBINED_REST.test(s.slice(c[0].length))) {
         over[i] = trimHead(line.slice(c[0].length)).trim();
-        forced.set(i, Number(both[1]));
+        forced.set(i, { n: Number(both[1]), raw: line });
         if (cur.headed && !cur.editor && cur.reviewer === who) cur.idx.push(i);
         else
           open({ reviewer: who, headed: true, numbered: true, combined: true, head: i, idx: [i] });
@@ -453,7 +454,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     idx.forEach((i, k) => {
       const s = txt(i);
       if (forced.has(i)) {
-        item = { n: forced.get(i), restart: false, idx: [i] };
+        item = { ...forced.get(i), restart: false, idx: [i] };
         items.push(item);
         last = i;
         gap = false;
