@@ -2675,3 +2675,21 @@ test("ledger_check: the retry of a malformed reply runs on the pinned provider o
     await t.cleanup();
   }
 });
+
+// The turn of one comment is told what the other comments of the review ask
+// and what is on record for them.
+test("review_preview and the turn carry the overview of the other comments", async () => {
+  const t = await setup();
+  await t.ask("review_save_comments", {
+    comments: [
+      { ref: "R1.1", reviewer: 1, text: "State the unit." },
+      { ref: "R1.2", reviewer: 1, text: "Name the antifoam agent." },
+    ],
+  });
+  const r = await t.ask("review_preview", { ref: "R1.1", paragraphs: [] });
+  assert.equal(r.ok, true, r.error);
+  assert.match(r.prompt, /\nOther comments of this review, for context/);
+  assert.match(r.prompt, /\n- R1\.2 \[no change on record\] "Name the antifoam agent\."\n/);
+  assert.equal(/\n- R1\.1 \[/.test(r.prompt), false, "not the comment of the turn itself");
+  await t.cleanup();
+});
