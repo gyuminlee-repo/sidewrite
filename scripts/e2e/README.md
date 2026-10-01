@@ -121,7 +121,7 @@ no daemon, no port and no task pane.
 node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
 ```
 
-- For 89 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
+- For 98 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
   pair covers: `PAIRS` in `marked-diff-word-lib.mjs`) it writes the baseline and
   the clean document under `<base-dir>/mdw-<time>/pairs/<nn>/` and runs the tool
   in both modes.
@@ -131,7 +131,7 @@ node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
   without dialogs. The track-changes output is opened twice: once for
   `Revisions.AcceptAll()`, once for `Revisions.RejectAll()`. The structure is
   read each time (the text of every paragraph, how many pictures and fields
-  it holds and the code and result of each field, every table with its rows,
+  it holds, the code and result of each field and the text of each equation, every table with its rows,
   columns, cell texts, whether cells are merged (`Table.Uniform`) and where
   each cell stands, every bookmark with its text, and the number of
   comments, footnotes and endnotes) and the document is
@@ -163,8 +163,8 @@ node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
 
 ### How Word writes a tracked change of an equation
 
-The tool refuses an equation that is new, gone or changed, because the
-notation is not confirmed. `word-math-probe.mjs` lets Word show it:
+The tool marks an equation that is new or gone the way Word does. That
+notation was read from Word with `word-math-probe.mjs`:
 
 ```
 node scripts/e2e/word-math-probe.mjs --base-dir /mnt/d/some/folder

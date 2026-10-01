@@ -3,12 +3,14 @@
 // how one pair is judged. No Word, no files.
 //
 // A structure is what marked-diff-word.ps1 reads from an open document:
-// { paragraphs: [text], inline: [n], fields: [n], codes: [text],
+// { paragraphs: [text], inline: [n], fields: [n], codes: [text], maths: [text],
 //   tables: [{ rows, columns, uniform, cells: [text], at: ["row,column"] }],
 //   bookmarks: [{ name, text }], comments, footnotes, endnotes }. inline
 // and fields are, for every paragraph, the number of its inline shapes
 // (pictures, objects) and of its fields; codes is, for every paragraph, the
-// code and the result of each of its fields (code, U+001F, result, U+001E).
+// code and the result of each of its fields (code, U+001F, result, U+001E);
+// maths is, for every paragraph, the text of each of its equations (text,
+// U+001E).
 // comments, footnotes and endnotes are counts of the whole document. uniform is Word's Table.Uniform (false when cells are merged), at
 // the row and column index of every cell: a cell that was merged into the
 // one above it is not there. The texts are Word's own (Range.Text), so
@@ -59,6 +61,7 @@ export const KINDS = [
   "simple-field",
   "wrapper",
   "link-paragraph",
+  "equation",
 ];
 
 // The pairs, by their name in tests/marked_diff_corpus.py, with the kinds each
@@ -144,15 +147,24 @@ export const PAIRS = [
   ["a word changed in a paragraph with a smartTag wrapper", ["wrapper"]],
   ["a paragraph with a smartTag wrapper added", ["wrapper", "paragraph-added"]],
   ["a smartTag wrapper only in the baseline, the paragraph changed", ["wrapper"]],
-  ["a word changed in a paragraph with a dir wrapper", ["wrapper"]],
-  ["a paragraph with a dir wrapper added", ["wrapper", "paragraph-added"]],
-  ["a paragraph with a dir wrapper deleted", ["wrapper", "paragraph-deleted"]],
-  ["a word changed in a paragraph with a bdo wrapper", ["wrapper"]],
-  ["a paragraph with a bdo wrapper added", ["wrapper", "paragraph-added"]],
-  ["a bdo wrapper only in the baseline, the paragraph changed", ["wrapper"]],
   ["a paragraph with a link added", ["link-paragraph", "paragraph-added"]],
   ["a paragraph with a link deleted", ["link-paragraph", "paragraph-deleted"]],
   ["a link reworded", ["link"]],
+  ["a link added to a paragraph", ["link"]],
+  ["a web link in a changed paragraph", ["link"]],
+  ["a web link reworded", ["link"]],
+  ["a web link added to a paragraph", ["link"]],
+  ["a web link taken out of a paragraph", ["link"]],
+  ["a paragraph with a web link added", ["link-paragraph", "paragraph-added"]],
+  ["a paragraph with a web link deleted", ["link-paragraph", "paragraph-deleted"]],
+  ["an equation changed", ["equation"]],
+  ["an equation added to a paragraph", ["equation"]],
+  ["an equation taken out of a paragraph", ["equation"]],
+  ["a paragraph with an equation added", ["equation", "paragraph-added"]],
+  ["a paragraph with an equation deleted", ["equation", "paragraph-deleted"]],
+  ["a power changed", ["equation"]],
+  ["a paragraph with a power added", ["equation", "paragraph-added"]],
+  ["a paragraph with a power deleted", ["equation", "paragraph-deleted"]],
 ].map(([name, covers]) => ({ name, covers }));
 
 // Kinds of KINDS that no pair covers.
@@ -210,6 +222,8 @@ export function compareStructure(got, want, { bookmarks = true, comments = true 
   }
   const codes = firstTextDifference("paragraph fields", got.codes ?? [], want.codes ?? []);
   if (codes) return codes;
+  const maths = firstTextDifference("paragraph equations", got.maths ?? [], want.maths ?? []);
+  if (maths) return maths;
   for (const key of ["footnotes", "endnotes", ...(comments ? ["comments"] : [])]) {
     if ((got[key] ?? 0) !== (want[key] ?? 0)) {
       return `${key}: expected ${want[key] ?? 0}, got ${got[key] ?? 0}`;

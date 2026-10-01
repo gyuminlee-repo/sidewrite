@@ -34,6 +34,7 @@ function Shape($doc) {
   $inline = @()
   $fields = @()
   $codes = @()
+  $maths = @()
   foreach ($x in $doc.Paragraphs) {
     $paras += [string]$x.Range.Text
     $inline += [int]$x.Range.InlineShapes.Count
@@ -42,6 +43,10 @@ function Shape($doc) {
     $code = ""
     foreach ($f in $x.Range.Fields) { $code += [string]$f.Code.Text + [char]31 + [string]$f.Result.Text + [char]30 }
     $codes += $code
+    # text, U+001E for every equation of the paragraph
+    $math = ""
+    foreach ($o in $x.Range.OMaths) { $math += [string]$o.Range.Text + [char]30 }
+    $maths += $math
   }
   $tables = @()
   foreach ($t in $doc.Tables) {
@@ -58,7 +63,8 @@ function Shape($doc) {
   $marks = @()
   foreach ($b in $doc.Bookmarks) { $marks += [ordered]@{ name = [string]$b.Name; text = [string]$b.Range.Text } }
   return [ordered]@{
-    paragraphs = $paras; inline = $inline; fields = $fields; codes = $codes; tables = $tables; bookmarks = $marks
+    paragraphs = $paras; inline = $inline; fields = $fields; codes = $codes; maths = $maths
+    tables = $tables; bookmarks = $marks
     comments = [int]$doc.Comments.Count; footnotes = [int]$doc.Footnotes.Count; endnotes = [int]$doc.Endnotes.Count
   }
 }

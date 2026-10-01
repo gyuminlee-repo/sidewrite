@@ -46,7 +46,12 @@ const good = () => ({
 
 test("the selection is fixed, 30 to 100 pairs, and covers every kind of change", () => {
   assert.ok(PAIRS.length >= 30 && PAIRS.length <= 100, String(PAIRS.length));
-  for (const k of ["wrapper", "link-paragraph"]) assert.ok(KINDS.includes(k), k);
+  for (const k of ["wrapper", "link-paragraph", "equation"]) assert.ok(KINDS.includes(k), k);
+  // Direction wrappers are refused where they come or go; no pair of the list has one.
+  assert.deepEqual(
+    PAIRS.filter((p) => / (dir|bdo) wrapper/.test(p.name)),
+    [],
+  );
   for (const k of [
     "cell-merge",
     "picture",
@@ -212,6 +217,15 @@ test("paragraphs are compared by the code and the result of their fields", () =>
   assert.equal(
     compareStructure({ ...shape(["One.\r"]), fields: [1] }, { ...shape(["One.\r"]), fields: [1] }),
     null,
+  );
+});
+
+test("paragraphs are compared by the text of their equations", () => {
+  const p = (...maths) => ({ ...shape(["One.\r", "Two.\r"]), maths });
+  assert.equal(compareStructure(p("", "x+y\u001e"), p("", "x+y\u001e")), null);
+  assert.equal(
+    compareStructure(p("", ""), p("", "x+y\u001e")),
+    'paragraph equations 2: expected len 4, got len 0, first difference at 0: expected "x+y\\u001e", got ""',
   );
 });
 
