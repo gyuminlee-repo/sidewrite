@@ -72,15 +72,39 @@ test("judgments and review turns wait for the pane's confirmed provider; hello s
   assert.match(code, /selection\.restore\(\s*key,/);
 });
 
-test("set_model: the list as it was before the wait decides whether a running session follows", () => {
+test("set_model: the model the session runs on, read after the wait, decides whether it restarts", () => {
   const at = code.indexOf("set_model: async");
-  const body = code.slice(at, at + 1200);
-  assert.match(body, /const before = modelCache\.current\(\);/);
-  assert.ok(body.indexOf("modelCache.current()") < body.indexOf("await modelCache.get()"));
+  const body = code.slice(at, at + 1400);
+  // The session's own model, read once the list is known.
+  assert.match(body, /const after = await modelCache\.get\(\);/);
+  assert.match(body, /running: sessionFor\(key\)\?\.model \?\? null/);
+  assert.ok(body.indexOf("await modelCache.get()") < body.indexOf("sessionFor(key)?.model"));
+  assert.match(body, /if \(restart\)/);
+  assert.equal(/modelCache\.current\(\)/.test(body), false, "no guess from the list as it was");
+  // The restart that corrects the stored model on the first connection keeps
+  // a first message that is still waiting; a choice made later does not.
   assert.match(
     body,
-    /modelChange\(\{\s*prev,\s*requested,\s*before,\s*after: await modelCache\.get\(\),?\s*\}\)/,
+    /restartSession\(key, host, \{\s*reason: "model_changed",\s*keepQueued: prev === undefined,?\s*\}\)/,
   );
-  assert.match(body, /if \(restart\)/);
-  assert.equal(/prev !== undefined && prev !== model/.test(body), false);
+  // The session records the model it is started on, where query() gets it.
+  assert.match(code, /session\.model = modelArgFor\(key\);/);
+  assert.match(code, /model: session\.model,/);
+  // Its definition, the session start and getModel: query() reads it nowhere else.
+  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 3);
+});
+
+test("a restart that keeps waiting input does not drop it or end its turn", () => {
+  assert.match(code, /q\.latest = \{[^}]*keepQueued[^}]*\}/);
+  assert.match(code, /keepQueued: req\.keepQueued/);
+  const at = code.indexOf("async function startSessionForFolder");
+  const body = code.slice(at, at + 900);
+  assert.match(body, /const kept = bridge\.clearUserMessages\(key, \{ keepQueued \}\);/);
+  // A message still waiting belongs to the next session: its turn is not over.
+  assert.match(
+    body,
+    /if \(!kept\) endTurnState\(key, \{ ok: false, error: "The session was restarted\." \}\);/,
+  );
+  const restart = code.slice(code.indexOf("async function restartSession"));
+  assert.match(restart.slice(0, 700), /\{ replay: false, keepQueued \}/);
 });
