@@ -436,3 +436,58 @@ test("LLM check: violations outrank unsure in status; a malformed unsure list is
     assert.match(r.error, why, JSON.stringify(json));
   }
 });
+
+// Codex review 9: a paragraph the model put under both violations and
+// unsure is unsure (it is read again next time). A paragraph read again
+// keeps only what the new check says: an old violation does not survive it.
+test("LLM check: a paragraph in violations and unsure is unsure; a recheck drops its old violation", async () => {
+  const both = async () => ({
+    ok: true,
+    json: {
+      violations: [{ paragraph_index: 5, quote: "in vitro", reason: "r" }],
+      unsure: [{ paragraph_index: 5, reason: "cannot tell" }],
+    },
+  });
+  const decisions = [];
+  const r = await checkLlmItem(LLM_ITEM, PARAS, {
+    oneshot: both,
+    onDecision: (d) => decisions.push(d),
+  });
+  assert.deepEqual([r.status, r.violations, r.unsure.length], ["unsure", [], 1]);
+  assert.equal(decisions.find((d) => d.paragraph_index === 5).verdict, "unsure");
+
+  const [first] = await checkLedgerIncremental([LLM_ITEM], PARAS, { oneshot: both });
+  assert.deepEqual([first.status, first.violations], ["unsure", []]);
+  assert.equal(first.checked_hashes.length, PARAS.length - 1, "the unsure paragraph is not stored");
+
+  // Codex reproduction: the stored item holds a violation for the paragraph
+  // it also left unchecked (as the old code stored it). The recheck finds
+  // nothing there, so the old violation must go and the hash is stored.
+  const stored = {
+    ...asStored(LLM_ITEM, first),
+    status: "violations",
+    violations: [
+      { paragraph_index: 5, start: null, match: "in vitro", reason: "r", h: first.unsure[0].h },
+    ],
+    unsure: first.unsure,
+  };
+  const prompts = [];
+  const quiet = async (req) => {
+    prompts.push(req);
+    return { ok: true, json: { violations: [], unsure: [] } };
+  };
+  const [next] = await checkLedgerIncremental([stored], PARAS, { oneshot: quiet });
+  assert.equal(next.mode, "incremental");
+  assert.match(prompts[0].prompt, /\[5\] /);
+  assert.deepEqual([next.status, next.violations, next.unsure], ["ok", [], []]);
+  assert.equal(next.checked_hashes.length, PARAS.length);
+
+  // A paragraph skipped by the cache keeps its violation.
+  const keepItem = {
+    ...stored,
+    checked_hashes: next.checked_hashes,
+    violations: [{ ...stored.violations[0] }],
+  };
+  const [kept] = await checkLedgerIncremental([keepItem], PARAS, { oneshot: quiet });
+  assert.deepEqual([kept.checked, kept.violations.map((v) => v.paragraph_index)], [0, [5]]);
+});
