@@ -153,9 +153,32 @@ node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
   folder, exit code 0 only when every pair passed and the Word of the run is
   gone.
 
-| File                         | Runs on | Does                                                                                    |
-| ---------------------------- | ------- | --------------------------------------------------------------------------------------- |
-| `marked-diff-word-check.mjs` | WSL     | the whole check                                                                         |
-| `marked-diff-word-lib.mjs`   | WSL     | the pairs, the comparison, the verdict (tests: `tests/marked-diff-word-check.test.mjs`) |
-| `marked_diff_pairs.py`       | WSL     | the docx pairs from the corpus                                                          |
-| `marked-diff-word.ps1`       | Windows | Word: open, accept or reject all, read the structure, close without saving, quit        |
+| File                         | Runs on | Does                                                                                             |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `marked-diff-word-check.mjs` | WSL     | the whole check                                                                                  |
+| `marked-diff-word-lib.mjs`   | WSL     | the pairs, the comparison, the verdict (tests: `tests/marked-diff-word-check.test.mjs`)          |
+| `marked_diff_pairs.py`       | WSL     | the docx pairs from the corpus                                                                   |
+| `marked-diff-word.ps1`       | Windows | Word: open, accept or reject all, read the structure, close without saving, quit                 |
+| `word-own.ps1`               | Windows | the Word of the run's own: start, ownership check, quit (dot-sourced by the two below and above) |
+
+### How Word writes a tracked change of an equation
+
+The tool refuses an equation that is new, gone or changed, because the
+notation is not confirmed. `word-math-probe.mjs` lets Word show it:
+
+```
+node scripts/e2e/word-math-probe.mjs --base-dir /mnt/d/some/folder
+```
+
+In a Word process of its own (the rules of `word-own.ps1`),
+`word-math-probe.ps1` makes `base.docx` under `<base-dir>/wmp-<time>/` (five
+paragraphs, four with an equation), then `revised.docx` with Track Changes on:
+an equation deleted and another inserted, a word changed next to an equation,
+a paragraph with an equation deleted, a paragraph with an equation added, one
+character changed inside an equation. The `word/document.xml` of both files is
+written next to them and summarised: for every paragraph with an equation or a
+change mark, what stands in what, and where the change marks stand (around
+`m:oMath`, inside it, in a `w:rPr`, in `m:ctrlPr`, in the paragraph mark).
+Exit code 0 when Word made both files, all five changes ran and the Word of
+the run is gone. The summary is `mathSummary` and `markRelations` in
+`word-math-probe-lib.mjs` (tests: `tests/word-math-probe.test.mjs`).
