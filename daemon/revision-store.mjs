@@ -330,7 +330,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
 }
 
 // Put a comment back so a change or blocked edit can be recorded under it
-// when the comment was removed anyway. from: { reviewer, text, requirements }
+// when the comment was removed anyway. from: { reviewer, text, section, requirements }
 // the daemon still holds, or null for the ref alone.
 export function restoreComment(rev, ref, from = null) {
   const m = /^(?:R(\d+)|E)\.\d+$/.exec(ref);
@@ -341,6 +341,7 @@ export function restoreComment(rev, ref, from = null) {
       ref,
       reviewer: from?.reviewer ?? (m[1] ? Number(m[1]) : 0),
       text: from?.text ?? "",
+      ...(from?.section && { section: from.section }),
       requirements: clone(from?.requirements ?? []),
       status: "in_progress",
     }),

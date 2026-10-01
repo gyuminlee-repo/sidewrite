@@ -471,6 +471,7 @@ export function createReviewService({
         hold(key, msg.ref, {
           reviewer: comment.reviewer,
           text: comment.text,
+          section: comment.section,
           requirements: comment.requirements,
         }),
       );
