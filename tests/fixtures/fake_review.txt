@@ -1,0 +1,13 @@
+Fake review for software testing. It refers to tests/fixtures/review_manuscript.docx, an invented manuscript. No real study, journal, or person is involved.
+
+Reviewer #1: Comments to the Author
+
+Comment 1: In Materials and Methods the incubation temperature is given as "30 degrees". Please state the unit as degrees Celsius.
+
+Comment 2: The Methods paragraph that describes how the extract was prepared calls it a "cell-free extract", but centrifugation alone does not remove every cell. Please call it a "clarified lysate" in that paragraph.
+
+Comment 3: In the first paragraph of section 3, please state how growth was followed (the Methods say optical density was read at 600 nm), and describe the synthetic carbon source as a novel substrate.
+
+Comment 4: The sentence in the Introduction about where the flasks came from is not needed. Please delete it.
+
+Comment 5: Foaming is common in shaken flasks. In Materials and Methods, please name the antifoam agent that was used and its concentration.

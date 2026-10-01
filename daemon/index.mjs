@@ -19,6 +19,14 @@ import { readTranscript } from "./transcript.mjs";
 import { diag } from "./diag.mjs";
 import { getContextEntries, setContextEntries } from "./context.mjs";
 import {
+  detectUsageLimit,
+  turnCompleteEvents,
+  emptyTurnStats,
+  noteMessage,
+} from "./limit-detect.mjs";
+import { createReviewService } from "./review-service.mjs";
+import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
+import {
   buildQueryOptions,
   formatUsageLine,
   resolveSettingSources,
@@ -276,6 +284,13 @@ const workspaceByKey = new Map();
 // Panes whose workspace the user set explicitly (Change workspace). Their
 // workspace must NOT be re-derived from the document folder on reconnect.
 const explicitWorkspaceKeys = new Set();
+// Panes with a turn in flight (a user_message or a review turn was queued
+// and no result/stop/stream end has come back yet). A review turn is only
+// started on an idle pane, so the SDK cannot fold it into a running turn.
+const turnBusy = new Set();
+// paneKey -> { ref } while a Review-tab turn runs. office-tools.mjs reads it
+// to refuse every document writer except office_tracked_edit.
+const reviewTurnByKey = new Map();
 // Per-pane sticky model choice (set by the taskpane composer). The SDK
 // model is fixed per agent loop, so a change while a loop is live triggers
 // a resuming restart (see the set_model handler).
@@ -492,6 +507,43 @@ async function ensureLoopForMessage(key, host) {
 }
 
 // ---------------------------------------------------------------------------
+// Review tab (C1/C3). Lambdas reach `bridge` lazily: it is created below.
+// ---------------------------------------------------------------------------
+const review = createReviewService({
+  getContext: (key) => bridge.getContext(key),
+  callTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key),
+  pushTurn: (key, host, text, turn) => {
+    if (turnBusy.has(key)) {
+      throw new Error(
+        "The agent is still working on the previous message. Wait until it is Ready.",
+      );
+    }
+    turnBusy.add(key);
+    reviewTurnByKey.set(key, turn);
+    // Same order as the user_message path in the bridge: schedule the loop,
+    // then queue the message it will consume.
+    ensureLoopForMessage(key, host).catch((e) =>
+      console.warn("[review] could not start the agent loop:", e.message),
+    );
+    bridge.pushUserMessage(text, key);
+  },
+  oneshot: makeOneshot(),
+  oneshotModel: ONESHOT_MODEL,
+  getModel: (key) => modelArgFor(key),
+  sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
+});
+
+// Clear per-turn state when a turn ends for any reason.
+function endTurnState(key) {
+  turnBusy.delete(key);
+  const turn = reviewTurnByKey.get(key);
+  if (turn) {
+    reviewTurnByKey.delete(key);
+    review.turnEnded(key, turn);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket bridge.
 // ---------------------------------------------------------------------------
 const bridge = createBridge({
@@ -499,9 +551,15 @@ const bridge = createBridge({
   token: BRIDGE_TOKEN,
   allowedOrigins: [HTTP_ORIGIN],
   onHello: (key, host, doc) => onPaneConnect(key, host, doc),
-  onUserMessage: (key, host) => ensureLoopForMessage(key, host),
+  onUserMessage: (key, host) => {
+    turnBusy.add(key);
+    return ensureLoopForMessage(key, host);
+  },
   onClose: (key) => onPaneClose(key),
+  // A tracked edit answered after its timeout or disconnect: record it.
+  onLateToolResult: (e) => review.lateToolResult(e.key, e),
   extraHandlers: {
+    ...review.handlers,
     pick_path: async (msg, reply) => {
       try {
         const result = await pickPathFromMain({
@@ -990,6 +1048,7 @@ async function startSessionForFolder(
   if (prior) {
     prior.abortController.abort();
     bridge.clearUserMessages(key);
+    endTurnState(key);
   }
 
   const abortController = new AbortController();
@@ -1007,7 +1066,10 @@ async function startSessionForFolder(
   // Register only this host's tool family, routed to THIS pane. A session
   // is created lazily on the first user message (onUserMessage →
   // ensureLoopForMessage), so `host` is normally "word" or "excel".
-  const officeMcp = createOfficeBridgeMcp(bridge, host, key);
+  const officeMcp = createOfficeBridgeMcp(bridge, host, key, {
+    getReviewTurn: () => reviewTurnByKey.get(key) ?? null,
+    trackedEdit: review.trackedEditDeps(key),
+  });
 
   await touchFolder(cwd);
   console.log(
@@ -1078,6 +1140,12 @@ async function startSessionForFolder(
       })) {
         if (sessionFor(key) !== session) break; // this pane's loop was restarted
         if (msg.type === "result") sawResult = true;
+        const limit = detectUsageLimit(msg);
+        if (limit.limited && !session.usageLimit) {
+          session.usageLimit = limit;
+          console.log(`[agent] ${limit.kind} detected (${limit.reason})`);
+        }
+        noteMessage((session.turnStats ??= emptyTurnStats()), msg);
         handleAgentMessage(msg, session);
       }
       // A turn that produced a `result` means the loop is healthy again —
@@ -1093,6 +1161,7 @@ async function startSessionForFolder(
           ? `Claude usage limit reached. ${rateLimitHint}`
           : "The agent stopped unexpectedly — this is usually a Claude usage limit. Wait for your limit to reset, or set ANTHROPIC_API_KEY to use an API key.";
         bridge.sendAssistantEvent({ event: "turn_complete", subtype: "stream_ended" }, key);
+        endTurnState(key);
         const { key: rkey, cwd: rcwd, sessionId: rsid, host: rhost } = session;
         if (allowFailureRestart(key)) {
           bridge.sendAssistantEvent({ event: "error", error: friendly }, key);
@@ -1127,6 +1196,7 @@ async function startSessionForFolder(
         // startSessionForFolder then builds cleanly.
         if (sessionFor(key) === session && session.interrupted) {
           bridge.sendAssistantEvent({ event: "turn_complete", interrupted: true }, key);
+          endTurnState(key);
           const { key: rkey, cwd: rcwd, sessionId: rsid, host: rhost } = session;
           scheduleSessionStart(rcwd, rsid, rkey, rhost, "post-stop");
         }
@@ -1146,6 +1216,7 @@ async function startSessionForFolder(
         } else {
           bridge.sendAssistantEvent({ event: "error", error: msgText }, key);
         }
+        endTurnState(key);
       }
     } finally {
       session.settled = true;
@@ -1254,8 +1325,16 @@ function handleAgentMessage(msg, session) {
       break;
     }
     case "result": {
+      // A usage limit, a refusal, an API error or an empty turn can arrive as
+      // subtype "success"; turnCompleteEvents turns those into
+      // usage_limit / refusal / api_error / empty + error.
+      const events = turnCompleteEvents(msg, session?.usageLimit ?? null, session?.turnStats);
+      if (session) {
+        session.usageLimit = null;
+        session.turnStats = null;
+      }
       console.log(
-        `[agent] turn complete (${msg.subtype}) slash=${!!session?.slashCommandPending} output=${!!session?.turnProducedOutput}`,
+        `[agent] turn complete (${events[0].subtype}) slash=${!!session?.slashCommandPending} output=${!!session?.turnProducedOutput}`,
       );
       console.log(formatUsageLine(msg.usage));
       // A slash command that emitted neither assistant text nor a tool call
@@ -1276,7 +1355,8 @@ function handleAgentMessage(msg, session) {
         session.slashCommandPending = false;
         session.turnProducedOutput = false;
       }
-      bridge.sendAssistantEvent({ event: "turn_complete", subtype: msg.subtype }, session?.key);
+      for (const ev of events) bridge.sendAssistantEvent(ev, session?.key);
+      if (session?.key) endTurnState(session.key);
       break;
     }
     case "user": {

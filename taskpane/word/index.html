@@ -40,6 +40,7 @@
 
     <nav class="tabs">
       <button class="tab" data-tab="chat" aria-current="page">Chat</button>
+      <button class="tab" data-tab="review">Review</button>
       <button class="tab" data-tab="library">Presets</button>
       <button class="tab" data-tab="setup">Setup</button>
     </nav>
@@ -89,6 +90,97 @@
         Click a preset to use it. Pinned presets appear as chips above the chat input.
       </div>
       <div class="library-list" id="library-list"></div>
+    </section>
+
+    <!-- Review tab content (C1 review response, C3 instruction ledger) -->
+    <section class="tab-content" data-tab="review" hidden>
+      <div class="setup-content" id="review-root">
+        <div id="review-message" hidden></div>
+        <small id="review-file"></small>
+        <div id="review-progress" class="review-progress" hidden></div>
+
+        <div class="setup-section">
+          <h3>Waiting for you</h3>
+          <div id="review-decisions" class="review-decisions"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>1. Reviewer comments</h3>
+          <textarea id="review-input" rows="6" placeholder="Paste the full review here"></textarea>
+          <button type="button" class="btn-primary btn-small" id="review-split">
+            Split into comments
+          </button>
+          <div id="review-draft"></div>
+          <div id="review-draft-actions" hidden>
+            <button type="button" class="btn-primary btn-small" id="review-save">
+              Save comment list
+            </button>
+          </div>
+        </div>
+
+        <div class="setup-section">
+          <h3>2. Comments and changes</h3>
+          <label class="setting-row">
+            <input type="checkbox" id="review-use-selection" />
+            <div class="setting-text">Send the selected paragraphs with "Propose changes"</div>
+          </label>
+          <button type="button" class="btn-secondary btn-small" id="review-refresh">
+            Refresh status
+          </button>
+          <div id="review-comments"></div>
+          <pre id="review-preview" class="review-preview" hidden></pre>
+          <h4>Changes made outside the tool</h4>
+          <div id="review-external"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>3. Instruction ledger</h3>
+          <div class="review-ledger-form">
+            <select id="ledger-kind" class="setting-select">
+              <option value="instruction">Instruction</option>
+              <option value="forbid">Forbidden</option>
+            </select>
+            <select id="ledger-scope" class="setting-select">
+              <option value="manuscript">Manuscript</option>
+              <option value="response">Response letter</option>
+              <option value="supplement">Supplement</option>
+            </select>
+            <input type="text" id="ledger-text" placeholder="Instruction, as you would say it" />
+            <button type="button" class="btn-secondary btn-small" id="ledger-suggest">
+              Draft check from text
+            </button>
+            <select id="ledger-check-type" class="setting-select">
+              <option value="regex">Regex check</option>
+              <option value="llm">LLM check</option>
+            </select>
+            <input type="text" id="ledger-pattern" placeholder="Regex pattern" />
+            <input type="text" id="ledger-flags" placeholder="Flags (i, m, s, u)" value="i" />
+            <select id="ledger-expect" class="setting-select">
+              <option value="absent">Match = violation</option>
+              <option value="present">Must stay in the text</option>
+            </select>
+            <button type="button" class="btn-primary btn-small" id="review-ledger-add">Add</button>
+          </div>
+          <div id="review-ledger"></div>
+          <button type="button" class="btn-secondary btn-small" id="review-check-all">
+            Check all (changed paragraphs)
+          </button>
+          <button type="button" class="btn-secondary btn-small" id="review-check-full">
+            Full check
+          </button>
+          <div id="review-violations"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>4. Before submission</h3>
+          <button type="button" class="btn-secondary btn-small" id="review-clean-tool">
+            Remove tool comments ([R...] only)
+          </button>
+          <button type="button" class="btn-secondary btn-small" id="review-delete-all">
+            Delete ALL comments...
+          </button>
+        </div>
+      </div>
     </section>
 
     <!-- Setup tab content -->

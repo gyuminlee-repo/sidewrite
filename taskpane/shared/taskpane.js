@@ -28,7 +28,18 @@ import {
   toolReplyToComment,
   toolResolveComment,
   toolHeaderFooter,
+  toolTrackedEdit,
+  collectReviewSnapshot,
+  selectionParagraphs,
+  selectCommentById,
+  selectParagraphByIndex,
+  readAllComments,
+  deleteBackedUpComments,
+  deleteToolComments,
 } from "./tools-word.js";
+import { initReviewPane } from "./review-pane.js";
+import { createTurnState } from "./turn-state.js";
+import { createResultQueue } from "./result-queue.js";
 import {
   toolExcelGetSelectedRange,
   toolExcelListSheets,
@@ -110,27 +121,22 @@ const $chipDetach = document.getElementById("selection-chip-detach");
 let assistantTurnElem = null;
 let attachSelection = true;
 
-// True while a user turn is mid-flight (we've sent user_message and are
-// waiting for turn_complete / error / auth_error). The composer is disabled
-// during this window so a second submit can't break turn ordering — without
-// the gate, appendUserMessage would reset assistantTurnElem and subsequent
-// streaming deltas would land in a new (wrong) bubble.
-let turnInFlight = false;
+let reviewPane = null; // Review tab controller (Word), set in Office.onReady
 
 function setComposerDisabled(disabled) {
   $send.disabled = disabled;
   $input.disabled = disabled;
 }
 
-function beginTurn() {
-  turnInFlight = true;
-  setComposerDisabled(true);
-}
-
-function endTurn() {
-  turnInFlight = false;
-  setComposerDisabled(false);
-}
+// turn.inFlight: true while a user turn is mid-flight (we've sent user_message and are
+// waiting for turn_complete / error / auth_error). The composer is disabled
+// during this window so a second submit can't break turn ordering — without
+// the gate, appendUserMessage would reset assistantTurnElem and subsequent
+// streaming deltas would land in a new (wrong) bubble.
+// turn-state.js also updates the Review tab buttons at every start and end.
+const turn = createTurnState({ setComposerDisabled, getReviewPane: () => reviewPane });
+const beginTurn = () => turn.begin();
+const endTurn = () => turn.end();
 
 // The connection status doubles as the live-model indicator. Horizontal
 // space in the topbar is tight (the workspace chip takes the rest), so when
@@ -264,6 +270,7 @@ const TOOL_STATUS_LABELS = {
   office_reply_to_comment: "Replying to a comment…",
   office_resolve_comment: "Resolving a comment…",
   office_header_footer: "Editing header/footer…",
+  office_tracked_edit: "Applying a tracked change with its rationale…",
   // Excel
   excel_get_selected_range: "Reading your selection…",
   excel_list_sheets: "Listing sheets…",
@@ -572,6 +579,7 @@ function wsConnect() {
   ws.onopen = () => {
     wsReady = true;
     sendHello();
+    for (const r of unsentResults.drain()) ws.send(JSON.stringify(r));
     // Record the sticky model for this pane key right after the hello
     // binds it, so the lazy first-message session start uses it.
     sendModel();
@@ -609,8 +617,14 @@ function wsConnect() {
   };
 }
 
+// A tool result made while the socket is down waits for the next
+// connection (result-queue.js); anything else is dropped as before.
+const unsentResults = createResultQueue();
 function wsSend(obj) {
-  if (!wsReady) return;
+  if (!wsReady) {
+    if (obj?.type === "tool_result") unsentResults.push(obj);
+    return;
+  }
   ws.send(JSON.stringify(obj));
 }
 
@@ -650,6 +664,7 @@ async function handleServerMessage(msg) {
       setConnectionStatus("ok", "Connected");
       setAgentStatus("idle", "Ready");
       refreshWorkspaceFromDaemon();
+      reviewPane?.reload();
       break;
 
     case "transcript_replay":
@@ -661,12 +676,13 @@ async function handleServerMessage(msg) {
       break;
 
     case "assistant_event":
+      // turn_complete, error and auth_error end the turn (turn-state.js).
+      turn.onAssistantEvent(msg);
       if (msg.event === "tool_use_announce") {
         appendToolUse(msg.tool, msg.input);
         setAgentStatus("working", statusForTool(msg.tool));
       } else if (msg.event === "turn_complete") {
         setAgentStatus("idle", msg.interrupted ? "Stopped" : "Ready");
-        endTurn();
       } else if (msg.event === "info") {
         appendNotice(msg.message);
       } else if (msg.event === "error") {
@@ -675,11 +691,9 @@ async function handleServerMessage(msg) {
         // user knows the turn ended on this error, not normally.
         appendError(msg.error || "The agent stopped without producing a result.");
         setAgentStatus("idle", "Stopped — see message");
-        endTurn();
       } else if (msg.event === "auth_error") {
         showAuthErrorBanner(msg.error);
         if (wsReady) setConnectionStatus("err", "Sign-in required");
-        endTurn();
       } else if (msg.event === "session_init") {
         appendEvent(`Session ${msg.session_id?.slice(0, 8)}… (${msg.model})`);
         // Authoritative: this is the model the SDK actually started with.
@@ -704,6 +718,10 @@ async function handleServerMessage(msg) {
       runOfficeTool(msg);
       break;
 
+    case "review_event":
+      reviewPane?.onEvent(msg);
+      break;
+
     case "pong":
       break;
 
@@ -725,7 +743,7 @@ async function handleServerMessage(msg) {
 const pendingRequests = new Map();
 const REQUEST_TIMEOUT_MS = 10_000;
 
-function sendRequest(type, payload = {}) {
+function sendRequest(type, payload = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     if (!wsReady) {
       reject(new Error("Not connected to daemon"));
@@ -739,7 +757,7 @@ function sendRequest(type, payload = {}) {
         pendingRequests.delete(request_id);
         reject(new Error(`Request "${type}" timed out`));
       }
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
   });
 }
 
@@ -865,6 +883,11 @@ async function runOfficeTool(msg) {
         break;
       case "office_header_footer":
         result = await toolHeaderFooter(args);
+        break;
+      // Review turns: always tracked, so NOT writeArgs() (a "never"
+      // track-changes setting must not turn tracking off for a review change).
+      case "office_tracked_edit":
+        result = await toolTrackedEdit(args || {});
         break;
       // ---- Excel ----
       case "excel_get_selected_range":
@@ -1000,7 +1023,7 @@ $composer.addEventListener("submit", (e) => {
   // Gate: refuse new submissions while a turn is still streaming. Without
   // this, appendUserMessage resets the assistant bubble pointer and the
   // remaining deltas of the prior turn would mis-order into a new bubble.
-  if (turnInFlight) return;
+  if (turn.inFlight) return;
   const text = $input.value.trim();
   if (!text) return;
   if (!wsReady) {
@@ -1096,6 +1119,35 @@ Office.onReady((info) => {
 
   // Initialize presets UI.
   initPresets();
+
+  // Review tab (Word only; the Excel page has no #review-root).
+  if (HOST === "word") {
+    reviewPane = initReviewPane({
+      sendRequest,
+      isTurnInFlight: () => turn.inFlight,
+      // Called before review_propose is sent; the returned release ends
+      // this turn if the request fails and no later turn has begun.
+      onTurnStarted: (note) => {
+        appendNotice(note);
+        const id = beginTurn();
+        setAgentStatus("working", "Proposing changes…");
+        return () => {
+          if (turn.endIf(id)) setAgentStatus("idle", "Ready");
+        };
+      },
+      word: {
+        collectReviewSnapshot,
+        selectionParagraphs,
+        selectCommentById,
+        selectParagraphByIndex,
+        readAllComments,
+        deleteToolComments,
+        deleteBackedUpComments,
+        listComments: () => toolListComments(),
+        resolveComment: (id) => toolResolveComment({ comment_id: id, resolved: true }),
+      },
+    });
+  }
 
   // Show the welcome card on first launch (per browser-storage, so it
   // re-shows in a fresh profile or if the user clears storage).
@@ -1500,7 +1552,7 @@ function usePreset(p) {
       appendEvent("Not connected to daemon — can't send preset.");
       return;
     }
-    if (turnInFlight) return;
+    if (turn.inFlight) return;
     appendUserMessage(p.prompt);
     wsSend({ type: "user_message", text: p.prompt });
     setAgentStatus("working", "Working…");

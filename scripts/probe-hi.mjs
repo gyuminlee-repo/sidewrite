@@ -220,6 +220,8 @@ async function main() {
   let summary;
   if (args.jsonl) {
     summary = summarizeSessionJsonl(await readFile(args.jsonl, "utf8"));
+    // Same rule as waitForSummary: no assistant usage is a failed probe.
+    if (!summary.hasAssistant) throw new Error(`no assistant usage found in ${args.jsonl}`);
   } else {
     const dir = await mkdtemp(join(tmpdir(), "probe-hi-"));
     meta = await runProbe({

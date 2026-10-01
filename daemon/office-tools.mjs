@@ -1,6 +1,12 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { diag } from "./diag.mjs";
+import {
+  guardedCall,
+  applyTrackedEdit,
+  trackedEditShape,
+  TRACKED_EDIT_DESCRIPTION,
+} from "./review-tools.mjs";
 
 // Wrap a bridge tool result for MCP. Handlers return {content: [...]}.
 function asMcpResult(result, { isError = false } = {}) {
@@ -31,11 +37,14 @@ function asMcpError(err) {
  * @param {{ callTaskpaneTool: (name: string, args: object) => Promise<any> }} bridge
  * @param {"word"|"excel"|null} host
  */
-export function createOfficeBridgeMcp(bridge, host = null, paneKey = null) {
+export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts = {}) {
   // `host` selects which tool family to register; `paneKey` routes every
   // call to the exact document pane this session belongs to (so two open
   // Word docs don't cross-talk).
-  const call = (name, args) => bridge.callTaskpaneTool(name, args, paneKey);
+  const rawCall = (name, args) => bridge.callTaskpaneTool(name, args, paneKey);
+  // Review turns (opts.getReviewTurn() returns { ref }) refuse every
+  // document writer except office_tracked_edit; normal turns are unchanged.
+  const call = guardedCall(rawCall, opts.getReviewTurn);
 
   const office_get_selection = tool(
     "office_get_selection",
@@ -819,6 +828,20 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null) {
     wrap("excel_set_row_height"),
   );
 
+  const office_tracked_edit = tool(
+    "office_tracked_edit",
+    TRACKED_EDIT_DESCRIPTION,
+    trackedEditShape,
+    async (args) => {
+      try {
+        const deps = { ...(opts.trackedEdit ?? {}), call: rawCall };
+        return asMcpResult(await applyTrackedEdit(deps, args, opts.getReviewTurn?.() ?? null));
+      } catch (e) {
+        return asMcpError(e);
+      }
+    },
+  );
+
   const wordTools = [
     office_get_selection,
     office_read_paragraphs,
@@ -847,6 +870,7 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null) {
     office_reply_to_comment,
     office_resolve_comment,
     office_header_footer,
+    office_tracked_edit,
   ];
   const excelTools = [
     excel_get_selected_range,

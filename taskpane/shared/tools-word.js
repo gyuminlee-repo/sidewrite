@@ -1,4 +1,11 @@
 /* global Word */
+import {
+  normalizeParaText,
+  computeAfterText,
+  countRevisionMarks,
+  isToolComment,
+  planBackupDelete,
+} from "./review-view.js";
 //
 // Word tool implementations + Word-specific helpers.
 //
@@ -126,6 +133,47 @@ function findIndexById(paragraphs, id, idMode) {
   const i = parseFallbackId(id);
   if (i === null || i < 0 || i >= paragraphs.items.length) return -1;
   return i;
+}
+
+// Index in paragraphs.items of each paragraph in `firsts` (a Paragraph taken
+// from a range, a comment or the selection; null gives -1). With
+// uniqueLocalId the id decides. Without it the text does, and when several
+// paragraphs have that text, the place: the paragraph's own range is
+// compared with each of them (one more sync, only then). Looking a twin up
+// by its text alone gave the first one (Codex review 14).
+const SAME_PLACE = ["Equal", "Inside", "InsideStart", "InsideEnd"];
+export async function paragraphIndexes(context, paragraphs, idMode, firsts) {
+  const out = [];
+  const open = [];
+  firsts.forEach((first, n) => {
+    if (!first) {
+      out[n] = -1;
+    } else if (idMode === "uniqueLocalId") {
+      out[n] = paragraphs.items.findIndex((p) => p.uniqueLocalId === first.uniqueLocalId);
+    } else {
+      const same = [];
+      paragraphs.items.forEach((p, i) => {
+        if (p.text === first.text) same.push(i);
+      });
+      if (same.length <= 1) {
+        out[n] = same.length ? same[0] : -1;
+      } else {
+        const own = first.getRange("Whole");
+        const where = same.map((i) =>
+          own.compareLocationWith(paragraphs.items[i].getRange("Whole")),
+        );
+        open.push({ n, same, where });
+      }
+    }
+  });
+  if (open.length) {
+    await context.sync();
+    for (const { n, same, where } of open) {
+      const k = where.findIndex((w) => SAME_PLACE.includes(w.value));
+      out[n] = k === -1 ? -1 : same[k];
+    }
+  }
+  return out;
 }
 
 // Run `body` with the document's changeTrackingMode set to TrackAll if
@@ -977,8 +1025,8 @@ export async function toolClearComments(args) {
 
     // Scoped path: determine which paragraph each comment is anchored on.
     // For each comment, load its contentRange.paragraphs (the paragraph[s]
-    // the comment is anchored in). Then match by text against our snapshot
-    // to derive paragraph indices.
+    // the comment is anchored in) and find the index of the first one
+    // (paragraphIndexes).
     const { paragraphs, idMode } = await getParagraphsWithIds(context);
     const snapshot = snapshotParagraphs(paragraphs, idMode);
 
@@ -1001,26 +1049,23 @@ export async function toolClearComments(args) {
 
     const probes = comments.items.map((c) => {
       const paras = c.contentRange.paragraphs;
-      paras.load("items/text");
+      paras.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId, items/text" : "items/text");
       return { comment: c, paras };
     });
     await context.sync();
 
+    // The paragraph of each comment's anchor: by id, or by its place when
+    // paragraphs share a text (paragraphIndexes), so a comment on a twin
+    // outside the scope is not cleared for the twin inside it.
+    const anchors = await paragraphIndexes(
+      context,
+      paragraphs,
+      idMode,
+      probes.map(({ paras }) => paras.items[0] ?? null),
+    );
     let deletedCount = 0;
-    for (const { comment, paras } of probes) {
-      if (paras.items.length === 0) continue;
-      // Map a comment to a paragraph by its anchor text. Office.js doesn't
-      // expose a stable paragraph handle for a comment's contentRange, so
-      // we match on text. Edge case under `paragraph_ids` scope: if two
-      // paragraphs have *identical* text and only one is in scope,
-      // findIndex returns the first occurrence — a comment anchored on the
-      // out-of-scope twin can match the in-scope one (or vice-versa) and
-      // get cleared (or skipped) wrongly. Acceptable: clear-comments is a
-      // bulk reset, identical-paragraph docs are rare, and the user can
-      // re-run. `heading_section` / `all: true` scopes are unaffected —
-      // they select by index range, not text.
-      const firstText = paras.items[0].text;
-      const idx = snapshot.findIndex((p) => p.text === firstText);
+    for (const [n, { comment }] of probes.entries()) {
+      const idx = anchors[n];
       if (idx !== -1 && allowedIdxs.has(idx)) {
         comment.delete();
         deletedCount += 1;
@@ -1464,5 +1509,344 @@ export async function toolHeaderFooter({ which, text }) {
     }
     await context.sync();
     return { which, sections: sections.items.length, set: true };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Review tab (C1). office_tracked_edit is the only writer in a review turn;
+// the other functions here are called by the Review tab directly, without
+// the agent. Word evidence for the comment anchors: 2026-09-30 spike
+// (comment on the deleted range survives accept and reject; comment on an
+// inserted range is removed by reject).
+// ---------------------------------------------------------------------------
+
+// Tool: office_tracked_edit. Always tracked, whatever the
+// track-changes mode setting (taskpane.js dispatches it without writeArgs()).
+// narrow ({ find, replace }, from daemon/edit-facts.mjs narrowEdit, L3): the
+// changed words only. Used when narrow.find occurs exactly once inside the
+// located hit; otherwise the full find/replace. The result says which.
+export async function toolTrackedEdit({
+  find,
+  replace,
+  insert_after,
+  paragraph_hint,
+  narrow,
+  comment_text,
+}) {
+  if (typeof find !== "string" || !find) throw new Error("`find` is required");
+  if (find.length > 255) throw new Error("`find` exceeds the 255-character limit of Word search");
+  const isInsert = typeof insert_after === "string";
+  if (isInsert === (typeof replace === "string")) {
+    throw new Error("Give exactly one of replace or insert_after");
+  }
+  if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
+
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const all = context.document.body.search(find, { matchCase: true });
+    all.load("items");
+    await context.sync();
+    let hits = all.items;
+    // The paragraph the hint picked, when it was read.
+    let hinted = -1;
+    if (hits.length > 1 && paragraph_hint) {
+      const idx = findIndexById(paragraphs, paragraph_hint, idMode);
+      if (idx === -1)
+        return {
+          ok: false,
+          code: "HintNotFound",
+          message: `Paragraph not found: ${paragraph_hint}`,
+        };
+      const inPara = paragraphs.items[idx].search(find, { matchCase: true });
+      inPara.load("items");
+      await context.sync();
+      hits = inPara.items;
+      hinted = idx;
+    }
+    if (hits.length === 0) return { ok: false, code: "NotFound", message: `"${find}" not found` };
+    if (hits.length > 1) {
+      return {
+        ok: false,
+        code: "Ambiguous",
+        hit_count: hits.length,
+        message: `"${find}" occurs ${hits.length} times; pass paragraph_hint or a longer find`,
+      };
+    }
+    const hit = hits[0];
+    const para = hit.paragraphs.getFirst();
+    para.load(idMode === "uniqueLocalId" ? "text, uniqueLocalId" : "text");
+    await context.sync();
+    const paragraphIndex =
+      hinted !== -1 ? hinted : (await paragraphIndexes(context, paragraphs, idMode, [para]))[0];
+    const before = normalizeParaText(para.text);
+    // after is computed from the full find/replace: narrowing cuts only
+    // words both sides share, so the sentence comes out the same.
+    const computed = computeAfterText(before, find, isInsert ? { insert_after } : { replace });
+    if (computed.error) return { ok: false, code: "AmbiguousInParagraph", message: computed.error };
+
+    let target = hit;
+    let editFind = find;
+    let editReplace = replace;
+    let narrowed = false;
+    if (!isInsert && narrow && typeof narrow.find === "string" && narrow.find) {
+      const sub = hit.search(narrow.find, { matchCase: true });
+      sub.load("items");
+      await context.sync();
+      if (sub.items.length === 1) {
+        target = sub.items[0];
+        editFind = narrow.find;
+        editReplace = narrow.replace;
+        narrowed = true;
+      }
+    }
+
+    return await withTrackChanges(context, true, async () => {
+      const inserted = isInsert
+        ? hit.insertText(insert_after, Word.InsertLocation.after)
+        : target.insertText(editReplace, Word.InsertLocation.replace);
+      // A failure of the sync that carries the edit is treated as not
+      // applied (the batch failed) and propagates.
+      await context.sync();
+      // From here on the edit is in the document. Every later failure comes
+      // back as applied:true so the daemon records the change and tells the
+      // model not to repeat it (afterEditApplied).
+      const applied = {
+        paragraph_index: paragraphIndex,
+        paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
+        before,
+        after: computed.after,
+        narrowed,
+      };
+      return await afterEditApplied(applied, async () => {
+        let anchor;
+        if (isInsert) {
+          anchor = inserted;
+        } else {
+          // The tracked-deleted original is still searchable (spike b). When
+          // the replacement contains the find text, skip the hit inside the
+          // insertion. A narrowed find is short and may occur elsewhere in
+          // the paragraph, so it is searched inside the original hit first.
+          let again = (narrowed ? hit : para).search(editFind, { matchCase: true });
+          again.load("items");
+          await context.sync();
+          if (narrowed && again.items.length === 0) {
+            again = para.search(editFind, { matchCase: true });
+            again.load("items");
+            await context.sync();
+          }
+          if (again.items.length > 1 && editReplace) {
+            const where = again.items.map((r) => r.compareLocationWith(inserted));
+            await context.sync();
+            anchor = again.items.find(
+              (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
+            );
+          } else {
+            anchor = again.items[0];
+          }
+        }
+        if (!anchor) {
+          return {
+            ok: false,
+            code: "CommentAnchorMissing",
+            applied: true,
+            message: "Edit applied but no range to anchor the comment",
+          };
+        }
+        const c = anchor.insertComment(comment_text);
+        c.load("id");
+        await context.sync();
+        return { ok: true, word_comment_id: c.id };
+      });
+    });
+  });
+}
+
+// The steps after a tracked edit is in the document (anchor search, comment
+// insert and its sync). step() returns { ok, ... } without the edit fields;
+// `applied` holds them (paragraph_index, paragraph_id, before, after,
+// narrowed), which the daemon records the change from. A throw becomes the
+// partial result CommentInsertFailed, applied:true, like CommentAnchorMissing.
+export async function afterEditApplied(applied, step) {
+  try {
+    return { ...(await step()), ...applied };
+  } catch (e) {
+    return {
+      ok: false,
+      code: "CommentInsertFailed",
+      applied: true,
+      message: `Edit applied but the rationale comment could not be added: ${e?.message ?? e}`,
+      ...applied,
+    };
+  }
+}
+
+function isoOrNull(d) {
+  const t = d ? new Date(d) : null;
+  return t && !Number.isNaN(t.getTime()) ? t.toISOString() : null;
+}
+
+// Paragraphs + comments for status refresh and ledger checks. replies: also
+// read every reply of each thread (Word.Comment.replies, WordApi 1.4, the
+// same set as getComments) for the "Delete ALL comments" backup.
+export async function collectReviewSnapshot({ replies = false } = {}) {
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const oox = paragraphs.items.map((p) => p.getOoxml());
+    const comments = context.document.body.getComments();
+    comments.load("items/id, items/content, items/resolved, items/authorName");
+    await context.sync();
+    const probes = comments.items.map((c) => {
+      const r = c.getRange();
+      r.load("text");
+      const ps = r.paragraphs;
+      ps.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId" : "items/text");
+      if (replies) c.replies.load("items/id, items/content, items/authorName, items/creationDate");
+      return { c, r, ps };
+    });
+    await context.sync();
+    const reviewed = await getReviewedTextBatch(
+      context,
+      paragraphs.items.map((p) => p.getRange("Whole")),
+    );
+    const anchors = await paragraphIndexes(
+      context,
+      paragraphs,
+      idMode,
+      probes.map(({ ps }) => ps.items[0] ?? null),
+    );
+    return {
+      paragraphs: paragraphs.items.map((p, i) => ({
+        index: i,
+        id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
+        text: p.text,
+        reviewed_text: reviewed ? reviewed[i] : null,
+        ...countRevisionMarks(oox[i].value),
+      })),
+      comments: probes.map(({ c, r, ps }, n) => {
+        const first = ps.items[0];
+        return {
+          id: String(c.id),
+          content: c.content,
+          author: c.authorName,
+          resolved: c.resolved,
+          anchor_text: r.text,
+          paragraph_id: idMode === "uniqueLocalId" && first ? first.uniqueLocalId : null,
+          paragraph_index: anchors[n] === -1 ? null : anchors[n],
+          ...(replies
+            ? {
+                replies: c.replies.items.map((x) => ({
+                  id: String(x.id),
+                  author: x.authorName,
+                  content: x.content,
+                  created_at: isoOrNull(x.creationDate),
+                })),
+              }
+            : {}),
+        };
+      }),
+    };
+  });
+}
+
+// Paragraphs under the current selection, for "Propose changes".
+export async function selectionParagraphs(max = 10) {
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const sel = context.document.getSelection().paragraphs;
+    sel.load(idMode === "uniqueLocalId" ? "items/uniqueLocalId, items/text" : "items/text");
+    await context.sync();
+    const picked = sel.items.slice(0, max);
+    const indexes = await paragraphIndexes(context, paragraphs, idMode, picked);
+    return picked.map((p, n) => ({
+      id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
+      index: indexes[n],
+      text: normalizeParaText(p.text),
+    }));
+  });
+}
+
+export async function selectCommentById(commentId) {
+  return await Word.run(async (context) => {
+    const comments = await getCommentsLoaded(context, "items/id");
+    const c = comments.items.find((x) => String(x.id) === String(commentId));
+    if (!c) throw new Error(`Comment not found: ${commentId}`);
+    c.getRange().select();
+    await context.sync();
+    return { selected: true };
+  });
+}
+
+export async function selectParagraphByIndex(index) {
+  return await Word.run(async (context) => {
+    const paragraphs = context.document.body.paragraphs;
+    paragraphs.load("items");
+    await context.sync();
+    const p = paragraphs.items[index];
+    if (!p) throw new Error(`Paragraph ${index} not found`);
+    p.select();
+    await context.sync();
+    return { selected: true };
+  });
+}
+
+export async function readAllComments() {
+  const snap = await collectReviewSnapshot({ replies: true });
+  return snap.comments;
+}
+
+// "Delete ALL comments", second press: delete only the backed-up threads
+// still equal to their backup (planBackupDelete). Reading, deciding and
+// deleting share one Word.run, so a comment added or changed while the
+// backup was written is kept.
+export async function deleteBackedUpComments(backupRows) {
+  return await Word.run(async (context) => {
+    const comments = context.document.body.getComments();
+    comments.load("items/id, items/content, items/resolved, items/authorName");
+    await context.sync();
+    const probes = comments.items.map((c) => {
+      const r = c.getRange();
+      r.load("text");
+      c.replies.load("items/content, items/authorName");
+      return { c, r };
+    });
+    await context.sync();
+    const current = probes.map(({ c, r }) => ({
+      id: String(c.id),
+      author: c.authorName,
+      content: c.content,
+      resolved: c.resolved,
+      anchor_text: r.text,
+      replies: c.replies.items.map((x) => ({ author: x.authorName, content: x.content })),
+    }));
+    const plan = planBackupDelete(backupRows, current);
+    const doomed = new Set(plan.delete_ids);
+    for (const { c } of probes) if (doomed.has(String(c.id))) c.delete();
+    await context.sync();
+    return plan;
+  });
+}
+
+// Delete only "[R<n>.<m>]" comments; returns counts before and after and
+// deleted_ids, the ids of the tool comments that are gone.
+export async function deleteToolComments() {
+  return await Word.run(async (context) => {
+    const comments = await getCommentsLoaded(context, "items/id, items/content");
+    const before = { tool: 0, user: 0 };
+    const doomed = [];
+    for (const c of comments.items) {
+      if (isToolComment(c.content)) {
+        before.tool += 1;
+        doomed.push(String(c.id));
+        c.delete();
+      } else {
+        before.user += 1;
+      }
+    }
+    await context.sync();
+    const left = await getCommentsLoaded(context, "items/id, items/content");
+    const after = { tool: 0, user: 0 };
+    for (const c of left.items) after[isToolComment(c.content) ? "tool" : "user"] += 1;
+    const still = new Set(left.items.map((c) => String(c.id)));
+    return { before, after, deleted_ids: doomed.filter((id) => !still.has(id)) };
   });
 }
