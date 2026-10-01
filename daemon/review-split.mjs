@@ -1063,14 +1063,24 @@ function markCuts(sentence) {
   return out + sentence.slice(at);
 }
 
-// items: [{ ref, sentences }], sentences numbered from 1 per ref.
+// items: [{ ref, sentences, section? }], sentences numbered from 1 per ref.
+// The section of a comment (taken off its line by the split) goes in as a
+// context line, so "this section" can be read; it is not a sentence to label.
 export function requirementPrompt(items) {
   return [
     'Return {"sentences":[{"ref":"R1.2","s":1,"type":"request"}, ...]} with every ref and sentence number exactly once.',
     'Types: "request" (asks the authors to do, change, add, explain or answer something; questions too), "other" (praise, summary, background, greeting).',
     'A sentence with marks <c1>, <c2>, ... may ask for more than one thing. For it give "cuts" instead of "type": one "split" or "keep" per mark in order, and "types": one type per part after the splits, e.g. {"ref":"R1.3","s":1,"cuts":["split"],"types":["request","request"]}. Split only where the parts ask for different things; keep when they are one request.',
+    ...(items.some((it) => it.section)
+      ? [
+          'A "[ref section]" line names the part of the review the comment is under. It is context, not a sentence: give it no label.',
+        ]
+      : []),
     "Sentences:",
-    ...items.flatMap((it) => it.sentences.map((t, i) => `[${it.ref} s${i + 1}] ${markCuts(t)}`)),
+    ...items.flatMap((it) => [
+      ...(it.section ? [`[${it.ref} section] ${it.section}`] : []),
+      ...it.sentences.map((t, i) => `[${it.ref} s${i + 1}] ${markCuts(t)}`),
+    ]),
   ].join("\n");
 }
 
@@ -1130,7 +1140,11 @@ export async function extractRequirements(comments, { oneshot } = {}) {
   const once = (ref) => comments.filter((c) => c.ref === ref).length === 1;
   const items = comments
     .filter((c) => !(c.requirements ?? []).length && once(c.ref))
-    .map((c) => ({ ref: c.ref, sentences: splitSentences(c.text) }))
+    .map((c) => ({
+      ref: c.ref,
+      sentences: splitSentences(c.text),
+      ...(c.section && { section: c.section }),
+    }))
     .filter((it) => it.sentences.length);
   if (!items.length) return none;
   const input = requirementPrompt(items);

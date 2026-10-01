@@ -337,6 +337,7 @@ export function createReviewService({
             kind: "requirement_link",
             input: {
               comment: comment?.text ?? "",
+              ...(comment?.section && { section: comment.section }),
               requirements: comment?.requirements ?? [],
               find: saved.find,
               text: saved.text,

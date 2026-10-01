@@ -27,6 +27,9 @@ export function buildReviewPrompt({
   const lines = [
     `[Review turn ${comment.ref}]`,
     `${comment.reviewer === 0 ? "Editor" : `Reviewer ${comment.reviewer}`}, comment ${comment.ref} (verbatim):`,
+    // The split takes a section label ("Abstract", "Round 2 / Minor comments")
+    // off its line; without it "this section" in the comment means nothing.
+    ...(comment.section ? [`Section of the review this comment is under: ${comment.section}`] : []),
     "<<<",
     comment.text,
     ">>>",
@@ -67,6 +70,7 @@ export function buildReviewPrompt({
     instructionIds: instructions.map((i) => i.id),
     forbidIds: forbids.map((i) => i.id),
     omittedForbidIds: includeForbid ? [] : forbidAll.map((i) => i.id),
+    section: comment.section || null,
   };
 }
 
@@ -74,6 +78,7 @@ export function formatPromptLog(ref, built, { paragraphs = 0, preview = false } 
   const ids = (a) => (a.length ? a.join(",") : "-");
   return (
     `[review] prompt ${ref} instructions=${ids(built.instructionIds)} forbid=${ids(built.forbidIds)}` +
-    ` omitted_forbid=${ids(built.omittedForbidIds)} paragraphs=${paragraphs}${preview ? " (preview)" : ""}`
+    ` omitted_forbid=${ids(built.omittedForbidIds)} paragraphs=${paragraphs}` +
+    `${built.section ? ` section=${JSON.stringify(built.section)}` : ""}${preview ? " (preview)" : ""}`
   );
 }
