@@ -187,9 +187,23 @@ export async function checkLlmItem(
     const before = { violations: violations.length, unsure: unsure.length };
     // Paragraphs with a reported violation whose quote is not in them.
     const unlocated = new Map();
+    // An entry that names a paragraph outside the batch and cannot be placed:
+    // the reply is about text that was not asked, so no paragraph of this
+    // batch counts as ok on the strength of it (Codex review 13).
+    let stray = null;
     for (const v of r.json.violations) {
-      const para = batch.find((p) => p.index === Number(v?.paragraph_index));
-      if (!para) continue;
+      let para = batch.find((p) => p.index === Number(v?.paragraph_index));
+      if (!para) {
+        // Its quote in exactly one paragraph of the batch says which one.
+        const holders = batch.filter(
+          (p) => locateQuote(viewText(p), String(v?.quote ?? "")) !== null,
+        );
+        if (holders.length !== 1) {
+          stray ??= v.paragraph_index;
+          continue;
+        }
+        para = holders[0];
+      }
       // A quote that is not in the paragraph is no evidence and is dropped:
       // the model must point at text.
       const match = locateQuote(viewText(para), String(v?.quote ?? ""));
@@ -207,6 +221,7 @@ export async function checkLlmItem(
     for (const u of r.json.unsure ?? []) {
       const para = batch.find((p) => p.index === Number(u.paragraph_index));
       if (para) unsure.push({ paragraph_index: para.index, reason: u.reason });
+      else stray ??= u.paragraph_index;
     }
     // A paragraph under both lists is unsure: no violation is kept for it,
     // and the incremental check reads it again (Codex review 9).
@@ -225,6 +240,16 @@ export async function checkLlmItem(
         reason: reason ? `${QUOTE_NOT_FOUND} (${reason})` : QUOTE_NOT_FOUND,
       });
       open.add(index);
+    }
+    if (stray !== null) {
+      for (const p of batch) {
+        if (hit.has(p.index) || open.has(p.index)) continue;
+        unsure.push({
+          paragraph_index: p.index,
+          reason: `model reply named paragraph ${stray}, which was not in the request; this paragraph has no result of its own`,
+        });
+        open.add(p.index);
+      }
     }
     decide(batch, (i) => (hit.has(i) ? "violation" : open.has(i) ? "unsure" : "ok"));
   }
@@ -257,24 +282,74 @@ export function inManuscriptScope(item) {
   return (item?.scope ?? "manuscript") === "manuscript";
 }
 
-// Ids of manuscript-scope forbid-list regex items (expect "absent") that
-// match `text`. LLM-checked forbid items cannot be pre-checked and are
-// skipped here.
-export function forbidHits(ledger, text) {
-  const hits = [];
+// The rules a tracked edit is pre-checked against: manuscript-scope
+// forbid-list regex items (expect "absent"). LLM-checked forbid items cannot
+// be pre-checked. A must-stay rule (expect "present") is not pre-checked
+// either: an edit that deletes its phrase is applied, and the ledger check
+// reports it afterwards.
+function forbidRules(ledger) {
+  const rules = [];
   for (const item of ledger ?? []) {
     if (item.kind !== "forbid" || item.check?.type !== "regex") continue;
     if (!inManuscriptScope(item)) continue;
     if ((item.check.expect ?? "absent") !== "absent") continue;
-    let re;
     try {
-      re = compileCheck(item.check);
+      rules.push({ id: item.id, re: compileCheck(item.check) });
     } catch {
       continue;
     }
-    if (findAll(re, String(text ?? "")).length) hits.push(item.id);
   }
-  return hits;
+  return rules;
+}
+
+// Ids of the pre-check rules that match `text` (the new text on its own).
+export function forbidHits(ledger, text) {
+  return forbidRules(ledger)
+    .filter(({ re }) => findAll(re, String(text ?? "")).length)
+    .map(({ id }) => id);
+}
+
+const collapse = (s) =>
+  String(s ?? "")
+    .replace(/\u0005/g, "")
+    .replace(/\s+/g, " ");
+
+// Matches of `re` in `text` that overlap or touch the range [a, b].
+// Touching counts: a deletion can end a word right at its edge ("novelty"
+// without "ty").
+const matchesAt = (re, text, a, b) =>
+  findAll(re, text).filter((m) => m.match && m.start <= b && m.start + m.match.length >= a).length;
+
+// Ids of the pre-check rules that the edit would newly break in the text
+// around it: the forbidden phrase is formed by the new text together with
+// the words next to it (forbid "novel substrate", "a novel material",
+// material -> substrate), or by a deletion that joins two words.
+// texts: the paragraphs as they read now; edit: { find, text, kind } with
+// kind replace | delete | insert (text is then inserted after find).
+// A rule counts only when it has more matches at the place of the edit after
+// it than before: a violation that was already there, next to the edit or
+// elsewhere in the paragraph, does not block, and removing one passes.
+// Every occurrence of `find` is tried (a paragraph_hint may pick any of
+// them). A `find` that is in none of the texts gives no hit.
+export function forbidHitsAfterEdit(ledger, texts, { find, text, kind }) {
+  const rules = forbidRules(ledger);
+  const f = collapse(find);
+  const n = collapse(text);
+  if (!rules.length || !f.trim()) return [];
+  const hits = new Set();
+  for (const raw of texts ?? []) {
+    const t = normalizeParaText(raw);
+    for (let i = t.indexOf(f); i !== -1; i = t.indexOf(f, i + 1)) {
+      const end = i + f.length;
+      const start = kind === "insert" ? end : i;
+      const after = t.slice(0, start) + n + t.slice(end);
+      for (const { id, re } of rules) {
+        if (matchesAt(re, after, start, start + n.length) > matchesAt(re, t, start, end))
+          hits.add(id);
+      }
+    }
+  }
+  return rules.map(({ id }) => id).filter((id) => hits.has(id));
 }
 
 // ---- L10: incremental check ------------------------------------------------

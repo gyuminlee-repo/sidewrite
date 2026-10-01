@@ -80,8 +80,13 @@ export async function runOneshot(
   } finally {
     clearTimeout(timer);
   }
-  if (limited)
-    return { ok: false, error: `Claude usage limit reached. ${limited.text}`.trim(), limited };
+  if (limited) {
+    const what =
+      limited.kind === "refusal"
+        ? "The model declined this request."
+        : "Claude usage limit reached.";
+    return { ok: false, error: `${what} ${limited.text}`.trim(), limited };
+  }
   if (!result) return { ok: false, error: "no result message" };
   if (result.subtype !== "success" || result.is_error) {
     const detail = String(result.result ?? (result.errors ?? []).join("; ")).slice(0, 300);
