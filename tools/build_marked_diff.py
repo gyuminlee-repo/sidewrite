@@ -951,8 +951,11 @@ def build_document(base_xml, clean_xml, styles, numids):
             stats['tables'].append('table %d: cell-by-cell (%s)' % (k + 1, table_dims(ct)))
         else:
             for p in ct.iter(q('p')):
-                if read_para(p, lambda r: False).text:
+                text = read_para(p, lambda r: False).text
+                if text:
                     colorize_in_place(p)
+                    stats['exp_ins'].append(text)   # the check counts inserted text per paragraph: cells are paragraphs too
+                    stats['marked'].append(('', text, '{+%s+}' % text))
             stats['tables'].append('table %d: whole-table insert (baseline dims %s, clean dims %s)'
                                    % (k + 1, table_dims(bts[k]) if k < len(bts) else None, table_dims(ct)))
             if k < len(bts):

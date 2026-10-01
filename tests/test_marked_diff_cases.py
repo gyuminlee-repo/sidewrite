@@ -67,12 +67,25 @@ class Case(unittest.TestCase):
         return r.returncode, out, (json.loads(last) if last.startswith("{") else None), r.stdout + r.stderr
 
     def accept_reject(self, out):
-        """(accept-all, reject-all) paragraph texts of a colour-mode marked file: struck = deleted, red = inserted."""
+        """(accept-all, reject-all) paragraph texts of a marked file, table cells included, in document order.
+        Colour mode: struck = deleted, red = inserted. Track changes: inside w:del / w:ins."""
         accept, reject = [], []
-        for p in Document(out).paragraphs:
-            runs = [(r.text, bool(r.font.strike), str(r.font.color.rgb) if r.font.color.rgb else None) for r in p.runs]
-            accept.append("".join(t for t, struck, _ in runs if not struck))
-            reject.append("".join(t for t, struck, colour in runs if struck or colour != "FF0000"))
+        for p in Document(out).element.body.iter(qn("w:p")):
+            a = r = ""
+            for run in p.iter(qn("w:r")):
+                text = "".join(t.text or "" for t in run if t.tag in (qn("w:t"), qn("w:delText")))
+                rpr = run.find(qn("w:rPr"))
+                strike = rpr.find(qn("w:strike")) if rpr is not None else None
+                struck = strike is not None and strike.get(qn("w:val")) not in ("0", "false", "off")
+                colour = rpr.find(qn("w:color")) if rpr is not None else None
+                red = colour is not None and colour.get(qn("w:val")) == "FF0000"
+                marks = {x.tag for x in run.iterancestors()}
+                deleted = struck or qn("w:del") in marks
+                inserted = (red and not struck) or qn("w:ins") in marks
+                a += "" if deleted else text
+                r += "" if inserted else text
+            accept.append(a)
+            reject.append(r)
         return [t for t in accept if t], [t for t in reject if t]
 
 
@@ -119,6 +132,83 @@ class StrikeSwitchedOff(Case):
                 self.assertEqual(code, 2, log)
                 self.assertIn("struck-through", log)
                 self.assertFalse(out.exists())
+
+
+def table(rows):
+    """edit(document): append a table with the given cell texts."""
+
+    def edit(d):
+        t = d.add_table(rows=len(rows), cols=len(rows[0]))
+        for i, row in enumerate(rows):
+            for j, text in enumerate(row):
+                t.cell(i, j).text = text
+
+    return edit
+
+
+def both(*edits):
+    def edit(d):
+        for e in edits:
+            e(d)
+
+    return edit
+
+
+class TableText(Case):
+    """Text of a table that is new, laid out differently, or gone is marked and passes the tool's own check."""
+
+    MODES = ("color", "track_changes")
+
+    def check(self, base, clean, old, new):
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                self.assertTrue(out.exists())
+                self.assertEqual(self.accept_reject(out), (new, old))
+
+    def test_a_table_added_in_the_clean_document(self):
+        base = self.doc([P1, P2])
+        clean = self.doc([P1, P2], table([["A new cell.", "Another new cell."]]))
+        self.check(base, clean, [P1, P2], [P1, P2, "A new cell.", "Another new cell."])
+
+    def test_a_table_whose_layout_changed(self):
+        base = self.doc([P1, P2], table([["An old cell."]]))
+        clean = self.doc([P1, P2], table([["An old cell.", "A second column."]]))
+        self.check(base, clean, [P1, P2, "An old cell."], [P1, P2, "An old cell.", "A second column."])
+
+    def test_a_cell_with_a_line_break_and_a_tab(self):
+        def edit(d):
+            run = d.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0].add_run("Line one")
+            run.add_break()
+            run.add_tab()
+            run.add_text("line two.")
+
+        base = self.doc([P1, P2])
+        clean = self.doc([P1, P2], edit)
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+
+    def test_the_second_of_two_tables_removed(self):
+        base = self.doc([P1, P2], both(table([["First table."]]), table([["Second table, removed."]])))
+        clean = self.doc([P1, P2], table([["First table."]]))
+        self.check(base, clean, [P1, P2, "First table.", "Second table, removed."], [P1, P2, "First table."])
+
+    def test_a_table_with_fewer_rows(self):
+        base = self.doc([P1, P2], table([["Row one."], ["Row two."]]))
+        clean = self.doc([P1, P2], table([["Row one."]]))
+        self.check(base, clean, [P1, P2, "Row one.", "Row two."], [P1, P2, "Row one."])
+
+    def test_every_table_removed_is_refused_with_a_reason(self):
+        # Known limit: a deleted table is placed next to a clean table; with none left there is no place for it.
+        base = self.doc([P1, P2], table([["Only table."]]))
+        clean = self.doc([P1, P2])
+        code, out, summary, log = self.run_tool(base, clean)
+        self.assertEqual(code, 2, log)
+        self.assertIn("no anchor", log)
+        self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":
