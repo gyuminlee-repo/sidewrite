@@ -491,3 +491,89 @@ test("LLM check: a paragraph in violations and unsure is unsure; a recheck drops
   const [kept] = await checkLedgerIncremental([keepItem], PARAS, { oneshot: quiet });
   assert.deepEqual([kept.checked, kept.violations.map((v) => v.paragraph_index)], [0, [5]]);
 });
+
+// Codex review 12: a violation whose quote is not in the paragraph was
+// dropped, the paragraph counted as ok and its hash was cached, so the next
+// incremental check skipped it ("An in-vitro assay." / quote "in-vitro
+// assays": first check ok, next check checked 0).
+test("LLM check: a violation with a quote that is not in the paragraph leaves it unsure, and it is read again", async () => {
+  const paras = [
+    { index: 1, text: "An in-vitro assay.", reviewed_text: null },
+    { index: 2, text: "Nothing to see here.", reviewed_text: null },
+  ];
+  const prompts = [];
+  const oneshot = async (req) => {
+    prompts.push(req.prompt);
+    return {
+      ok: true,
+      json: { violations: [{ paragraph_index: 1, quote: "in-vitro assays", reason: "hyphen" }] },
+    };
+  };
+  const verdicts = [];
+  const r = await checkLlmItem(LLM_ITEM, paras, {
+    oneshot,
+    onDecision: (d) => verdicts.push([d.paragraph_index, d.verdict]),
+  });
+  assert.equal(r.status, "unsure");
+  assert.deepEqual(r.violations, []); // the quote is no evidence
+  assert.deepEqual(r.unsure, [
+    {
+      paragraph_index: 1,
+      reason: "model reported a violation but its quote was not found (hyphen)",
+    },
+  ]);
+  assert.deepEqual(verdicts, [
+    [1, "unsure"],
+    [2, "ok"],
+  ]);
+
+  const [first] = await checkLedgerIncremental([LLM_ITEM], paras, { oneshot });
+  assert.deepEqual([first.status, first.checked_hashes.length], ["unsure", 1]);
+  prompts.length = 0;
+  const [next] = await checkLedgerIncremental(
+    [{ ...asStored(LLM_ITEM, first), unsure: first.unsure }],
+    paras,
+    { oneshot },
+  );
+  assert.deepEqual([next.mode, next.checked, next.status], ["incremental", 1, "unsure"]);
+  assert.match(prompts[0], /\[1\] An in-vitro assay\./);
+  assert.doesNotMatch(prompts[0], /\[2\] /);
+});
+
+test("LLM check: a quote that differs only in case or spacing is located; an empty quote is unsure", async () => {
+  const reply = (violations) => async () => ({ ok: true, json: { violations } });
+  const r = await checkLlmItem(LLM_ITEM, PARAS, {
+    oneshot: reply([
+      { paragraph_index: 7, quote: "in-vitro", reason: "r" }, // text has "In-Vitro"
+      { paragraph_index: 3, quote: "activity   in-vitro\nonly", reason: "r" },
+      { paragraph_index: 5, quote: "", reason: "r" },
+    ]),
+  });
+  assert.deepEqual(
+    r.violations.map((v) => [v.paragraph_index, v.match]),
+    [
+      [7, "In-Vitro"], // the words as the paragraph has them
+      [3, "activity in-vitro only"],
+    ],
+  );
+  assert.deepEqual(
+    r.unsure.map((u) => u.paragraph_index),
+    [5],
+  );
+  // A quote of regex characters is literal text, not a pattern.
+  const lit = await checkLlmItem(LLM_ITEM, [{ index: 1, text: "abc", reviewed_text: null }], {
+    oneshot: reply([{ paragraph_index: 1, quote: ".*", reason: "r" }]),
+  });
+  assert.deepEqual([lit.status, lit.violations.length], ["unsure", 0]);
+  // A paragraph with one located quote stays a violation; its bad quote is dropped.
+  const mixed = await checkLlmItem(LLM_ITEM, PARAS, {
+    oneshot: reply([
+      { paragraph_index: 3, quote: "in-vitro only", reason: "r" },
+      { paragraph_index: 3, quote: "words that are not there", reason: "r" },
+    ]),
+  });
+  assert.deepEqual(
+    [mixed.status, mixed.violations.length, mixed.unsure.length],
+    ["violations", 1, 0],
+  );
+});

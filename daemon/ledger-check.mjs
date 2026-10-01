@@ -99,6 +99,19 @@ export function ledgerPrompt(item, batch) {
   ].join("\n");
 }
 
+// The words of `text` (a normalized paragraph) that the model quoted, or null.
+// Exact first; then the same words in another case or with other spacing.
+// Anything further off is not evidence of where the violation is.
+export function locateQuote(text, quote) {
+  const q = normalizeParaText(quote);
+  if (!q) return null;
+  if (text.includes(q)) return q;
+  const words = q.split(" ").map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(words.join("\\s+"), "i").exec(text)?.[0] ?? null;
+}
+
+export const QUOTE_NOT_FOUND = "model reported a violation but its quote was not found";
+
 const notInteger = (idx) =>
   typeof idx === "boolean" || idx === null || idx === "" || !Number.isInteger(Number(idx));
 
@@ -172,16 +185,22 @@ export async function checkLlmItem(
       return { id: item.id, status: "error", error, violations, unsure };
     }
     const before = { violations: violations.length, unsure: unsure.length };
+    // Paragraphs with a reported violation whose quote is not in them.
+    const unlocated = new Map();
     for (const v of r.json.violations) {
       const para = batch.find((p) => p.index === Number(v?.paragraph_index));
       if (!para) continue;
-      const quote = String(v?.quote ?? "");
-      // Drop quotes that are not in the paragraph: the model must point at text.
-      if (!quote || !viewText(para).includes(normalizeParaText(quote))) continue;
+      // A quote that is not in the paragraph is no evidence and is dropped:
+      // the model must point at text.
+      const match = locateQuote(viewText(para), String(v?.quote ?? ""));
+      if (match === null) {
+        if (!unlocated.has(para.index)) unlocated.set(para.index, String(v?.reason ?? ""));
+        continue;
+      }
       violations.push({
         paragraph_index: para.index,
         start: null,
-        match: quote,
+        match,
         reason: String(v?.reason ?? ""),
       });
     }
@@ -196,6 +215,17 @@ export async function checkLlmItem(
       if (open.has(violations[i].paragraph_index)) violations.splice(i, 1);
     }
     const hit = new Set(violations.slice(before.violations).map((v) => v.paragraph_index));
+    // The model saw a violation it could not point at: the paragraph is not
+    // ok. Unsure keeps it with the author and out of checked_hashes, so the
+    // next incremental check reads it again (Codex review 12).
+    for (const [index, reason] of unlocated) {
+      if (hit.has(index) || open.has(index)) continue;
+      unsure.push({
+        paragraph_index: index,
+        reason: reason ? `${QUOTE_NOT_FOUND} (${reason})` : QUOTE_NOT_FOUND,
+      });
+      open.add(index);
+    }
     decide(batch, (i) => (hit.has(i) ? "violation" : open.has(i) ? "unsure" : "ok"));
   }
   return { id: item.id, status: llmStatus(violations, unsure), violations, unsure };
