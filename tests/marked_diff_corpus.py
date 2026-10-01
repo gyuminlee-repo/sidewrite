@@ -14,7 +14,7 @@ shown text) (a field as a reference manager writes it: a long code cut into seve
 result) (a w:fldSimple), ("fopen", code) and ("fend",) (the two ends of a field that runs over several
 paragraphs, as a bibliography does), ("sym",), ("nbh",) (a hyphen that does not break), ("shy",) (a soft
 hyphen), ("cr",), ("math", text), ("cm", text) (text with a comment on it), ("sdt", text) (text in a content
-control), ("ins", text) and ("del", text) (a change that is still pending in the input file).
+control), ("smartTag", text), ("customXml", text), ("dir", text) and ("bdo", text) (text in another wrapper), ("ins", text) and ("del", text) (a change that is still pending in the input file).
 A table is {"k": "t", "id": ..., "rows": [[cell, ...], ...]}; a cell is a list of piece lists (its paragraphs).
 A table may have "merge": [("h", row, first column, last column) | ("v", column, first row, last row)]; the
 cells a merge takes in must be empty in the model.
@@ -40,6 +40,10 @@ INSERT_RGB = "FF0000"
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 A_BLIP = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
 R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+# Wrappers around runs, besides the content control: tag -> attributes.
+WRAPPERS = {"smartTag": {"uri": "urn:example-invalid:tags", "element": "thing"},
+            "customXml": {"uri": "urn:example-invalid:xml", "element": "thing"},
+            "dir": {"val": "ltr"}, "bdo": {"val": "ltr"}}
 BIBLIOGRAPHY = 'ADDIN ZOTERO_BIBL {"uncited":[],"omitted":[],"custom":[]} CSL_BIBLIOGRAPHY'
 
 
@@ -207,6 +211,10 @@ def _fill(par, pieces):
             sdt.append(pr)
             sdt.append(body)
             p.append(sdt)
+        elif kind in WRAPPERS:
+            wrap = _el("w:" + kind, **WRAPPERS[kind])
+            wrap.append(_run(piece[1]))
+            p.append(wrap)
         elif kind in ("ins", "del"):
             w = _el("w:" + kind, id=str(next(_IDS)), author="Somebody", date="2031-01-02T03:04:05Z")
             r = _run(piece[1])
@@ -296,7 +304,7 @@ def _text(pieces):
             out += "\t"
         elif piece[0] == "br":
             out += {"line": "\n", "none": "\n", "page": PAGE, "column": COLUMN, "all": LINE_ALL}[piece[1]]
-        elif piece[0] in ("link", "b", "ins", "cm", "sdt"):
+        elif piece[0] in ("link", "b", "ins", "cm", "sdt") or piece[0] in WRAPPERS:
             out += piece[1]
         elif piece[0] in ("bm", "field", "cite", "simple"):
             out += piece[2]
@@ -440,9 +448,26 @@ def view(path, mode, side):
     for tbl in list(body.iter(qn("w:tbl"))):
         if tbl.find(qn("w:tr")) is None:
             tbl.getparent().remove(tbl)
+    # A content control is marked as inserted or deleted by range marks around it (track changes); in colour mode
+    # it is one whose runs are all inserted or all deleted. When its side is dropped the control goes.
+    filled = [x for x in body.iter(qn("w:sdt")) if x.find(".//" + qn("w:r")) is not None]
     for r in list(body.iter(qn("w:r"))):
         if run_state(r) == drop:
             r.getparent().remove(r)
+    start = qn("w:customXmlInsRangeStart" if drop == "ins" else "w:customXmlDelRangeStart")
+    marked = set()
+    for mark in body.iter(start):
+        x = mark.getnext()
+        while x is not None and not (x.tag == start.replace("Start", "End") and x.get(qn("w:id")) == mark.get(qn("w:id"))):
+            if x.tag == qn("w:sdt"):
+                marked.add(x)
+            x = x.getnext()
+    for sdt in filled:
+        gone = sdt in marked if track else sdt.find(".//" + qn("w:r")) is None
+        if gone and sdt.find(".//" + qn("w:p")) is None:
+            for child in list(sdt.find(qn("w:sdtContent"))):
+                sdt.addprevious(child)
+            sdt.getparent().remove(sdt)
     for p in list(body.iter(qn("w:p"))):
         if para_state(p) != drop:
             continue
@@ -520,6 +545,9 @@ def _contents(p):
         elif e.tag in (qn("w:t"), qn("w:delText")):
             if field is not None and field["sep"]:
                 field["result"] += e.text or ""
+        elif e.tag == qn("w:sdt"):
+            if e.find(".//" + qn("w:r")) is None:      # Word shows an empty content control as a placeholder
+                out.append(("empty control",))
         elif e.tag == qn("w:fldSimple"):
             out.append(("field", e.get(qn("w:instr")), "".join(t.text or "" for t in e.iter(qn("w:t")))))
         elif e.tag == qn("w:drawing"):
@@ -954,6 +982,14 @@ CASES = {
     "a paragraph with a comment deleted": (variant(WITH_COMMENT), del_para("c"), None),
     # a wrapper the writer does not rebuild: the paragraph is shown as deleted and new
     "a word changed in a paragraph with a content control": (variant(WITH_CONTROL), reword("c"), None),
+    "a paragraph with a content control added": (
+        variant(), lambda m: m.insert(_at(m, "b"), P("ctl", text(20) + " ", ("sdt", "a controlled phrase"), ".")), None),
+    "a paragraph with a content control deleted": (variant(WITH_CONTROL), del_para("c"), None),
+    "a content control only in the baseline, the paragraph changed": (
+        variant(WITH_CONTROL), set_pieces("c", text(5) + " a controlled phrase and more " + text(6, 7)), None),
+    "a content control added to a paragraph": (variant(), WITH_CONTROL, None),
+    "a paragraph with a link added": (
+        variant(), lambda m: m.insert(_at(m, "b"), P("lnk", text(20) + " ", ("link", "a linked phrase"), ".")), None),
     "a sentence moved to the next paragraph": (variant(), move_sentence("a", "b"), None),
     "a sentence moved across an empty paragraph": (variant(), move_sentence("b", "c"), None),
     "a paragraph rewritten around one sentence": (variant(), rewrite_keeping("a", 1, (20, 21, 22)), None),
@@ -997,6 +1033,16 @@ CASES = {
     "all but one paragraph and the table deleted": (variant(), only("a", "t1"), r"paragraph mark cannot show"),
     "a paragraph added between two tables": (variant(add_table("d")), add_para("t2", (20, 21)), r"paragraph mark cannot show"),
 }
+for _kind in WRAPPERS:
+    _with = set_pieces("c", text(5) + " ", (_kind, "a wrapped phrase"), " " + text(6, 7))
+    CASES.update({
+        "a word changed in a paragraph with a %s wrapper" % _kind: (variant(_with), reword("c"), None),
+        "a paragraph with a %s wrapper added" % _kind: (
+            variant(), lambda m, k=_kind: m.insert(_at(m, "b"), P("wr", text(20) + " ", (k, "a wrapped phrase"), ".")), None),
+        "a paragraph with a %s wrapper deleted" % _kind: (variant(_with), del_para("c"), None),
+        "a %s wrapper only in the baseline, the paragraph changed" % _kind: (
+            variant(_with), set_pieces("c", text(5) + " a wrapped phrase and more " + text(6, 7)), None),
+    })
 
 # Changes that can be combined freely: each touches another part of the base model.
 MIXABLE = [

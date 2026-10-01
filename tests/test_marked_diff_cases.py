@@ -913,6 +913,51 @@ class ElementsThatAreNotText(Case):
                 self.assertRegex(" ".join(summary["warnings"]), r"clean paragraph 5 of the body .* holds sdt and is not rewritten")
                 self.assertEqual(doc_xml(out).count("<w:sdt>"), 1)
 
+    def test_an_inserted_content_control_goes_when_the_insertion_is_rejected(self):
+        """Word showed it: without a mark of its own, the control stays behind, empty, with a placeholder."""
+        tool = tool_module()
+        for name in ("a word changed in a paragraph with a content control", "a paragraph with a content control added"):
+            base, clean = self.pair(name)
+            with self.subTest(case=name):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+                self.assertEqual(code, 0, log)
+                xml = doc_xml(out)
+                self.assertRegex(xml, r'<w:customXmlInsRangeStart w:id="(\d+)"[^>]*/><w:sdt>.*?</w:sdt><w:customXmlInsRangeEnd w:id="\1"/>')
+                rejected = tool.resolve_revisions(xml.encode("utf-8"), "reject")[0].decode("utf-8")
+                accepted = tool.resolve_revisions(xml.encode("utf-8"), "accept")[0].decode("utf-8")
+                self.assertEqual((rejected.count("<w:sdt>"), accepted.count("<w:sdt>")), (0, 1))
+                self.assertNotIn("customXml", rejected + accepted)
+                # the tool's own check sees a control that is left behind: the same output without the range marks
+                bare = re.sub(r"<w:customXmlInsRange(Start|End)[^>]*/>", "", xml).encode("utf-8")
+                tool.MODE = "track_changes"
+                accept, reject = tool.structure_failures(bare, doc_xml(base).encode(), doc_xml(clean).encode())
+                self.assertEqual(accept, [])
+                self.assertRegex(" ".join(reject), r"reject-all, body paragraphs")
+
+    def test_a_content_control_whose_markup_is_pending_as_deleted_is_read_without_it(self):
+        tool = tool_module()
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        xml = ('<w:document %s><w:body><w:p><w:customXmlDelRangeStart w:id="1" w:author="A" w:date="2031-01-02T03:04:05Z"/>'
+               '<w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>kept</w:t></w:r><w:del w:id="2"><w:r><w:delText>gone</w:delText></w:r></w:del>'
+               '</w:sdtContent></w:sdt><w:customXmlDelRangeEnd w:id="1"/></w:p></w:body></w:document>' % w).encode()
+        accepted, rejected = (tool.resolve_revisions(xml, side)[0].decode() for side in ("accept", "reject"))
+        self.assertEqual((accepted.count("<w:sdt>"), rejected.count("<w:sdt>")), (0, 1))
+        self.assertIn("<w:t>kept</w:t>", accepted)
+        self.assertNotIn("gone", accepted)
+        self.assertIn("<w:t>gone</w:t>", rejected)
+
+    def test_the_text_inside_a_wrapper_of_the_baseline_is_in_the_deleted_text(self):
+        for kind in ("content control", "smartTag wrapper", "customXml wrapper", "dir wrapper", "bdo wrapper"):
+            name = "a %s only in the baseline, the paragraph changed" % kind
+            base, clean = self.pair(name)
+            for mode in ("color", "track_changes"):
+                with self.subTest(case=name, mode=mode):
+                    code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                    self.assertEqual(code, 0, log)
+                    reject = [x[1] for x in corpus.structure_read(corpus.view(out, mode, "reject"))[0] if x[0] == "p"]
+                    self.assertIn("phrase The bright", reject[4])
+                    self.assertEqual(reject, [x[1] for x in corpus.structure_of(corpus.models(corpus.CASES[name])[0])[0] if x[0] == "p"])
+
     def test_a_deleted_note_reference_brings_its_note(self):
         tool = tool_module()
         for name, part in (("a footnote in a deleted paragraph", "word/bmd_footnotes.xml"),

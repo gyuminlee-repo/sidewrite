@@ -60,7 +60,10 @@ where the other document has no paragraph at all (a paragraph mark cannot show t
 deletions and merges; a file with characters of the private plane this tool uses for the units above. A clean
 paragraph whose runs stand inside a content control, a smart tag or a similar wrapper is not refused: it is not
 rewritten word by word, which would take the wrapper apart, but shown as a deleted paragraph and a new paragraph,
-with a warning. The output is never one of the inputs, and an output or report file that already exists is
+with a warning. A content control of a new paragraph is marked as inserted markup (w:customXmlInsRangeStart / End
+around it), so that rejecting takes it away with its content; the check reads a content control without a run
+as something that is there, as Word shows a placeholder for it. Text inside a wrapper of the baseline is in the
+deleted text; the wrapper itself is not. The output is never one of the inputs, and an output or report file that already exists is
 refused unless --overwrite is given (the write creates the name exclusively).
 
 Needs lxml.
@@ -149,7 +152,8 @@ NOTE_REFS = ('footnoteReference', 'endnoteReference')
 # counted as dropped.
 COMMENT_TAGS = {'commentRangeStart', 'commentRangeEnd', 'commentReference'}
 WRAPPERS = ('smartTag', 'sdt', 'sdtContent', 'customXml', 'dir', 'bdo')   # hold runs: the reader looks inside
-SKIPPED = {'proofErr', 'lastRenderedPageBreak', 'sdtPr', 'sdtEndPr', 'smartTagPr', 'customXmlPr'}   # say nothing
+SKIPPED = {'proofErr', 'lastRenderedPageBreak', 'sdtPr', 'sdtEndPr', 'smartTagPr', 'customXmlPr',
+           'customXmlInsRangeStart', 'customXmlInsRangeEnd', 'customXmlDelRangeStart', 'customXmlDelRangeEnd'}   # say nothing
 
 
 def q(tag):
@@ -219,10 +223,12 @@ REV_KEPT = ('ins', 'moveTo')              # content that accepting keeps: only t
 REV_PROPERTY_CHANGES = ('rPrChange', 'pPrChange', 'sectPrChange', 'tblPrChange', 'tblPrExChange', 'tblGridChange',
                         'trPrChange', 'tcPrChange', 'numberingChange')   # hold the old formatting: dropped
 REV_RANGE_MARKERS = ('moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd',
-                     'customXmlInsRangeStart', 'customXmlInsRangeEnd', 'customXmlMoveToRangeStart',
-                     'customXmlMoveToRangeEnd')                          # dropped
-REV_REFUSED = ('cellIns', 'cellDel', 'cellMerge', 'customXmlDelRangeStart', 'customXmlDelRangeEnd',
+                     'customXmlInsRangeStart', 'customXmlInsRangeEnd', 'customXmlDelRangeStart',
+                     'customXmlDelRangeEnd', 'customXmlMoveToRangeStart',
+                     'customXmlMoveToRangeEnd')                          # dropped (customXml...: after unwrap_marked)
+REV_REFUSED = ('cellIns', 'cellDel', 'cellMerge',
                'customXmlMoveFromRangeStart', 'customXmlMoveFromRangeEnd')   # accepting these is not implemented
+MARKUP = ('sdt', 'customXml', 'smartTag')   # what w:customXmlInsRange / w:customXmlDelRange marks stand around
 REV_PROPERTY_PARENTS = ('rPr', 'numPr', 'trPr', 'ctrlPr')   # here ins/del is a flag on the parent, not a wrapper
 
 
@@ -232,7 +238,8 @@ def resolve_revisions(xml, side='accept'):
 
     The bytes are returned as they came when the document has no tracked change. Accepting: deleted and moved-away
     content is removed, inserted and moved-in content is unwrapped, a paragraph whose mark is deleted is joined with
-    the paragraph after it (which keeps its own properties, as in Word), a deleted table row is removed. Rejecting
+    the paragraph after it (which keeps its own properties, as in Word), a deleted table row is removed, a
+    content control whose markup is marked as deleted (w:customXmlDelRange marks around it) is unwrapped. Rejecting
     is the same with the two kinds exchanged (and w:delText turned back into w:t). On both sides recorded old
     formatting (w:rPrChange and the like) and move range markers are dropped: the tool compares text and
     structure, not formatting. Pending cell insertions, deletions and merges are refused."""
@@ -279,6 +286,24 @@ def resolve_revisions(xml, side='accept'):
             for ch in list(e):
                 e.addprevious(ch)
             drop(e)
+    # A content control (or other markup) between w:customXmlInsRangeStart and its End was inserted as markup:
+    # rejecting takes the wrapper away (what it holds is marked on its own). The same for w:customXmlDelRange
+    # when accepting.
+    start = 'customXmlInsRangeStart' if side == 'reject' else 'customXmlDelRangeStart'
+    for e in found:
+        if ln(e) != start or e.getparent() is None:
+            continue
+        x = e.getnext()
+        while x is not None and not (isinstance(x.tag, str) and ln(x) == start.replace('Start', 'End')
+                                     and x.get(q('id')) == e.get(q('id'))):
+            nxt = x.getnext()
+            if isinstance(x.tag, str) and ln(x) in MARKUP:
+                inner = x.find(q('sdtContent')) if ln(x) == 'sdt' else x
+                for ch in list(inner) if inner is not None else []:
+                    if not isinstance(ch.tag, str) or ln(ch) not in ('sdtPr', 'sdtEndPr', 'customXmlPr', 'smartTagPr'):
+                        x.addprevious(ch)
+                drop(x)
+            x = nxt
     for e in found:
         if ln(e) in REV_PROPERTY_CHANGES + REV_RANGE_MARKERS:
             drop(e)
@@ -533,6 +558,12 @@ def read_para(p, skip_rpr=is_struck, side='accept', _open=frozenset()):
             elif t in WRAPPERS:
                 if t != 'sdtContent':
                     para.fixed[t] += 1
+                if t == 'sdt' and ch.find('.//' + q('r')) is None:
+                    # a content control without a run: Word shows a placeholder there, so it is something
+                    atom = Atom('empty content control', link, el=ch)
+                    put(atom)
+                    finish(atom)
+                    continue
                 walk(ch, link, mark)
             elif t in ('moveFrom', 'pPr') or t in SKIPPED:
                 continue
@@ -814,12 +845,21 @@ def colorize_in_place(p, rgb=None):
     """Mark the whole content of a clean-only paragraph as inserted (structure kept): every run, also one that
     holds a picture, a field mark or a footnote reference instead of text. Colour mode applies the insert colour
     to the run, track_changes mode wraps the run in <w:ins>. A w:fldSimple is written with field marks first, so
-    that nothing of it is left when the paragraph goes. What else stands outside a run cannot be marked this way;
-    the caller refuses such a paragraph."""
+    that nothing of it is left when the paragraph goes, and in track_changes mode a content control gets
+    w:customXmlInsRangeStart / End around it, so that rejecting takes the control away with its content. What
+    else stands outside a run cannot be marked this way; the caller refuses such a paragraph."""
     for fld in list(p.iter(q('fldSimple'))):
         for r in unfold_simple_field(fld):
             fld.addprevious(r)
         fld.getparent().remove(fld)
+    if MODE == 'track_changes':
+        # A content control is markup of its own: without a mark, rejecting would leave it behind, empty. Word
+        # marks an inserted one with range marks around it.
+        for sdt in list(p.iter(q('sdt'))):
+            first, last = rev_mark('customXmlInsRangeStart'), etree.Element(q('customXmlInsRangeEnd'))
+            last.set(q('id'), first.get(q('id')))
+            sdt.addprevious(first)
+            sdt.addnext(last)
     n = 0
     for r in list(p.iter(q('r'))):
         if any(a.tag == q('r') for a in r.iterancestors()):
@@ -2125,7 +2165,7 @@ def view_root(marked_xml, side):
     """The marked document with every mark accepted ('accept') or rejected ('reject'), as a tree without marks.
 
     track_changes mode: resolve_revisions. Colour mode: the runs marked as deleted (accept) or inserted (reject)
-    go, a row whose paragraph marks are all of that kind goes, and a paragraph whose mark is of that kind is
+    go, a content control that held only such runs goes with them, a row whose paragraph marks are all of that kind goes, and a paragraph whose mark is of that kind is
     joined with the next one."""
     if MODE == 'track_changes':
         return etree.fromstring(resolve_revisions(marked_xml, side)[0])
@@ -2137,9 +2177,13 @@ def view_root(marked_xml, side):
     for t in list(root.iter(q('tbl'))):
         if t.find(q('tr')) is None:
             t.getparent().remove(t)
+    filled = [x for x in root.iter(q('sdt')) if x.find('.//' + q('r')) is not None]
     for r in list(root.iter(q('r'))):
         if run_kind(r) == gone:
             r.getparent().remove(r)
+    for x in filled:                                  # a content control all of whose runs went: it came or goes with them
+        if x.find('.//' + q('r')) is None and x.find('.//' + q('p')) is None:
+            x.getparent().remove(x)
     for x in [x for x in root.iter(q('p')) if para_mark(x) == gone]:
         join_with_next(x)
     return root
