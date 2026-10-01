@@ -30,6 +30,9 @@
 //                                after, rationale, state), requirements no
 //                                change names, how the turn ended, its time
 //                                and model
+//   paragraph_check.json         "Check revised paragraphs" at the end of
+//                                the run: paragraphs with two or more
+//                                changes and what the model found in them
 //   responses.json               with --draft-responses: answers and quotes
 //   summary.txt                  counts and times
 //   result.json, daemon.log      every step as the pane showed it; the log
@@ -52,6 +55,7 @@ import { cleanupDecision } from "./judge.mjs";
 import { pauseResident } from "./resident-unit.mjs";
 import {
   changesReport,
+  editsStayedOff,
   keepRefPattern,
   ledgerFromLines,
   otherModels,
@@ -465,8 +469,12 @@ let saved = false;
 let drafted = null;
 // What the pane says each kind of work ran on, at the end of the run.
 let modelsLine = "";
+// A fallback after a refusal that is gone by the next turn is not a
+// failure; edits that stay on another model for more than one turn are, and
+// so is writing or a judgment on another model.
 const otherModel = () =>
-  otherModels(modelsLine).length > 0 || Object.values(turns).some((t) => t.other_model);
+  otherModels(modelsLine).some((x) => !x.startsWith("edits: ")) ||
+  editsStayedOff(Object.values(turns));
 
 async function main() {
   must("open-review", pane("open-review"));
@@ -524,6 +532,9 @@ async function main() {
     console.log(`      ${ref}: ${turns[ref].outcome}, ${turns[ref].seconds} s`);
   }
   note("refresh", pane("refresh"));
+  // The paragraphs that now hold two or more changes, read once more by the
+  // model of the edits. Its result is in revision.json (consistency).
+  note("check-paragraphs", pane("check-paragraphs", {}, 25 * 60_000));
 
   if (opt["draft-responses"]) {
     const opened = note("open-response", pane("open-response"));
@@ -553,6 +564,14 @@ function writeReports(headings = []) {
   const report = changesReport(revision, headings, turns);
   const out = (name, text) => fs.writeFileSync(path.join(RUN, name), text);
   out("changes.json", JSON.stringify(report, null, 2));
+  out(
+    "paragraph_check.json",
+    JSON.stringify(
+      revision.consistency ?? { checked_at: null, note: "the check left no result" },
+      null,
+      2,
+    ),
+  );
   if (opt["draft-responses"])
     out("responses.json", JSON.stringify(responsesReport(revision), null, 2));
   out(
@@ -569,6 +588,7 @@ function writeReports(headings = []) {
         line: modelsLine,
       },
       source: record.source ?? null,
+      paragraphCheck: revision.consistency ?? null,
       responses: opt["draft-responses"] ? (drafted ?? 0) : null,
     }),
   );

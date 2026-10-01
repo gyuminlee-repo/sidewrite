@@ -187,6 +187,45 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(sorted(x.name for x in d.iterdir()),
                              ["after.docx", "before.docx", "changes.json", "out"])
 
+    def test_what_the_tool_said_instead_of_changing_is_listed_by_comment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            before = docx(d / "before.docx", "".join(p(x) for x in BEFORE if x))
+            after = docx(d / "after.docx", "".join(p(x) for x in AFTER if x))
+            tool = d / "changes.json"
+            tool.write_text(json.dumps([
+                {"ref": "R1.1", "changes": [change("R1.1-1", METHOD, METHOD.replace("six", "four"))],
+                 "requirements": [{"id": "q1", "text": "a", "state": "changed"},
+                                  {"id": "q2", "text": "b", "state": "needs_author"},
+                                  {"id": "q3", "text": "c", "state": "outside_this_file"}],
+                 "questions": [{"id": "a1", "requirement_id": "q2", "question": "Which reader | which day?",
+                                "why": "the text names none", "answer": ""}],
+                 "outside": [{"requirement_id": "q3", "why": "a supplementary file"}]},
+                {"ref": "R1.2", "changes": [], "requirements": [{"id": "q1", "text": "d", "state": "open"}],
+                 "questions": [], "outside": []},
+                {"ref": "R1.3", "changes": [], "requirements": [{"id": "q1", "text": "e", "state": "changed"}],
+                 "questions": [], "outside": []},
+            ]), encoding="utf-8")
+            self.assertEqual(rc.main(["--before", str(before), "--after", str(after), "--tool", str(tool),
+                                      "--out", str(d / "o")]), 0)
+            md = (d / "o" / "compare.md").read_text(encoding="utf-8")
+            tail = md.split("## What the tool said instead of changing (by comment)")[1]
+            one = tail.split("### R1.1")[1].split("### ")[0]
+            self.assertIn("Requests: q1 changed, q2 needs_author, q3 outside_this_file", one)
+            self.assertIn("| a1 | q2 | Which reader \\| which day? | the text names none | (empty) |", one)
+            self.assertIn("| q3 | a supplementary file |", one)
+            two = tail.split("### R1.2")[1].split("### ")[0]
+            self.assertIn("Requests: q1 open", two)
+            self.assertIn("No question and no outside note.", two)
+            # A comment whose requests all have a change has nothing to say here.
+            self.assertNotIn("### R1.3", tail)
+            self.assertTrue(md.endswith("\n") and not md.endswith("\n\n"))
+
+    def test_a_run_without_questions_says_so(self):
+        md = rc.compare_md(BEFORE, AFTER, rc.reference_changes(BEFORE, AFTER), {}, [], True,
+                           [{"ref": "R1.1", "changes": [], "requirements": [], "questions": [], "outside": []}])
+        self.assertIn("No question, no outside note and no request left open.", md)
+
     def test_without_tool_changes_only_the_reference_is_written(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)

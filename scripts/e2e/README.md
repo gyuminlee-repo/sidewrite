@@ -430,9 +430,13 @@ python3 scripts/e2e/replay-compare.py \
 The manuscript and the review are only read. The run folder
 `replay-<UTC time>` holds the copy (`manuscript.docx`, saved with its tracked
 changes and rationale comments), `manuscript.revision.json`,
-`manuscript.decisions.jsonl`, `changes.json` (per comment: requirements,
-changes with the paragraph before and after, rationale and state, the
-requirements no change names, how the turn ended, its time and model),
+`manuscript.decisions.jsonl`, `changes.json` (per comment: the requests with
+their state `changed`, `needs_author`, `outside_this_file` or `open`, the
+questions for the author, the requests declared outside this file, the terms
+a change took out that other paragraphs still hold, the edits a guard refused
+by code, the changes with the paragraph before and after, rationale and
+state, how the turn ended, its time and model), `paragraph_check.json` (the
+result of "Check revised paragraphs", run once after the last turn),
 `responses.json` with `--draft-responses`, `summary.txt`, `result.json` and
 `daemon.log`. The screen shows step names and counts, never text of the
 manuscript. One review turn per comment, in order; a turn that fails or runs
@@ -448,8 +452,17 @@ file is copied once and never opened in Word itself.
 
 `--model`, `--writing-model` and `--judgment-model` are chosen in Setup
 (Providers: Edits, Writing, Judgments; Claude). `summary.txt` and each turn
-of `changes.json` hold what the pane's own line says the work ran on; a model
-other than the one asked for is marked FAILED and the exit code is 1.
+of `changes.json` hold what the pane's own line says the work ran on. A model
+replaced after a refusal that is back on the chosen one by the next turn is
+counted in `summary.txt` and is no failure; edits on another model for two
+turns in a row, or writing or a judgment on another model, are marked FAILED
+and the exit code is 1.
+
+The refused edits are counted from the daemon log of each turn:
+`NumberNeedsAuthor` (a number changed without the author), `ForbidBlocked`
+(a forbid rule) and `Refused` (any other refusal of the pane's edit). When no
+request was extracted in the whole run, `summary.txt` says "not measured" for
+the requirements no change names.
 
 `--instructions` and `--forbid` are text files with one rule per line (`#`
 starts a note); each line becomes a ledger rule the model checks.
@@ -459,5 +472,7 @@ starts a note); each line becomes a ledger rule the model checks.
 files: modified, rewritten, deleted, inserted; "rewritten" is a removed and
 an added paragraph that share enough words) and `compare.md` (counts, then the
 paragraphs changed by both, by the authors only, by the tool only, and the
-tool changes it could not place on a paragraph). Without `--tool` it writes
-the authors' side only.
+tool changes it could not place on a paragraph, and per comment what the
+tool said instead of changing: its questions for the author and the requests
+it declared outside this file, so silence and a question can be told apart).
+Without `--tool` it writes the authors' side only.

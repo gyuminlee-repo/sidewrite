@@ -20,7 +20,10 @@ Writes
                           (before, the authors' text, the tool's text),
                           paragraphs only the authors changed, paragraphs only
                           the tool changed, tool changes that could not be
-                          placed on a paragraph of --before
+                          placed on a paragraph of --before; then, per
+                          comment, what the tool said instead of changing:
+                          its questions for the author and the requests it
+                          declared to lie outside this file
 
 The script judges nothing: it lines texts up for a reader. Without --tool
 only reference_changes.json and the counts are written.
@@ -242,7 +245,44 @@ def table(head, rows):
     return "\n".join(lines)
 
 
-def compare_md(before, after, reference, placed, unplaced, tool_given):
+def said_instead(report):
+    """Per comment, what the tool said instead of changing the text: the
+    questions it put to the author and the requests it declared outside this
+    file, with the state of every request. So a reader can tell a request the
+    tool passed over in silence from one it asked about."""
+    out = ["", "## What the tool said instead of changing (by comment)"]
+    any_row = False
+    for c in report:
+        questions, outside = c.get("questions") or [], c.get("outside") or []
+        states = [(q.get("id"), q.get("state")) for q in c.get("requirements") or []]
+        if not questions and not outside and not any(s in ("open", "needs_author", "outside_this_file")
+                                                       for _, s in states):
+            continue
+        any_row = True
+        out += ["", "### %s" % c.get("ref"), ""]
+        if states:
+            out.append("Requests: " + ", ".join("%s %s" % (i, s) for i, s in states))
+            out.append("")
+        if questions:
+            out.append(table(
+                ["Question", "Request", "Asked", "Why", "Answer"],
+                [[str(q.get("id")), str(q.get("requirement_id") or "(none)"), cell(q.get("question") or ""),
+                  cell(q.get("why") or ""), cell(q.get("answer") or "")] for q in questions]))
+            out.append("")
+        if outside:
+            out.append(table(
+                ["Request declared outside this file", "Why"],
+                [[str(n.get("requirement_id")), cell(n.get("why") or "")] for n in outside]))
+            out.append("")
+        if not questions and not outside:
+            out.append("No question and no outside note.")
+            out.append("")
+    if not any_row:
+        out += ["", "No question, no outside note and no request left open."]
+    return out
+
+
+def compare_md(before, after, reference, placed, unplaced, tool_given, report=None):
     in_before = [r for r in reference if r["paragraph_index_before"] is not None]
     ref_index = {r["paragraph_index_before"]: r for r in in_before}
     both = sorted(set(ref_index) & set(placed))
@@ -316,6 +356,9 @@ def compare_md(before, after, reference, placed, unplaced, tool_given):
                  for u in unplaced],
             ) if unplaced else "None.",
         ]
+        out += said_instead(report or [])
+    while out and out[-1] == "":
+        out.pop()
     return "\n".join(out) + "\n"
 
 
@@ -328,15 +371,16 @@ def main(argv=None):
     a = ap.parse_args(argv)
     before, after = paragraphs(a.before), paragraphs(a.after)
     reference = reference_changes(before, after)
-    placed, unplaced = {}, []
+    placed, unplaced, report = {}, [], []
     if a.tool:
-        placed, unplaced = place_tool_changes(json.loads(Path(a.tool).read_text(encoding="utf-8")), before)
+        report = json.loads(Path(a.tool).read_text(encoding="utf-8"))
+        placed, unplaced = place_tool_changes(report, before)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "reference_changes.json").write_text(
         json.dumps(reference, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (out / "compare.md").write_text(
-        compare_md(before, after, reference, placed, unplaced, bool(a.tool)), encoding="utf-8")
+        compare_md(before, after, reference, placed, unplaced, bool(a.tool), report), encoding="utf-8")
     kinds = {k: sum(1 for r in reference if r["kind"] == k)
              for k in ("modified", "rewritten", "deleted", "inserted")}
     # Counts only on the screen: no text of the manuscript.
@@ -346,6 +390,8 @@ def main(argv=None):
         **kinds,
         "tool_paragraphs": len(placed),
         "tool_unplaced": len(unplaced),
+        "tool_questions": sum(len(c.get("questions") or []) for c in report),
+        "tool_outside": sum(len(c.get("outside") or []) for c in report),
         "both": len(set(placed) & {r["paragraph_index_before"] for r in reference}),
         "out": str(out),
     }))

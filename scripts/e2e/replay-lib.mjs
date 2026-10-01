@@ -4,6 +4,8 @@
 // headings of the document and the daemon log. Pure functions.
 
 import { sectionOf } from "../../daemon/response-quotes.mjs";
+import { requirementStates } from "../../taskpane/shared/review-view.js";
+import { stillPresent } from "../../taskpane/shared/residue.js";
 
 const REF = /^(?:R\d+|E)\.\d+$/;
 
@@ -66,6 +68,43 @@ export function turnFromLog(log, ref) {
   };
 }
 
+// The edits a guard of the daemon refused while a turn ran, by code, read
+// from the lines review-tools.mjs logs (they hold counts and ids, no text):
+//   [review] number needs author <ref> count=<n>   NumberNeedsAuthor
+//   [review] blocked <ref> by=<ledger ids>         ForbidBlocked
+//   [review] refused <ref>: <reason>               Refused
+const REFUSALS = [
+  ["NumberNeedsAuthor", "number needs author"],
+  ["ForbidBlocked", "blocked"],
+  ["Refused", "refused"],
+];
+export function refusalsFromLog(log, ref) {
+  const at = ref.replace(".", "\\.");
+  const out = {};
+  for (const [code, words] of REFUSALS) {
+    const n = (String(log ?? "").match(new RegExp(`^\\[review\\] ${words} ${at}[ :]`, "gm")) ?? [])
+      .length;
+    if (n) out[code] = n;
+  }
+  return out;
+}
+
+// How often the model was replaced after a refusal while a turn ran
+// (daemon/model-list.mjs refusalFallback):
+//   [agent] model refusal fallback original=<m> fallback=<m> scope=<s> category=<c>
+export const fallbacksFromLog = (log) =>
+  [
+    ...String(log ?? "").matchAll(
+      /^\[agent\] model refusal fallback original=(\S+) fallback=(\S+)/gm,
+    ),
+  ].map((m) => ({ original: m[1], fallback: m[2] }));
+
+// Did the edits stay on another model than the one asked for? A fallback
+// after a refusal that is gone by the next turn is not that; two turns in a
+// row on another model are. turns: the turn results in the order they ran.
+export const editsStayedOff = (turns) =>
+  turns.some((t, i) => i > 0 && t.other_model && turns[i - 1].other_model);
+
 // One comment of the run: { step, log, seconds } of its propose step.
 // outcome: "ok", "failed" (the turn ended with an error: limit, refusal,
 // crash), "timeout" (the pane step gave up), "no_turn" (no turn was seen).
@@ -93,6 +132,8 @@ export function turnResult(ref, { step, log, seconds, model = null, line = null 
     model: t.model ?? model,
     model_line: edits?.text ?? null,
     other_model: edits?.other ?? false,
+    fallbacks: fallbacksFromLog(log),
+    refused: refusalsFromLog(log, ref),
   };
 }
 
@@ -123,8 +164,11 @@ export const otherModels = (line) =>
     .filter(([, v]) => v.other)
     .map(([k, v]) => `${k}: ${v.text}`);
 
-// changes.json: per comment its requirements, the changes that were recorded
-// and the requirements no change names.
+// changes.json: per comment its requests with the state of each (changed,
+// needs_author, outside_this_file, open: review-view.js requirementStates),
+// the changes that were recorded, the questions put to the author, the
+// requests declared to lie outside this file, the terms the changes took out
+// that other paragraphs still hold (residue.js), and what the guards refused.
 //   revision: revision.json as the daemon saved it
 //   headings: [{ index, level, text }] of the document after the run
 //   turns: { <ref>: turnResult(...) }
@@ -145,15 +189,29 @@ export function changesReport(revision, headings = [], turns = {}) {
       requirement_ids: x.rationale?.requirement_ids ?? [],
       state: x.state,
     }));
-    const met = new Set(changes.flatMap((x) => x.requirement_ids));
+    const requirements = requirementStates(c);
     return {
       ref: c.ref,
       reviewer: c.reviewer,
       section: c.section ?? null,
       comment: c.text,
-      requirements: c.requirements ?? [],
-      unmet_requirements: (c.requirements ?? []).filter((q) => !met.has(q.id)).map((q) => q.id),
+      requirements,
+      // The requests no change names (whatever else was said about them).
+      unmet_requirements: requirements.filter((q) => q.state !== "changed").map((q) => q.id),
+      questions: (c.questions ?? []).map((q) => ({
+        id: q.id,
+        requirement_id: q.requirement_id ?? null,
+        question: q.question,
+        why: q.why ?? "",
+        answer: q.answer ?? "",
+      })),
+      outside: (c.requirements_outside ?? []).map((n) => ({
+        requirement_id: n.id,
+        why: n.why ?? "",
+      })),
+      still_present: stillPresent(c, revision?.snapshot?.paragraphs),
       blocked_edits: (c.blocked ?? []).length,
+      refused: turns[c.ref]?.refused ?? {},
       turn: turns[c.ref] ?? null,
       changes,
     };
@@ -181,27 +239,61 @@ export function responsesReport(revision) {
 
 // summary.txt: counts and times only, no text of the manuscript.
 //   models: { asked: { edits, writing, judgments }, line } (line: the pane's
-//   own line at the end of the run); source: how the manuscript was opened.
-export function summaryText(report, { seconds, saved, models, source = null, responses = null }) {
+//   own line at the end of the run); source: how the manuscript was opened;
+//   paragraphCheck: revision.consistency after "Check revised paragraphs".
+export function summaryText(
+  report,
+  { seconds, saved, models, source = null, responses = null, paragraphCheck = null },
+) {
   const turns = report.filter((c) => c.turn);
   const bad = turns.filter((c) => c.turn.outcome !== "ok");
   const asked = models?.asked ?? {};
-  const other = otherModels(models?.line);
+  const other = otherModels(models?.line).filter((x) => !x.startsWith("edits: "));
   const drifted = turns.filter((c) => c.turn.other_model);
+  const stayedOff = editsStayedOff(turns.map((c) => c.turn));
+  const sum = (f) => report.reduce((n, c) => n + f(c), 0);
+  const requests = report.flatMap((c) => c.requirements);
+  const state = (name) => requests.filter((q) => q.state === name).length;
+  const codes = {};
+  for (const c of report)
+    for (const [code, n] of Object.entries(c.refused ?? {})) codes[code] = (codes[code] ?? 0) + n;
+  const fallbacks = turns.filter((c) => c.turn.fallbacks?.length);
+  const withRequests = report.filter((c) => c.requirements.length).length;
   const lines = [
     `comments: ${report.length}`,
     `turns run: ${turns.length}`,
-    `changes: ${report.reduce((n, c) => n + c.changes.length, 0)}`,
+    `changes: ${sum((c) => c.changes.length)}`,
     `comments without a change: ${report.filter((c) => !c.changes.length).length}`,
-    `requirements no change names: ${report.reduce((n, c) => n + c.unmet_requirements.length, 0)}`,
+    `comments with extracted requests: ${withRequests}; without: ${report.length - withRequests}`,
+    `requests by state: changed ${state("changed")}, needs_author ${state("needs_author")}, outside_this_file ${state("outside_this_file")}, open ${state("open")}`,
+    `requirements no change names: ${
+      requests.length
+        ? sum((c) => c.unmet_requirements.length)
+        : "not measured (no requests were extracted)"
+    }`,
+    `questions for the author: ${sum((c) => c.questions.length)}`,
+    `requests declared outside this file: ${sum((c) => c.outside.length)}`,
+    `terms still present elsewhere: ${sum((c) => c.still_present.length)}`,
+    `edits a guard refused: ${
+      Object.entries(codes)
+        .map(([code, n]) => `${code} ${n}`)
+        .join(", ") || "none"
+    }`,
     `turns that did not end well: ${bad.length}${bad.length ? ` (${bad.map((c) => `${c.ref} ${c.turn.outcome}`).join(", ")})` : ""}`,
     `models asked for: edits ${asked.edits ?? "-"}, writing ${asked.writing ?? "(the pane's own)"}, judgments ${asked.judgments ?? "(the pane's own)"}`,
     `models that ran, as the pane says: ${models?.line || "-"}`,
     `models that ran, from the daemon log: ${[...new Set(turns.map((c) => c.turn.model).filter(Boolean))].join(", ") || "-"}`,
+    `model replaced after a refusal: ${sum((c) => c.turn?.fallbacks?.length ?? 0)} times in ${fallbacks.length} turns${fallbacks.length ? ` (${fallbacks.map((c) => c.ref).join(", ")})` : ""}`,
+    `turns on another model than asked: ${drifted.length}${drifted.length ? ` (${drifted.map((c) => c.ref).join(", ")})` : ""}`,
     `another model than asked: ${
-      other.length || drifted.length
-        ? `FAILED (${[...other, ...drifted.map((c) => `turn ${c.ref}`)].join("; ")})`
+      other.length || stayedOff
+        ? `FAILED (${[...other, ...(stayedOff ? ["edits stayed on another model for more than one turn"] : [])].join("; ")})`
         : "no"
+    }`,
+    `paragraph check: ${
+      paragraphCheck
+        ? `${paragraphCheck.findings?.length ?? 0} findings in ${paragraphCheck.paragraphs?.length ?? 0} paragraphs`
+        : "not run"
     }`,
     `turn time: ${turns.reduce((n, c) => n + (c.turn.seconds ?? 0), 0)} s`,
     `total time: ${seconds} s`,
