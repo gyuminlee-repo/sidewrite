@@ -2360,3 +2360,58 @@ test("a comment card shows the questions for the author; Save answer sends the a
     answer: "3,020 hours.",
   });
 });
+
+// A turn that handles one request of three and says nothing of the others:
+// the line after the turn and the card both name the two left open.
+test("after a turn the line names the requests still open; the card shows the state of each", async () => {
+  const t = await proposeAllSetup({
+    usedLabel: (role) => (role === "turn" ? "Claude · Opus 5.5" : null),
+  });
+  const c = t.revision.comments[0];
+  c.requirements = [
+    { id: "q1", text: "state the unit" },
+    { id: "q2", text: "give the n" },
+    { id: "q3", text: "name the test" },
+  ];
+  const buttons = () => findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+  const lines = () =>
+    findAll(t.$("review-comments"), (n) => n.attributes.class === "review-reqs-line").map(
+      (n) => n.textContent,
+    );
+  try {
+    await t.pane.reload();
+    assert.equal(
+      lines()[0],
+      "Requirements: q1 state the unit; q2 give the n; q3 name the test. Open: q1, q2, q3.",
+    );
+    assert.equal(
+      lines()[1],
+      "Requests not extracted: add them above, one per line. Until then a turn lists them itself.",
+    );
+    await buttons()[0].click();
+    await t.wait();
+    c.changes.push({
+      id: "R1.1-1",
+      word_comment_id: "w1",
+      state: "pending",
+      kind: "replace",
+      before: "b",
+      after: "a",
+      rationale: { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] },
+    });
+    t.doc.comments.push({ id: "w1", content: "[R1.1] a / b / c" });
+    t.endTurn("R1.1");
+    await t.wait();
+    await t.wait();
+    assert.match(
+      t.$("review-message").textContent,
+      /^Proposed 1 change for R1\.1 with Claude · Opus 5\.5\. 2 requests of R1\.1 are still open \(q2, q3\)\. Accepted 0, /,
+    );
+    assert.equal(
+      lines()[0],
+      "Requirements: q1 state the unit; q2 give the n; q3 name the test. Changed: q1. Open: q2, q3.",
+    );
+  } finally {
+    await t.pane.reload();
+  }
+});
