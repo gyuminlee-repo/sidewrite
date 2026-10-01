@@ -6,7 +6,8 @@
 // Everything here is pure: the prompt, the form of the reply, and the checks.
 
 import { REVIEW_RULES, commentBlock, ledgerBlock } from "./review-prompt.mjs";
-import { currentTexts } from "./review-tools.mjs";
+import { z } from "zod";
+import { currentTexts, editTarget } from "./review-tools.mjs";
 
 // Rules of the Claude review turn that do not need its tool: 2 (only what
 // the comment asks), 3 (no revision history in the manuscript), 4 (facts
@@ -126,5 +127,159 @@ export function buildProposalPrompt({
     forbidIds: rules.forbidIds,
     omittedForbidIds: rules.omittedForbidIds,
     section: comment.section || null,
+  };
+}
+
+// ---- The reply ----
+
+const Proposal = z.object({
+  paragraph_id: z.string().min(1).max(64),
+  find: z.string().min(1).max(255), // Word's search limit (review-tools.mjs)
+  op: z.enum(["replace", "insert_after"]),
+  text: z.string().max(2000), // replace with "" deletes
+  what: z.string().min(1).max(500),
+  why: z.string().min(1).max(500),
+  addresses: z.string().min(1).max(500),
+  requirement_ids: z.array(z.string().max(16)).max(20),
+});
+// Keys this object does not name are dropped: what a model adds (override,
+// comment_ref, a path) never leaves this function.
+const ProposalReply = z.object({
+  proposals: z.array(Proposal).max(20),
+  note: z.string().max(1000).nullish(),
+});
+export const MAX_REPLY_BYTES = 200_000;
+
+// The same form as a JSON Schema, for a CLI that can be given one
+// (--output-schema). It only steers the model: readProposalReply decides.
+// Every field is required and nothing else is allowed, which is the form
+// such schemas must have; the limits of length are checked here only.
+const text = { type: "string" };
+export const PROPOSAL_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    proposals: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          paragraph_id: text,
+          find: text,
+          op: { type: "string", enum: ["replace", "insert_after"] },
+          text,
+          what: text,
+          why: text,
+          addresses: text,
+          requirement_ids: { type: "array", items: text },
+        },
+        required: [
+          "paragraph_id",
+          "find",
+          "op",
+          "text",
+          "what",
+          "why",
+          "addresses",
+          "requirement_ids",
+        ],
+        additionalProperties: false,
+      },
+    },
+    note: text,
+  },
+  required: ["proposals", "note"],
+  additionalProperties: false,
+};
+
+// r: what the one-shot call answered ({ ok, text, json } or { ok: false,
+// error, text }). { ok: true, proposals: [{ id: "P1", ... }], note }, or
+// { ok: false, problem } for a reply in the wrong form (problem names fields
+// and limits, never text of the reply, so it can be sent back to the model
+// and logged), or null when the call failed for another reason.
+export function readProposalReply(r) {
+  if (Buffer.byteLength(String(r?.text ?? ""), "utf8") > MAX_REPLY_BYTES) {
+    return { ok: false, problem: `the reply is longer than ${MAX_REPLY_BYTES} bytes` };
+  }
+  if (!r?.ok) {
+    return r?.error === "reply was not JSON"
+      ? { ok: false, problem: "the reply was not JSON" }
+      : null;
+  }
+  const parsed = ProposalReply.safeParse(r.json);
+  if (!parsed.success) {
+    const problem = parsed.error.issues
+      .slice(0, 8)
+      .map((i) => `${i.path.join(".") || "reply"}: ${i.message}`)
+      .join("; ");
+    return { ok: false, problem };
+  }
+  return {
+    ok: true,
+    proposals: parsed.data.proposals.map((p, i) => ({ id: `P${i + 1}`, ...p })),
+    note: parsed.data.note ?? "",
+  };
+}
+
+// As editTarget reads a find and currentTexts a paragraph.
+const fold = (s) =>
+  String(s ?? "")
+    .replace(/\u0005/g, "")
+    .replace(/\s+/g, " ");
+
+// Why a proposal cannot be applied, or null. ctx: { texts: the paragraphs as
+// they read now (currentTexts), ids: the snapshot's ids, shown: the
+// paragraphs the model was given [{ id, index }], requirements: of the
+// comment }.
+//   UnknownParagraph    not a paragraph the model was shown
+//   FindNotInParagraph  find is not in that paragraph
+//   FindAmbiguous       find is there more than once
+//   TargetMismatch      editTarget, which decides where Word edits, lands elsewhere
+//   UnknownRequirement  an id the comment does not list
+//   NoChange            replace by the same text
+//   EmptyInsert         insert_after with nothing to insert
+export function checkProposal(p, { texts, ids, shown, requirements = [] }) {
+  const at = shown.find((s) => s.id === p.paragraph_id);
+  if (!at) return "UnknownParagraph";
+  const f = fold(p.find);
+  const hits = f.trim() ? String(texts[at.index] ?? "").split(f).length - 1 : 0;
+  if (hits === 0) return "FindNotInParagraph";
+  if (hits > 1) return "FindAmbiguous";
+  if (editTarget(texts, ids, p.find, p.paragraph_id).index !== at.index) return "TargetMismatch";
+  const known = new Set(requirements.map((r) => r.id));
+  if (p.requirement_ids.some((id) => !known.has(id))) return "UnknownRequirement";
+  if (p.op === "replace" && p.text === p.find) return "NoChange";
+  if (p.op === "insert_after" && p.text === "") return "EmptyInsert";
+  return null;
+}
+
+// Every proposal of a reply: [{ id, proposal, code }], code null when it can
+// be applied. One refused proposal does not stop the others. Duplicate: the
+// same find in the same paragraph as a proposal before it.
+export function checkProposals(proposals, ctx) {
+  const seen = new Set();
+  return proposals.map((proposal) => {
+    const key = `${proposal.paragraph_id}\0${fold(proposal.find)}`;
+    const code = checkProposal(proposal, ctx) ?? (seen.has(key) ? "Duplicate" : null);
+    seen.add(key);
+    return { id: proposal.id, proposal, code };
+  });
+}
+
+// The arguments of office_tracked_edit for a proposal. Built field by field:
+// comment_ref is the turn's, the paragraph is always given as the hint
+// (editTarget reads it only when find occurs more than once), and nothing
+// else of the proposal is carried over.
+export function toTrackedEditArgs(ref, p) {
+  return {
+    comment_ref: ref,
+    find: p.find,
+    ...(p.op === "insert_after" ? { insert_after: p.text } : { replace: p.text }),
+    paragraph_hint: p.paragraph_id,
+    rationale: {
+      what: p.what,
+      why: p.why,
+      addresses: p.addresses,
+      requirement_ids: [...p.requirement_ids],
+    },
   };
 }

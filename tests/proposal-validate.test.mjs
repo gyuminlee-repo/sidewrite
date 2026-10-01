@@ -129,7 +129,7 @@ test("each proposal is checked against the paragraph it names: the eight codes",
   assert.equal(editTarget(texts, null, "600 nm", "p1").index, 2);
   assert.equal(code({ find: "600 nm" }), "FindNotInParagraph");
   assert.equal(code({ find: "not there" }), "FindNotInParagraph");
-  assert.equal(code({ find: "the extract" }), "FindAmbiguous");
+  assert.equal(code({ find: "extract was" }), "FindAmbiguous");
   // Spaces are folded as the daemon folds the paragraph.
   assert.equal(code({ find: "30   degrees" }), null);
   assert.equal(code({ requirement_ids: ["q1", "q7"] }), "UnknownRequirement");
