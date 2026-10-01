@@ -483,3 +483,86 @@ test("a request under a section is extracted verbatim, with the section in the m
   // The requirement is text of the comment, not of the section label.
   for (const c of r.comments) assert.ok(c.text.includes(c.requirements[0].text));
 });
+
+// A long review in one request ran into the time limit of a one-shot (a real
+// review of 25 comments: "timed out after 120000 ms"), and every comment was
+// left without requirements. The sentences now go in batches: a request that
+// fails costs its own comments only, and the warning names them.
+test("a long review is labelled in batches; a batch that fails leaves only its comments without requirements", async () => {
+  const { REQUIREMENT_BATCH_SENTENCES } = await import("../daemon/review-split.mjs");
+  assert.equal(REQUIREMENT_BATCH_SENTENCES, 40);
+  const body = (n) => Array.from({ length: n }, (_, i) => `Please add item ${i + 1}.`).join(" ");
+  const comments = [
+    C("R1.1", body(30)),
+    C("R1.2", body(30)),
+    C("R1.3", body(8)),
+    C("R1.4", body(50)),
+  ];
+  const prompts = [];
+  // Labels every sentence of the prompt it is given as a request.
+  const all = async ({ prompt }) => {
+    prompts.push(prompt);
+    const sentences = [...prompt.matchAll(/^\[(R\d+\.\d+) s(\d+)\] /gm)].map((m) => ({
+      ref: m[1],
+      s: Number(m[2]),
+      type: "request",
+    }));
+    return { ok: true, json: { sentences } };
+  };
+  const refsOf = (prompt) => [
+    ...new Set([...prompt.matchAll(/^\[(R\d+\.\d+) s\d+\] /gm)].map((m) => m[1])),
+  ];
+  const ok = await extractRequirements(comments, { oneshot: all });
+  // R1.1 alone (30 + 30 is over the limit), R1.2 with R1.3 (38), R1.4 alone though it is over it.
+  assert.deepEqual(prompts.map(refsOf), [["R1.1"], ["R1.2", "R1.3"], ["R1.4"]]);
+  assert.deepEqual(ok.warnings, []);
+  assert.deepEqual(ok.requests, { "R1.1": 30, "R1.2": 30, "R1.3": 8, "R1.4": 50 });
+  assert.equal(ok.comments[3].requirements.length, 50);
+  assert.equal(ok.input, prompts.join("\n\n"));
+
+  // The second request times out.
+  let n = 0;
+  const flaky = async (req) =>
+    ++n === 2 ? { ok: false, error: "timed out after 120000 ms" } : all(req);
+  const part = await extractRequirements(comments, { oneshot: flaky });
+  assert.deepEqual(
+    part.comments.map((c) => c.requirements.length),
+    [30, 0, 0, 50],
+  );
+  assert.deepEqual(part.warnings, [
+    "requirement extraction failed for R1.2, R1.3: timed out after 120000 ms; add them by hand",
+  ]);
+  assert.deepEqual(part.requests, { "R1.1": 30, "R1.4": 50 });
+  assert.equal(part.asked, true);
+
+  // A reply that does not label a batch is said for that batch.
+  n = 0;
+  const wrong = async (req) => (++n === 3 ? { ok: true, json: { sentences: [] } } : all(req));
+  const bad = await extractRequirements(comments, { oneshot: wrong });
+  assert.deepEqual(bad.warnings, [
+    "model could not label requirement sentences of R1.4; add them by hand",
+  ]);
+  assert.deepEqual(
+    bad.comments.map((c) => c.requirements.length),
+    [30, 30, 8, 0],
+  );
+
+  // A usage limit ends the run: the requests after it are not sent.
+  n = 0;
+  const limited = async (req) =>
+    ++n === 2
+      ? { ok: false, error: "Claude usage limit reached.", limited: { limited: true } }
+      : all(req);
+  const cut = await extractRequirements(comments, { oneshot: limited });
+  assert.equal(n, 2, "no third request");
+  assert.deepEqual(cut.warnings, [
+    "requirement extraction failed for R1.2, R1.3, R1.4: Claude usage limit reached.; add them by hand",
+  ]);
+  // Every request failed: as before, nothing is changed and no count is given.
+  const none = await extractRequirements(comments, {
+    oneshot: async () => ({ ok: false, error: "timed out after 120000 ms" }),
+  });
+  assert.equal(none.requests, null);
+  assert.equal(none.warnings.length, 3);
+  assert.ok(none.comments.every((c) => c.requirements.length === 0));
+});
