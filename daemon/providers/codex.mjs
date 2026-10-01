@@ -23,6 +23,63 @@
 // Every run is `-s read-only`, `--ephemeral` and never carries a flag that
 // turns approvals or the sandbox off. The user's ~/.codex/config.toml is
 // kept: without it the sign-in has no model provider and the run fails.
+//
+// What a run can reach, measured on 2026-10-01 (codex-cli 0.159.2, made-up
+// text only; fixtures codex_exec_isolated.jsonl, codex_exec_tool_probe.jsonl,
+// codex_request_tools.json):
+//   With the arguments this file used until then (exec --json --ephemeral
+//   --skip-git-repo-check -s read-only -C <dir>):
+//   - the model ran shell commands (item type "command_execution": `echo
+//     hi`, `ls -a`, a python one-liner that tried to open a URL; the
+//     read-only sandbox refused the network, nothing else);
+//   - the user's hooks ran (SessionStart, UserPromptSubmit, PreToolUse,
+//     PostToolUse, Stop), one of them with the prompt text as an argument of
+//     a process, and they wrote files into the run directory;
+//   - the request to the model carried exec_command, write_stdin, the MCP
+//     resource tools, request_plugin_install, view_image, apply_patch and
+//     the goal tools; with model gpt-5.5 also web_search.
+//   With the switches of ISOLATION below:
+//   - no hook process started, and the same prompt got "NO_TOOL" for the
+//     shell, the file listing and the web page (a real run, with the
+//     switches the plan named; goals, sleep_tool, shell_snapshot and
+//     web_search="disabled" were added after it and are covered by the
+//     request reading below). Before shell_snapshot was switched off Codex
+//     itself still started the user's shell to take a snapshot of it, which
+//     reads the user's shell startup file; the prompt is not part of that.
+//   - the request to the model carries no shell, no MCP, no web search, no
+//     image and no plugin tool. What Codex has no switch for stays: for the
+//     default model `exec` (a JavaScript isolate; its own description says
+//     "no Node, no file system, no network access"), wait,
+//     request_user_input, apply_patch and clock__curr_time; for gpt-5.5
+//     request_user_input, apply_patch and tool_search. Not measured, taken
+//     from what the tools are: apply_patch writes a local file and the
+//     sandbox is read-only; tool_search has nothing to find with plugins
+//     and apps off. None of them is a way to the network.
+//   - On this machine a local proxy of the user stands between Codex and
+//     the model (the provider's base_url is 127.0.0.1). The request was read
+//     where Codex hands it to that proxy. In the real run the model named
+//     multi_agent tools the request does not carry; whether it made them up
+//     or the proxy adds tools is not known. What the result rests on is the
+//     behaviour: no tool item in the run, NO_TOOL for all three steps.
+//   - `--disable unified_exec` does not change what `codex features list`
+//     prints for a user config that sets it, but exec_command and
+//     write_stdin are gone from the request all the same.
+//   Not usable: --ignore-user-config (the run goes to the default provider
+//   instead of the one the user set up and failed here); so the user's
+//   AGENTS.md is still part of the prompt.
+//   The environment PATH and HOME alone was enough (with that proxy
+//   already running; Windows was not measured).
+//   --output-schema <file> was accepted and the answer had the shape.
+//   No item of type "reasoning" came in any run: it is not on the list of
+//   item types a run may have (ALLOWED_ITEMS).
+// The request body was read by pointing the provider's base_url (a -c
+// override on the command line) at a local server that answers 400: no
+// model call and no file of the user is touched. It was read for two models
+// of one Codex version; a later version or another model may send more.
+// That is why a run is also watched: the first item that is not an answer
+// or a notice ends it and its reply is discarded. The watch is an alarm
+// after the fact (the text is already with the CLI when an item shows); the
+// wall is the list of switches.
 
 import { parseJsonReply } from "../oneshot.mjs";
 import { runCli as defaultRunCli, emptyWorkDir, resolveCliBin } from "./cli-exec.mjs";

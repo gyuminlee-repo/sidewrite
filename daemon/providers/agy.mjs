@@ -26,6 +26,28 @@
 //
 // agy has no setting for a run that leaves no trace: every judgment is kept
 // as a conversation in the user's Antigravity history.
+//
+// What a print-mode run can reach, measured on 2026-10-01 (agy 1.2.14,
+// made-up text only; fixture agy_print_tool_probe.jsonl), with
+// --disable-slash-commands --sandbox:
+//   - run_command ran: `echo hi` came back with its output, and `ls -la`
+//     too. Nothing asked for a permission and nothing was denied.
+//   - read_url_content was denied (denied_actions: read_url) and the run
+//     ended with an empty response.
+//   - `--mode plan` changed nothing: "--mode plan has no effect while slash
+//     command expansion is disabled", and the same commands ran.
+//   - init lists 58 tools (browser_*, search_web, write_to_file, ...) and
+//     agy has no flag that takes one away. A hook of the user ran too.
+//   - view_file and search_web were not tried: the model used run_command.
+//   - --json-schema <schema> worked for a judgment (PATH and HOME alone as
+//     environment): the result carries "structured_output", the response
+//     text has two more keys (toolAction, toolSummary) and the stream has a
+//     step of type "finish". Not used here.
+// So agy cannot be kept from running a command next to the text it is
+// given. It is offered for nothing (probe.mjs says why). The code below
+// still reads every run as a stream and fails one that shows a tool step,
+// a denied action or another permission mode, for a caller that runs it
+// anyway; that watch is an alarm after the fact, not a wall.
 
 import { parseJsonReply } from "../oneshot.mjs";
 import { runCli as defaultRunCli, emptyWorkDir, resolveCliBin } from "./cli-exec.mjs";
