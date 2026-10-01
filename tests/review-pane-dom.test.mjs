@@ -457,6 +457,44 @@ test("Save shows the daemon's warning about comments it kept", async () => {
   assert.equal(t.$("review-message").hidden, false);
 });
 
+test("Save sends the section label the split gave a comment, and none where it gave none", async () => {
+  const revision = { comments: [], ledger: [] };
+  let t = null;
+  t = await setup({
+    revision,
+    respond: {
+      review_split: () => {
+        t.pane.onEvent({
+          type: "review_event",
+          event: "job_done",
+          job_id: "j1",
+          result: {
+            ok: true,
+            method: "regex",
+            warnings: [],
+            comments: [
+              { ref: "R1.1", reviewer: 1, text: "Add a control.", section: "Major comments" },
+              { ref: "R1.2", reviewer: 1, text: "Add units." },
+            ],
+          },
+        });
+        return { ok: true, accepted: true, job_id: "j1" };
+      },
+      review_save_comments: () => ({ ok: true, revision, warnings: [] }),
+    },
+  });
+  await t.$("review-split").click();
+  await t.$("review-save").click();
+  const sent = t.requests.find((r) => r.type === "review_save_comments").payload.comments;
+  assert.deepEqual(
+    sent.map((c) => [c.ref, c.section, "section" in c]),
+    [
+      ["R1.1", "Major comments", true],
+      ["R1.2", undefined, false],
+    ],
+  );
+});
+
 // Codex review 7: review_propose answers after the agent message is queued
 // and the revision file is written, so turn_complete and turn_done can come
 // first. The turn is taken before the request and a turn that already ended

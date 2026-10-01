@@ -1,0 +1,117 @@
+{
+  "family": "questionnaire",
+  "cases": [
+    {
+      "name": "one question block, then the free-text section",
+      "kind": "positive",
+      "text": "Reviewers' comments:\n\n1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n**********\n\n2. Review Comments to the Author\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes",
+        "E.2": "2. Review Comments to the Author",
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R2.1": "Please add error bars."
+      }
+    },
+    {
+      "name": "no separator lines: the answers and the next heading are one editor comment",
+      "kind": "positive",
+      "text": "Reviewers' comments:\n\n1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n2. Review Comments to the Author\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.",
+      "refs": ["E.1", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n2. Review Comments to the Author",
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R2.1": "Please add error bars."
+      }
+    },
+    {
+      "name": "a question block after the reviews",
+      "kind": "positive",
+      "text": "Reviewers' comments:\n\n1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n**********\n\n2. Review Comments to the Author\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.\n\n**********\n\n3. Do you want your name to be public?\n\nReviewer #1: No\n\nReviewer #2: No",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2", "R2.1", "E.3"],
+      "texts": {
+        "E.3": "3. Do you want your name to be public?\n\nReviewer #1: No\n\nReviewer #2: No",
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R2.1": "Please add error bars."
+      }
+    },
+    {
+      "name": "three reviewers, one with a short review",
+      "kind": "positive",
+      "text": "Reviewers' comments:\n\n1. Is the work technically sound?\n\nReviewer #1: Yes\n\nReviewer #2: Yes\n\nReviewer #3: No\n\n**********\n\n2. Review Comments to the Author\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Accept as is.\n\nReviewer #3: - Add a control.\n- Repeat the assay.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2", "R2.1", "R3.1", "R3.2"],
+      "texts": {
+        "R2.1": "Accept as is.",
+        "R3.2": "Repeat the assay."
+      }
+    },
+    {
+      "name": "referee heads and N/A answers",
+      "kind": "positive",
+      "text": "Referee comments:\n\n1. Are the data available?\n\nReferee 1: N/A\n\nReferee 2: No\n\n==========\n\n2. Comments\n\nReferee 1: 1. Add units.\n2. State n.\n\nReferee 2: Please add error bars to every panel of Fig. 2.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "1. Are the data available?\n\nReferee 1: N/A\n\nReferee 2: No",
+        "E.2": "2. Comments"
+      }
+    },
+    {
+      "name": "letter before the questions is its own editor comment",
+      "kind": "positive",
+      "text": "Dear Author,\n\nPlease revise the manuscript.\n\nReviewers' comments:\n\n1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n**********\n\n2. Review Comments to the Author\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.",
+      "refs": ["E.1", "E.2", "E.3", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "Dear Author,\n\nPlease revise the manuscript.",
+        "E.2": "1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes",
+        "R1.1": "Add units.",
+        "R1.2": "State n.",
+        "R2.1": "Please add error bars."
+      }
+    },
+    {
+      "name": "two review rounds of one reviewer are not answers",
+      "kind": "trap",
+      "text": "Round 1\nReviewer 1 Report\n1. Add units.\n2. State n.\n\nRound 2\nReviewer 1 Report\n1. Add error bars.\n2. Cite the method.",
+      "refs": ["E.1", "R1.1", "R1.2", "R1.1", "R1.2"]
+    },
+    {
+      "name": "a rule line between the comments of an ordinary review cuts nothing",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\n----------\n2. State n.\n\nReviewer 2:\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "R1.1": "Add units.\n----------"
+      }
+    },
+    {
+      "name": "a second short block under its own head line is not an answer",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 2:\n1. Add error bars.\n\nReviewer 1:\nNo further comments.",
+      "refs": ["R1.1", "R1.2", "R2.1", "R1.1"]
+    },
+    {
+      "name": "one short review of a reviewer is not an answer",
+      "kind": "trap",
+      "text": "Reviewer 1: Accept.\n\nReviewer 2:\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R2.1", "R2.2"],
+      "texts": {
+        "R1.1": "Accept."
+      }
+    },
+    {
+      "name": "numbered comments worded as questions are comments",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Is the work technically sound? Partly.\n2. Has the analysis been done properly? No.",
+      "refs": ["R1.1", "R1.2"]
+    },
+    {
+      "name": "two long head-line texts of one reviewer are not answers",
+      "kind": "trap",
+      "text": "Reviewer 1: The units are missing throughout the manuscript and must be added.\n\nReviewer 1: The number of replicates is also not stated anywhere in the text.",
+      "refs": ["R1.1", "R1.1"]
+    }
+  ]
+}

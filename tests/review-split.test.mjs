@@ -7,7 +7,12 @@ import {
   SPLIT_SYSTEM,
   uncoveredText,
 } from "../daemon/review-split.mjs";
-import { emptyRevision, replaceComments, RevisionSchema } from "../daemon/revision-store.mjs";
+import {
+  emptyRevision,
+  replaceComments,
+  restoreComment,
+  RevisionSchema,
+} from "../daemon/revision-store.mjs";
 
 const TWO_REVIEWERS = `Dear Editor,
 
@@ -629,4 +634,36 @@ test("the section label of a comment survives a save and a schema round trip", (
   rev = replaceComments(rev, [{ ref: "R1.2", reviewer: 1, text: "State n (edited)." }]);
   assert.equal(RevisionSchema.parse(rev).comments[0].section, "Minor comments");
   assert.equal("section" in splitReviewRegex("1. Add units.\n2. State n.")[0], false);
+});
+
+test("a restored comment keeps its section label", () => {
+  const rev = restoreComment(emptyRevision("/m/paper.docx"), "R1.2", {
+    reviewer: 1,
+    text: "State n.",
+    requirements: [],
+    section: "Minor comments",
+  });
+  assert.equal(rev.comments[0].section, "Minor comments");
+  const bare = restoreComment(emptyRevision("/m/paper.docx"), "R1.2");
+  assert.equal("section" in bare.comments[0], false);
+});
+
+// The label split reads the same lines as the regex split: an email quote
+// mark on every line is taken off, and full-width markers are stripped.
+test("label split: quote marks are taken off and full-width markers stripped", async () => {
+  const quoted = await splitReview("> Please add units.\n> Also state n.\n", {
+    oneshot: async (q) => {
+      assert.equal(q.prompt, splitPrompt(["Please add units.", "Also state n."]));
+      return labels("comment_start", "comment_start")();
+    },
+  });
+  assert.deepEqual(refsTexts(quoted), [
+    ["R1.1", "Please add units."],
+    ["R1.2", "Also state n."],
+  ]);
+  const wide = await splitReview("Reviewer ２：\n３． Add units.\nmore text\n", {
+    oneshot: labels(RH(2), "comment_start", "continue"),
+  });
+  assert.equal(wide.method, "llm");
+  assert.deepEqual(refsTexts(wide), [["R2.3", "Add units.\nmore text"]]);
 });

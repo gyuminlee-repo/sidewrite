@@ -22,6 +22,9 @@ const FAMILIES = [
   "sections",
   "traps",
   "boilerplate",
+  "combined_heads",
+  "sublists",
+  "questionnaire",
 ];
 
 // Head lines the split may consume without putting them in a comment.
@@ -35,7 +38,7 @@ function lostLines(text, comments) {
   return text
     .split(/\r\n?|\n/)
     .map((l) => squash(l.replace(/^(?:\s*>)+/, "")))
-    .filter((l) => l && !HEAD_LINE.test(l) && !/^\(?\d+[.)]$/.test(l))
+    .filter((l) => l && !HEAD_LINE.test(l) && !/^\(?\d+[.)]$/.test(l) && !/^[*=]{5,}$/.test(l))
     .filter((l) => !hay.includes(l.replace(/[:.]$/, "").slice(-8).trim()));
 }
 

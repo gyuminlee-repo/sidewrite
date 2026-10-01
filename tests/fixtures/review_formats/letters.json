@@ -1,5 +1,5 @@
 {
-  "note": "Whole decision letters in letters/*.txt. The head lines follow the layouts of ScholarOne, Editorial Manager, MDPI and Nature-style review files; every sentence is invented.",
+  "note": "Whole decision letters in letters/*.txt. The head lines follow the layouts of ScholarOne, Editorial Manager, MDPI, Nature-style review files and a questionnaire letter; every sentence is invented.",
   "letters": [
     {
       "file": "scholarone.txt",
@@ -72,7 +72,30 @@
         "R1.3": "Figure 2에 오차 막대를 추가해 주십시오.",
         "R2.2": "플라스크 구입처 문장은 삭제해 주십시오."
       },
-      "sections": { "R1.1": "주요 의견", "R1.2": "주요 의견", "R1.3": "세부 의견" },
+      "sections": {
+        "R1.1": "주요 의견",
+        "R1.2": "주요 의견",
+        "R1.3": "세부 의견"
+      },
+      "strong": true
+    },
+    {
+      "file": "questionnaire.txt",
+      "refs": ["E.1", "E.2", "E.3", "E.4", "E.5", "R1.0", "R1.1", "R1.2", "R1.3", "R2.1", "E.6"],
+      "texts": {
+        "E.2": "Reviewer's Responses to Questions\n\nComments to the Author\n\n1. Is the work technically sound, and do the data support the conclusions?\n\nReviewer #1: Partly\n\nReviewer #2: Yes",
+        "E.3": "2. Has the statistical analysis been done appropriately?\n\nReviewer #1: No\n\nReviewer #2: Yes",
+        "E.5": "4. Review Comments to the Author\n\nPlease use the space below to explain your answers to the questions above.",
+        "R1.0": "The manuscript reports a growth assay in shaken flasks.",
+        "R1.3": "The unit of the incubation temperature is missing.",
+        "R2.1": "The study is sound. I have only one request: please add error bars to Fig. 2.",
+        "E.6": "5. Do you want your name to be public for this review?\n\nReviewer #1: No\n\nReviewer #2: Yes: A. Reviewer\n\n[NOTE: If a reviewer sent comments as a file, the file is attached to this email.]"
+      },
+      "sections": {
+        "R1.1": "Major",
+        "R1.2": "Major",
+        "R1.3": "Minor"
+      },
       "strong": true
     }
   ]
