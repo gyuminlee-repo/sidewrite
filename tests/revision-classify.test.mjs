@@ -981,3 +981,81 @@ test("a tracked run that opens with a space is placed on its own text, and a tie
   assert.deepEqual(multi([i1, i2], T2, sib, { w_ins: 1 }), ["accepted", "pending"]);
   assert.deepEqual(multi([i1, i2], T2, [], {}), ["accepted", "accepted"]);
 });
+
+// PR #5 re-review (P2). With every context word gone, the change is looked
+// for by its own text alone, and a match of that text says nothing about
+// WHERE the change is. "The control was measured for 5 s.": "s" is inserted
+// after "control" and still tracked, and the author rewrote the words around
+// it ("Our controls were assessed over 5 s."). The only bounded "s" is the
+// unit at the end; no tracked run is there, so the pending insertion read
+// accepted and its rationale comment was marked resolved. The runs here are
+// real trackedRuns() output.
+test("a context-free match elsewhere does not settle a change whose own text is still a tracked run", async () => {
+  const view = await import("../taskpane/shared/review-view.js");
+  const r = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const xIns = (t, id = 1) => `<w:ins w:id="${id}" w:author="A">${r(t)}</w:ins>`;
+  const xDel = (t, id = 2) =>
+    `<w:del w:id="${id}" w:author="A"><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:del>`;
+  const runsOf = (...xs) =>
+    view.trackedRuns(
+      `<pkg:package><pkg:part pkg:name="/word/document.xml"><pkg:xmlData><w:body><w:p>${xs.join("")}</w:p></w:body></pkg:xmlData></pkg:part></pkg:package>`,
+    );
+
+  // The insertion.
+  const BEFORE = "The control was measured for 5 s.";
+  const i1 = {
+    ...chg("insert", "control", "s", "", ""),
+    id: "R1.1-1",
+    word_comment_id: "7",
+    context: classify.changeContext(BEFORE, "control", { kind: "insert" }),
+  };
+  assert.deepEqual(i1.context, { left: "The control", right: " was measured for" });
+  const NOW = "Our controls were assessed over 5 s.";
+  const pendingS = runsOf(r("Our control"), xIns("s"), r(" were assessed over 5 s."));
+  assert.deepEqual(pendingS, [{ kind: "ins", text: "s", start: 11, marks: 1 }]);
+  assert.deepEqual(multi([i1], NOW, pendingS, { w_ins: 1 }), ["pending"]);
+  // Its rationale comment stays open.
+  const snapshot = {
+    paragraphs: [{ index: 3, id: "P3", text: NOW, w_ins: 1, w_del: 0, tracked: pendingS }],
+    comments: [{ id: "7", paragraph_index: 3, resolved: false }],
+  };
+  const row = { ref: "R1.1", change_id: "R1.1-1", ...classifyChange(i1, snapshot) };
+  const revision = { comments: [{ ref: "R1.1", changes: [i1] }] };
+  assert.deepEqual(view.commentsToResolve([row], revision, snapshot.comments), []);
+  // With its context in place the same pending insertion was always pending.
+  const kept = runsOf(r("The control"), xIns("s"), r(" was measured for 5 s."));
+  assert.deepEqual(multi([i1], "The controls was measured for 5 s.", kept, { w_ins: 1 }), [
+    "pending",
+  ]);
+
+  // The same for a deletion inside a word: "s" of "controls" deleted and
+  // still tracked (the raw text keeps it), the words around it rewritten.
+  const d1 = {
+    ...chg("delete", "s", "", "", ""),
+    context: classify.changeContext("The controls were measured for 5 s.", "controls", {
+      narrowFind: "s",
+    }),
+  };
+  assert.deepEqual(d1.context, { left: "The control", right: " were measured for" });
+  const pendingD = runsOf(r("Our control"), xDel("s"), r(" was assessed over 5 s."));
+  assert.deepEqual(pendingD, [{ kind: "del", text: "s", start: 11, marks: 1 }]);
+  assert.deepEqual(multi([d1], "Our controls was assessed over 5 s.", pendingD, { w_del: 1 }), [
+    "pending",
+  ]);
+
+  // Not too much pending.
+  // 1. The insertion was accepted and its context is intact; a sibling
+  //    insertion of the same text elsewhere is still tracked.
+  const sib = runsOf(r("The controls was measured for 5 min"), xIns("s", 3), r("."));
+  assert.deepEqual(sib, [{ kind: "ins", text: "s", start: 35, marks: 1 }]);
+  const i2 = chg("insert", "min", "s", "for 5 min", ".");
+  const T2 = "The controls was measured for 5 mins.";
+  assert.deepEqual(multi([i1, i2], T2, sib, { w_ins: 1 }), ["accepted", "pending"]);
+  // 2. Context rewritten, and the only tracked run left is other text.
+  const other = runsOf(r("Our controls were assessed"), xIns(" twice", 4), r(" over 5 s."));
+  assert.deepEqual(multi([i1], "Our controls were assessed twice over 5 s.", other, { w_ins: 1 }), [
+    "accepted",
+  ]);
+  // 3. Context rewritten and nothing tracked any more.
+  assert.deepEqual(multi([i1], NOW, [], {}), ["accepted"]);
+});
