@@ -428,16 +428,26 @@ function marker(name, evidence) {
 // check and the same log line as for an edit of a turn. The item is taken
 // off the file again; the blocked edit the daemon recorded itself stays.
 async function forbidGuard() {
+  // A refresh first: what the last turn left to write is written before the
+  // run writes the file itself.
+  note("refresh", pane("refresh"), { label: "refresh (before the forbid guard item)" });
   const seeded = addBlocked(await loadRevision(REVISION, winPath(DOC)), "R1.3", {
     args: FORBID_GUARD_EDIT,
     blocked_by: [FORBID_GUARD_SEED_RULE],
   });
   await saveRevision(REVISION, seeded.revision);
   const seedId = seeded.blocked.id;
-  note("refresh", pane("refresh"), { label: "refresh (forbid guard item on file)" });
+  // The pane reads the file again; the item has to be on the card of R1.3
+  // before its button is pressed.
+  const shown = note("refresh", pane("refresh"), { label: "refresh (forbid guard item on file)" });
+  const onCard = (shown.comments ?? [])
+    .find((c) => c.ref === "R1.3")
+    ?.blocked.some((b) => b.startsWith(`Blocked by ${FORBID_GUARD_SEED_RULE}:`));
   const wordBefore = com("state");
   const at = readLog(daemonLog).length;
-  const step = pane("allow-exception", { ref: "R1.3", blocked_by: FORBID_GUARD_SEED_RULE });
+  const step = onCard
+    ? pane("allow-exception", { ref: "R1.3", blocked_by: FORBID_GUARD_SEED_RULE })
+    : { ok: false, error: "the seeded item is not on the card of R1.3 after the refresh" };
   const evidence = forbidBlockEvidence({
     step,
     log: readLog(daemonLog).slice(at),
