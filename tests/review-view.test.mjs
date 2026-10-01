@@ -603,8 +603,8 @@ test("a change applied without its rationale comment: warning flag and an invari
   };
   const r = view.invariantReport(rev, [{ id: "1", content: "[R1.1] a / b / c" }]);
   assert.deepEqual(
-    [r.ok, r.changes, r.expected_comments, r.tool_comments, r.missing_comment],
-    [false, 2, 2, 1, ["R1.3-1"]],
+    [r.ok, r.changes, r.expected_comments, r.tool_comments, r.missing_comment, r.uncommented],
+    [false, 2, 2, 1, [], ["R1.3-1"]],
   );
   assert.deepEqual(
     view.commentsToResolve([{ change_id: "R1.3-1", state: "accepted" }], rev, []),

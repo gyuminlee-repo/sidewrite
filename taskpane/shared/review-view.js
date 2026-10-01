@@ -320,16 +320,46 @@ export function invariantReport(revision, comments) {
     (ch) => !(ch.kind === "insert" && ch.state === "rejected") && !ch.comment_cleaned_at,
   );
   const recorded = new Set(changes.map((ch) => String(ch.word_comment_id)));
-  const missing = expected.filter((ch) => !ids.has(String(ch.word_comment_id)));
+  // A change the task pane applied without its rationale comment
+  // (comment_missing, no comment id) never had one: it is not a comment that
+  // went missing, and it is named apart. It is not ok either: every change
+  // needs its rationale comment.
+  const bare = (ch) => ch.word_comment_id == null && !!ch.comment_missing;
+  const uncommented = expected.filter(bare);
+  const missing = expected.filter((ch) => !bare(ch) && !ids.has(String(ch.word_comment_id)));
   const orphans = [...ids].filter((id) => !recorded.has(id));
   return {
     changes: changes.length,
     expected_comments: expected.length,
     tool_comments: ids.size,
     missing_comment: missing.map((ch) => ch.id),
+    uncommented: uncommented.map((ch) => ch.id),
     unrecorded_comment_ids: orphans,
-    ok: expected.length === ids.size && missing.length === 0 && orphans.length === 0,
+    ok:
+      expected.length === ids.size &&
+      missing.length === 0 &&
+      uncommented.length === 0 &&
+      orphans.length === 0,
   };
+}
+
+// The end of the status line of a refresh: "." when the report is ok, else
+// what does not match. The word MISMATCH stays in every such line (the
+// acceptance judge reads it).
+export function invariantText(inv) {
+  if (inv.ok) return ".";
+  const parts = [];
+  if (inv.missing_comment.length || inv.unrecorded_comment_ids.length || !inv.uncommented.length) {
+    parts.push(
+      `missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"}`,
+    );
+  }
+  if (inv.uncommented.length) {
+    parts.push(
+      `no rationale comment on ${inv.uncommented.join(",")}: applied in Word, the comment could not be added`,
+    );
+  }
+  return ` (MISMATCH: ${parts.join("; ")})`;
 }
 
 // Design 0 C1: once the author accepts or rejects a change, its rationale

@@ -608,6 +608,18 @@ async function recordApplied(
   if (lost.length) deps.log?.(`[review] lost facts ${id}: ${lost.join("; ")}`);
   if (unsourced.length) deps.log?.(`[review] unsourced ${id}: ${unsourced.join("; ")}`);
   if (commentMissing) deps.log?.(`[review] comment missing ${id} code=${commentMissing}`);
+  // What Word answered when the comment step failed (tools-word.js
+  // afterEditApplied): logged only. Without it nothing says why a change has
+  // no rationale comment. One line per failed try, no text of the manuscript.
+  const commentErrors = Array.isArray(r.comment_errors) ? r.comment_errors : [];
+  commentErrors.forEach((e, n) =>
+    deps.log?.(
+      `[review] comment error ${id} try=${n + 1} step=${e?.step ?? "-"} word=${e?.code ?? "-"} at=${e?.location ?? "-"} msg=${String(e?.message ?? "-").slice(0, 200)}`,
+    ),
+  );
+  if (!commentMissing && commentErrors.length) {
+    deps.log?.(`[review] comment added on try ${r.comment_attempts ?? "?"} ${id}`);
+  }
   // A task pane that compares the paragraph before the edit says so
   // (tools-word.js target_checked). One that does not is older than this
   // daemon: its edit is in the document and is recorded, but it was not

@@ -1668,7 +1668,10 @@ export async function toolTrackedEdit({
         // flags an applied result without this (an older task pane).
         target_checked: true,
       };
-      return await afterEditApplied(applied, async () => {
+      // The comment the edit may have got although its sync threw: looked
+      // for before the second try, so that try adds no second comment.
+      const commentThere = () => existingComment(context, para, comment_text);
+      return await afterEditApplied(applied, commentThere, async (at) => {
         let anchor;
         if (isInsert) {
           anchor = inserted;
@@ -1686,6 +1689,7 @@ export async function toolTrackedEdit({
             await context.sync();
           }
           if (again.items.length > 1 && editReplace) {
+            at("anchor_compare");
             const where = again.items.map((r) => r.compareLocationWith(inserted));
             await context.sync();
             anchor = again.items.find(
@@ -1703,6 +1707,7 @@ export async function toolTrackedEdit({
             message: "Edit applied but no range to anchor the comment",
           };
         }
+        at("insert_comment");
         const c = anchor.insertComment(comment_text);
         c.load("id");
         await context.sync();
@@ -1712,23 +1717,71 @@ export async function toolTrackedEdit({
   });
 }
 
+// The comment with this text on the paragraph, as { ok, word_comment_id },
+// or null.
+async function existingComment(context, para, comment_text) {
+  const comments = para.getComments();
+  comments.load("items/id, items/content");
+  await context.sync();
+  const want = normalizeParaText(comment_text);
+  const c = comments.items.find((x) => normalizeParaText(x.content) === want);
+  return c ? { ok: true, word_comment_id: c.id } : null;
+}
+
+// What goes to the daemon log about a failed comment step: the step, the
+// Office error code and place, and the message of the error. Word's errors
+// name no text of the document; the statement lists of debugInfo, which can
+// (a search string, the comment text), are left out.
+function commentError(e, step) {
+  return {
+    step,
+    code: e?.code ?? e?.debugInfo?.code ?? null,
+    location: e?.debugInfo?.errorLocation ?? null,
+    message: String(e?.message ?? e).slice(0, 200),
+  };
+}
+
 // The steps after a tracked edit is in the document (anchor search, comment
-// insert and its sync). step() returns { ok, ... } without the edit fields;
-// `applied` holds them (paragraph_index, paragraph_id, before, after,
-// narrowed), which the daemon records the change from. A throw becomes the
-// partial result CommentInsertFailed, applied:true, like CommentAnchorMissing.
-export async function afterEditApplied(applied, step) {
-  try {
-    return { ...(await step()), ...applied };
-  } catch (e) {
-    return {
-      ok: false,
-      code: "CommentInsertFailed",
-      applied: true,
-      message: `Edit applied but the rationale comment could not be added: ${e?.message ?? e}`,
-      ...applied,
-    };
+// insert and its sync). step(at) returns { ok, ... } without the edit fields
+// and names the part it is in with at(name); `applied` holds the edit fields
+// (paragraph_index, paragraph_id, before, after, narrowed), which the daemon
+// records the change from.
+// Word's comment insert fails now and then on an edit it accepts the next
+// time (the s25 acceptance run: the same edit, one run without its comment,
+// the next with it). So a step that threw is tried once more. Before the
+// second try found() looks for the comment in the document: a sync can
+// throw after Word did the insert, and a second insert would then leave two
+// comments on one change. Two throws become the partial result
+// CommentInsertFailed, applied:true, like CommentAnchorMissing. Each throw is
+// described in comment_errors (commentError), with comment_attempts, also
+// when the second try worked: the daemon logs them.
+export async function afterEditApplied(applied, found, step) {
+  const errors = [];
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let where = "anchor_search";
+    try {
+      if (attempt === 2) where = "find_existing";
+      const there = attempt === 2 ? await found() : null;
+      where = "anchor_search";
+      const r = there ?? (await step((name) => (where = name)));
+      return {
+        ...r,
+        ...applied,
+        ...(errors.length ? { comment_attempts: attempt, comment_errors: errors } : {}),
+      };
+    } catch (e) {
+      errors.push(commentError(e, where));
+    }
   }
+  return {
+    ok: false,
+    code: "CommentInsertFailed",
+    applied: true,
+    message: `Edit applied but the rationale comment could not be added: ${errors.at(-1).message}`,
+    comment_attempts: 2,
+    comment_errors: errors,
+    ...applied,
+  };
 }
 
 function isoOrNull(d) {

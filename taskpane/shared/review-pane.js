@@ -23,6 +23,7 @@ import {
   ledgerCheckFromText,
   ledgerStatusText,
   pendingDecisions,
+  invariantText,
   inFlightEdit,
   reviewerOfRef,
   progressText,
@@ -748,9 +749,7 @@ export function initReviewPane({
     report(
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
-        (inv.ok
-          ? "."
-          : ` (MISMATCH: missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"})`) +
+        invariantText(inv) +
         outside +
         (unresolved.length
           ? ` ${unresolved.length} rationale comment(s) not marked resolved (Word: ${unresolved[0]}; one cause is a document in compatibility mode).`
@@ -1073,6 +1072,17 @@ export function initReviewPane({
             (inv) => {
               if (failed) return failed;
               if (inv.ok) return { ok: true };
+              // Only changes Word applied without their rationale comment:
+              // said as that, not as a mismatch.
+              if (
+                inv.uncommented.length &&
+                !inv.missing_comment.length &&
+                !inv.unrecorded_comment_ids.length
+              ) {
+                return unchecked(
+                  `${inv.uncommented.join(", ")} was applied in Word and its rationale comment could not be added; look at that change in Word, then press Refresh status.`,
+                );
+              }
               return unchecked(
                 `the changes on record and the tool comments in Word do not match (missing ${inv.missing_comment.join(",") || "-"}, unrecorded ${inv.unrecorded_comment_ids.join(",") || "-"}); check those in Word, then press Refresh status.`,
               );
