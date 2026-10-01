@@ -76,25 +76,6 @@ function printArgs({ prompt, model, timeoutS, format }) {
 export const agyOneshotArgs = ({ prompt, model, timeoutS }) =>
   printArgs({ prompt, model, timeoutS, format: "stream-json" });
 
-export const agyTurnArgs = ({ prompt, model, timeoutS }) =>
-  printArgs({ prompt, model, timeoutS, format: "stream-json" });
-
-// `agy mcp add` writes the user's Antigravity settings, so it is run only
-// when the user asks for it in the task pane, never by a probe. Flags come
-// before the name.
-export function agyMcpAddArgs({ url, token }) {
-  return [
-    "mcp",
-    "add",
-    "--type",
-    "http",
-    "--header",
-    `Authorization: Bearer ${token}`,
-    "office",
-    url,
-  ];
-}
-
 function resultOf(o) {
   const text = [o?.response, o?.result, o?.text].find((v) => typeof v === "string");
   const status = typeof o?.status === "string" ? o.status : null;

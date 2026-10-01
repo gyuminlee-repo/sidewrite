@@ -37,8 +37,6 @@ import { createProviderSelection, providersListReply } from "./providers/selecti
 import { chatOneshot } from "./providers/openai-compat.mjs";
 import { codexOneshot } from "./providers/codex.mjs";
 import { agyOneshot } from "./providers/agy.mjs";
-import { createMcpHttp } from "./mcp-http.mjs";
-import { createCliTurns } from "./cli-turns.mjs";
 import {
   buildQueryOptions,
   formatUsageLine,
@@ -150,27 +148,7 @@ function sendError(req, res, status, headline, requestedPath) {
   }
 }
 
-// The office tools for a CLI provider's review turn (mcp-http.mjs), set
-// once the review service exists (below). Until then /mcp/ is not served.
-let mcpHttp = null;
-
 const http = createServer(async (req, res) => {
-  // /mcp/<route> first: it has its own checks (loopback peer and Host, no
-  // Origin, the route's bearer token) and takes no part in the CORS and
-  // OPTIONS handling of the task pane files below.
-  const mcpPath = (req.url || "/").split("?")[0];
-  if (mcpPath.startsWith("/mcp/")) {
-    try {
-      if (mcpHttp && (await mcpHttp.handle(req, res, mcpPath))) return;
-    } catch (e) {
-      console.warn("[mcp-http] request failed:", e?.message ?? e);
-      if (!res.headersSent) res.writeHead(500);
-      res.end();
-      return;
-    }
-    res.writeHead(404).end();
-    return;
-  }
   // Restrictive CORS: only the taskpane's same origin (HTTP_ORIGIN) gets the
   // Access-Control-Allow-Origin header. Other origins (malicious web pages
   // running in a regular browser tab) hit a no-CORS-header response and the
@@ -587,29 +565,17 @@ const review = createReviewService({
         "The agent is still working on the previous message. Wait until it is Ready.",
       );
     }
-    // The provider the pane chose for review turns (set_provider checked it
-    // against the probe). Claude: the pane's Agent SDK session, as before.
-    const choice = selection.choiceFor(key, "turn");
+    // A review turn is a turn of the pane's Agent SDK session: Claude is the
+    // only provider offered for review turns (probe.mjs; turnGate below has
+    // waited for the pane's confirmed choice and refuses any other).
     turnBusy.add(key);
     reviewTurnByKey.set(key, turn);
-    if (choice.id === "claude") {
-      // Same order as the user_message path in the bridge: schedule the loop,
-      // then queue the message it will consume.
-      ensureLoopForMessage(key, host).catch((e) =>
-        console.warn("[review] could not start the agent loop:", e.message),
-      );
-      bridge.pushUserMessage(text, key);
-      return;
-    }
-    // A CLI has no separate system prompt: the host instructions go in front.
-    buildSystemPromptAppend(host)
-      .then((append) => cliTurns.start(key, host, `${append}\n\n${text}`, choice, turn))
-      .catch((e) => {
-        const error = e?.message ?? String(e);
-        bridge.sendAssistantEvent({ event: "error", error }, key);
-        bridge.sendAssistantEvent({ event: "turn_complete", subtype: "error" }, key);
-        endTurnState(key, { ok: false, error });
-      });
+    // Same order as the user_message path in the bridge: schedule the loop,
+    // then queue the message it will consume.
+    ensureLoopForMessage(key, host).catch((e) =>
+      console.warn("[review] could not start the agent loop:", e.message),
+    );
+    bridge.pushUserMessage(text, key);
   },
   oneshot: makeOneshot(),
   oneshotModel: ONESHOT_MODEL,
@@ -618,10 +584,7 @@ const review = createReviewService({
   oneshotJob: (key) => oneshotRouter.pin(key),
   // A review turn starts only with a confirmed provider for review turns.
   turnGate: (key) => selection.ready(key, "turn"),
-  getModel: (key) => {
-    const t = selection.choiceFor(key, "turn");
-    return t.id === "claude" ? modelArgFor(key) : `${t.id}:${t.model ?? "default"}`;
-  },
+  getModel: (key) => modelArgFor(key),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
   // The answers of the response letter that a change of the manuscript made
   // out of date (same rule as the Response tab).
@@ -635,21 +598,6 @@ const response = createResponseService({
   getContext: (key) => bridge.getContext(key),
   oneshotJob: (key, options) => oneshotRouter.pin(key, options),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
-});
-
-// Review turns of a CLI provider: the MCP endpoint they call and their
-// runner. A route is open only while its turn runs (cli-turns.mjs).
-mcpHttp = createMcpHttp({
-  bridge: { callTaskpaneTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key) },
-  getReviewTurn: (key) => reviewTurnByKey.get(key) ?? null,
-  trackedEditDeps: (key) => review.trackedEditDeps(key),
-});
-const cliTurns = createCliTurns({
-  mcpHttp,
-  baseUrl: HTTP_ORIGIN,
-  sendText: (text, key) => bridge.sendAssistantText(text, key),
-  sendEvent: (event, key) => bridge.sendAssistantEvent(event, key),
-  endTurn: (key, outcome) => endTurnState(key, outcome),
 });
 
 // Clear per-turn state when a turn ends for any reason. outcome: how it
@@ -777,11 +725,6 @@ const bridge = createBridge({
       // flag the session interrupted) emits turn_complete interrupted so
       // the taskpane flips to Ready and auto-restarts a resuming loop.
       // Every other pane's loop is untouched.
-      // A CLI provider's review turn first: it is not an SDK session.
-      if (cliTurns.stop(key)) {
-        reply({ type: "stop_agent_result", ok: true, request_id: msg.request_id });
-        return;
-      }
       const s = sessionFor(key);
       if (s) {
         s.interrupted = true;
@@ -1614,14 +1557,9 @@ if (process.send) {
 }
 
 // Keep process alive even when nothing is happening.
-// A running CLI review turn is stopped first: that also takes the turn's
-// office entry (route and token) out of the agy settings.
 function shutdown() {
   console.log("\n[daemon] Shutting down");
-  const bye = () => process.exit(0);
-  const limit = setTimeout(bye, 8_000);
-  limit.unref?.();
-  cliTurns.shutdown().then(bye, bye);
+  process.exit(0);
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

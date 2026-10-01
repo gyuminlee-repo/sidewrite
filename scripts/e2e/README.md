@@ -77,8 +77,7 @@ node scripts/e2e/run-acceptance.mjs --stage s25 \
   --base-dir <folder on a Windows drive, as a WSL path> \
   --playwright-core 'D:\path\to\node_modules\playwright-core' \
   --feature-list <stage 2.5 feature_list.json> \
-  --plan-repo <repo path the feature_list commands cd into> \
-  --conditional S25-33,S25-34,S25-35,S25-36
+  --plan-repo <repo path the feature_list commands cd into>
 ```
 
 The copy of the manuscript is `paper.docx`, so the files the feature list
@@ -96,20 +95,14 @@ judgments). The steps and what each feature is judged from:
 | (no feature id) | daemon stopped and started again, `split` as soon as the pane is back                   | `s25-restart-split`: the stored provider restored, the split's judgments on it, no judgment or receipt of another provider |
 | S25-39          | `import-ledger` (fixture), `export-ledger`, `import-ledger` (the exported file)         | the step rows; the feature reads `paper.ledger.json` and the `[review] ledger import` log line                             |
 | S25-40          | `suggest-ledger` on `tests/fixtures/fake_review_rules.txt`, ticking "cell-free extract" | `s25-ledger-suggest`: the candidate ticked, added, and in the ledger                                                       |
-| S25-33          | `select-provider turn=codex`, `propose R1.1`                                            | `s25-codex-turn`: the turn started and ended with code 0, the endpoint was called, a change with its comment               |
-| S25-34          | `propose R1.3` (asks for a word rule L2 forbids)                                        | `s25-codex-guard`: `document_changes` = recorded changes that hold the word (0 to pass)                                    |
-| S25-36          | `propose-stop R1.4`                                                                     | `s25-cli-stop`: Stop pressed mid-turn, pane Ready, no `codex exec --json` process left                                     |
-| S25-35          | `select-provider turn=antigravity`, `propose R1.2`                                      | `s25-agy-turn`: as S25-33                                                                                                  |
 | S25-37          | `propose-all` (with Claude)                                                             | `s25-propose-all`: `overlaps`, `proposed`, `open_before`                                                                   |
 | S25-38          | Word COM deletes a sentence, `focus-refresh`                                            | `s25-focus-refresh`: the auto-refresh line changed and an outside change is listed                                         |
 | S25-41          | cleanup (Word quit, daemon stopped), then the verify commands                           | `s25-cleanup`: own Word gone, earlier Word processes alive, ports closed                                                   |
 
-When the pane does not offer Codex or Antigravity for review turns, the
-`select-provider turn=...` row is `SKIP`, no CLI turn is run, and the four
-evidence files carry `pass: false` with the pane's reason. With
-`--conditional` those features are then `SKIPPED-CONDITION-NOT-MET` (the log
-shows finished turns and no `[cli-turn] start`); without it they fail the
-run. The pane outputs these judgments were unit-tested with are written by
+Review turns run with Claude. Codex is a provider for judgments only (the
+Review turns menu does not list it), so the flow has no step that chooses it
+for a review turn and the feature ids S25-33 to S25-36, which were about such
+turns, have no steps and no evidence. The pane outputs these judgments were unit-tested with are written by
 hand in the form the driver returns: none was recorded from Word before the
 first stage 2.5 run.
 
@@ -182,14 +175,11 @@ A step that only reads or computes again (`open-response`, `response-locate`,
 fixed wait: every Response step waits for the message its own action ends
 with.
 
-`--provider <id>` (claude, codex, antigravity; stage 2 flow) chooses the
-provider of the review turns in the pane's Providers section right after the
-Review tab opened (step `select-provider turn=<id>`). A provider the pane
-does not offer for review turns is not chosen: the step fails with the text
-of its menu row, and the turns run with Claude. Known conditions for
-`--conditional` in stage 2.5: `S25-33`, `S25-34` (a Codex review turn
-started), `S25-35` (an Antigravity review turn started), `S25-36` (any CLI
-review turn started), each read from `[cli-turn] start provider=...`.
+`--provider <id>` (stage 2 flow) chooses the provider of the review turns
+in the pane's Providers section right after the Review tab opened (step
+`select-provider turn=<id>`). Only `claude` is offered for review turns; any
+other id is not chosen: the step fails with what the menu shows, and the
+turns run with Claude. Stage 2.5 has no condition for `--conditional`.
 
 Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
 `--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
@@ -242,8 +232,7 @@ Stage 3 (Response tab). Each step returns what the tab shows: `message`,
 
 `judge.mjs` holds the expected texts of these steps (`JUDGES`) and the
 evidence builders of the stage 2.5 markers (`modelsEvidence`,
-`providersEvidence`, `ollamaSplitEvidence`, `cliTurnEvidence`,
-`guardEvidence`, `stopEvidence`, `proposeAllEvidence`, `focusEvidence`,
+`providersEvidence`, `ollamaSplitEvidence`, `proposeAllEvidence`, `focusEvidence`,
 `suggestEvidence`, `cleanupEvidence`) and of the stage 3 markers
 (`openEvidence`, `proposalEvidence`, `secondReader`, `exportEvidence`,
 `lineShift`, `staleEvidence`, `ledgerEvidence`, `langEvidence`,
