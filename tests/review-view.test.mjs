@@ -583,7 +583,7 @@ test("invariantReport: a change whose comment the cleanup removed expects no com
 });
 
 test("review file: txt and md, BOM and CRLF removed, size and type checked", () => {
-  assert.deepEqual(view.reviewTextFromFile({ name: "r.txt", size: 10, text: "﻿a\r\nb" }), {
+  assert.deepEqual(view.reviewTextFromFile({ name: "r.txt", size: 10, text: "\uFEFFa\r\nb" }), {
     ok: true,
     text: "a\nb",
   });

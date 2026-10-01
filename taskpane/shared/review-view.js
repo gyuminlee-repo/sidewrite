@@ -447,7 +447,7 @@ export function reviewTextFromFile({ name, size, text }) {
     return { ok: false, error: `${name} is larger than 2 MB.` };
   }
   const t = String(text ?? "")
-    .replace(/^﻿/, "")
+    .replace(/^\uFEFF/, "")
     .replace(/\r\n?/g, "\n");
   if (!t.trim()) return { ok: false, error: `${name} is empty.` };
   return { ok: true, text: t };

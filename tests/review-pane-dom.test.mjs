@@ -865,7 +865,7 @@ test("Load review from file fills the paste box; a wrong type only shows an erro
   await t.$("review-load-file").click();
   assert.equal(opened, 1, "the button opens the file picker");
 
-  input.files = [{ name: "review.txt", size: 20, text: async () => "﻿Reviewer 1\r\nOne." }];
+  input.files = [{ name: "review.txt", size: 20, text: async () => "\uFEFFReviewer 1\r\nOne." }];
   await fire(input, "change");
   assert.equal(t.$("review-input").value, "Reviewer 1\nOne.");
   assert.match(t.$("review-message").textContent, /Loaded review\.txt/);
