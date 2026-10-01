@@ -38,6 +38,7 @@ import {
 import { decisionsPathFor, findComment, loadRevision } from "./revision-store.mjs";
 import { appendDecisions, decisionRecord } from "./decision-log.mjs";
 import { presetById } from "./providers/registry.mjs";
+import { fixtureHandleFor } from "./proposal-fixture.mjs";
 
 export const PROPOSAL_TOOL = "mcp__office__office_tracked_edit";
 const STOPPED = "The turn was stopped.";
@@ -497,8 +498,18 @@ export function proposalTurnsFor({
   env = process.env,
   log = console.log,
 }) {
+  // For the acceptance run only (proposal-fixture.mjs): the replies of
+  // proposal turns come from a file and no provider is asked. Said in the log.
+  const fixture = env.CC_OFFICE_E2E_PROPOSAL_FIXTURE
+    ? fixtureHandleFor(env.CC_OFFICE_E2E_PROPOSAL_FIXTURE, { log })
+    : null;
+  if (fixture) {
+    log(
+      `[proposal] E2E FIXTURE: the replies of proposal turns come from ${env.CC_OFFICE_E2E_PROPOSAL_FIXTURE} (CC_OFFICE_E2E_PROPOSAL_FIXTURE). No provider is asked for a review turn.`,
+    );
+  }
   return createProposalTurns({
-    handleFor: (choice) => router.handleFor(choice),
+    handleFor: fixture ?? ((choice) => router.handleFor(choice)),
     trackedEditDeps: (key, d) => review.trackedEditDeps(key, d),
     call: (name, args, key) => bridge.callTaskpaneTool(name, args, key),
     // One switch for both kinds of review turn (review-service.mjs).
