@@ -20,6 +20,7 @@
 // handler-wrap.mjs wraps both kinds.
 
 import { access } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   localDocPath,
   revisionPathFor,
@@ -67,6 +68,7 @@ import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
 import { wrapHandlers } from "./handler-wrap.mjs";
+import { effectiveProfile, rationaleLang, splitPatterns } from "./journal-profile.mjs";
 
 async function exists(p) {
   try {
@@ -179,6 +181,9 @@ export function createReviewService({
   // the pane's provider for review turns is confirmed and throws otherwise
   // (providers/selection.mjs ready). The request then fails with that text.
   turnGate = async () => {},
+  // Default language of the settings file, between the profile and the
+  // environment (journal-profile.mjs rationaleLang): () => string | null.
+  langDefault = null,
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -503,14 +508,34 @@ export function createReviewService({
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";
 
+  // The journal profile of the paper (journal-profile.mjs). A profile that
+  // cannot be read does not stop a review: the language falls back to the
+  // settings and environment default, the split to its built-in patterns.
+  async function profileOf(d, rev) {
+    const settingsDefault = langDefault?.() ?? null;
+    try {
+      const { profile } = await effectiveProfile(rev, {
+        docDir: dirname(d.doc),
+        env,
+        settingsDefault,
+      });
+      return profile;
+    } catch (e) {
+      log(`[review] profile not loaded: ${e?.message ?? e}`);
+      return { rationale_lang: rationaleLang({}, { env, settingsDefault }) };
+    }
+  }
+
   async function buildFor(d, ref, paragraphs) {
     const rev = await load(d);
     const comment = findComment(rev, ref);
     if (!comment) throw new Error(`No reviewer comment ${ref}. Save the comment list first.`);
+    const profile = await profileOf(d, rev);
     const built = buildReviewPrompt({
       comment,
       paragraphs: Array.isArray(paragraphs) ? paragraphs : [],
       ledger: rev.ledger,
+      lang: profile.rationale_lang,
       includeForbid: includeForbid(),
     });
     return { rev, comment, built };
@@ -537,7 +562,17 @@ export function createReviewService({
           asked = true;
           return shot(req);
         });
-      const r = await splitReview(text, { patterns: msg.patterns, oneshot: ask });
+      // Head patterns: the request's own, else those of the paper profile.
+      // A document without a local path has no profile.
+      let patterns = msg.patterns;
+      if (!patterns) {
+        try {
+          patterns = splitPatterns(await profileOf(d, await load(d)));
+        } catch {
+          patterns = undefined;
+        }
+      }
+      const r = await splitReview(text, { patterns, oneshot: ask });
       const records = [];
       if (asked) {
         records.push(
