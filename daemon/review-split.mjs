@@ -221,8 +221,13 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // Blocks opened by combined heads carry their own numbers and are left as
 // written.
 // R{reviewer}.0 is the text before the first comment of the first block of a
-// reviewer with a head; without any reviewer head that text is dropped (and
-// named by the check). A reviewer block with no head of any kind is split
+// reviewer with a head. When that text lies under more than one section
+// ("Major comments" text, then "Minor comments" text, then the numbers), each
+// section's text is a comment of its own with its own `section`: the first is
+// R{reviewer}.0, the others take the next numbers and the numbered comments
+// go on after them (so "1." under the second section is then R1.2); the same
+// holds in an editor block and in a later block. Without any reviewer head
+// the text before the first comment is dropped (and named by the check). A reviewer block with no head of any kind is split
 // at blank lines when it has more than one paragraph (a weak split: it does
 // not stop the model split), else kept whole as R{reviewer}.1.
 //
@@ -580,23 +585,35 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       ]);
     }
     const out = [];
-    const preamble = { ...base, number: 0, kept: true, idx: [] };
+    // Text before the first comment: one row per part that has any, so the
+    // text under "Minor comments" does not end up under "Major comments".
+    // The first is the preamble (R{n}.0 in a first block); the others, and
+    // all of them in a later block, take the next numbers when the first
+    // comment comes.
+    const before = [];
+    let numbered = false;
     for (const p of parts) {
       const mode = modeOf(p);
       const { pre, items } = mode ? partItems(p.idx, mode) : { pre: p.idx, items: [] };
       if (hasText(pre)) {
         if (out.length) out.push({ ...base, number: ++max, idx: pre, section: sec(p.section) });
         else {
-          preamble.idx.push(...pre);
-          preamble.section ??= p.section;
+          before.push({
+            ...base,
+            number: 0,
+            kept: !before.length,
+            idx: pre,
+            section: sec(p.section),
+          });
         }
       }
       let off = null;
       for (const it of items) {
-        // In a later block the text before the first comment is a comment of
-        // its own, with the next number.
-        if (later && !out.length && !preamble.number && hasText(preamble.idx)) {
-          preamble.number = ++max;
+        if (!numbered) {
+          before.forEach((row, k) => {
+            if (later || k > 0) row.number = ++max;
+          });
+          numbered = true;
         }
         let number;
         if (it.n === null) number = ++max;
@@ -619,8 +636,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
         });
       }
     }
-    preamble.section = sec(preamble.section);
-    return done(b.headed ? [preamble, ...out] : out);
+    return done(b.headed ? [...before, ...out] : out);
   };
 
   let editors = 0;
