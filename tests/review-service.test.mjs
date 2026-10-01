@@ -2332,7 +2332,7 @@ test("review_split: the section of a comment reaches the requirement extraction 
     const preview = await t.ask("review_preview", { ref: "R1.2", paragraphs: [] });
     assert.match(
       preview.prompt,
-      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\n<<<\n1\. Expand this section\.\n>>>/,
+      /comment R1\.2 \(verbatim\):\nSection of the review this comment is under: Methods\nThe comment is the text between[^\n]*\n<<<([0-9a-f]{12})\n1\. Expand this section\.\n>>>\1\n/,
     );
     assert.ok(
       t.lines.some((l) => /^\[review\] prompt R1\.2 .* section="Methods"/.test(l)),
