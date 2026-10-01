@@ -8,7 +8,8 @@ result, a picture with the bytes it shows, an equation with its text, a symbol, 
 with its rows, cells and cell paragraphs, and the text inside every bookmark.
 
 A paragraph is {"k": "p", "id": ..., "pieces": [...]}. A piece is a string or a tuple:
-("tab",), ("br", "line" | "page" | "column" | "all" | "none"), ("link", text), ("bm", name, text), ("b", text),
+("tab",), ("br", "line" | "page" | "column" | "all" | "none"), ("link", text) (a link to a place in the
+document), ("url", text) (a link to a web address), ("pow", base, exponent) (an equation with an object), ("bm", name, text), ("b", text),
 ("fn",) and ("fn2",) (references to two notes), ("pic",) and ("pic2",) (two inline pictures that differ), ("field", code, result), ("cite", number,
 shown text) (a field as a reference manager writes it: a long code cut into several runs), ("simple", code,
 result) (a w:fldSimple), ("fopen", code) and ("fend",) (the two ends of a field that runs over several
@@ -27,12 +28,14 @@ import hashlib
 import io
 import json
 import random
+import re
 import struct
 import zipfile
 import zlib
 
 from docx import Document
 from docx.oxml import OxmlElement, parse_xml
+from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
@@ -40,10 +43,14 @@ INSERT_RGB = "FF0000"
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 A_BLIP = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
 R_EMBED = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
-# Wrappers around runs, besides the content control: tag -> attributes.
+# Wrappers around runs, besides the content control: tag -> attributes. Word reads w:dir and w:bdo as direction
+# characters, so these two are content (DIRECTION); the others say nothing by themselves.
 WRAPPERS = {"smartTag": {"uri": "urn:example-invalid:tags", "element": "thing"},
             "customXml": {"uri": "urn:example-invalid:xml", "element": "thing"},
             "dir": {"val": "ltr"}, "bdo": {"val": "ltr"}}
+DIRECTION = ("dir", "bdo")
+WEB = "https://example.invalid/item/7"
+R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
 BIBLIOGRAPHY = 'ADDIN ZOTERO_BIBL {"uncited":[],"omitted":[],"custom":[]} CSL_BIBLIOGRAPHY'
 
 
@@ -153,6 +160,15 @@ def _fill(par, pieces):
             link = _el("w:hyperlink", anchor="somewhere")
             link.append(_run(piece[1]))
             p.append(link)
+        elif kind == "url":
+            link = _el("w:hyperlink")
+            link.set(R_ID, par.part.relate_to(WEB, RELATIONSHIP_TYPE.HYPERLINK, is_external=True))
+            link.append(_run(piece[1]))
+            p.append(link)
+        elif kind == "pow":
+            p.append(parse_xml(
+                '<m:oMath xmlns:m="%s"><m:sSup><m:e><m:r><m:t>%s</m:t></m:r></m:e><m:sup><m:r><m:t>%s</m:t></m:r></m:sup>'
+                '</m:sSup><m:r><m:t>+1</m:t></m:r></m:oMath>' % (M_NS, piece[1], piece[2])))
         elif kind == "bm":
             n = str(next(_IDS))
             p.append(_el("w:bookmarkStart", id=n, name=piece[1]))
@@ -304,7 +320,7 @@ def _text(pieces):
             out += "\t"
         elif piece[0] == "br":
             out += {"line": "\n", "none": "\n", "page": PAGE, "column": COLUMN, "all": LINE_ALL}[piece[1]]
-        elif piece[0] in ("link", "b", "ins", "cm", "sdt") or piece[0] in WRAPPERS:
+        elif piece[0] in ("link", "url", "b", "ins", "cm", "sdt") or piece[0] in WRAPPERS:
             out += piece[1]
         elif piece[0] in ("bm", "field", "cite", "simple"):
             out += piece[2]
@@ -312,8 +328,9 @@ def _text(pieces):
 
 
 def _inline(pieces):
-    """What the pieces hold besides text, in order: ("field", code, result), ("drawing", digest of the picture),
-    ("oMath", text), ("sym", font, character), (kind,) for the rest."""
+    """What the pieces hold besides text, in order: ("field", code, result), ("link", target, text) (Word counts a
+    hyperlink as a field), ("drawing", digest of the picture), ("oMath", text), ("dir" | "bdo", text),
+    ("sym", font, character), (kind,) for the rest."""
     out = []
     for piece in pieces:
         kind = "" if isinstance(piece, str) else piece[0]
@@ -329,6 +346,12 @@ def _inline(pieces):
             out.append(("fldChar", "end"))
         elif kind == "math":
             out.append(("oMath", piece[1]))
+        elif kind == "pow":
+            out.append(("oMath", piece[1] + piece[2] + "+1"))
+        elif kind in ("link", "url"):
+            out.append(("link", "#somewhere" if kind == "link" else WEB, piece[1]))
+        elif kind in DIRECTION:
+            out.append((kind, piece[1]))
         elif kind == "sym":
             out.append(("sym", "Symbol", "F061"))
         elif kind in ("fn", "fn2"):
@@ -416,6 +439,9 @@ def view(path, mode, side):
     for blip in body.iter(A_BLIP):                    # a picture is the bytes it shows, not the id that points to them
         if blip.get(R_EMBED) in doc.part.related_parts:
             blip.set(R_EMBED, hashlib.sha256(doc.part.related_parts[blip.get(R_EMBED)].blob).hexdigest())
+    for link in body.iter(qn("w:hyperlink")):         # a link is where it leads, not the id that says so
+        rel = doc.part.rels.get(link.get(R_ID))
+        link.set("target", rel.target_ref if rel is not None else "#" + (link.get(qn("w:anchor")) or ""))
     notes = {}                                        # a note reference is the text of its note, not its id
     for rel in doc.part.rels.values():
         if rel.reltype.endswith("/footnotes"):
@@ -462,6 +488,25 @@ def view(path, mode, side):
             if x.tag == qn("w:sdt"):
                 marked.add(x)
             x = x.getnext()
+    # An equation is marked inside: track changes puts w:ins / w:del into every m:r, around its text; colour mode
+    # formats the w:rPr of the m:r. An equation of which no run is left is gone.
+    m_r, m_math, m_para = ("{%s}%s" % (M_NS, x) for x in ("r", "oMath", "oMathPara"))
+    zones = [z for z in body.iter(m_math) if z.find(".//" + m_r) is not None]
+    for r in list(body.iter(m_r)):
+        mark = next((c for c in r if c.tag in (qn("w:ins"), qn("w:del"))), None)
+        state = (None if mark is None else mark.tag.split("}")[-1]) if track else _rpr_state(r.find(qn("w:rPr")))
+        if state == drop:
+            r.getparent().remove(r)
+        elif mark is not None:
+            for child in list(mark):
+                mark.addprevious(child)
+            r.remove(mark)
+    for z in zones:
+        if z.find(".//" + m_r) is None:
+            holder = z.getparent()
+            holder.remove(z)
+            if holder.tag == m_para and holder.find(m_math) is None:
+                holder.getparent().remove(holder)
     for sdt in filled:
         gone = sdt in marked if track else sdt.find(".//" + qn("w:r")) is None
         if gone and sdt.find(".//" + qn("w:p")) is None:
@@ -537,7 +582,9 @@ def _contents(p):
             elif kind == "end":
                 field["depth"] -= 1
                 if field["depth"] == 0:
-                    out.append(("field", field["code"], field["result"]))
+                    link = re.match(r'HYPERLINK(?: "([^"]*)")?(?: \\l "([^"]*)")? \\h$', field["code"])
+                    out.append(("link", link.group(1) or "#" + link.group(2), field["result"]) if link else
+                               ("field", field["code"], field["result"]))
                     field = None
         elif e.tag in (qn("w:instrText"), qn("w:delInstrText")):
             if field is not None:
@@ -545,6 +592,10 @@ def _contents(p):
         elif e.tag in (qn("w:t"), qn("w:delText")):
             if field is not None and field["sep"]:
                 field["result"] += e.text or ""
+        elif e.tag == qn("w:hyperlink"):
+            out.append(("link", e.get("target"), "".join(t.text or "" for t in e.iter(qn("w:t"), qn("w:delText")))))
+        elif e.tag in (qn("w:dir"), qn("w:bdo")):
+            out.append((e.tag.split("}")[-1], "".join(t.text or "" for t in e.iter(qn("w:t"), qn("w:delText")))))
         elif e.tag == qn("w:sdt"):
             if e.find(".//" + qn("w:r")) is None:      # Word shows an empty content control as a placeholder
                 out.append(("empty control",))
@@ -834,6 +885,8 @@ CAPTION = lambda m: m.insert(_at(m, "d"), P("cap", "Figure ", ("field", "SEQ Fig
 CAPTION2 = lambda m: m.insert(_at(m, "d"), P("cap", "Figure ", ("field", "SEQ Figure \\* ARABIC", "1"), ". " + text(40) + " See ", ("field", "REF _Ref4242 \\h", "Table 2"), "."))  # noqa: E731
 WITH_SIGNS = set_pieces("c", text(5) + " well", ("nbh",), "known ", ("sym",), " " + text(6), ("cr",), text(7), ("shy",))
 WITH_MATH = set_pieces("c", text(5) + " ", ("math", "x+y"), " " + text(6, 7))
+WITH_POWER = set_pieces("c", text(5) + " ", ("pow", "x", "2"), " " + text(6, 7))
+WITH_WEB = set_pieces("c", text(5) + " ", ("url", "a web address"), " " + text(6, 7))
 WITH_COMMENT = set_pieces("c", text(5) + " ", ("cm", "a remarked phrase"), " " + text(6, 7))
 WITH_SIMPLE = set_pieces("c", text(5) + " ", ("simple", "PAGE", "3"), " " + text(6, 7))
 WITH_CONTROL = set_pieces("c", text(5) + " ", ("sdt", "a controlled phrase"), " " + text(6, 7))
@@ -968,11 +1021,31 @@ CASES = {
     "a paragraph with a hard hyphen and a symbol deleted": (variant(WITH_SIGNS), del_para("c"), None),
     # equations: kept where they are the same, refused where they change
     "a word changed in a paragraph with an equation": (variant(WITH_MATH), reword("c"), None),
-    "an equation changed": (
-        variant(WITH_MATH), set_pieces("c", text(5) + " ", ("math", "x+z"), " " + text(6, 7)), r"\(oMath\) that stands outside a run"),
+    "an equation changed": (variant(WITH_MATH), set_pieces("c", text(5) + " ", ("math", "x+z"), " " + text(6, 7)), None),
+    "an equation added to a paragraph": (variant(), WITH_MATH, None),
+    "an equation taken out of a paragraph": (variant(WITH_MATH), set_pieces("c", text(5) + "  " + text(6, 7)), None),
     "a paragraph with an equation added": (
-        variant(), lambda m: m.insert(_at(m, "b"), P("eq", text(20) + " ", ("math", "x+y"))), r"clean paragraph 3 of the body .*\(oMath\)"),
-    "a paragraph with an equation deleted": (variant(WITH_MATH), del_para("c"), r"baseline paragraph 5 of the body .*\(oMath\)"),
+        variant(), lambda m: m.insert(_at(m, "b"), P("eq", text(20) + " ", ("math", "x+y"))), None),
+    "a paragraph that is only an equation added": (variant(), lambda m: m.insert(_at(m, "b"), P("eq", ("math", "x+y"))), None),
+    "a paragraph with an equation deleted": (variant(WITH_MATH), del_para("c"), None),
+    # an equation with an object (a power), which Word marks in the object's properties too
+    "a word changed in a paragraph with a power": (variant(WITH_POWER), reword("c"), None),
+    "a power changed": (variant(WITH_POWER), set_pieces("c", text(5) + " ", ("pow", "y", "2"), " " + text(6, 7)), None),
+    "a paragraph with a power added": (
+        variant(), lambda m: m.insert(_at(m, "b"), P("eq", text(20) + " ", ("pow", "x", "2"))), None),
+    "a paragraph with a power deleted": (variant(WITH_POWER), del_para("c"), None),
+    "a table with an equation that lost a row": (
+        variant(table("t1", lambda rows: rows[0].__setitem__(0, [[text(30) + " ", ("pow", "x", "2")]]))), table("t1", del_row), None),
+    # hyperlinks: Word counts one as a field
+    "a web link in a changed paragraph": (variant(WITH_WEB), reword("c"), None),
+    "a web link reworded": (variant(WITH_WEB), set_pieces("c", text(5) + " ", ("url", "a changed address"), " " + text(6, 7)), None),
+    "a web link added to a paragraph": (variant(), WITH_WEB, None),
+    "a web link taken out of a paragraph": (variant(WITH_WEB), set_pieces("c", text(5) + "  " + text(6, 7)), None),
+    "a paragraph with a web link added": (
+        variant(), lambda m: m.insert(_at(m, "b"), P("lnk", text(20) + " ", ("url", "a web address"), ".")), None),
+    "a paragraph with a web link deleted": (variant(WITH_WEB), del_para("c"), None),
+    "a link taken out of a paragraph": (variant(WITH_LINK), set_pieces("c", text(5) + "  " + text(6, 7)), None),
+    "a link added to a paragraph": (variant(), WITH_LINK, None),
     # comments
     "a word changed in a paragraph with a comment": (variant(WITH_COMMENT), reword("c"), None),
     "a word changed under a comment": (
@@ -1035,13 +1108,16 @@ CASES = {
 }
 for _kind in WRAPPERS:
     _with = set_pieces("c", text(5) + " ", (_kind, "a wrapped phrase"), " " + text(6, 7))
+    # A direction wrapper is content that cannot be written as inserted or deleted: where it comes or goes the
+    # pair is refused. Where both documents have it, the paragraph around it is rewritten word by word.
+    _no = r"\(%s\) that stands outside a run and cannot be shown as (inserted|deleted)" % _kind if _kind in DIRECTION else None
     CASES.update({
         "a word changed in a paragraph with a %s wrapper" % _kind: (variant(_with), reword("c"), None),
         "a paragraph with a %s wrapper added" % _kind: (
-            variant(), lambda m, k=_kind: m.insert(_at(m, "b"), P("wr", text(20) + " ", (k, "a wrapped phrase"), ".")), None),
-        "a paragraph with a %s wrapper deleted" % _kind: (variant(_with), del_para("c"), None),
+            variant(), lambda m, k=_kind: m.insert(_at(m, "b"), P("wr", text(20) + " ", (k, "a wrapped phrase"), ".")), _no),
+        "a paragraph with a %s wrapper deleted" % _kind: (variant(_with), del_para("c"), _no),
         "a %s wrapper only in the baseline, the paragraph changed" % _kind: (
-            variant(_with), set_pieces("c", text(5) + " a wrapped phrase and more " + text(6, 7)), None),
+            variant(_with), set_pieces("c", text(5) + " a wrapped phrase and more " + text(6, 7)), _no),
     })
 
 # Changes that can be combined freely: each touches another part of the base model.

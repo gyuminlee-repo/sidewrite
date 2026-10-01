@@ -35,6 +35,13 @@ and a deleted picture is marked only in the formatting of its run. A field that 
 bibliography) is read by its ends: its begin with its code is one unit, its end another, and the paragraphs
 between are text. A comment keeps its place in a changed paragraph, like a bookmark.
 
+A hyperlink (w:hyperlink) is such a unit too: Word counts it as a field, and it is read as the HYPERLINK field it
+stands for. Where it stays it stays the element; where it is new or gone, or its text changed, it is written as
+that field with field marks, in w:ins or w:del (an element could not stand there, and an empty one left behind
+would still be a field). An equation that is new or gone is marked the way Word does it: inside every m:r a
+w:ins / w:del around its properties and text, and in the m:ctrlPr of every object. A changed equation is the old
+one deleted and the new one inserted.
+
 What is read how: pending tracked changes are carried out (accepted) in both files before they are compared, so the
 output holds this tool's marks only; pending cell insertions, deletions and merges are refused. Text that is struck through in the
 baseline is read as already deleted. In colour mode a clean file that already has struck-through text, or text in the
@@ -52,8 +59,10 @@ and column breaks (a deleted one is left out there, because a struck break would
 itself is tested by damaging a copy. When a check fails nothing is written and the exit code is 1.
 
 What is refused (exit 2) instead of written wrong, each with the paragraph, its first words and the kind of the
-element: an equation that is new, gone or changed (it stands outside a run; the same holds for any other element
-outside a run that is no field), also when its paragraph is new or deleted; deleted content that points to a part
+element: an element outside a run that is new, gone or changed and is neither a field, a hyperlink nor an equation
+(w:dir and w:bdo, which Word reads as direction characters: text of right-to-left scripts is outside what this
+tool does), also when its paragraph is new or deleted; a hyperlink that points to a part of the file, has a
+quote in its address or holds more than runs and markers, when it is new, gone or changed; deleted content that points to a part
 of the baseline that cannot be copied on its own (a chart, a diagram), or to a note with links or pictures of its
 own. Further: nested tables; a paragraph of one document before a table or at the end of a cell or of the document
 where the other document has no paragraph at all (a paragraph mark cannot show that); pending cell insertions,
@@ -151,7 +160,15 @@ NOTE_REFS = ('footnoteReference', 'endnoteReference')
 # comment is not carried over (the output has no comments part of the baseline); in a deleted paragraph it is
 # counted as dropped.
 COMMENT_TAGS = {'commentRangeStart', 'commentRangeEnd', 'commentReference'}
-WRAPPERS = ('smartTag', 'sdt', 'sdtContent', 'customXml', 'dir', 'bdo')   # hold runs: the reader looks inside
+WRAPPERS = ('smartTag', 'sdt', 'sdtContent', 'customXml')   # hold runs: the reader looks inside
+# w:dir and w:bdo are not among them: Word reads them as direction characters, so they are content. They are read
+# as an element outside a run: kept where both documents have the same, refused where one comes or goes.
+M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+MATH_KINDS = ('oMath', 'oMathPara')
+# The equation objects that have properties of their own (m:<name>Pr with m:ctrlPr), where Word marks the object
+# as inserted or deleted.
+MATH_OBJECTS = ('acc', 'bar', 'box', 'borderBox', 'd', 'eqArr', 'f', 'func', 'groupChr', 'limLow', 'limUpp', 'm',
+                'nary', 'phant', 'rad', 'sPre', 'sSub', 'sSubSup', 'sSup')
 SKIPPED = {'proofErr', 'lastRenderedPageBreak', 'sdtPr', 'sdtEndPr', 'smartTagPr', 'customXmlPr',
            'customXmlInsRangeStart', 'customXmlInsRangeEnd', 'customXmlDelRangeStart', 'customXmlDelRangeEnd'}   # say nothing
 
@@ -159,6 +176,11 @@ SKIPPED = {'proofErr', 'lastRenderedPageBreak', 'sdtPr', 'sdtEndPr', 'smartTagPr
 def q(tag):
     """Qualified WordprocessingML tag name."""
     return '{%s}%s' % (W_NS, tag)
+
+
+def mq(tag):
+    """Qualified math tag name."""
+    return '{%s}%s' % (M_NS, tag)
 
 
 def ln(el):
@@ -258,12 +280,23 @@ def resolve_revisions(xml, side='accept'):
 
     flags = [e for e in found if ln(e) in gone + kept and ln(e.getparent()) in REV_PROPERTY_PARENTS]
     joined = []
+    # An equation is marked inside (as Word writes it): in every m:r a w:ins / w:del around its w:rPr and its text,
+    # and in the m:ctrlPr of every object a w:ins / w:del around the w:rPr.
+    zones = [z for z in root.iter(mq('oMath')) if any(ln(x.getparent()) in ('r', 'ctrlPr') for x in z.iter(q('ins'), q('del')))]
+    objects = []                                      # equation objects that go
     for e in flags:
         owner, kind = e.getparent(), ln(e)
+        if ln(owner) == 'ctrlPr':
+            if kind in kept:
+                for ch in list(e):
+                    e.addprevious(ch)
+            else:
+                objects.append(owner.getparent().getparent())
+            drop(e)
+            continue
         drop(e)
         if kind in kept:
             continue
-        assert ln(owner) != 'ctrlPr', 'a pending change inside an equation is not handled; accept or reject it in Word first'
         if ln(owner) == 'trPr':                       # a row that goes
             row = owner.getparent()
             tbl = row.getparent()
@@ -276,7 +309,20 @@ def resolve_revisions(xml, side='accept'):
     wrappers = [e for e in found if ln(e) in gone + kept and id(e) not in flagged]
     for e in wrappers:
         if ln(e) in gone:
+            run = e.getparent()
             drop(e)
+            if run is not None and run.tag == mq('r') and all(ch.tag == mq('rPr') for ch in run):
+                drop(run)                             # a run of an equation that held nothing else
+    for obj in objects:
+        assert obj.find('.//' + mq('r')) is None, ('an equation object is marked as %s while text inside it is not; '
+                                                    'accept or reject the changes in Word first' % gone[0])
+        drop(obj)
+    for z in zones:                                   # an equation of which nothing is left goes
+        if z.find('.//' + mq('r')) is None:
+            holder = z.getparent()
+            drop(z)
+            if holder is not None and holder.tag == mq('oMathPara') and holder.find(mq('oMath')) is None:
+                drop(holder)
     for e in wrappers:
         if ln(e) in kept and e.getparent() is not None:
             for t in e.iter(q('delText')):
@@ -343,7 +389,7 @@ def canon(el):
     save to the next and what is formatting (revision save ids, drawing ids and names, run properties). A
     relationship id stands as what it points to, a note id as what the note says; deleted text reads like text."""
     tag = {'delText': 't', 'delInstrText': 'instrText'}.get(ln(el), ln(el))
-    if tag in ('rPr', 'pPr', 'bookmarkStart', 'bookmarkEnd') or tag in SKIPPED or tag in COMMENT_TAGS:
+    if tag in ('rPr', 'pPr', 'ctrlPr', 'bookmarkStart', 'bookmarkEnd') or tag in SKIPPED or tag in COMMENT_TAGS:
         return None
     attrs = []
     for k, v in sorted(el.attrib.items()):
@@ -358,9 +404,23 @@ def canon(el):
         elif tag in NOTE_REFS and local == 'id':
             v = NOTE_DIGEST.get((tag, v), v)
         attrs.append((local, v))
-    kids = tuple(x for x in (canon(ch) for ch in el if isinstance(ch.tag, str)) if x is not None)
+    kids = tuple(x for x in (canon(ch) for ch in unmarked(el)) if x is not None)
+    if not attrs and not kids and tag.endswith('Pr') and el.tag.startswith('{%s}' % M_NS):
+        return None                                   # properties of an equation object that say nothing
     text = el.text or ''
     return (tag, tuple(attrs), text if tag in ('t', 'instrText') else text.strip(), kids)
+
+
+def unmarked(el):
+    """The element children of an element, with those inside a w:ins or w:del in their place (inside an equation
+    the marks stand in the runs)."""
+    for ch in el:
+        if not isinstance(ch.tag, str):
+            continue
+        if ch.tag in (q('ins'), q('del')):
+            yield from unmarked(ch)
+        else:
+            yield ch
 
 
 def canon_seq(children):
@@ -380,9 +440,11 @@ class Atom:
     """An element, or a whole field, that stands in the text of a paragraph as one character.
 
     frags: [(the run it was read from, its rPr, [the children of that run that belong to the atom])]. el: the
-    element itself when it stands outside a run and is no field (an equation); such an atom can only be kept."""
+    element itself when it stands outside a run and is no field; of these only an equation can be written as
+    inserted or deleted (mark_math), the others can only be kept."""
     def __init__(self, kind, link, el=None):
         self.kind, self.link, self.el, self.frags, self.char, self.open = kind, link, el, [], None, False
+        self.keep = None                              # the element to write where the atom stays (a w:hyperlink)
 
     def add(self, r, rpr, ch):
         if self.frags and self.frags[-1][0] is r:
@@ -401,10 +463,10 @@ class Atom:
         self.char = ATOMS[content]
 
 
-def unfold_simple_field(fld):
-    """A w:fldSimple as runs with field marks (begin, code, separate, result, end): the form that can stand inside
-    w:ins and w:del. The new runs take the properties of the first run of the result."""
-    inner = [r for r in fld.iter(q('r')) if not any(a.tag == q('r') for a in r.iterancestors())]
+def field_runs(code, inner, result=None):
+    """Runs with field marks (begin, code, separate, the runs of the result, end): the form of a field that can
+    stand inside w:ins and w:del. The new runs take the properties of the first run of the result. result: what
+    stands between separate and end when that is more than the runs (markers between them)."""
     rpr = inner[0].find(q('rPr')) if inner else None
 
     def run(child):
@@ -419,10 +481,52 @@ def unfold_simple_field(fld):
         e.set(q('fldCharType'), kind)
         return run(e)
 
-    code = etree.Element(q('instrText'))
-    code.text = fld.get(q('instr')) or ''
-    code.set(XML_SPACE, 'preserve')
-    return [mark('begin'), run(code), mark('separate')] + [copy.deepcopy(r) for r in inner] + [mark('end')]
+    text = etree.Element(q('instrText'))
+    text.text = code
+    text.set(XML_SPACE, 'preserve')
+    return [mark('begin'), run(text), mark('separate')] + [copy.deepcopy(r) for r in result or inner] + [mark('end')]
+
+
+def top_runs(el):
+    return [r for r in el.iter(q('r')) if not any(a.tag == q('r') for a in r.iterancestors())]
+
+
+def unfold_simple_field(fld):
+    """A w:fldSimple as runs with field marks."""
+    return field_runs(fld.get(q('instr')) or '', top_runs(fld))
+
+
+def unfold_hyperlink(link):
+    """A w:hyperlink as the HYPERLINK field it stands for, as runs with field marks; None when it cannot be
+    written that way (it points to a part of the file, its address holds a quote, or it holds more than runs
+    and bookmark or comment markers).
+
+    Word counts a w:hyperlink as a field and shows this code for it: HYPERLINK, the address in quotes, \\l with
+    the place in the document, \\o with the tip, \\t with the frame, \\h. A link that comes or goes is written
+    in this form, because a w:hyperlink element cannot stand inside w:ins or w:del and an empty one that is left
+    behind is still a field."""
+    code = 'HYPERLINK'
+    inner = [ch for ch in link if isinstance(ch.tag, str) and ln(ch) not in SKIPPED]
+    if any(ch.tag != q('r') and ln(ch) not in ('bookmarkStart', 'bookmarkEnd') and ln(ch) not in COMMENT_TAGS for ch in inner):
+        return None
+    rid = link.get('{%s}id' % R_NS)
+    if rid is not None:
+        target = REL_DIGEST.get(rid, '')
+        if not target.startswith('outside:') or '"' in target:
+            return None
+        code += ' "%s"' % target[len('outside:'):]
+    for switch, attr in (('l', 'anchor'), ('o', 'tooltip'), ('t', 'tgtFrame')):
+        if link.get(q(attr)):
+            if '"' in link.get(q(attr)):
+                return None
+            code += ' \\%s "%s"' % (switch, link.get(q(attr)))
+    return field_runs(code + ' \\h', [ch for ch in inner if ch.tag == q('r')], inner)
+
+
+def math_mark(math):
+    """'ins' | 'del' when every run of an equation is marked that way (see mark_math), else None."""
+    kinds = {next((ln(ch) for ch in r if ch.tag in (q('ins'), q('del'))), None) for r in math.iter(mq('r'))}
+    return kinds.pop() if len(kinds) == 1 else None
 
 
 class Para:
@@ -534,20 +638,22 @@ def read_para(p, skip_rpr=is_struck, side='accept', _open=frozenset()):
             if t == 'r':
                 if side in ('accept', 'reject') or mark == side:
                     add_run(ch, link)
-            elif t == 'hyperlink':
-                walk(ch, ch, mark)
             elif t == 'ins':
                 if side in ('accept', 'ins'):
                     walk(ch, link, 'ins')
             elif t == 'del':
                 if side in ('reject', 'del'):
                     walk(ch, link, 'del')
-            elif t == 'fldSimple':
-                runs = unfold_simple_field(ch)
+            elif t == 'fldSimple' or (t == 'hyperlink' and unfold_hyperlink(ch) is not None):
+                runs = unfold_simple_field(ch) if t == 'fldSimple' else unfold_hyperlink(ch)
                 if not (side in ('accept', 'reject') or mark == side) or skip_rpr(runs[0].find(q('rPr'))):
                     continue
                 atom = Atom('field', link)
+                atom.keep = ch if t == 'hyperlink' else None   # where it stays, it stays the element it is
                 for r in runs:
+                    if r.tag != q('r'):               # a marker inside a link: it goes along as it is
+                        atom.frags.append((None, None, [r]))
+                        continue
                     for c in r:
                         if ln(c) != 'rPr':
                             atom.add(r, r.find(q('rPr')), c)
@@ -572,7 +678,11 @@ def read_para(p, skip_rpr=is_struck, side='accept', _open=frozenset()):
                     para.special[t] += 1
                 para.marks.append((ch, len(para.fmt), link))
             else:                                     # an equation, or whatever else stands outside a run
-                if not (side in ('accept', 'reject') or mark == side) or skip_rpr(None):
+                first = ch.find('.//' + mq('r')) if t in MATH_KINDS else None
+                inside = math_mark(ch) if first is not None else None
+                seen = ({'accept': inside == 'ins', 'reject': inside == 'del'}.get(side, inside == side) if inside
+                        else side in ('accept', 'reject') or mark == side)
+                if not seen or skip_rpr(first.find(q('rPr')) if first is not None else None):
                     continue
                 if state['field'] is not None:
                     para.fixed['an element outside a run inside a field'] += 1
@@ -716,6 +826,8 @@ def atom_block(kind, atom):
     if kind == 'eq':
         return None
     if atom.el is not None:
+        if atom.kind in MATH_KINDS:
+            return None
         return 'stands outside a run and cannot be shown as %s' % ('inserted' if kind == 'ins' else 'deleted')
     if kind == 'del':
         for e in (e for ch in atom.children() for e in ch.iter() if isinstance(e.tag, str)):
@@ -740,6 +852,39 @@ def refuse_atoms(pairs, where):
         assert not why, '%s holds an element (%s) that %s' % (where, atom.kind, why)
 
 
+def mark_math(math, kind):
+    """Mark an equation (m:oMath or m:oMathPara) as inserted or deleted, the way Word writes it (read from a file
+    Word saved with tracked changes of equations): in every m:r a w:ins / w:del around the w:rPr and the text,
+    behind the m:rPr; in the m:ctrlPr of every object (m:sSup, m:f, ...) a w:ins / w:del around its w:rPr. The
+    m:oMath itself carries no mark. Colour mode formats the w:rPr of every m:r instead."""
+    for r in list(math.iter(mq('r'))):
+        if MODE == 'track_changes':
+            w = rev_mark(kind)
+            for ch in [c for c in r if c.tag != mq('rPr')]:
+                w.append(ch)
+            r.append(w)
+        else:
+            old = r.find(q('rPr'))
+            new = marked_rpr(kind, old, None)
+            if old is not None:
+                r.remove(old)
+            r.insert(1 if len(r) and r[0].tag == mq('rPr') else 0, new)
+    if MODE != 'track_changes':
+        return
+    for obj in list(math.iter(*[mq(t) for t in MATH_OBJECTS])):
+        pr = obj.find(mq(ln(obj) + 'Pr'))
+        if pr is None:
+            pr = etree.Element(mq(ln(obj) + 'Pr'))
+            obj.insert(0, pr)
+        ctrl = pr.find(mq('ctrlPr'))
+        if ctrl is None:
+            ctrl = etree.SubElement(pr, mq('ctrlPr'))
+        w = rev_mark(kind)
+        for ch in list(ctrl):
+            w.append(ch)
+        ctrl.append(w)
+
+
 def emit_atom(kind, atom, styles):
     """The elements of an atom, copied: as they are ('eq'), or as inserted or deleted content.
 
@@ -749,11 +894,19 @@ def emit_atom(kind, atom, styles):
     drawing gets an id of its own, and a note reference gets a new id under which the baseline's note is added to
     the notes of the output (NOTE_MOVE)."""
     if atom.el is not None:
-        assert kind == 'eq', 'an element outside a run reached the writer as %s' % kind   # refuse_atoms comes first
-        return [copy.deepcopy(atom.el)]
+        el = copy.deepcopy(atom.el)
+        if kind != 'eq':
+            assert atom.kind in MATH_KINDS, 'an element outside a run reached the writer as %s' % kind   # refuse_atoms comes first
+            mark_math(el, kind)
+        return [el]
+    if kind == 'eq' and atom.keep is not None:
+        return [copy.deepcopy(atom.keep)]
     tc = MODE == 'track_changes'
     runs = []
-    for _, rpr, children in atom.frags:
+    for source, rpr, children in atom.frags:
+        if source is None:                            # a marker: the clean document's is kept, the baseline's is not carried
+            runs += [copy.deepcopy(ch) for ch in children] if kind != 'del' else []
+            continue
         r = etree.Element(q('r'))
         new = marked_rpr(kind, rpr, styles)
         if len(new):
@@ -844,14 +997,20 @@ def build_children(segs, styles):
 def colorize_in_place(p, rgb=None):
     """Mark the whole content of a clean-only paragraph as inserted (structure kept): every run, also one that
     holds a picture, a field mark or a footnote reference instead of text. Colour mode applies the insert colour
-    to the run, track_changes mode wraps the run in <w:ins>. A w:fldSimple is written with field marks first, so
-    that nothing of it is left when the paragraph goes, and in track_changes mode a content control gets
+    to the run, track_changes mode wraps the run in <w:ins>. A w:fldSimple and a w:hyperlink are written with
+    field marks first, so that nothing of them is left when the paragraph goes, an equation is marked inside
+    (mark_math), and in track_changes mode a content control gets
     w:customXmlInsRangeStart / End around it, so that rejecting takes the control away with its content. What
     else stands outside a run cannot be marked this way; the caller refuses such a paragraph."""
-    for fld in list(p.iter(q('fldSimple'))):
-        for r in unfold_simple_field(fld):
+    for fld in list(p.iter(q('fldSimple'), q('hyperlink'))):
+        runs = unfold_simple_field(fld) if fld.tag == q('fldSimple') else unfold_hyperlink(fld)
+        if runs is None:
+            continue
+        for r in runs:
             fld.addprevious(r)
         fld.getparent().remove(fld)
+    for math in [m for m in p.iter(mq('oMath'), mq('oMathPara')) if m.getparent().tag != mq('oMathPara')]:
+        mark_math(math, 'ins')
     if MODE == 'track_changes':
         # A content control is markup of its own: without a mark, rejecting would leave it behind, empty. Word
         # marks an inserted one with range marks around it.
@@ -2178,9 +2337,16 @@ def view_root(marked_xml, side):
         if t.find(q('tr')) is None:
             t.getparent().remove(t)
     filled = [x for x in root.iter(q('sdt')) if x.find('.//' + q('r')) is not None]
-    for r in list(root.iter(q('r'))):
+    zones = [z for z in root.iter(mq('oMath')) if z.find('.//' + mq('r')) is not None]
+    for r in list(root.iter(q('r'), mq('r'))):
         if run_kind(r) == gone:
             r.getparent().remove(r)
+    for z in zones:                                   # an equation all of whose runs went
+        if z.find('.//' + mq('r')) is None:
+            holder = z.getparent()
+            holder.remove(z)
+            if holder.tag == mq('oMathPara') and holder.find(mq('oMath')) is None:
+                holder.getparent().remove(holder)
     for x in filled:                                  # a content control all of whose runs went: it came or goes with them
         if x.find('.//' + q('r')) is None and x.find('.//' + q('p')) is None:
             x.getparent().remove(x)

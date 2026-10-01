@@ -514,10 +514,12 @@ class Bookmarks(Case):
         for mode, out, summary, log in self.marked(P2, self.HEAD, link, self.TAIL):
             with self.subTest(mode=mode):
                 self.assertEqual(bookmark_text(out, "fig1"), "Figure 1")
+                # The link is new, so it is written as the field it stands for; the bookmark stays in its result.
                 xml = doc_xml(out)
-                inside = xml[xml.index("<w:hyperlink"): xml.index("</w:hyperlink>")]
+                inside = xml[xml.index('w:fldCharType="separate"'): xml.index('w:fldCharType="end"')]
                 self.assertIn("Figure 1", inside)
                 self.assertIn("w:bookmarkStart", inside)
+                self.assertIn('HYPERLINK \\l "somewhere" \\h', xml)
 
     def test_a_bookmark_across_paragraphs_with_a_deletion_between_its_ends(self):
         def ends(d):
@@ -947,7 +949,7 @@ class ElementsThatAreNotText(Case):
         self.assertIn("<w:t>gone</w:t>", rejected)
 
     def test_the_text_inside_a_wrapper_of_the_baseline_is_in_the_deleted_text(self):
-        for kind in ("content control", "smartTag wrapper", "customXml wrapper", "dir wrapper", "bdo wrapper"):
+        for kind in ("content control", "smartTag wrapper", "customXml wrapper"):
             name = "a %s only in the baseline, the paragraph changed" % kind
             base, clean = self.pair(name)
             for mode in ("color", "track_changes"):
@@ -975,29 +977,109 @@ class ElementsThatAreNotText(Case):
                     self.assertLessEqual(refs, set(ids))
                     self.assertIn(corpus.NOTE_TEXT["fn"], "".join(notes.itertext()))
 
-    def test_an_equation_that_changes_is_refused_with_its_place(self):
+    # What Word itself wrote for a deleted and an inserted equation and for a deleted paragraph with one (read
+    # from a file Word saved; the text is invented). The marks stand inside m:r and inside m:ctrlPr.
+    WORD_MATH = (
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>'
+        '<w:p><w:r><w:t xml:space="preserve">Text before </w:t></w:r><m:oMath><m:sSup><m:sSupPr><m:ctrlPr>'
+        '<w:del w:id="0" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:i/></w:rPr></w:del></m:ctrlPr></m:sSupPr>'
+        '<m:e><m:r><w:del w:id="1" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:b/></w:rPr><m:t>x</m:t></w:del></m:r></m:e>'
+        '<m:sup><m:r><w:del w:id="2" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:b/></w:rPr><m:t>2</m:t></w:del></m:r></m:sup>'
+        '</m:sSup></m:oMath><w:r><w:t xml:space="preserve"> </w:t></w:r><m:oMath><m:sSup><m:sSupPr><m:ctrlPr>'
+        '<w:ins w:id="3" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:i/></w:rPr></w:ins></m:ctrlPr></m:sSupPr>'
+        '<m:e><m:r><w:ins w:id="4" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:b/></w:rPr><m:t>y</m:t></w:ins></m:r></m:e>'
+        '<m:sup><m:r><w:ins w:id="5" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:b/></w:rPr><m:t>2</m:t></w:ins></m:r></m:sup>'
+        '</m:sSup></m:oMath><w:r><w:t>text after</w:t></w:r></w:p>'
+        '<w:p><w:r><w:t xml:space="preserve">Fifth holds </w:t></w:r><m:oMath><m:r><w:rPr><w:b/></w:rPr><m:t>a+</m:t></m:r>'
+        '<m:r><w:ins w:id="6" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:b/></w:rPr><m:t>c</m:t></w:ins></m:r>'
+        '<m:r><w:del w:id="7" w:author="A" w:date="2031-01-02T03:04:05Z"><w:rPr><w:b/></w:rPr><m:t>b</m:t></w:del></m:r></m:oMath></w:p>'
+        '</w:body></w:document>'
+    )
+
+    def test_changes_of_equations_as_word_writes_them_are_read_on_both_sides(self):
+        tool = tool_module()
+        maths = lambda side: [  # noqa: E731
+            ["".join(t.text for t in z.iter(tool.mq("t"))) for z in p.iter(tool.mq("oMath"))]
+            for p in tool.etree.fromstring(tool.resolve_revisions(self.WORD_MATH.encode(), side)[0]).iter(tool.q("p"))]
+        self.assertEqual(maths("accept"), [["y2"], ["a+c"]])
+        self.assertEqual(maths("reject"), [["x2"], ["a+b"]])
+        for side in ("accept", "reject"):
+            resolved = tool.resolve_revisions(self.WORD_MATH.encode(), side)[0].decode()
+            self.assertNotRegex(resolved, r"<w:(ins|del)\b")
+            self.assertEqual(resolved.count("<w:i/>"), 1, "the properties of the object that stays are kept")
+
+    def test_an_equation_that_comes_or_goes_is_marked_as_word_marks_it(self):
         from lxml import etree
 
         m = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
-        math = lambda text: (lambda d: d.paragraphs[-1]._p.append(etree.fromstring("<m:oMath %s><m:r><m:t>%s</m:t></m:r></m:oMath>" % (m, text))))
+        power = lambda text: (lambda d: d.paragraphs[-1]._p.append(etree.fromstring(  # noqa: E731
+            "<m:oMath %s><m:sSup><m:e><m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><m:t>%s</m:t></m:r></m:e>"
+            "<m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath>" % (m, text))))
         plain = self.doc([P1, P2])
-        with_x = self.doc([P1, P2, "A new paragraph. "], math("x"))
-        with_y = self.doc([P1, P2, "A new paragraph. "], math("y"))
-        reworded = self.doc([P1, P2, "A changed paragraph. "], math("x"))
-        for name, base, clean, message in (
-            ("a new paragraph", plain, with_x, r"clean paragraph 3 of the body \('A new paragraph. <oMath>'\) holds an element \(oMath\) that stands outside a run and cannot be shown as inserted"),
-            ("a deleted paragraph", with_x, plain, r"baseline paragraph 3 of the body .* \(oMath\) that stands outside a run and cannot be shown as deleted"),
-            ("another equation", with_x, with_y, r"clean paragraph 3 of the body .* \(oMath\) that stands outside a run"),
+        with_x = self.doc([P1, P2, "A new paragraph. "], power("x"))
+        with_y = self.doc([P1, P2, "A new paragraph. "], power("y"))
+        tool = tool_module()
+        texts = lambda xml: ["".join(t.text for t in z.iter(tool.mq("t"))) for z in tool.etree.fromstring(xml).iter(tool.mq("oMath"))]  # noqa: E731
+        for name, base, clean, accept, reject in (
+            ("a new paragraph", plain, with_x, ["x2"], []),
+            ("a deleted paragraph", with_x, plain, [], ["x2"]),
+            ("another equation", with_x, with_y, ["y2"], ["x2"]),
         ):
+            with self.subTest(case=name):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+                self.assertEqual(code, 0, log)
+                xml = doc_xml(out)
+                # in the run: behind m:rPr, around the text; in the object: inside m:ctrlPr
+                self.assertRegex(xml, r"<m:r><m:rPr><m:sty m:val=\"p\"/></m:rPr><w:(ins|del) [^>]*><m:t>[xy]</m:t></w:(ins|del)></m:r>")
+                self.assertRegex(xml, r"<m:sSup><m:sSupPr><m:ctrlPr><w:(ins|del) [^>]*/></m:ctrlPr></m:sSupPr>")
+                self.assertNotRegex(xml, r"<w:(ins|del) [^>]*><m:oMath")
+                self.assertEqual(texts(tool.resolve_revisions(xml.encode(), "accept")[0]), accept)
+                self.assertEqual(texts(tool.resolve_revisions(xml.encode(), "reject")[0]), reject)
+                code, out, summary, log = self.run_tool(base, clean, "--mode", "color")
+                self.assertEqual(code, 0, log)
+
+    def test_a_direction_wrapper_that_comes_or_goes_is_refused_with_its_place(self):
+        for name, message in (
+            ("a paragraph with a dir wrapper added", r"clean paragraph 3 of the body \(.*\) holds an element \(dir\) that stands outside a run and cannot be shown as inserted"),
+            ("a paragraph with a bdo wrapper deleted", r"baseline paragraph 5 of the body \(.*\) holds an element \(bdo\) that stands outside a run and cannot be shown as deleted"),
+        ):
+            base, clean = self.pair(name)
             for mode in ("color", "track_changes"):
                 with self.subTest(case=name, mode=mode):
                     code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
                     self.assertEqual(code, 2, log)
                     self.assertRegex(log, message)
                     self.assertFalse(out.exists())
-        code, out, summary, log = self.run_tool(with_x, reworded, "--mode", "track_changes")   # the equation stays: written
+        base, clean = self.pair("a word changed in a paragraph with a dir wrapper")   # the wrapper stays: written, word by word
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
         self.assertEqual(code, 0, log)
-        self.assertEqual(doc_xml(out).count("<m:oMath"), 1)
+        self.assertEqual((doc_xml(out).count("<w:dir "), summary["warnings"]), (1, []))
+
+    def test_a_hyperlink_that_comes_or_goes_is_written_as_the_field_it_stands_for(self):
+        """Word counts a w:hyperlink as a field; an empty one left behind after a rejection is still one."""
+        tool = tool_module()
+        for name, accept, reject in (
+            ("a paragraph with a web link added", 1, 0),
+            ("a paragraph with a web link deleted", 0, 1),
+            ("a web link reworded", 1, 1),
+            ("a link reworded", 1, 1),
+            ("a web link in a changed paragraph", 1, 1),
+        ):
+            base, clean = self.pair(name)
+            with self.subTest(case=name):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+                self.assertEqual(code, 0, log)
+                xml = doc_xml(out).encode()
+                links = lambda side: (lambda x: x.count("<w:hyperlink") + x.count("HYPERLINK"))(  # noqa: E731
+                    tool.resolve_revisions(xml, side)[0].decode())
+                self.assertEqual((links("accept"), links("reject")), (accept, reject))
+        self.assertIn(b"<w:hyperlink ", xml)              # the link that stays is the element it was
+        self.assertNotIn(b"HYPERLINK", xml)
+        base, clean = self.pair("a web link reworded")
+        code, out, summary, log = self.run_tool(base, clean, "--mode", "track_changes")
+        self.assertRegex(doc_xml(out), r'<w:delInstrText[^>]*>HYPERLINK "https://example.invalid/item/7" \\h</w:delInstrText>')
+        self.assertRegex(doc_xml(out), r'<w:instrText[^>]*>HYPERLINK "https://example.invalid/item/7" \\h</w:instrText>')
 
     def test_a_file_with_characters_of_the_private_plane_is_refused(self):
         base, clean = self.doc([P1, P2]), self.doc([P1, P2 + " \U000F0001"])
