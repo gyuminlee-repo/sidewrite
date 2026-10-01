@@ -83,6 +83,8 @@
 // after the fact (the text is already with the CLI when an item shows); the
 // wall is the list of switches.
 
+import { writeFile as defaultWriteFile } from "node:fs/promises";
+import { join } from "node:path";
 import { parseJsonReply } from "../oneshot.mjs";
 import { runCli as defaultRunCli, childEnv, resolveCliBin, withRunDir } from "./cli-exec.mjs";
 
@@ -245,20 +247,30 @@ export function parseCodexLine(line) {
 // is a tool ends it, and the reply is discarded ({ ok: false, tool_event }).
 // signal ends it from outside ({ ok: false, aborted: true }).
 export async function codexOneshot(
-  { system, prompt, model, expectJson = true, timeoutMs = 120_000, signal = null },
+  { system, prompt, model, expectJson = true, timeoutMs = 120_000, signal = null, schema = null },
   {
     runCli = defaultRunCli,
     bin = resolveCliBin("codex", { envVar: "CC_OFFICE_CODEX_BIN" }),
     runDir = withRunDir,
     env = process.env,
     log = console.log,
+    writeFile = defaultWriteFile,
   } = {},
 ) {
   let r;
   let tool = null;
   try {
-    r = await runDir((cwd) =>
-      runCli(bin, codexOneshotArgs({ model, cwd }), {
+    r = await runDir(async (cwd) => {
+      // schema: the form of the reply as a JSON Schema. It goes into a file
+      // of this run's directory (removed with it) and only steers the model;
+      // the caller checks the reply itself.
+      const args = codexOneshotArgs({ model, cwd });
+      if (schema) {
+        const file = join(cwd, "schema.json");
+        await writeFile(file, JSON.stringify(schema));
+        args.splice(args.length - 1, 0, "--output-schema", file);
+      }
+      return runCli(bin, args, {
         stdin: `${system}\n\n${prompt}`,
         timeoutMs,
         cwd,
@@ -268,8 +280,8 @@ export async function codexOneshot(
           tool ??= toolEventOf(line);
           if (tool) kill();
         },
-      }),
-    );
+      });
+    });
   } catch (e) {
     return { ok: false, error: `codex could not be run: ${String(e?.message ?? e)}` };
   }

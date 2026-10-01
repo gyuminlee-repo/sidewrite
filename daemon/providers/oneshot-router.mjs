@@ -12,6 +12,7 @@
 // A change of the choice in the pane applies to the next pin. run has the
 // contract of oneshot.mjs runOneshot ({ ok, text, json?, error?, limited? },
 // never throws). forKey(key) is a single request: it pins and runs.
+// handleFor(choice) gives the same handle for a choice the caller holds.
 //
 // Nothing here falls back to another provider: a choice that cannot be
 // resolved, or a provider that cannot be used (no key, no server URL,
@@ -79,6 +80,12 @@ export function createOneshotRouter({
       log(`[providers] judgment refused: ${error}`);
       return { provider: null, model: "none", run: async () => ({ ok: false, error }) };
     }
+    return handle(choice, "judgment");
+  }
+
+  // The handle of a choice: every run goes to that provider and model and
+  // to no other. what: the word of its log line.
+  function handle(choice, what) {
     const provider = choice?.id ?? "claude";
     const model =
       provider === "claude"
@@ -89,17 +96,23 @@ export function createOneshotRouter({
       model,
       run(req) {
         // One line per request, with no text of it.
-        log(`[providers] judgment provider=${provider} model=${model}`);
-        return send(choice, req).then(
-          (r) => r,
-          (e) => ({ ok: false, error: String(e?.message ?? e) }),
-        );
+        log(`[providers] ${what} provider=${provider} model=${model}`);
+        return Promise.resolve()
+          .then(() => send(choice, req))
+          .then(
+            (r) => r,
+            (e) => ({ ok: false, error: String(e?.message ?? e) }),
+          );
       },
     };
   }
 
   return {
     pin,
+    // For a caller that holds the choice already: a proposal turn runs on
+    // the provider chosen for review turns (index.mjs reads it from the
+    // selection), not on the one for judgments. req.signal ends a run.
+    handleFor: (choice) => handle(choice ?? null, "proposal"),
     forKey: (key) => (req) => pin(key).then((h) => h.run(req)),
   };
 }

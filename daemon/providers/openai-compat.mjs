@@ -44,10 +44,15 @@ export async function chatOneshot(
     timeoutMs = 120_000,
     body = null,
     jsonBody = null,
+    signal = null,
   },
   { fetchFn = fetch } = {},
 ) {
   if (!model) return { ok: false, error: "Choose a model for this provider first." };
+  // signal: ends the request from outside (a Stop). Its answer is
+  // { ok: false, aborted: true }, apart from a timeout.
+  const stoppedResult = { ok: false, aborted: true, error: "stopped" };
+  if (signal?.aborted) return stoppedResult;
   const scrub = (s) => (apiKey ? String(s).split(apiKey).join("[key]") : String(s));
   // A timer of its own, not AbortSignal.timeout: that one does not keep the
   // process alive, so a request nobody else waits on would never time out.
@@ -56,7 +61,14 @@ export async function chatOneshot(
     () => abort.abort(Object.assign(new Error("timeout"), { name: "TimeoutError" })),
     timeoutMs,
   );
-  const timedOut = { ok: false, error: `timed out after ${timeoutMs} ms` };
+  let stopped = false;
+  const onStop = () => {
+    stopped = true;
+    abort.abort(Object.assign(new Error("stopped"), { name: "AbortError" }));
+  };
+  signal?.addEventListener("abort", onStop, { once: true });
+  const ended = () =>
+    stopped ? stoppedResult : { ok: false, error: `timed out after ${timeoutMs} ms` };
   // The timer runs until the body has been read, not only until the headers
   // came: a server that answers 200 and then stalls is a timeout too. The
   // abort also ends a body read that is under way.
@@ -88,12 +100,12 @@ export async function chatOneshot(
           signal: abort.signal,
         });
       } catch (e) {
-        if (e?.name === "TimeoutError" || e?.name === "AbortError") return timedOut;
+        if (e?.name === "TimeoutError" || e?.name === "AbortError") return ended();
         return { ok: false, error: `Connection failed (${e?.cause?.code ?? e?.code ?? e?.name})` };
       }
       if (res.ok) break;
       const detail = scrub(await errorDetail(res));
-      if (abort.signal.aborted) return timedOut;
+      if (abort.signal.aborted) return ended();
       if (res.status === 400 && "temperature" in request && /temperature/i.test(detail)) {
         delete request.temperature; // once: the next 400 finds none to drop
         continue;
@@ -108,11 +120,12 @@ export async function chatOneshot(
       content = choice?.message?.content;
       finish = choice?.finish_reason;
     } catch {
-      if (abort.signal.aborted) return timedOut;
+      if (abort.signal.aborted) return ended();
       return { ok: false, error: "the reply was not JSON from the server" };
     }
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onStop);
   }
   if (typeof content !== "string") return { ok: false, error: "the reply had no message" };
   const text = stripThinking(content);
