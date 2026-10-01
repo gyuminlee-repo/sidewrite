@@ -1068,3 +1068,36 @@ test("every refusal of a proposal says what happened and what to do", async () =
     await t.cleanup();
   }
 });
+
+// Stop is answered when it is pressed. Between the check at the head of a
+// proposal and the call to Word lie file reads and a file write (the attempt
+// record): a Stop in that stretch must still keep the edit from Word.
+test("a Stop after a proposal was taken up and before its Word call sends nothing to Word", async () => {
+  let t = null;
+  t = await setup({
+    depsOver: (deps) => ({
+      ...deps,
+      onAttempt: async (a) => {
+        assert.equal(t.turns.stop("k"), true);
+        return deps.onAttempt(a);
+      },
+    }),
+  });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.equal(t.wordCalls.length, 0, "no edit reaches Word after the Stop was answered");
+    assert.deepEqual(t.ended, [["k", { ok: false, error: "The turn was stopped." }]]);
+    assert.deepEqual(t.out.at(-1)[2], { event: "turn_complete", interrupted: true });
+    const rev = await t.revision();
+    assert.deepEqual([rev.comments[0].changes, rev.comments[0].blocked], [[], []]);
+    const [b] = await t.batch();
+    assert.deepEqual(
+      b.output.proposals.map((p) => p.outcome),
+      ["not_applied", "not_applied", "not_applied"],
+    );
+    assert.equal(b.output.stopped_at, "P1");
+  } finally {
+    await t.cleanup();
+  }
+});
