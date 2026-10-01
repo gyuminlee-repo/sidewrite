@@ -1058,4 +1058,15 @@ test("a context-free match elsewhere does not settle a change whose own text is 
   ]);
   // 3. Context rewritten and nothing tracked any more.
   assert.deepEqual(multi([i1], NOW, [], {}), ["accepted"]);
+
+  // The closed side of the rule, stated: a tracked insertion of other words
+  // that merely contain the letter also holds it pending. Word joins
+  // adjacent tracked insertions into one run, so the change's own "s" can
+  // sit anywhere inside a longer run and cannot be told from this one. It
+  // lasts only while the context is gone AND such a run is still tracked.
+  const holds = runsOf(r("Our controls were assessed over 5 s."), xIns(" This too.", 6));
+  assert.deepEqual(
+    multi([i1], "Our controls were assessed over 5 s. This too.", holds, { w_ins: 1 }),
+    ["pending"],
+  );
 });
