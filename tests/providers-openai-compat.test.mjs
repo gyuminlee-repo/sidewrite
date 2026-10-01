@@ -196,3 +196,14 @@ test("the temperature is the preset's (body): 0 unless it says otherwise, none w
   await chatOneshot({ ...REQ, body: { temperature: null } }, { fetchFn: f });
   assert.equal("temperature" in reply.seen.body, false);
 });
+
+test("the model the server says it used is reported", async () => {
+  const body = { model: "qwen3.5:9b-q4", choices: [{ message: { content: "hello" } }] };
+  const r = await chatOneshot({ ...REQ, expectJson: false }, { fetchFn: reply(200, body) });
+  assert.deepEqual(r, { ok: true, text: "hello", model_ran: "qwen3.5:9b-q4" });
+  const silent = await chatOneshot(
+    { ...REQ, expectJson: false },
+    { fetchFn: reply(200, { choices: [{ message: { content: "hello" } }] }) },
+  );
+  assert.deepEqual(silent, { ok: true, text: "hello" });
+});

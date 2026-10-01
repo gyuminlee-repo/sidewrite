@@ -3,7 +3,7 @@
 // document is read or written.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAuxService, AUX_JOBS, ASK_SYSTEM, MAX_SELECTION } from "../daemon/aux-service.mjs";
@@ -11,7 +11,12 @@ import { createAuxService, AUX_JOBS, ASK_SYSTEM, MAX_SELECTION } from "../daemon
 const ENV = { CC_OFFICE_WSL_PATHS: "0", CC_OFFICE_CONFIG_DIR: "/nonexistent-config" };
 const TEXT = "The cells were grown at 30 °C for two days.";
 
-async function setup({ reply = { ok: true, text: " answer " }, model = "sonnet", run } = {}) {
+async function setup({
+  reply = { ok: true, text: " answer " },
+  model = "sonnet",
+  run,
+  unsaved = false,
+} = {}) {
   const dir = await mkdtemp(join(tmpdir(), "sel-"));
   await writeFile(join(dir, "paper.docx"), "docx");
   const asked = [];
@@ -19,7 +24,10 @@ async function setup({ reply = { ok: true, text: " answer " }, model = "sonnet",
   const contexts = [];
   const events = [];
   const service = createAuxService({
-    getContext: (key) => (contexts.push(key), { activeDoc: join(dir, "paper.docx") }),
+    getContext: (key) => (
+      contexts.push(key),
+      { activeDoc: unsaved ? null : join(dir, "paper.docx") }
+    ),
     oneshotFor: async (key, options) => {
       pins.push({ key, options });
       if (run === null) return { run: null, model: null };
@@ -57,6 +65,15 @@ test("translate: the selection goes to the model with the language, and the answ
     assert.equal(t.asked[0].expectJson, false);
     // The pane's writing choice is pinned once for the job.
     assert.deepEqual(t.pins, [{ key: "k", options: { role: "writing" } }]);
+    // A receipt next to the document: the model, sizes and the language, no text.
+    const lines = (await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8")).trim().split("\n");
+    const rec = lines.map((l) => JSON.parse(l));
+    assert.deepEqual(
+      rec.map((x) => [x.kind, x.model, x.output]),
+      [["selection_translate", "sonnet", { lang: "Korean", chars: TEXT.length }]],
+    );
+    assert.equal(lines.join("").includes("cells"), false);
+    assert.equal(lines.join("").includes("번역문"), false);
   } finally {
     await t.done();
   }
@@ -75,15 +92,30 @@ test("ask: the selection and the question go to the model in one prompt", async 
   }
 });
 
-test("neither request reads the document or writes a file next to it", async () => {
+test("neither request reads the document; next to a saved one only the receipt is written", async () => {
   const t = await setup();
   try {
     await t.job("selection_translate", { text: TEXT, lang: "Korean" });
     await t.job("selection_ask", { text: TEXT, question: "Why?" });
-    assert.deepEqual(t.contexts, []);
-    assert.deepEqual(await readdir(t.dir), ["paper.docx"]);
+    // The pane's context is asked for the path of the receipts, nothing else.
+    assert.deepEqual(t.contexts, ["k", "k"]);
+    assert.deepEqual((await readdir(t.dir)).sort(), ["paper.decisions.jsonl", "paper.docx"]);
+    const kinds = (await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l).kind);
+    assert.deepEqual(kinds, ["selection_translate", "selection_ask"]);
   } finally {
     await t.done();
+  }
+  // A document that is not saved has no place for a receipt: the answer comes all the same.
+  const u = await setup({ unsaved: true });
+  try {
+    const r = await u.job("selection_ask", { text: TEXT, question: "Why?" });
+    assert.equal(r.ok, true);
+    assert.deepEqual(await readdir(u.dir), ["paper.docx"]);
+  } finally {
+    await u.done();
   }
 });
 

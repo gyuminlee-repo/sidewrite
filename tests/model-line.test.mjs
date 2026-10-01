@@ -1,0 +1,106 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { modelLabel, ranOther, roleText, modelLineText } from "../taskpane/shared/model-line.js";
+
+const MODELS = [
+  { value: "opus", displayName: "Opus 5.5", resolvedModel: "claude-opus-5-5" },
+  { value: "sonnet", displayName: "Sonnet 5.5", resolvedModel: "claude-sonnet-5-5" },
+  { value: "haiku", displayName: "Haiku 4.5", resolvedModel: "claude-haiku-4-5" },
+];
+
+test("modelLabel: provider and model as a person reads them", () => {
+  assert.equal(modelLabel({ provider: "claude", model: "opus" }, MODELS), "Claude · Opus 5.5");
+  assert.equal(
+    modelLabel({ provider: "claude", model: "claude-sonnet-5-5" }, MODELS),
+    "Claude · Sonnet 5.5",
+  );
+  assert.equal(
+    modelLabel({ provider: "ollama", model: "qwen3.5:9b" }, MODELS),
+    "Ollama · qwen3.5:9b",
+  );
+  assert.equal(modelLabel({ provider: "codex", model: null }, MODELS), "Codex · its default model");
+  assert.equal(modelLabel({ provider: "newone", model: "m" }, MODELS), "newone · m");
+});
+
+test("ranOther: only a difference that can be told is one", () => {
+  assert.equal(ranOther("opus", "claude-opus-5-5", MODELS), false);
+  assert.equal(ranOther("opus", "claude-opus-5-5[1m]", MODELS), false);
+  assert.equal(ranOther("opus", "claude-sonnet-5-5", MODELS), true);
+  assert.equal(ranOther("claude-opus-5-5", "claude-opus-5-5", MODELS), false);
+  // No list: an alias is in the id of its family, a longer id holds the shorter.
+  assert.equal(ranOther("opus", "claude-opus-5-5", null), false);
+  assert.equal(ranOther("opus", "claude-sonnet-5-5", null), true);
+  assert.equal(ranOther("qwen3.5:9b", "qwen3.5:9b-q4", null), false);
+  // The provider did not say, or nothing was asked for by name.
+  assert.equal(ranOther("opus", null, MODELS), false);
+  assert.equal(ranOther(null, "gpt-6", MODELS), false);
+});
+
+test("roleText: what last ran; the choice while nothing ran; a difference is said", () => {
+  const choice = { provider: "claude", model: "opus" };
+  assert.equal(
+    roleText("turn", { used: null, choice }, MODELS),
+    "Edits: Claude · Opus 5.5 (not used yet)",
+  );
+  assert.equal(
+    roleText(
+      "turn",
+      { used: { provider: "claude", asked: "opus", ran: "claude-opus-5-5" }, choice },
+      MODELS,
+    ),
+    "Edits: Claude · Opus 5.5",
+  );
+  assert.equal(
+    roleText(
+      "turn",
+      { used: { provider: "claude", asked: "opus", ran: "claude-sonnet-5-5" }, choice },
+      MODELS,
+    ),
+    "Edits: asked for Claude · Opus 5.5, ran on Claude · Sonnet 5.5",
+  );
+  // The provider does not say what ran: what was asked for, said as that.
+  assert.equal(
+    roleText(
+      "oneshot",
+      {
+        used: { provider: "ollama", asked: "qwen3.5:9b", ran: null },
+        choice: { provider: "ollama", model: "qwen3.5:9b" },
+      },
+      MODELS,
+    ),
+    "Judgments: Ollama · qwen3.5:9b",
+  );
+  // The choice was changed since: the next request will use another one.
+  assert.equal(
+    roleText(
+      "writing",
+      {
+        used: { provider: "claude", asked: "sonnet", ran: "claude-sonnet-5-5" },
+        choice: { provider: "claude", model: "opus" },
+      },
+      MODELS,
+    ),
+    "Writing: Claude · Sonnet 5.5 (next: Claude · Opus 5.5)",
+  );
+  // A request that failed is said as that.
+  assert.equal(
+    roleText(
+      "writing",
+      { used: { provider: "claude", asked: "opus", ran: null, ok: false }, choice },
+      MODELS,
+    ),
+    "Writing: Claude · Opus 5.5 (last request failed)",
+  );
+});
+
+test("modelLineText: the three kinds of work in one line", () => {
+  const state = {
+    turn: { used: null, choice: { provider: "claude", model: "opus" } },
+    writing: { used: null, choice: { provider: "claude", model: "opus" } },
+    oneshot: { used: null, choice: { provider: "claude", model: "haiku" } },
+  };
+  assert.equal(
+    modelLineText(state, MODELS),
+    "Edits: Claude · Opus 5.5 (not used yet)   Writing: Claude · Opus 5.5 (not used yet)   Judgments: Claude · Haiku 4.5 (not used yet)",
+  );
+});

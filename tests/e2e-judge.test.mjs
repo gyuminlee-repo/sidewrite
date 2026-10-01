@@ -1957,3 +1957,14 @@ test("second reader: one line, a hyphen at the line end, a page break and lines 
     false,
   );
 });
+
+// The result lines of the pane may name what ran ("... with Claude · Opus
+// 5.5."): the judges take both forms.
+test("judges take a result line with or without the model that ran", () => {
+  const one = (message) => judge("response-draft", { ok: true, message }, { ref: "R1.1" }).pass;
+  assert.equal(one("Drafted R1.1."), true);
+  assert.equal(one("Drafted R1.1 with Claude · Opus 5.5."), true);
+  assert.equal(one("Drafted R1.1 with Claude · Opus 5.5. 1 check fails for it: x."), true);
+  assert.equal(one("Drafted R1.10."), false);
+  assert.equal(one("Drafting R1.1..."), false);
+});

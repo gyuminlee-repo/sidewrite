@@ -1161,7 +1161,7 @@ test("ledger suggestions: a checklist from the review text; Add selected imports
 
 // P15 "Propose all": one review turn per open comment, the next one only
 // after the turn_done of the one before.
-async function proposeAllSetup({ providersReady } = {}) {
+async function proposeAllSetup({ providersReady, usedLabel } = {}) {
   const { createTurnState } = await import("../taskpane/shared/turn-state.js");
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
@@ -1218,6 +1218,7 @@ async function proposeAllSetup({ providersReady } = {}) {
     },
     isTurnInFlight: () => turn.inFlight,
     providersReady,
+    usedLabel,
   });
   await pane.reload();
   const $ = (id) => document.getElementById(id);
@@ -2181,4 +2182,27 @@ test("Refresh status, Clean up tool comments and Delete all run once at a time",
     assert.equal(calls[name], 1);
   }
   assert.equal(t.requests.filter((r) => r.type === "review_refresh").length, 1);
+});
+
+test("Propose all says what the turns ran on, when the pane knows it", async () => {
+  const roles = [];
+  const t = await proposeAllSetup({
+    usedLabel: (role) => (roles.push(role), "Claude · Opus 5.5"),
+  });
+  try {
+    const all = t.$("review-propose-all").click();
+    for (const ref of ["R1.1", "R1.3", "R2.1"]) {
+      await t.wait();
+      t.endTurn(ref);
+      await t.wait();
+    }
+    await all;
+    assert.equal(
+      t.$("review-message").textContent,
+      "Propose all with Claude · Opus 5.5: 3 of 3 proposed.",
+    );
+    assert.deepEqual([...new Set(roles)], ["turn"]);
+  } finally {
+    await t.pane.reload();
+  }
 });

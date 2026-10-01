@@ -273,3 +273,55 @@ test("a job may name the Claude model used when the pane names none; a choice is
   await plain.run(req);
   assert.deepEqual([plain.model, calls.at(-1)[1].model], ["haiku", "haiku"]);
 });
+
+// What a request really ran on goes to the pane: onUsed gets one notice per
+// request that was sent, with what was asked for and what the provider said.
+test("every request that is sent is reported: role, provider, the model asked for and the one that ran", async () => {
+  const used = [];
+  const choices = { writing: null, oneshot: { id: "ollama", model: "qwen3.5:9b" } };
+  const router = createOneshotRouter({
+    claude: async (req) => ({ ok: true, text: "c", model_ran: `claude-${req.model}-5-5` }),
+    codex: async () => ({ ok: true, text: "x" }),
+    antigravity: async () => ({ ok: true, text: "g" }),
+    http: async () => ({ ok: false, error: "HTTP 500" }),
+    keys: { get: async () => ({ key: null }) },
+    getChoice: (key, role) => {
+      if (key === "none") throw new Error("no confirmed choice");
+      return choices[role];
+    },
+    claudeDefault: (role) => (role === "writing" ? "opus" : "haiku"),
+    onUsed: (key, u) => used.push([key, u]),
+  });
+  const w = await router.pin("k", { role: "writing" });
+  assert.equal(w.used(), null, "nothing ran yet");
+  await w.run({ system: "s", prompt: "p" });
+  assert.deepEqual(w.used(), {
+    role: "writing",
+    provider: "claude",
+    asked: "opus",
+    ran: "claude-opus-5-5",
+    ok: true,
+  });
+  const j = await router.pin("k");
+  await j.run({ system: "s", prompt: "p" });
+  // A provider that does not say what ran: ran is null. A failed request is reported too.
+  assert.deepEqual(j.used(), {
+    role: "oneshot",
+    provider: "ollama",
+    asked: "qwen3.5:9b",
+    ran: null,
+    ok: false,
+  });
+  choices.writing = { id: "codex", model: null };
+  const c = await router.pin("k", { role: "writing" });
+  await c.run({ system: "s", prompt: "p" });
+  assert.deepEqual(used, [
+    ["k", w.used()],
+    ["k", j.used()],
+    ["k", { role: "writing", provider: "codex", asked: null, ran: null, ok: true }],
+  ]);
+  // A job that was refused sends nothing and reports nothing.
+  const refused = await router.pin("none");
+  await refused.run({ system: "s", prompt: "p" });
+  assert.equal(used.length, 3);
+});

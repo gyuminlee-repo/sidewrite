@@ -28,6 +28,11 @@ test("the head of a selection answer quotes the start of the selection", () => {
     selectionHead("translate", "One\n two.", { lang: "Korean", model: "sonnet" }),
     'Translation into Korean (sonnet) for: "One two."',
   );
+  // With what really ran, when the pane knows it.
+  assert.equal(
+    selectionHead("translate", "One.", { lang: "Korean", model: "opus" }, "Claude · Opus 5.5"),
+    'Translation into Korean (Claude · Opus 5.5) for: "One."',
+  );
   const long = selectionHead("ask", "x".repeat(200), { model: "haiku" });
   assert.equal(long, `Answer (haiku) for: "${"x".repeat(80)}..."`);
 });

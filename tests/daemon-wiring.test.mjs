@@ -141,3 +141,18 @@ test("a restart that keeps waiting input does not drop it or end its turn", () =
   const restart = code.slice(code.indexOf("async function restartSession"));
   assert.match(restart.slice(0, 700), /\{ replay: false, keepQueued \}/);
 });
+
+// What runs is told to the pane as it runs, not as it was chosen.
+test("the pane is told what each request ran on: one-shots by the router, the session by its init", () => {
+  assert.match(
+    code,
+    /onUsed: \(key, used\) =>\s*bridge\.sendToTaskpane\(\{ type: "model_used", \.\.\.used \}, key\)/,
+  );
+  // The session: the model query() was given and the one the CLI says it runs.
+  const at = code.indexOf('event: "session_init"');
+  const ev = code.slice(at, at + 200);
+  assert.match(ev, /model: msg\.model,/);
+  assert.match(ev, /asked: session\?\.model \?\? null,/);
+  // No option of the session or of a one-shot lowers thinking or effort.
+  assert.equal(/\b(thinking|effort|maxThinkingTokens)\s*:/.test(code), false);
+});

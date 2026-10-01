@@ -78,7 +78,14 @@ const STATE = {
 
 // respond: { <type>: (payload) => answer }. hold: job types whose job_done is
 // kept back until deliver(type) is called.
-async function setup({ respond = {}, word = {}, hold = [], missing = [], settings = {} } = {}) {
+async function setup({
+  respond = {},
+  word = {},
+  hold = [],
+  missing = [],
+  settings = {},
+  usedLabel,
+} = {}) {
   globalThis.document = fakeDocument(missing);
   const { initToolsPane } = await import("../taskpane/shared/tools-pane.js");
   const requests = [];
@@ -100,6 +107,7 @@ async function setup({ respond = {}, word = {}, hold = [], missing = [], setting
   const saved = [];
   pane = initToolsPane({
     sendRequest,
+    usedLabel,
     settings,
     saveSettings: (s) => saved.push({ ...s }),
     word: {
@@ -508,4 +516,21 @@ test("a page without the Tools tab (Excel) gets a pane that does nothing", async
   const t = await setup({ missing: ["tools-root"] });
   assert.equal(t.requests.length, 0);
   t.pane.onEvent({ event: "job_done", job_id: "x", result: { ok: true } });
+});
+
+test("the head of an answer names what really ran, when the pane knows it", async () => {
+  const t = await setup({
+    settings: { toolsLang: "Korean" },
+    word: { selectionText: async () => "Grown at 30 °C." },
+    usedLabel: (role) => (role === "writing" ? "Claude · Opus 5.5" : null),
+    respond: {
+      selection_translate: (p) => ({ ok: true, text: "번역", lang: p.lang, model: "opus" }),
+    },
+  });
+  await t.$("tools-translate").click();
+  await tick();
+  assert.equal(
+    texts(t.$("tools-selection"))[0],
+    'Translation into Korean (Claude · Opus 5.5) for: "Grown at 30 °C."',
+  );
 });
