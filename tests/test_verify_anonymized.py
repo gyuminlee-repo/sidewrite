@@ -56,9 +56,72 @@ class VerifyAnonymized(unittest.TestCase):
         code, rep, err = self.verify(after)
         self.assertEqual(code, 0, err)
         self.assertEqual(rep["total"], 0)
-        self.assertTrue(all(v == 0 for v in rep["remaining"].values()), rep["remaining"])
-        self.assertEqual([rep["body_equal"], rep["markup_equal"]], [True, True])
+        self.assertEqual([rep["body_equal"], rep["markup_equal"], rep["structure_ok"]], [True, True, True])
         self.assertGreaterEqual(len(rep["remaining"]), 10)
+        for cid, c in rep["categories"].items():
+            if c["default"] == "clear":
+                self.assertEqual((c["status"], c["count"]), ("cleared", 0), cid)
+        # The clean fixture still has a hidden run and a paragraph id: reported, and no reason to fail.
+        self.assertEqual(rep["categories"]["hidden_text"]["status"], "not cleared")
+        self.assertEqual(rep["categories"]["para_ids"]["status"], "kept by option")
+        self.assertEqual(rep["not_cleared"], ["hidden_text"])
+
+    def test_the_dirty_fixture_has_the_known_count_in_every_category(self):
+        code, rep, _ = self.verify(self.before)
+        self.assertEqual(code, 1)
+        self.assertEqual(set(rep["categories"]), set(fx.EXPECTED_DIRTY))
+        self.assertEqual({c: v["count"] for c, v in rep["categories"].items()}, fx.EXPECTED_DIRTY)
+        self.assertGreaterEqual(len(rep["categories"]), 22)
+        for cid, c in rep["categories"].items():
+            self.assertEqual(c["status"], "kept by option" if c["default"] == "keep" else "not cleared", cid)
+        clear = [c for c, v in rep["categories"].items() if v["default"] == "clear"]
+        self.assertEqual(rep["total"], sum(fx.EXPECTED_DIRTY[c] for c in clear))
+
+    def test_keep_and_also_move_a_category_between_kept_and_expected(self):
+        clear = [c for c, v in self.verify(self.before)[1]["categories"].items() if v["default"] == "clear"]
+        code, rep, err = self.verify(self.before, "--keep", ",".join(clear))
+        self.assertEqual([code, rep["total"]], [0, 0], err)
+        for cid in clear:
+            self.assertEqual(rep["categories"][cid]["status"], "kept by option", cid)
+        # Reported-only categories stay "not cleared" whatever is kept.
+        self.assertEqual(rep["not_cleared"], ["hidden_text", "protection", "image_uninspected", "embedded"])
+        code, rep, _ = self.verify(self.before, "--keep", ",".join(clear), "--also", "title,para_ids")
+        self.assertEqual([code, rep["total"]], [1, fx.EXPECTED_DIRTY["title"] + fx.EXPECTED_DIRTY["para_ids"]])
+        self.assertEqual(rep["categories"]["title"]["status"], "not cleared")
+        for bad in ("hidden_text", "no_such_category"):
+            r = subprocess.run([sys.executable, str(SCRIPT), "--before", str(self.before), "--after", str(self.before), "--keep", bad],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, bad)
+
+    def test_a_picture_that_cannot_be_read_counts_as_not_cleared(self):
+        marks = fx.clean_marks()
+        for name, data, n in (
+            ("word/media/a.jpeg", fx.jpeg(with_exif=False, comment=b""), 0),
+            ("word/media/a.jpeg", fx.jpeg(orientation=6), 1),
+            ("word/media/a.JPG", fx.jpeg(with_exif=False), 1),  # a comment only
+            ("word/media/a.jpeg", b"\xff\xd8 broken", 1),
+            ("word/media/a.png", fx.png(text=False), 0),
+            ("word/media/a.png", fx.png(), 1),
+            ("word/media/a.png", b"\x89PNG\r\n\x1a\n cut", 1),
+        ):
+            with self.subTest(name=name, n=n):
+                after = fx.build(self.dir / "pic.docx", extra={name: data}, **marks)
+                code, rep, _ = self.verify(after)
+                self.assertEqual([rep["categories"]["image_meta"]["count"], code], [n, 1 if n else 0])
+
+    def test_a_reference_to_a_part_that_is_gone_fails_the_check(self):
+        before = fx.build(self.dir / "b5.docx", **fx.clean_marks())
+        rels = (
+            b'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            b'<Relationship Id="rId1" Type="t" Target="gone.xml"/>'
+            b'<Relationship Id="rId2" Type="t" Target="https://journal.example/" TargetMode="External"/></Relationships>'
+        )
+        after = fx.build(self.dir / "after.docx", extra={"word/_rels/document.xml.rels": rels}, **fx.clean_marks())
+        code, rep, _ = self.verify(after, before=before)
+        self.assertEqual([code, rep["structure_ok"], rep["total"]], [1, False, 0])
+        self.assertEqual(rep["dangling"], ["word/_rels/document.xml.rels -> word/gone.xml"])
+        # A reference that was already broken in the source is not held against the copy.
+        self.assertEqual(self.verify(after, before=after)[0], 0)
 
     def test_each_mark_left_in_is_counted_under_its_own_key(self):
         self.assertGreaterEqual(len(LEFT_IN), 10)
@@ -116,11 +179,12 @@ class VerifyAnonymized(unittest.TestCase):
 
     def test_a_part_that_is_not_xml_is_not_read_and_a_broken_xml_part_fails(self):
         # Word stores a thumbnail next to the properties; it is not an XML part.
-        picture = {"docProps/thumbnail.jpeg": b"\xff\xd8\xff\xe0 not xml", "word/media/image1.png": b"\x89PNG"}
+        picture = {"docProps/thumbnail.jpeg": b"\xff\xd8\xff\xe0 not xml", "word/media/image9.png": fx.png(text=False)}
         before = fx.build(self.dir / "b4.docx", extra=picture)
         after = fx.build(self.dir / "after.docx", extra=picture, **fx.clean_marks())
-        code, rep, err = self.verify(after, before=before)
+        code, rep, err = self.verify(after, "--keep", "thumbnail", before=before)
         self.assertEqual([code, rep["unreadable_parts"]], [0, []], err)
+        self.assertEqual(rep["categories"]["thumbnail"], {**rep["categories"]["thumbnail"], "status": "kept by option", "count": 1})
         broken = fx.build(self.dir / "broken.docx", extra={"word/endnotes.xml": b"<w:endnotes>"}, **fx.clean_marks())
         code, rep, _ = self.verify(broken)
         self.assertEqual([code, rep["unreadable_parts"]], [1, ["word/endnotes.xml"]])
