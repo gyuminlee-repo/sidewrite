@@ -411,3 +411,40 @@ test("siblingMatch: the handled change shows its own state while a sibling revis
     false,
   );
 });
+
+// Follow-up review: every tracked run the pane reads from the OOXML must be
+// found in the paragraph text Word reports, special characters included.
+test("trackedPlaced: every tracked run of every paragraph is found in Word's paragraph text", async () => {
+  const { trackedPlaced } = await import("../scripts/e2e/judge.mjs");
+  const p = (index, text, tracked, counts = {}) => ({
+    index,
+    text,
+    w_ins: 0,
+    w_del: 0,
+    ...counts,
+    tracked,
+  });
+  const run = (kind, text, start) => ({ kind, text, start, marks: 1 });
+  const good = [
+    p(0, "Title", []),
+    p(1, "Case 0 before non\u001elinear after.", [run("ins", "non\u001elinear", 14)], { w_ins: 1 }),
+    p(2, "Case 1 before left\tright after.", [run("del", "left\tright", 14)], { w_del: 1 }),
+  ];
+  const ok = trackedPlaced(good, 2);
+  assert.equal(ok.pass, true, ok.got);
+  // The hyphen was lost in the extraction: the run is not in the text.
+  const lost = trackedPlaced(
+    [good[0], p(1, good[1].text, [run("ins", "nonlinear", 14)], { w_ins: 1 }), good[2]],
+    2,
+  );
+  assert.equal(lost.pass, false);
+  assert.match(lost.got, /paragraph 1/);
+  // A tracked mark with no run read from it.
+  assert.equal(
+    trackedPlaced([good[0], p(1, good[1].text, [], { w_ins: 1 }), good[2]], 2).pass,
+    false,
+  );
+  // Fewer tracked paragraphs than the document was built with.
+  assert.equal(trackedPlaced(good, 3).pass, false);
+  assert.equal(trackedPlaced([], 0).pass, false);
+});

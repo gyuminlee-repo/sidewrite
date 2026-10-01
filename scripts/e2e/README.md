@@ -71,6 +71,15 @@ revision`): before the author's steps the runner puts a tracked insertion
   with its rationale comment resolved, while Word still lists the author's
   insertion as a revision. The paragraph's revision mark total used to
   decide, which kept such a change Pending.
+- Tracked special characters (row `special: tracked runs found in Word's
+paragraph text`, files under `special/`): `make_tracked_special.py` builds
+  a document whose tracked insertions and deletions hold a no-break hyphen,
+  a soft hyphen, a tab, a line break, a carriage return and symbols. It is
+  opened in a third Word of the run, the pane's own snapshot is read, and
+  every tracked run must be found in the paragraph text Word reports. This
+  is the measurement behind the character table in `trackedRuns`
+  (`taskpane/shared/review-view.js`). No model turn; `--skip-special` leaves
+  it out.
 - Mode-14 check (`mode-14:` rows, files under `mode14/` in the run folder,
   daemon log `-mode14.log`): after the main Word is closed, the runner
   builds a compatibility mode 14 copy with

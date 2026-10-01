@@ -290,6 +290,29 @@ const steps = {
     return { offer, ...(await view(page)), message };
   },
 
+  // The snapshot the Refresh sends, taken straight from the pane's own
+  // module: paragraph texts as Word reports them and the tracked runs read
+  // from the paragraph OOXML.
+  async snapshot(page) {
+    await page.waitForFunction(
+      () => document.getElementById("review-file").textContent.startsWith("Review file:"),
+      null,
+      { timeout: 60_000 },
+    );
+    const paragraphs = await page.evaluate(async (origin) => {
+      const m = await import(`${origin}/shared/tools-word.js`);
+      const s = await m.collectReviewSnapshot();
+      return s.paragraphs.map((p) => ({
+        index: p.index,
+        text: p.text,
+        w_ins: p.w_ins,
+        w_del: p.w_del,
+        tracked: p.tracked,
+      }));
+    }, ORIGIN);
+    return { paragraphs };
+  },
+
   view,
 };
 
