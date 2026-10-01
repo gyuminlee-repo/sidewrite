@@ -120,6 +120,42 @@ export function markedLines(r) {
   ];
 }
 
+// The lines under "Make anonymized copy": [{ text, bad? }]. The verifier's
+// report (scripts/verify-anonymized.py) is shown whether the copy passed or
+// not.
+const yes = (b) => (b ? "yes" : "NO");
+export function anonymizeLines(r) {
+  const out = [];
+  if (r.ok) out.push({ text: `Written: ${r.name}.` });
+  else {
+    out.push({
+      text: r.name
+        ? `The copy did not pass its check and was set aside as ${r.name}. Do not submit it.`
+        : "No anonymized copy was written.",
+      bad: true,
+    });
+    out.push({ text: r.error, bad: true });
+  }
+  const rep = r.report;
+  if (rep) {
+    out.push({
+      text: `Verifier: total ${rep.total} left; text unchanged: ${yes(rep.body_equal)}; tracked changes unchanged: ${yes(rep.markup_equal)}; structure intact: ${yes(rep.structure_ok)}.`,
+      bad: !r.ok,
+    });
+    for (const [id, c] of Object.entries(rep.categories ?? {})) {
+      if (c.status === "cleared") continue;
+      out.push({
+        text: `${c.status === "not cleared" ? "Still present" : "Kept"}: ${id} (${c.count}): ${c.what}`,
+        bad: c.status === "not cleared",
+      });
+    }
+    for (const [name, n] of Object.entries(rep.name_mentions ?? {}))
+      out.push({ text: `The text still has the name "${name}" (${n} times).`, bad: true });
+  }
+  if (r.notice) out.push({ text: r.notice });
+  return out;
+}
+
 // Which file the copies are made from.
 export const docLine = (doc) =>
   doc

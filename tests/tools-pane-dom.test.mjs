@@ -4,6 +4,7 @@
 // its result comes as a tools_event.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 class FakeEl {
   constructor(tag, id = null) {
@@ -421,6 +422,86 @@ test("marked copy: no file, a file that is not a docx or one too large is said a
   await t.$("tools-marked-build").click();
   assert.equal(t.message(), "v1.docx is too large to send to the daemon.");
   assert.equal(t.of("marked_build").length, 0);
+});
+
+// ---- anonymized copy ---------------------------------------------------------
+
+test("anonymized copy: the verifier's result is listed under the button", async () => {
+  const t = await setup({
+    respond: {
+      anonymize: () => ({
+        ok: true,
+        name: "paper_anonymized.docx",
+        report: {
+          total: 0,
+          body_equal: true,
+          markup_equal: true,
+          structure_ok: true,
+          categories: {},
+        },
+        notice: "The text itself is not changed.",
+      }),
+    },
+  });
+  await t.$("tools-anonymize").click();
+  await tick();
+  assert.deepEqual(t.of("anonymize")[0].payload, {});
+  assert.deepEqual(texts(t.$("tools-anonymized")), [
+    "Written: paper_anonymized.docx.",
+    "Verifier: total 0 left; text unchanged: yes; tracked changes unchanged: yes; structure intact: yes.",
+    "The text itself is not changed.",
+  ]);
+  assert.equal(t.message(), "");
+});
+
+test("anonymized copy: a copy that failed its check is shown with its report; a tool error is a message", async () => {
+  let t = await setup({
+    respond: {
+      anonymize: () => ({
+        ok: false,
+        name: "paper_anonymized.INCOMPLETE.docx",
+        error: "The copy is incomplete: the text changed.",
+        report: {
+          total: 0,
+          body_equal: false,
+          markup_equal: true,
+          structure_ok: true,
+          categories: {},
+        },
+      }),
+    },
+  });
+  await t.$("tools-anonymize").click();
+  await tick();
+  assert.match(
+    texts(t.$("tools-anonymized"))[0],
+    /set aside as paper_anonymized\.INCOMPLETE\.docx/,
+  );
+  assert.match(texts(t.$("tools-anonymized"))[2], /text unchanged: NO/);
+  t = await setup({ respond: { anonymize: () => ({ ok: false, error: "python3 not found" }) } });
+  await t.$("tools-anonymize").click();
+  await tick();
+  assert.equal(t.message(), "python3 not found");
+  assert.deepEqual(texts(t.$("tools-anonymized")), []);
+});
+
+// ---- the page ----------------------------------------------------------------
+
+test("the Word page has the Tools tab with every element the pane uses, and nothing of the parts that are not connected", async () => {
+  const html = await readFile(new URL("../taskpane/word/index.html", import.meta.url), "utf8");
+  const pane = await readFile(new URL("../taskpane/shared/tools-pane.js", import.meta.url), "utf8");
+  assert.match(html, /<button class="tab" data-tab="tools">Tools<\/button>/);
+  assert.match(html, /<section class="tab-content" data-tab="tools" hidden>/);
+  const ids = new Set([...pane.matchAll(/(?:\$|onClick)\("(tools-[a-z-]+)"/g)].map((m) => m[1]));
+  assert.ok(ids.size >= 15, `${ids.size} ids`);
+  for (const id of [...ids, "tools-root"]) assert.ok(html.includes(`id="${id}"`), id);
+  // Modules that exist and are not connected to the pane have no control here.
+  const tab = html.slice(
+    html.indexOf('data-tab="tools" hidden'),
+    html.indexOf("<!-- Setup tab content -->"),
+  );
+  for (const word of [/deepl/i, /languagetool/i, /crossref/i, /\bcsl\b/i, /consent/i, /unit/i])
+    assert.doesNotMatch(tab, word);
 });
 
 test("a page without the Tools tab (Excel) gets a pane that does nothing", async () => {

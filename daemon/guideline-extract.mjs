@@ -15,9 +15,9 @@
 // { ok, json?, error? } (daemon/oneshot.mjs), splitSentences(text) ->
 // string[], fetchFn(url, { signal }) -> Response.
 //
-// Not wired yet. The caller passes splitSentences from review-split.mjs and
-// the one-shot function of the chosen provider, and shows candidates to the
-// author before any of them enters the ledger.
+// Called by the Tools tab (aux-service.mjs profile_rules_extract) with
+// splitSentences from review-split.mjs and the one-shot function of the
+// chosen provider; the author picks candidates before any enters the ledger.
 
 import { COUNT_TARGETS, SECTION_PATTERNS, SECTION_TERMS } from "./count-check.mjs";
 

@@ -5,7 +5,8 @@
 //   tools_state, profile_rules_apply, format_check
 // Jobs (AUX_JOBS; they call a model or a Python tool): accepted at once, the
 // result follows as { type: "tools_event", event: "job_done", job_id, result }.
-//   selection_translate, selection_ask, profile_rules_extract, marked_build
+//   selection_translate, selection_ask, profile_rules_extract, marked_build,
+//   anonymize
 //
 // The selection requests get the selected text from the pane and answer with
 // text for the pane. They read no file and no revision, and nothing of the
@@ -23,6 +24,10 @@
 // the tool and the options the script uses (tools/build_marked_diff.py), so
 // the button and the script give the same file. A refusal of the tool is the
 // error of the job, word for word.
+//
+// Anonymized copy. anonymize writes "<name>_anonymized.docx" from the saved
+// file and answers the verifier's report (anonymize.mjs). A copy that fails
+// the verifier is set aside under an INCOMPLETE name and the result says so.
 //
 // Checks. format_check reports and changes nothing: the format rules the
 // profile turns on (format-check.mjs) over the formatting the pane read, and
@@ -57,6 +62,7 @@ import { appendDecisions, decisionRecord } from "./decision-log.mjs";
 import { SAVE_FIRST } from "./doc-bytes.mjs";
 import { runPy as defaultRunPy } from "./py-tool.mjs";
 import { runMarkedDiff } from "./marked-diff.mjs";
+import { runAnonymize } from "./anonymize.mjs";
 import { findFormatIssues } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
 import { usableHeadings } from "./response-service.mjs";
@@ -67,6 +73,7 @@ export const AUX_JOBS = new Set([
   "selection_ask",
   "profile_rules_extract",
   "marked_build",
+  "anonymize",
 ]);
 
 export const MARKED_MODES = ["track_changes", "color"];
@@ -298,6 +305,17 @@ export function createAuxService({
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
+    },
+
+    // An anonymized copy of the saved file, with what the verifier found in
+    // it. A copy that does not pass is not a result to use: ok is false, the
+    // report and the name it was set aside under come with the error.
+    async anonymize(_msg, key) {
+      const d = at(key);
+      const r = await runAnonymize({ src: d.doc, runPy, exists });
+      log(`[tools] anonymize ok=${r.ok} total=${r.report?.total ?? "-"} path=${r.path ?? "-"}`);
+      if (!r.ok && !r.report) throw new Error(r.error);
+      return { ...r, name: r.path ? basename(r.path) : null };
     },
 
     // Format findings and count results for the document as the pane read

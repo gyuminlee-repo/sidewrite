@@ -14,6 +14,7 @@ import {
   fileTooLarge,
   markedLines,
   checkRows,
+  anonymizeLines,
 } from "./tools-view.js";
 import { bytesToBase64 } from "./response-view.js";
 
@@ -278,6 +279,17 @@ export function initToolsPane({
     $("tools-marked").replaceChildren(...lines(markedLines(r)));
   }
   onClick("tools-marked-build", buildMarked);
+
+  // Anonymized copy: made by the daemon from the saved file, then verified.
+  async function anonymize() {
+    $("tools-anonymized").replaceChildren();
+    say("Writing and checking the anonymized copy...");
+    const r = await askJob("anonymize", {});
+    if (!r.ok && !r.report) throw new Error(r.error || "The copy could not be written.");
+    say("");
+    $("tools-anonymized").replaceChildren(...lines(anonymizeLines(r)));
+  }
+  onClick("tools-anonymize", anonymize);
 
   renderDoc(); // loaded on "welcome" (taskpane.js calls reload once connected)
 

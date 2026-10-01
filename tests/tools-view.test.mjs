@@ -11,6 +11,7 @@ import {
   markedLines,
   checkRows,
   formatFindingText,
+  anonymizeLines,
 } from "../taskpane/shared/tools-view.js";
 
 test("the document line names the saved file, or says to save", () => {
@@ -175,4 +176,60 @@ test("the rows of a check: rules on, findings with their paragraph, count result
       "No count rule is in the ledger.",
     ],
   );
+});
+
+test("the anonymized copy: the verifier's totals, what is kept, what is left", () => {
+  const report = {
+    total: 0,
+    body_equal: true,
+    markup_equal: true,
+    structure_ok: true,
+    categories: {
+      names: { status: "cleared", count: 0, what: "creator" },
+      title: { status: "kept by option", count: 1, what: "document title in core.xml" },
+    },
+    name_mentions: {},
+  };
+  assert.deepEqual(
+    anonymizeLines({
+      ok: true,
+      name: "paper_anonymized.docx",
+      report,
+      notice: "Text is not changed.",
+    }),
+    [
+      { text: "Written: paper_anonymized.docx." },
+      {
+        text: "Verifier: total 0 left; text unchanged: yes; tracked changes unchanged: yes; structure intact: yes.",
+        bad: false,
+      },
+      { text: "Kept: title (1): document title in core.xml", bad: false },
+      { text: "Text is not changed." },
+    ],
+  );
+  const failed = anonymizeLines({
+    ok: false,
+    name: "paper_anonymized.INCOMPLETE.docx",
+    error: "The copy is incomplete: still present: names (2).",
+    report: {
+      ...report,
+      total: 2,
+      body_equal: false,
+      categories: { names: { status: "not cleared", count: 2, what: "creator" } },
+      name_mentions: { "A. Writer": 3 },
+    },
+  });
+  assert.deepEqual(failed, [
+    {
+      text: "The copy did not pass its check and was set aside as paper_anonymized.INCOMPLETE.docx. Do not submit it.",
+      bad: true,
+    },
+    { text: "The copy is incomplete: still present: names (2).", bad: true },
+    {
+      text: "Verifier: total 2 left; text unchanged: NO; tracked changes unchanged: yes; structure intact: yes.",
+      bad: true,
+    },
+    { text: "Still present: names (2): creator", bad: true },
+    { text: 'The text still has the name "A. Writer" (3 times).', bad: true },
+  ]);
 });

@@ -13,9 +13,8 @@
 // writes, and another name is tried), and the move to the INCOMPLETE name is
 // exclusive too.
 //
-// Not wired yet. The caller passes runPy (daemon/py-tool.mjs), the local
-// path of the saved document and existsSync, and shows ANONYMIZE_NOTICE with
-// the report.
+// Called by the Tools tab (aux-service.mjs anonymize) with the saved file of
+// the document; the pane shows the report and ANONYMIZE_NOTICE.
 
 import { join, resolve } from "node:path";
 import {
