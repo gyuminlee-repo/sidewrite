@@ -5,7 +5,7 @@
 # Every action prints one JSON object.
 #
 # Actions
-#   state           comments and revisions of the document
+#   state           comments (with done = resolved) and revisions of the document
 #   apply           -PlanJson <file>: accept or reject the tracked changes of
 #                   each rationale comment, optionally edit one inserted word
 #   delete-text     -Text <s>: delete its first occurrence, track changes off
@@ -44,7 +44,10 @@ function RevList() {
 function CommentList() {
   $list = @()
   foreach ($c in $d.Comments) {
-    $list += [pscustomobject]@{ com = $c; text = (Norm $c.Range.Text); start = $c.Scope.Start; end = $c.Scope.End; author = $c.Author }
+    # Done: the comment is resolved. Unreadable in some documents: null then.
+    $done = $null
+    try { $done = [bool]$c.Done } catch { $done = $null }
+    $list += [pscustomobject]@{ com = $c; text = (Norm $c.Range.Text); start = $c.Scope.Start; end = $c.Scope.End; author = $c.Author; done = $done }
   }
   return $list
 }
@@ -75,7 +78,7 @@ switch ($Action) {
     Out ([ordered]@{
       ok = $true
       track_revisions = $d.TrackRevisions
-      comments = @(CommentList | ForEach-Object { [ordered]@{ text = $_.text; author = $_.author; start = $_.start; end = $_.end } })
+      comments = @(CommentList | ForEach-Object { [ordered]@{ text = $_.text; author = $_.author; start = $_.start; end = $_.end; done = $_.done } })
       revisions = @(RevList | ForEach-Object { [ordered]@{ type = $_.type; text = $_.text; start = $_.start; end = $_.end } })
     })
   }
