@@ -49,6 +49,20 @@ function harness(spawn, over = {}) {
   const cli = [];
   const lines = [];
   const removed = [];
+  // endTurn is the last thing a turn does: turnEnded() resolves when it has
+  // been called (again), however long the steps before it took.
+  const waiters = [];
+  let endedSeen = 0;
+  const turnEnded = () =>
+    new Promise((resolve, reject) => {
+      if (ended.length > endedSeen) return resolve(void (endedSeen = ended.length));
+      const timer = setTimeout(() => reject(new Error("the turn did not end within 10 s")), 10_000);
+      waiters.push(() => {
+        clearTimeout(timer);
+        endedSeen = ended.length;
+        resolve();
+      });
+    });
   const turns = createCliTurns({
     spawnFn: spawn.fn,
     mcpHttp: {
@@ -57,7 +71,10 @@ function harness(spawn, over = {}) {
     baseUrl: "http://127.0.0.1:47834",
     sendText: (t, k) => out.push(["text", t, k]),
     sendEvent: (e, k) => out.push(["event", e.event, e, k]),
-    endTurn: (k, outcome) => ended.push([k, outcome]),
+    endTurn: (k, outcome) => {
+      ended.push([k, outcome]);
+      waiters.shift()?.();
+    },
     log: (s) => lines.push(s),
     mkTurnDir: async () => "/tmp/turn",
     rmTurnDir: async (d) => removed.push(d),
@@ -66,9 +83,8 @@ function harness(spawn, over = {}) {
     env: { PATH: "/usr/bin", HOME: "/home/u" },
     ...over,
   });
-  return { turns, out, ended, binds, cli, lines, removed };
+  return { turns, out, ended, binds, cli, lines, removed, turnEnded };
 }
-const settle = () => new Promise((r) => setTimeout(r, 25));
 const kinds = (h) => h.out.map((x) => x[1]);
 const BYPASS = /approval|bypass|dangerously|skip-permissions|accept-edits|yolo|full-access/i;
 
@@ -87,7 +103,7 @@ test("codex turn: per-turn route and token by env, events mapped, ends the turn 
     { id: "codex", model: "gpt-6.1-sol" },
     { ref: "R1.1" },
   );
-  await settle();
+  await h.turnEnded();
   const [route, binding] = h.binds[0];
   assert.match(route, /^[0-9a-f]{32}$/);
   assert.deepEqual([binding.key, binding.ref], ["k", "R1.1"]);
@@ -132,7 +148,7 @@ test("failure: error event before turn_complete; the limit text is the outcome",
     fakeSpawn(['{"type":"turn.failed","error":{"message":"usage limit reached"}}'], { code: 1 }),
   );
   await h.turns.start("k", "word", "P", { id: "codex" }, { ref: "R1.1" });
-  await settle();
+  await h.turnEnded();
   assert.deepEqual(kinds(h), ["error", "turn_complete"]);
   assert.match(h.out[0][2].error, /usage limit/);
   assert.deepEqual(h.out[1][2], { event: "turn_complete", subtype: "error" });
@@ -142,7 +158,7 @@ test("failure: error event before turn_complete; the limit text is the outcome",
 test("the captured Codex run: the refused tool call fails the turn with Codex's own message", async () => {
   const h = harness(fakeSpawn(fixture("codex_exec_turn_approval.jsonl")));
   await h.turns.start("k", "word", "P", { id: "codex", model: "gpt-5.5" }, { ref: "R1.1" });
-  await settle();
+  await h.turnEnded();
   assert.equal(h.ended.length, 1);
   const [, outcome] = h.ended[0];
   assert.equal(outcome.ok, false);
@@ -165,7 +181,7 @@ test("a tool error that is not about approval (a blocked edit) does not fail the
     ]),
   );
   await h.turns.start("k", "word", "P", { id: "codex" }, { ref: "R1.1" });
-  await settle();
+  await h.turnEnded();
   assert.deepEqual(h.ended, [["k", { ok: true }]]);
 });
 
@@ -173,7 +189,7 @@ test("agy turn: the office server is registered for the turn and removed after i
   const sp = fakeSpawn(fixture("agy_print_stream.jsonl"));
   const h = harness(sp);
   await h.turns.start("k", "word", "PROMPT", { id: "antigravity", model: "g" }, { ref: "R2.1" });
-  await settle();
+  await h.turnEnded();
   const [route, binding] = h.binds[0];
   assert.deepEqual(h.cli[0], [
     "agy",
@@ -202,7 +218,7 @@ test("agy turn: the office server is registered for the turn and removed after i
 test("the captured agy run: the denied tool call fails the turn with what agy reported", async () => {
   const h = harness(fakeSpawn(fixture("agy_turn_denied.jsonl")));
   await h.turns.start("k", "word", "P", { id: "antigravity" }, { ref: "R1.1" });
-  await settle();
+  await h.turnEnded();
   const [, outcome] = h.ended[0];
   assert.equal(outcome.ok, false);
   assert.match(outcome.error, /agy denied the office tool call \(CallMcpTool\)/);
@@ -217,7 +233,7 @@ test("agy: a failed registration ends the turn and starts nothing; one agy turn 
       args[1] === "add" ? { code: 1, stdout: "", stderr: "config is read-only" } : { code: 0 },
   });
   await h.turns.start("k", "word", "P", { id: "antigravity" }, { ref: "R1.1" });
-  await settle();
+  await h.turnEnded();
   assert.equal(sp.seen.spawns, 0);
   assert.match(h.ended[0][1].error, /could not register the office tools with agy.*read-only/i);
   assert.deepEqual(h.binds.at(-1)[0], "unbind");
@@ -229,7 +245,7 @@ test("agy: a failed registration ends the turn and starts nothing; one agy turn 
     /one Antigravity turn at a time/,
   );
   held.turns.stop("a");
-  await settle();
+  await held.turnEnded();
 });
 
 test("stop kills the child and reports interrupted; a second start on the pane is refused", async () => {
@@ -242,7 +258,7 @@ test("stop kills the child and reports interrupted; a second start on the pane i
     /already running/,
   );
   assert.equal(h.turns.stop("k"), true);
-  await settle();
+  await h.turnEnded();
   assert.deepEqual(sp.seen.signals, ["SIGTERM"]);
   assert.equal(h.out.at(-1)[2].interrupted, true);
   assert.deepEqual(h.ended, [["k", { ok: false, error: "The turn was stopped." }]]);
@@ -254,19 +270,19 @@ test("a CLI that is not installed, a non-zero exit and a timeout are failed turn
     fakeSpawn([], { error: Object.assign(new Error("spawn codex ENOENT"), { code: "ENOENT" }) }),
   );
   await missing.turns.start("k", "word", "P", { id: "codex" }, { ref: "R1.1" });
-  await settle();
+  await missing.turnEnded();
   assert.match(missing.ended[0][1].error, /Codex CLI is not installed/);
   assert.deepEqual(missing.binds.at(-1)[0], "unbind");
 
   const exit = harness(fakeSpawn(["not json"], { code: 3 }));
   await exit.turns.start("k", "word", "P", { id: "codex" }, { ref: "R1.1" });
-  await settle();
+  await exit.turnEnded();
   assert.match(exit.ended[0][1].error, /Codex CLI exited with code 3/);
 
   const sp = fakeSpawn([], { hold: true });
   const slow = harness(sp, { timeoutMs: 20 });
   await slow.turns.start("k", "word", "P", { id: "codex" }, { ref: "R1.1" });
-  await new Promise((r) => setTimeout(r, 60));
+  await slow.turnEnded();
   assert.deepEqual(sp.seen.signals, ["SIGTERM"]);
   assert.match(slow.ended[0][1].error, /timed out after 20 ms/);
 });
@@ -285,7 +301,7 @@ test("shutdown stops every running turn and removes the agy registration", async
   const h = harness(fakeSpawn([], { hold: true }));
   await h.turns.start("a", "word", "P", { id: "antigravity" }, { ref: "R1.1" });
   await h.turns.shutdown();
-  await settle();
+  await h.turnEnded();
   assert.equal(h.turns.running("a"), false);
   assert.deepEqual(h.cli.at(-1), ["agy", "mcp", "remove", "office"]);
   assert.equal(h.binds.at(-1)[0], "unbind");
