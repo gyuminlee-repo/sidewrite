@@ -76,3 +76,14 @@ export function roleText(role, { used, choice }, models) {
 export function modelLineText(state, models) {
   return ROLES.map((role) => roleText(role, state[role], models)).join("   ");
 }
+
+// The chat line for the daemon's model_fallback event: the CLI ran a refused
+// request again on another model ({ original, fallback, scope }).
+export function fallbackNotice({ original, fallback, scope }, models) {
+  const from = modelDisplayName(original, models);
+  const to = modelDisplayName(fallback, models);
+  const head = `${from} declined a request of this turn, and Claude Code ran it again on ${to}.`;
+  return scope === "local"
+    ? `${head} Only that answer came from ${to}; the session keeps its model.`
+    : `${head} The session stays on ${to} from here on. To go back to the model you chose, pick it again in the chat box or in Setup.`;
+}

@@ -110,7 +110,10 @@ test("set_model: the model the session runs on, read after the wait, decides whe
   const body = code.slice(at, at + 1400);
   // The session's own model, read once the list is known.
   assert.match(body, /const after = await modelCache\.get\(\);/);
-  assert.match(body, /running: sessionFor\(key\)\?\.model \?\? null/);
+  assert.match(
+    body,
+    /running: sessionFor\(key\)\?\.fellBackTo \?\? sessionFor\(key\)\?\.model \?\? null/,
+  );
   assert.ok(body.indexOf("await modelCache.get()") < body.indexOf("sessionFor(key)?.model"));
   assert.match(body, /if \(restart\)/);
   assert.equal(/modelCache\.current\(\)/.test(body), false, "no guess from the list as it was");
@@ -164,9 +167,10 @@ test("a refusal fallback of the CLI is logged, told to the pane, and recorded as
   assert.match(body, /const f = refusalFallback\(msg\);/);
   assert.match(body, /console\.log\(f\.log\);/);
   assert.match(body, /bridge\.sendAssistantEvent\(f\.event, session\?\.key\);/);
-  // set_model compares session.model with the model the user chose: with the
-  // fallback recorded, choosing the model again restarts the session on it.
-  assert.match(body, /if \(f\.session && session\) session\.model = msg\.fallback_model;/);
+  // set_model compares the model the session runs on with the one the user
+  // chose: with the fallback recorded, choosing the model again restarts the
+  // session on it. session.model stays what was asked for.
+  assert.match(body, /if \(f\.session && session\) session\.fellBackTo = msg\.fallback_model;/);
   // The daemon itself names no fallback model.
   assert.equal(/fallbackModel/.test(code), false);
 });

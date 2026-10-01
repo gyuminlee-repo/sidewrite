@@ -47,7 +47,7 @@ import { initReviewPane } from "./review-pane.js";
 import { initResponsePane } from "./response-pane.js";
 import { initToolsPane } from "./tools-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
-import { modelLabel, modelLineText } from "./model-line.js";
+import { fallbackNotice, modelLabel, modelLineText } from "./model-line.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
 import {
@@ -851,6 +851,20 @@ async function handleServerMessage(msg) {
         setAgentStatus("working", statusForTool(msg.tool));
       } else if (msg.event === "turn_complete") {
         setAgentStatus("idle", msg.interrupted ? "Stopped" : "Ready");
+      } else if (msg.event === "model_fallback") {
+        // The CLI moved a refused request, and unless the scope is local the
+        // session, to another model: said in the chat and shown at once.
+        if (msg.scope !== "local") {
+          liveModel = msg.fallback || liveModel;
+          modelUsed.turn = {
+            provider: "claude",
+            asked: modelUsed.turn?.asked ?? editsModel(),
+            ran: msg.fallback ?? null,
+          };
+          renderConnection();
+          renderModelLine();
+        }
+        appendNotice(fallbackNotice(msg, accountModels));
       } else if (msg.event === "info") {
         appendNotice(msg.message);
       } else if (msg.event === "error") {

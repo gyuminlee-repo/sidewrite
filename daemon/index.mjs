@@ -33,6 +33,7 @@ import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
 import {
   bestClaudeModel,
   createModelCache,
+  refusalFallback,
   modelChange,
   resolveModelChoice,
 } from "./model-list.mjs";
@@ -872,7 +873,8 @@ const bridge = createBridge({
       const { model, restart } = modelChange({
         requested,
         after,
-        running: sessionFor(key)?.model ?? null,
+        // A session the CLI moved to another model runs on that one.
+        running: sessionFor(key)?.fellBackTo ?? sessionFor(key)?.model ?? null,
       });
       modelByKey.set(key, model);
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
@@ -1487,6 +1489,16 @@ function handleAgentMessage(msg, session) {
             console.warn("[daemon] Could not save session id:", err.message),
           );
         }
+      } else if (msg.subtype === "model_refusal_fallback") {
+        // The CLI ran a refused request again on another model. The pane is
+        // told at once. For the session the swap lasts: it is recorded
+        // (session.fellBackTo) next to the model that was asked for
+        // (session.model), and set_model compares the user's choice with
+        // it, so choosing the model again restarts the session on it.
+        const f = refusalFallback(msg);
+        console.log(f.log);
+        bridge.sendAssistantEvent(f.event, session?.key);
+        if (f.session && session) session.fellBackTo = msg.fallback_model;
       } else {
         console.log(`[agent] system/${msg.subtype}`);
       }
