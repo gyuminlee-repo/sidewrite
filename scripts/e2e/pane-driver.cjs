@@ -283,8 +283,16 @@ function providersView(page) {
       }));
     const raw = document.getElementById("providers-root")?.getAttribute("data-selection");
     return {
-      menus: { turn: menu("provider-turn"), oneshot: menu("provider-oneshot") },
-      models: { turn: menu("provider-turn-model"), oneshot: menu("provider-oneshot-model") },
+      menus: {
+        turn: menu("provider-turn"),
+        writing: menu("provider-writing"),
+        oneshot: menu("provider-oneshot"),
+      },
+      models: {
+        turn: menu("provider-turn-model"),
+        writing: menu("provider-writing-model"),
+        oneshot: menu("provider-oneshot-model"),
+      },
       selection: raw ? JSON.parse(raw) : {},
       rows: q("#providers-list .provider-row").map((r) => ({
         id: r.getAttribute("data-provider"),

@@ -17,6 +17,21 @@ export function modelMenuOptions(models, current) {
   return rows;
 }
 
+// The rows of the model menus before the account's list is known.
+export const ALIAS_MODELS = [
+  { value: "haiku", displayName: "Haiku", description: "cheapest", resolvedModel: null },
+  { value: "sonnet", displayName: "Sonnet", description: "balanced", resolvedModel: null },
+  { value: "opus", displayName: "Opus", description: "most capable", resolvedModel: null },
+];
+
+// The model of edits (review turns and the chat), one value for the chat box
+// and for Setup: the stored choice; else the default the daemon answered
+// set_model with (the best model the account lists); else, before it
+// answered, the alias it takes for that.
+export function editsModelValue(stored, daemonDefault) {
+  return stored || daemonDefault || "opus";
+}
+
 // A stored model choice the pane may send to the daemon, which checks it
 // against the account's list. "default" was retired: a model is always named.
 export function isStoredModelValid(v) {

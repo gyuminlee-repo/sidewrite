@@ -76,6 +76,8 @@ import {
 } from "./tools-excel.js";
 import { isInOrUnder, docDirFromActiveUrl } from "./paths.js";
 import {
+  ALIAS_MODELS,
+  editsModelValue,
   modelMenuOptions,
   isStoredModelValid,
   effectiveModelNote,
@@ -167,6 +169,11 @@ let connLabel = "Connecting…";
 let liveModel = null; // SDK-reported model id of the running loop
 let pendingModelShort = null; // target short name while a switch restarts
 let accountModels = null; // models_list of the daemon, once it answered
+// The model the daemon uses for a pane that stored none (its answer to
+// set_model with no model: the best the account lists).
+let defaultModel = null;
+// The model of edits, for the chat box, Setup and the status: one value.
+const editsModel = () => editsModelValue(settings?.model, defaultModel);
 
 function shortModelName(idOrAlias) {
   return modelDisplayName(idOrAlias, accountModels);
@@ -185,7 +192,7 @@ function renderConnection() {
     } else {
       // Connected but no turn has run yet — show what the next message
       // will use (the sticky dropdown choice) rather than a bare "Connected".
-      text = shortModelName(settings?.model || "sonnet");
+      text = shortModelName(editsModel());
       title = `Connected · ${text} on next message`;
     }
   }
@@ -506,9 +513,10 @@ function defaultSettings() {
   return {
     showDiagnostics: false,
     trackChangesMode: "always", // "always" | "modifications" | "never"
-    // Global, sticky. Cheaper models use less of your monthly Claude
-    // programmatic credit. "default" defers to the Claude Code CLI config.
-    model: "sonnet", // an alias or a model id the account lists (models_list)
+    // Global, sticky: the model of edits (review turns and the chat). An
+    // alias or a model id the account lists (models_list); null until the
+    // user chooses one, and the daemon then uses the best the account lists.
+    model: null,
   };
 }
 
@@ -517,10 +525,10 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return defaultSettings();
     const s = { ...defaultSettings(), ...JSON.parse(raw) };
-    // Migrate the retired "default" model choice (and any malformed value)
-    // to the explicit Sonnet default. Whether the account can use the model
-    // is the daemon's check (set_model), against its model list.
-    if (!isStoredModelValid(s.model)) s.model = "sonnet";
+    // The retired "default" model choice (and any malformed value) is no
+    // choice. Whether the account can use a stored model is the daemon's
+    // check (set_model), against its model list.
+    if (!isStoredModelValid(s.model)) s.model = null;
     return s;
   } catch {
     return defaultSettings();
@@ -547,7 +555,7 @@ function applySettings() {
   if ($model) {
     // The static rows are the three aliases; a stored id outside them gets
     // a row of its own until loadModelMenu brings the account's list.
-    const value = settings.model || "sonnet";
+    const value = editsModel();
     if (![...$model.options].some((o) => o.value === value)) {
       $model.append(modelOption({ value, label: value, title: "" }));
     }
@@ -578,6 +586,7 @@ async function loadModelMenu() {
   accountModels = r.models;
   fillModelMenu();
   renderConnection(); // the indicator can now use the account's display names
+  providersPane?.render(); // Setup shows the same rows
   $m.title =
     r.source === "sdk"
       ? "Models your Claude account can use"
@@ -587,8 +596,8 @@ async function loadModelMenu() {
 function fillModelMenu() {
   const $m = document.getElementById("composer-model");
   if (!$m || !accountModels) return;
-  $m.replaceChildren(...modelMenuOptions(accountModels, settings.model).map(modelOption));
-  $m.value = settings.model;
+  $m.replaceChildren(...modelMenuOptions(accountModels, editsModel()).map(modelOption));
+  $m.value = editsModel();
 }
 
 // Push the chosen model to the daemon. The SDK model is fixed per agent
@@ -596,12 +605,44 @@ function fillModelMenu() {
 // (daemon side); on first connect it's just recorded for the lazy start.
 function sendModel() {
   if (!wsReady) return;
-  const asked = settings.model || "sonnet";
+  // No stored choice: an empty model, which the daemon answers with the
+  // best one the account lists. It is shown and not stored, so the default
+  // follows the account.
+  const asked = settings.model || "";
   // The daemon waits for the account's model list before it answers.
   sendRequest("set_model", { model: asked }, { timeoutMs: 30_000 }).then(
-    (r) => applyEffectiveModel(asked, r.model),
-    (e) => console.warn(`[model] set_model for ${asked} got no answer: ${e.message}`),
+    (r) => {
+      if (asked) return applyEffectiveModel(asked, r.model);
+      if (settings.model) return undefined; // a choice was made meanwhile
+      defaultModel = r.model || null;
+      refreshModelViews();
+      return undefined;
+    },
+    (e) =>
+      console.warn(`[model] set_model for ${asked || "(default)"} got no answer: ${e.message}`),
   );
+}
+
+// The chat box, Setup and the status all show the model of edits.
+function refreshModelViews() {
+  fillModelMenu();
+  applySettings();
+  renderConnection();
+  providersPane?.render();
+}
+
+// The one way the model of edits is chosen, from the chat box or from Setup.
+function chooseEditsModel(value) {
+  settings.model = value;
+  saveSettings(settings);
+  applySettings();
+  sendModel();
+  // If a loop is already live (a turn has run), the daemon will restart it
+  // to apply the new model: show that until the next session_init confirms.
+  // If nothing has run yet, renderConnection already shows the new choice.
+  if (liveModel) pendingModelShort = shortModelName(settings.model);
+  renderConnection();
+  providersPane?.render();
 }
 
 // The daemon answers with the model it will use. When that is not the one
@@ -617,6 +658,7 @@ function applyEffectiveModel(asked, effective) {
   applySettings();
   pendingModelShort = null;
   renderConnection();
+  providersPane?.render();
   appendNotice(note);
 }
 
@@ -638,15 +680,7 @@ document.getElementById("setting-track-changes-mode")?.addEventListener("change"
 });
 
 document.getElementById("composer-model")?.addEventListener("change", (e) => {
-  settings.model = e.target.value;
-  saveSettings(settings);
-  applySettings();
-  sendModel();
-  // If a loop is already live (a turn has run), the daemon will restart it
-  // to apply the new model — show that until the next session_init confirms.
-  // If nothing has run yet, renderConnection already shows the new choice.
-  if (liveModel) pendingModelShort = shortModelName(settings.model);
-  renderConnection();
+  chooseEditsModel(e.target.value);
 });
 
 applySettings();
@@ -1275,7 +1309,17 @@ Office.onReady((info) => {
   // Providers section of the Setup tab (the Excel page has none).
   // Filled on welcome, which comes after the connect below.
   if (document.getElementById("providers-root")) {
-    providersPane = initProvidersPane({ sendRequest, settings, saveSettings });
+    providersPane = initProvidersPane({
+      sendRequest,
+      settings,
+      saveSettings,
+      // The model of edits is the chat box's: Setup shows and changes it here.
+      editsModel: {
+        get: editsModel,
+        rows: () => modelMenuOptions(accountModels ?? ALIAS_MODELS, editsModel()),
+        set: chooseEditsModel,
+      },
+    });
   }
 
   // Show the welcome card on first launch (per browser-storage, so it

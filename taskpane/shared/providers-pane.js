@@ -1,6 +1,12 @@
-// Providers section of the Setup tab (P14): which provider runs review turns
-// and which one makes the judgments, out of the ones the daemon's probe
-// passed. Pure helpers are in providers-view.js.
+// Providers section of the Setup tab (P14): which provider and model do
+// each kind of work, out of the ones the daemon's probe passed. Edits (role
+// "turn": review turns and the chat), Writing (response drafts,
+// translations, questions) and Judgments (role "oneshot"). Pure helpers are
+// in providers-view.js.
+//
+// The model of Edits is not stored here: it is the model of the chat box
+// (taskpane.js, settings.model). editsModel = { get(), rows(), set(value) }
+// reads and changes that one value, so the two menus cannot differ.
 //
 // Text goes in through textContent only. An API key is read from its box,
 // sent once in provider_set_key and the box emptied before the answer comes;
@@ -9,10 +15,12 @@
 import { providerRows, choiceAfterProbe, providerStatus, modelRows } from "./providers-view.js";
 
 const $ = (id) => document.getElementById(id);
-const ROLES = ["turn", "oneshot"];
-const SETTING = { turn: "turnProvider", oneshot: "oneshotProvider" };
-const WORDS = { turn: "review turns", oneshot: "judgments" };
-const STOPPED = { turn: "Review turns", oneshot: "Judgments" };
+const ROLES = ["turn", "writing", "oneshot"];
+const SETTING = { turn: "turnProvider", writing: "writingProvider", oneshot: "oneshotProvider" };
+const WORDS = { turn: "review turns", writing: "writing", oneshot: "judgments" };
+const STOPPED = { turn: "Review turns", writing: "Drafts and translations", oneshot: "Judgments" };
+// The first row of a Claude model menu: what runs when no model is named.
+const DEFAULT_MODEL_LABEL = { writing: "Best model (default)", oneshot: "Default model" };
 // The probe starts CLIs and calls servers; a choice waits for it.
 const TIMEOUT = { timeoutMs: 60_000 };
 // The one key provider without a fixed server: it takes a URL with its key.
@@ -27,14 +35,14 @@ function el(tag, { text, cls, ...props } = {}, kids = []) {
   return e;
 }
 
-export function initProvidersPane({ sendRequest, settings, saveSettings }) {
+export function initProvidersPane({ sendRequest, settings, saveSettings, editsModel = null }) {
   let list = [];
   // What the menus show: the choice the daemon confirmed, or the stored one
   // it refused (the notes then say so).
-  const sel = { turn: { id: "claude", model: null }, oneshot: { id: "claude", model: null } };
+  const sel = Object.fromEntries(ROLES.map((r) => [r, { id: "claude", model: null }]));
   // Why a stored choice is not in use, per role, and a daemon that gave no
   // answer. Shown until the user picks a provider that passes.
-  const notes = { turn: null, oneshot: null, daemon: null };
+  const notes = { turn: null, writing: null, oneshot: null, daemon: null };
   let waiting = null; // the restore_providers request under way
 
   const ask = (type, payload) =>
@@ -51,7 +59,7 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
   }
 
   const showNotes = () =>
-    message([notes.daemon, notes.turn, notes.oneshot].filter(Boolean).join(" "));
+    message([notes.daemon, notes.turn, notes.writing, notes.oneshot].filter(Boolean).join(" "));
 
   function store(role, choice) {
     // Claude without a model is the daemon's default: nothing to remember.
@@ -69,19 +77,26 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
       );
       menu.value = sel[role].id;
       const models = $(`provider-${role}-model`);
-      // Claude's review turns run on the model chosen in the chat box.
+      // Claude's edits run on the model of the chat box: the same value,
+      // shown here and changed through editsModel.
       const ofChat = role === "turn" && sel.turn.id === "claude";
-      const opts = ofChat
-        ? [{ value: "", label: "Model of the chat box", selected: true }]
-        : modelRows(
-            list.find((r) => r.id === sel[role].id),
-            sel[role].model,
-          );
+      const chat = ofChat && editsModel ? editsModel.get() : null;
+      const opts = chat
+        ? editsModel
+            .rows()
+            .map((r) => ({ value: r.value, label: r.label, selected: r.value === chat }))
+        : ofChat
+          ? [{ value: "", label: "Model of the chat box", selected: true }]
+          : modelRows(
+              list.find((r) => r.id === sel[role].id),
+              sel[role].model,
+              DEFAULT_MODEL_LABEL[role],
+            );
       models.replaceChildren(
         ...opts.map((o) => el("option", { value: o.value, text: o.label, selected: o.selected })),
       );
-      models.value = ofChat ? "" : (sel[role].model ?? "");
-      models.disabled = ofChat || opts.length < 2;
+      models.value = chat ?? (ofChat ? "" : (sel[role].model ?? ""));
+      models.disabled = chat ? false : ofChat || opts.length < 2;
     }
   }
 
@@ -161,7 +176,7 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
   function restoreStored() {
     const stored = Object.fromEntries(ROLES.map((r) => [r, settings[SETTING[r]] ?? null]));
     for (const role of ROLES) sel[role] = stored[role] ?? { id: "claude", model: null };
-    notes.turn = notes.oneshot = null;
+    for (const role of ROLES) notes[role] = null;
     const mine = ask("restore_providers", stored).then((r) => {
       if (waiting !== mine) return; // a newer connection asked again
       waiting = null;
@@ -216,7 +231,9 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
       return choose(role, c.id, c.model);
     });
     $(`provider-${role}-model`).addEventListener("change", (e) =>
-      choose(role, sel[role].id, e.target.value || null),
+      role === "turn" && sel.turn.id === "claude" && editsModel
+        ? editsModel.set(e.target.value)
+        : choose(role, sel[role].id, e.target.value || null),
     );
   }
   $("providers-recheck").addEventListener("click", () => reload({ refresh: true }));
@@ -224,6 +241,10 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
   return {
     reload,
     restoreStored,
+    // Draw again: the model of the chat box changed.
+    render,
+    // What the menus hold, per role: { id, model }.
+    selection: () => structuredClone(sel),
     restoring: () => waiting !== null,
     // The request the Review tab waits for before it asks the daemon for a
     // judgment or a review turn; null when there is nothing to wait for.

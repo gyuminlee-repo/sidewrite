@@ -492,7 +492,7 @@ test("providersEvidence: one entry per provider from the judgment menu, with the
         { id: "claude", text: "Claude (Agent SDK)", enabled: true, note: "" },
         {
           id: "codex",
-          text: "Codex CLI (judgments only)",
+          text: "Codex CLI (not for edits)",
           enabled: false,
           note: "Judgments only. x",
         },
@@ -579,12 +579,12 @@ test("judge: the stage 2.5 pane steps", () => {
       ok: true,
       selected: { id: "claude", model: null },
       message: "",
-      refused: "Codex CLI (judgments only)",
+      refused: "Codex CLI (not for edits)",
     },
     { id: "codex" },
   );
   assert.equal(refused.pass, false);
-  assert.match(refused.got, /Codex CLI \(judgments only\)/);
+  assert.match(refused.got, /Codex CLI \(not for edits\)/);
 
   const loaded = {
     ok: true,
