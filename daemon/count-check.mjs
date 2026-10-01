@@ -17,11 +17,9 @@
 // { id, status: "ok" | "violations" | "error", violations: [{ paragraph_index,
 // start, match, count, min, max }], count?, error? }.
 //
-// Not wired yet. The ledger check needs (ledger-check.mjs, checkLedger):
-//   item.check.type === "count" ? checkCountItem(item, paragraphs, deps) : ...
-// and the incremental check must read the whole document for a count item
-// (needsFull). revision-store.mjs needs a CountCheck in the check union and
-// count, min, max on Violation, or the store strips them.
+// Run from the Tools tab (aux-service.mjs format_check), which has the
+// headings; the result is shown and not stored. The ledger check of the
+// Review tab skips a count item (ledger-check.mjs).
 
 import { normalizeParaText } from "./revision-classify.mjs";
 

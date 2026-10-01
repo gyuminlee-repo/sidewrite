@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewPrompt, formatPromptLog, REVIEW_RULES } from "../daemon/review-prompt.mjs";
+import {
+  buildReviewPrompt,
+  formatPromptLog,
+  REVIEW_RULES,
+  rulesFor,
+} from "../daemon/review-prompt.mjs";
 
 const comment = {
   ref: "R1.3",
@@ -146,4 +151,34 @@ test("formatPromptLog names the section when the comment has one", () => {
     formatPromptLog("R1.4", b, { paragraphs: 2 }),
     '[review] prompt R1.4 instructions=L1,L3 forbid=L2 omitted_forbid=- paragraphs=2 section="Round 2 / Minor comments"',
   );
+});
+
+// ---- policy packs: rules 2 to 4 are a pack a journal profile can switch off
+
+test("without a profile every rule is in the prompt, numbered 1 to 7", () => {
+  const { text } = buildReviewPrompt({ comment, ledger });
+  assert.equal(rulesFor({}).length, REVIEW_RULES.length);
+  assert.match(text, /\n7\. Follow every author instruction below/);
+});
+
+test("a profile that switches the review_scope pack off drops rules 2 to 4 and renumbers", () => {
+  const profile = { policy_packs: { review_scope: false } };
+  assert.deepEqual(rulesFor(profile), [REVIEW_RULES[0], ...REVIEW_RULES.slice(4)]);
+  const { text } = buildReviewPrompt({ comment, ledger, profile });
+  assert.doesNotMatch(text, /Do not delete or add anything the reviewer did not request/);
+  assert.doesNotMatch(text, /revision history/);
+  assert.doesNotMatch(text, /Base every change/);
+  assert.match(text, /\n1\. Change the manuscript only with office_tracked_edit/);
+  assert.match(text, /\n4\. Follow every author instruction below/);
+  assert.doesNotMatch(text, /\n5\. /);
+  // Any other value keeps the pack; an unknown pack name changes nothing.
+  assert.equal(rulesFor({ policy_packs: { review_scope: true, other: false } }).length, 7);
+});
+
+test("the rationale language is the one given; the default names no particular reader", () => {
+  assert.match(
+    buildReviewPrompt({ comment, ledger, lang: "French" }).text,
+    /Write the rationale in French/,
+  );
+  assert.match(buildReviewPrompt({ comment, ledger }).text, /Write the rationale in English/);
 });

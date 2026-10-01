@@ -670,6 +670,8 @@ export function createReviewService({
       paragraphs: Array.isArray(paragraphs) ? paragraphs : [],
       ledger: rev.ledger,
       lang: profile.rationale_lang,
+      // policy_packs of the journal profile: which rule packs the turn carries.
+      profile,
       includeForbid: includeForbid(),
     });
     return { rev, comment, built };

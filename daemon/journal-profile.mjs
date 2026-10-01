@@ -85,6 +85,9 @@ export function withDefaults(profile) {
   // as it is; regexProblems names it.
   if (p.italics == null || isObj(p.italics)) p.italics = { ...ITALICS_DEFAULTS, ...p.italics };
   p.first_line_indent ??= null;
+  // The rule packs of a review turn (review-prompt.mjs POLICY_PACKS): on
+  // unless a profile says false.
+  p.policy_packs = { review_scope: true, ...(isObj(p.policy_packs) ? p.policy_packs : {}) };
   return p;
 }
 

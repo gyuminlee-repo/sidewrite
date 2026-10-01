@@ -3,6 +3,21 @@
 
 import { inManuscriptScope } from "./ledger-check.mjs";
 
+// Rules 2 to 4 are a policy pack ("review_scope": keep to what the reviewer
+// asked, no revision history in the manuscript, facts only). A journal
+// profile switches it off with policy_packs: { review_scope: false }; the
+// other rules are how the tool works and always stay.
+export const POLICY_PACKS = { review_scope: [1, 2, 3] };
+
+export function rulesFor(profile = {}) {
+  const off = new Set(
+    Object.entries(POLICY_PACKS)
+      .filter(([name]) => profile?.policy_packs?.[name] === false)
+      .flatMap(([, indexes]) => indexes),
+  );
+  return REVIEW_RULES.filter((_, i) => !off.has(i));
+}
+
 export const REVIEW_RULES = [
   "Change the manuscript only with office_tracked_edit, one call per change. Every other document-writing tool is disabled in this turn.",
   "Make only the changes this comment asks for. Do not delete or add anything the reviewer did not request.",
@@ -17,7 +32,8 @@ export function buildReviewPrompt({
   comment,
   paragraphs = [],
   ledger = [],
-  lang = "Korean",
+  lang = "English",
+  profile = {},
   includeForbid = true,
 }) {
   const inScope = ledger.filter(inManuscriptScope);
@@ -63,7 +79,7 @@ export function buildReviewPrompt({
   if (forbids.length) for (const i of forbids) lines.push(`- [${i.id}] ${i.text}`);
   else lines.push("- (none listed)");
   lines.push("", "Rules:");
-  REVIEW_RULES.forEach((r, n) => lines.push(`${n + 1}. ${r.replace("{lang}", lang)}`));
+  rulesFor(profile).forEach((r, n) => lines.push(`${n + 1}. ${r.replace("{lang}", lang)}`));
   lines.push("", `Call office_tracked_edit with comment_ref "${comment.ref}".`);
   return {
     text: lines.join("\n"),

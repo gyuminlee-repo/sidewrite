@@ -464,11 +464,13 @@ export async function checkLedgerIncremental(items, paragraphs, { full = false, 
   const allHashes = [...new Set(hashes)];
   const outcomes = [];
   for (const item of items) {
-    if (!inManuscriptScope(item)) {
+    // A count rule needs the headings of the document, which this check
+    // does not have: the Tools tab checks it (aux-service.mjs format_check).
+    if (!inManuscriptScope(item) || item.check.type === "count") {
       outcomes.push({
         id: item.id,
         status: "skipped",
-        skipped: "scope",
+        skipped: item.check.type === "count" ? "count" : "scope",
         violations: [],
         unsure: [],
         mode: "skipped",

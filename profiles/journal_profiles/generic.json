@@ -8,6 +8,9 @@
     "statistics": false
   },
   "first_line_indent": null,
+  "policy_packs": {
+    "review_scope": true
+  },
   "colors": {
     "response_body": null,
     "response_revised": null,

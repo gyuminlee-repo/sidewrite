@@ -406,8 +406,10 @@ export function ledgerStatusText(item) {
   // or a failed call, a regex that does not compile): no paragraph of it is
   // taken as checked.
   if (item?.status === "error") return "check failed: nothing counts as passed";
-  if (item?.status === "skipped")
+  if (item?.status === "skipped") {
+    if (item.check?.type === "count") return "Checked in the Tools tab";
     return SKIPPED_SCOPE_LABELS[item.scope] ?? `Checked at the ${item.scope} stage`;
+  }
   return item?.status;
 }
 
