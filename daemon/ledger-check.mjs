@@ -189,14 +189,21 @@ export async function checkLlmItem(
       const para = batch.find((p) => p.index === Number(u.paragraph_index));
       if (para) unsure.push({ paragraph_index: para.index, reason: u.reason });
     }
-    const hit = new Set(violations.slice(before.violations).map((v) => v.paragraph_index));
+    // A paragraph under both lists is unsure: no violation is kept for it,
+    // and the incremental check reads it again (Codex review 9).
     const open = new Set(unsure.slice(before.unsure).map((u) => u.paragraph_index));
+    for (let i = violations.length - 1; i >= before.violations; i--) {
+      if (open.has(violations[i].paragraph_index)) violations.splice(i, 1);
+    }
+    const hit = new Set(violations.slice(before.violations).map((v) => v.paragraph_index));
     decide(batch, (i) => (hit.has(i) ? "violation" : open.has(i) ? "unsure" : "ok"));
   }
   return { id: item.id, status: llmStatus(violations, unsure), violations, unsure };
 }
 
-// A violation outranks unsure; unsure paragraphs still wait for the author.
+// A violation outranks unsure in the status of the item (a paragraph under
+// both lists is unsure only, checkLlmItem); unsure paragraphs still wait for
+// the author.
 const llmStatus = (violations, unsure) =>
   violations.length ? "violations" : unsure.length ? "unsure" : "ok";
 
@@ -244,13 +251,15 @@ export function forbidHits(ledger, text) {
 //
 // Default check: only paragraphs whose text changed since this item was last
 // checked (hash not in item.checked_hashes). Violations of the last check
-// stay for paragraphs that are still there unchanged; a paragraph that
-// occurs twice keeps its violation in both copies. A full run happens when
-// asked (full), for an item never checked or last in error, and always for
-// an expect:"present" rule (it is about the whole document). An item outside
-// the manuscript scope (inManuscriptScope) is not run against the manuscript:
-// it comes back status "skipped", skipped "scope", with no violations and
-// checked_hashes null, so a later scope change to manuscript runs in full.
+// stay for paragraphs that are still there unchanged and skipped (hash in
+// checked_hashes); a paragraph read again keeps only its new result. A
+// paragraph that occurs twice keeps its violation in both copies. A full
+// run happens when asked (full), for an item never checked or last in
+// error, and always for an expect:"present" rule (it is about the whole
+// document). An item outside the manuscript scope (inManuscriptScope) is
+// not run against the manuscript: it comes back status "skipped", skipped
+// "scope", with no violations and checked_hashes null, so a later scope
+// change to manuscript runs in full.
 // Returns [{ id, status, violations, unsure, error?, mode, checked, total,
 // checked_hashes }]; violations and unsure entries carry `h`, the paragraph
 // hash. An unsure paragraph's hash is left out of checked_hashes, so the
@@ -302,9 +311,12 @@ export async function checkLedgerIncremental(items, paragraphs, { full = false, 
     }));
     let kept = [];
     if (!whole) {
+      // Only paragraphs the cache skipped keep their old violations; one
+      // read again has the new result alone (Codex review 9).
       const once = new Map();
       for (const v of item.violations ?? []) {
-        if (v.h && indexOfHash.has(v.h)) once.set(`${v.h}|${v.start}|${v.match}`, v);
+        if (v.h && seen.has(v.h) && indexOfHash.has(v.h))
+          once.set(`${v.h}|${v.start}|${v.match}`, v);
       }
       for (const v of once.values()) {
         for (const idx of indexOfHash.get(v.h)) kept.push({ ...v, paragraph_index: idx });

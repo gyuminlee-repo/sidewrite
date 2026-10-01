@@ -48,6 +48,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     backupShown: null,
     editingLedger: null, // L6: id of the ledger item loaded into the form
     confirmDone: null, // L5: ref whose "Done" was asked once with open requirements
+    reqDrafts: new Map(), // ref -> requirement text typed and not saved yet (Codex review 9)
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
     applyingBlocked: new Set(), // ids of blocked edits whose override request is in flight
@@ -366,7 +367,12 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         class: "review-reqs",
         placeholder: "What it asks for, one per line",
       });
-      reqs.value = (c.requirements ?? []).map((r) => r.text).join("\n");
+      // A render rebuilds this textarea: unsaved text lives in state and is
+      // dropped only when the save succeeds.
+      reqs.value = state.reqDrafts.has(c.ref)
+        ? state.reqDrafts.get(c.ref)
+        : (c.requirements ?? []).map((r) => r.text).join("\n");
+      reqs.addEventListener("input", () => state.reqDrafts.set(c.ref, reqs.value));
       const saveReqs = el("button", {
         type: "button",
         class: "btn-secondary btn-small",
@@ -374,12 +380,13 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       });
       saveReqs.addEventListener(
         "click",
-        guard(() =>
-          ask("review_set_requirements", {
+        guard(async () => {
+          await ask("review_set_requirements", {
             ref: c.ref,
             requirements: requirementsFromText(reqs.value),
-          }),
-        ),
+          });
+          state.reqDrafts.delete(c.ref);
+        }),
       );
       const reqLine = (c.requirements ?? []).length
         ? `Requirements: ${c.requirements.map((r) => `${r.id} ${r.text}`).join("; ")}.` +

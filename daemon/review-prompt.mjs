@@ -40,7 +40,7 @@ export function buildReviewPrompt({
     );
     for (const r of reqs) lines.push(`- [${r.id}] ${r.text}`);
     lines.push(
-      "If you are not sure which request a change answers, leave rationale.requirement_ids empty; the author sees the open request and decides.",
+      "Put in rationale.requirement_ids the id of every request this change handles. If it handles only part of a request, still put its id. Leave it empty only when the change answers none of them.",
     );
     lines.push("");
   }

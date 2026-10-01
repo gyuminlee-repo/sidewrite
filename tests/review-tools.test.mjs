@@ -471,9 +471,11 @@ test("a failure that did not apply the edit records nothing", async () => {
   assert.deepEqual([r.ok, r.code, d.edits.length], [false, "NotFound", 0]);
 });
 
-// L5 abstain: an unlinked change is allowed and shows as an open requirement.
-test("requirement_ids says it may stay empty when the model is not sure", () => {
+// L5: an unlinked change is allowed and shows as an open requirement, but a
+// change that answers part of a request cites it (S2-30).
+test("requirement_ids: cite a request handled in part; empty only when unrelated", () => {
   const desc = trackedEditShape.rationale.shape.requirement_ids.description;
-  assert.match(desc, /not sure/);
-  assert.match(desc, /empty/);
+  assert.match(desc, /part of a request[^.]*still put its id/i);
+  assert.match(desc, /empty only when the change answers none of them/i);
+  assert.doesNotMatch(desc, /not sure/);
 });

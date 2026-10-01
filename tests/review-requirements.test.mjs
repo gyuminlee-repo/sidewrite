@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   splitSentences,
+  clauseCuts,
+  requirementParts,
   extractRequirements,
   requirementPrompt,
   REQUIREMENT_SYSTEM,
@@ -76,7 +78,9 @@ const labelled =
       ok: true,
       json: {
         sentences: Object.entries(byRef).flatMap(([ref, types]) =>
-          types.map((type, i) => ({ ref, s: i + 1, type })),
+          types.map((type, i) =>
+            typeof type === "string" ? { ref, s: i + 1, type } : { ref, s: i + 1, ...type },
+          ),
         ),
       },
     };
@@ -122,6 +126,7 @@ test("the prompt lists ref and sentence numbers and asks for types only", () => 
   assert.match(p, /\[R2\.1 s2\] Nice\./);
   assert.deepEqual(REQUIREMENT_TYPES, ["request", "other"]);
   assert.match(REQUIREMENT_SYSTEM, /Do not return any text/);
+  assert.match(REQUIREMENT_SYSTEM, /cuts and types where cut marks are shown/);
 });
 
 test("comments that already have requirements are skipped and kept", async () => {
@@ -227,6 +232,10 @@ const PIECES = [
   "\n  ",
   "A vs. B",
   "i.e. the same",
+  "Please state the unit, and describe the method.",
+  "Report n; give the spread (mean, and SD) too.",
+  "State the mean and also the median.",
+  "Name the agent and explain its role.",
 ];
 
 test("property: request texts are substrings of their comment text", async () => {
@@ -242,17 +251,114 @@ test("property: request texts are substrings of their comment text", async () =>
       comments.push(C(`R1.${k + 1}`, text));
     }
     const byRef = {};
+    const type = () => (rand() < 0.5 ? "request" : "other");
     for (const c of comments) {
-      byRef[c.ref] = splitSentences(c.text).map(() => (rand() < 0.5 ? "request" : "other"));
+      byRef[c.ref] = splitSentences(c.text).map((sentence) => {
+        const k = clauseCuts(sentence).length;
+        if (!k) return type();
+        const cuts = Array.from({ length: k }, () => (rand() < 0.5 ? "split" : "keep"));
+        return { cuts, types: [type(), ...cuts.filter((x) => x === "split").map(type)] };
+      });
     }
     const r = await extractRequirements(comments, { oneshot: labelled(byRef) });
     comments.forEach((c, i) => {
       const got = r.comments[i].requirements.map((q) => q.text);
       for (const t of got) assert.ok(squash(c.text).includes(squash(t)), `run ${run}: ${t}`);
       const want = [
-        ...new Set(splitSentences(c.text).filter((_, j) => byRef[c.ref][j] === "request")),
+        ...new Set(
+          splitSentences(c.text).flatMap((sentence, j) => {
+            const l = byRef[c.ref][j];
+            const parts = requirementParts(sentence, typeof l === "string" ? [] : l.cuts);
+            const types = typeof l === "string" ? [l] : l.types;
+            for (const part of parts) assert.ok(sentence.includes(part), `run ${run}: ${part}`);
+            return parts.filter((_, n) => types[n] === "request");
+          }),
+        ),
       ];
       assert.deepEqual(got, want, `run ${run} ${c.ref}`);
     });
   }
 });
+
+// ---- S2-30: more than one request in one sentence ---------------------------
+
+const R13 =
+  "In the first paragraph of section 3, please state how growth was followed (the Methods say optical density was read at 600 nm), and describe the synthetic carbon source as a novel substrate.";
+
+test("clause cuts: coordinators at depth 0 only; the parts are pieces of the sentence", () => {
+  assert.equal(clauseCuts(R13).length, 1);
+  assert.deepEqual(requirementParts(R13, ["split"]), [
+    "In the first paragraph of section 3, please state how growth was followed (the Methods say optical density was read at 600 nm)",
+    "describe the synthetic carbon source as a novel substrate.",
+  ]);
+  assert.deepEqual(requirementParts(R13, ["keep"]), [R13]);
+  // Kept from the 2026-10-01 acceptance run: one request, no cut point.
+  assert.deepEqual(
+    clauseCuts(
+      "In Materials and Methods, please name the antifoam agent that was used and its concentration.",
+    ),
+    [],
+  );
+  assert.deepEqual(clauseCuts("Give the spread (mean, and SD; or range) of each run."), []);
+  assert.deepEqual(requirementParts("Report n; state the unit.", ["split"]), [
+    "Report n",
+    "state the unit.",
+  ]);
+  assert.deepEqual(requirementParts("Report n and also state the unit.", ["split"]), [
+    "Report n",
+    "state the unit.",
+  ]);
+  assert.deepEqual(requirementParts("Name the agent and explain its role.", ["split"]), [
+    "Name the agent",
+    "explain its role.",
+  ]);
+  assert.deepEqual(clauseCuts("Name the agent and its supplier."), []);
+  // An astral character before a bracket does not shift the depth lookup.
+  assert.deepEqual(clauseCuts(`Use ${"\u{1D400}".repeat(20)} (n, and m) here.`), []);
+  assert.deepEqual(requirementParts("Use \u{1D400} (n), and state the unit.", ["split"]), [
+    "Use \u{1D400} (n)",
+    "state the unit.",
+  ]);
+});
+
+test("S2-30: the R1.3 sentence gives two requirements when the model splits it", async () => {
+  const calls = [];
+  const r = await extractRequirements([C("R1.3", R13)], {
+    oneshot: labelled({ "R1.3": [{ cuts: ["split"], types: ["request", "request"] }] }, calls),
+  });
+  assert.match(calls[0].prompt, /\[R1\.3 s1\] .*600 nm\)<c1>, and describe/);
+  assert.match(calls[0].prompt, /"cuts"/);
+  assert.deepEqual(r.warnings, []);
+  assert.deepEqual(r.comments[0].requirements, [
+    {
+      id: "q1",
+      text: "In the first paragraph of section 3, please state how growth was followed (the Methods say optical density was read at 600 nm)",
+    },
+    { id: "q2", text: "describe the synthetic carbon source as a novel substrate." },
+  ]);
+  assert.deepEqual(r.requests, { "R1.3": 2 });
+});
+
+test("S2-30: one request with a cut point stays one when the model keeps it", async () => {
+  const one = "Please state the mean, and the spread of the same measurement.";
+  assert.equal(clauseCuts(one).length, 1);
+  const r = await extractRequirements([C("R1.1", one)], {
+    oneshot: labelled({ "R1.1": [{ cuts: ["keep"], types: ["request"] }] }),
+  });
+  assert.deepEqual(r.comments[0].requirements, [{ id: "q1", text: one }]);
+});
+
+for (const [name, label] of Object.entries({
+  "no cuts for a sentence that has a cut point": { type: "request" },
+  "too few cuts": { cuts: [], types: ["request"] },
+  "a cut that is neither split nor keep": { cuts: ["maybe"], types: ["request"] },
+  "types that do not match the parts": { cuts: ["split"], types: ["request"] },
+})) {
+  test(`S2-30: a reply with ${name} leaves requirements empty and warns`, async () => {
+    const r = await extractRequirements([C("R1.3", R13)], {
+      oneshot: labelled({ "R1.3": [label] }),
+    });
+    assert.deepEqual(r.comments[0].requirements, []);
+    assert.deepEqual(r.warnings, [WARN]);
+  });
+}
