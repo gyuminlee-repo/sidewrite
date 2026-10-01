@@ -90,11 +90,25 @@ export async function fetchClaudeModels({
   }
 }
 
+// The best model for work whose quality matters (edits of the manuscript,
+// the response letter): the first row of the Opus family in the account's
+// list, by its name or by what it resolves to, else "sonnet". While the list
+// is unavailable its stand-in holds the alias "opus", which query() takes.
+export function bestClaudeModel(state) {
+  const opus = (state?.models ?? []).find(
+    (m) => /opus/i.test(m.value) || /opus/i.test(String(m.resolvedModel ?? "")),
+  );
+  return opus?.value ?? "sonnet";
+}
+
 // The model the daemon passes to query(): the three aliases always, anything
 // the account lists (by value or by resolved id), and, while the list is
-// unavailable, any well-formed claude-* id. Everything else is "sonnet".
+// unavailable, any well-formed claude-* id. No model asked for (a pane that
+// stored none) is the best one; a model that was asked for and cannot be
+// used is "sonnet".
 export function resolveModelChoice(requested, state) {
   const r = String(requested ?? "").trim();
+  if (!r) return bestClaudeModel(state);
   if (ALIASES.includes(r)) return r;
   const models = state?.models ?? [];
   if (models.some((m) => m.value === r || m.resolvedModel === r)) return r;

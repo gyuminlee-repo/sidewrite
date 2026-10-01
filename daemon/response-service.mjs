@@ -78,10 +78,14 @@ export const RESPONSE_JOBS = new Set([
   "response_export",
 ]);
 
-// An answer is prose, so a draft asks Claude for a stronger model than a
-// judgment does. Only a default: the provider and model chosen in the pane
-// are what is used (providers/oneshot-router.mjs pin).
-export const DRAFT_CLAUDE_MODEL = "sonnet";
+// An answer is prose: a draft and a translation are jobs of the pane's
+// writing choice (providers/oneshot-router.mjs pin, role "writing"), not of
+// the one for judgments. CC_OFFICE_RESPONSE_MODEL names the Claude model for
+// a writing choice of Claude without a model; unset, the router's default.
+export const writingJob = (env) => ({
+  role: "writing",
+  ...(env.CC_OFFICE_RESPONSE_MODEL ? { claudeModel: env.CC_OFFICE_RESPONSE_MODEL } : {}),
+});
 
 // A PDF arrives as base64 in one WebSocket frame of at most 100 MiB.
 const MAX_BASE64 = 100 * 1024 * 1024;
@@ -189,7 +193,7 @@ export function refreshed(rev, snapshot, headings, profile) {
 
 export function createResponseService({
   getContext,
-  // The one-shot of ONE JOB of a pane: async (key, { claudeModel }?) =>
+  // The one-shot of ONE JOB of a pane: async (key, { role, claudeModel }?) =>
   // { run, model } (providers/oneshot-router.mjs pin). run is null when the
   // daemon has no model to ask.
   oneshotJob = async () => ({ run: null, model: null }),
@@ -655,9 +659,7 @@ export function createResponseService({
       const d = at(key);
       const ref = msg.ref;
       // Provider and model of this job, fixed now (the pane's choice).
-      const job = await oneshotJob(key, {
-        claudeModel: env.CC_OFFICE_RESPONSE_MODEL || DRAFT_CLAUDE_MODEL,
-      });
+      const job = await oneshotJob(key, writingJob(env));
       if (!job?.run)
         throw new Error("No model is available for drafting. Pick a provider in Setup.");
       const { snapshot, headings, profile, revision: before } = await current(d, msg);
@@ -734,9 +736,7 @@ export function createResponseService({
     async response_translate(msg, key) {
       const d = at(key);
       const ref = msg.ref;
-      const job = await oneshotJob(key, {
-        claudeModel: env.CC_OFFICE_RESPONSE_MODEL || DRAFT_CLAUDE_MODEL,
-      });
+      const job = await oneshotJob(key, writingJob(env));
       if (!job?.run)
         throw new Error("No model is available for translating. Pick a provider in Setup.");
       const before = await load(d);

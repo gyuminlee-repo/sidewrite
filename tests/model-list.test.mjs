@@ -78,7 +78,7 @@ test("fetch: rejection and timeout fall back to aliases", async () => {
 // Edits and Writing default to the best model the account can use: a row of
 // the Opus family when the list has one, else sonnet.
 test("bestClaudeModel: the Opus row of the list, else sonnet; nothing asked for resolves to it", async () => {
-  const { bestClaudeModel } = await import("../daemon/model-list.mjs");
+  const { bestClaudeModel, modelChange } = await import("../daemon/model-list.mjs");
   const row = (value, resolvedModel = null) => ({ value, displayName: value, resolvedModel });
   const withOpus = {
     source: "sdk",

@@ -30,7 +30,12 @@ import { createResponseService } from "./response-service.mjs";
 import { createAuxService } from "./aux-service.mjs";
 import { markStale } from "./response-quotes.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
-import { createModelCache, modelChange, resolveModelChoice } from "./model-list.mjs";
+import {
+  bestClaudeModel,
+  createModelCache,
+  modelChange,
+  resolveModelChoice,
+} from "./model-list.mjs";
 import { createKeyStore } from "./providers/keys.mjs";
 import { probeAll, createProbeCache } from "./providers/probe.mjs";
 import { createOneshotRouter } from "./providers/oneshot-router.mjs";
@@ -325,12 +330,12 @@ const modelByKey = new Map();
 // fails, the three aliases and well-formed claude-* ids are accepted.
 const modelCache = createModelCache();
 
-// The model to pass to query(). Draftspect always pins an explicit
-// model (cost-control UI), never silently inherits the CLI default, which
-// can be Opus. Falls back to "sonnet" if the taskpane hasn't said yet.
+// The model to pass to query(). Draftspect always pins an explicit model,
+// never the CLI default: the one the pane chose, or, when it chose none (or
+// has not said yet), the best the account lists (model-list.mjs
+// bestClaudeModel).
 function modelArgFor(key) {
-  const m = modelByKey.get(key);
-  return m ? resolveModelChoice(m, modelCache.current()) : "sonnet";
+  return resolveModelChoice(modelByKey.get(key), modelCache.current());
 }
 
 function sessionFor(key) {
@@ -566,7 +571,11 @@ const oneshotRouter = createOneshotRouter({
   keys: providerKeys,
   // Waits for the pane's confirmed choice and throws when there is none:
   // the router then answers with that error and sends nothing anywhere.
-  getChoice: (key) => selection.ready(key, "oneshot"),
+  getChoice: (key, role) => selection.ready(key, role),
+  // A choice of Claude that names no model: writing gets the best model of
+  // the account, a judgment the cheap one.
+  claudeDefault: (role) =>
+    role === "writing" ? bestClaudeModel(modelCache.current()) : ONESHOT_MODEL,
   log: console.log,
 });
 
@@ -803,11 +812,11 @@ const bridge = createBridge({
         c && typeof c === "object" && c.id ? { id: c.id, model: c.model } : null;
       const state = await selection.restore(
         key,
-        { turn: pick(msg.turn), oneshot: pick(msg.oneshot) },
+        { turn: pick(msg.turn), writing: pick(msg.writing), oneshot: pick(msg.oneshot) },
         () => probeCache.get(),
       );
       console.log(
-        `[providers] restore turn=${state.state.turn} oneshot=${state.state.oneshot}` +
+        `[providers] restore turn=${state.state.turn} writing=${state.state.writing} oneshot=${state.state.oneshot}` +
           ` provider=${state.oneshot?.id ?? (state.state.oneshot === "ready" ? "claude" : "-")}`,
       );
       reply({

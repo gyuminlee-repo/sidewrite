@@ -1,5 +1,8 @@
 // Which provider a pane uses for each role (P14):
 //   turn     review turns. Default Claude; its model is the composer's.
+//   writing  prose the author reads or sends: response drafts, translations,
+//            questions about a selection. Default null: Claude with the best
+//            model of the account (oneshot-router.mjs claudeDefault).
 //   oneshot  judgments (split, requirements, ledger checks and suggestions).
 //            Default null: Claude with its judgment model (oneshot-router.mjs).
 //
@@ -22,9 +25,9 @@
 // (probe.mjs): available for a judgment, turn_ready for a review turn. A
 // refusal carries the row's own reason, which the task pane shows.
 
-const ROLES = ["turn", "oneshot"];
-const WORDS = { turn: "review turns", oneshot: "judgments" };
-const DEFAULT = { turn: { id: "claude", model: null }, oneshot: null };
+const ROLES = ["turn", "writing", "oneshot"];
+const WORDS = { turn: "review turns", writing: "writing", oneshot: "judgments" };
+const DEFAULT = { turn: { id: "claude", model: null }, writing: null, oneshot: null };
 const MODEL_NAME = /^[\w.:/@[\]-]{1,120}$/;
 // Longer than the probe's own deadline (probe.mjs DEADLINE_MS, 35 s).
 const WAIT_MS = 45_000;
@@ -79,17 +82,17 @@ function checked(role, { id, model = null } = {}, rows) {
     throw new Error(`${row.label} does not list the model ${name}`);
   }
   if (name && !MODEL_NAME.test(name)) throw new Error(`${name} is not a model name`);
-  if (!name && role === "oneshot" && needsModel(row)) {
+  if (!name && role !== "turn" && needsModel(row)) {
     throw new Error(`Choose a model for ${row.label}`);
   }
   return { id, model: name };
 }
 
 export function createProviderSelection({ waitMs = WAIT_MS } = {}) {
-  const byKey = new Map(); // pane key -> { turn: slot, oneshot: slot }
+  const byKey = new Map(); // pane key -> { turn: slot, writing: slot, oneshot: slot }
   const fresh = () => ({ state: "restoring", choice: null, error: null, gen: 0, waiters: [] });
   function slots(key) {
-    if (!byKey.has(key)) byKey.set(key, { turn: fresh(), oneshot: fresh() });
+    if (!byKey.has(key)) byKey.set(key, Object.fromEntries(ROLES.map((r) => [r, fresh()])));
     return byKey.get(key);
   }
   function settle(slot, state, choice, error = null) {
@@ -125,7 +128,7 @@ export function createProviderSelection({ waitMs = WAIT_MS } = {}) {
         Object.assign(s, { state: "restoring", choice: null, error: null });
       }
     },
-    // The pane's stored choices, sent right after hello: { turn, oneshot },
+    // The pane's stored choices, sent right after hello: { turn, writing, oneshot },
     // each { id, model } or null (nothing stored: the default applies at
     // once). A stored one is checked against the probe rows (getRows may be
     // slow); a choice made by hand meanwhile wins. Returns get(key).

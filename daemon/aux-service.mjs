@@ -65,7 +65,7 @@ import { runMarkedDiff } from "./marked-diff.mjs";
 import { runAnonymize } from "./anonymize.mjs";
 import { findFormatIssues } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
-import { usableHeadings } from "./response-service.mjs";
+import { usableHeadings, writingJob } from "./response-service.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
 
 export const AUX_JOBS = new Set([
@@ -80,10 +80,6 @@ export const MARKED_MODES = ["track_changes", "color"];
 
 // A file arrives as base64 in one WebSocket frame of at most 100 MiB.
 const MAX_BASE64 = 100 * 1024 * 1024;
-
-// A translation or an answer is prose: the model of a response draft
-// (response-service.mjs DRAFT_CLAUDE_MODEL), unless the pane chose another.
-const PROSE_CLAUDE_MODEL = "sonnet";
 
 // The longest selection that is sent to a model, in characters.
 export const MAX_SELECTION = 20000;
@@ -125,7 +121,7 @@ function selectedText(msg) {
 
 export function createAuxService({
   getContext,
-  // The one-shot of ONE JOB of a pane: async (key, { claudeModel }?) =>
+  // The one-shot of ONE JOB of a pane: async (key, { role, claudeModel }?) =>
   // { run, model } (providers/oneshot-router.mjs pin).
   oneshotFor = async () => ({ run: null, model: null }),
   // Default language of the settings file: () => string | null.
@@ -168,7 +164,9 @@ export function createAuxService({
     if (!job?.run) throw new Error(`No model is available for ${what}. Pick a provider in Setup.`);
     return job;
   }
-  const proseModel = { claudeModel: env.CC_OFFICE_RESPONSE_MODEL || PROSE_CLAUDE_MODEL };
+  // A translation or an answer is prose: a job of the pane's writing choice,
+  // as a response draft is.
+  const proseModel = writingJob(env);
   async function prose(job, request, what) {
     const r = await job.run(request);
     const text = r.ok ? String(r.text ?? "").trim() : "";
