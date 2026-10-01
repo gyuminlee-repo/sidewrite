@@ -816,3 +816,43 @@ test("trackedRuns keeps the run elements that are text without being w:t, as Wor
     { kind: "del", text: "gone", start: 14, marks: 1 },
   ]);
 });
+
+test("doneBlockers: what is still open when a comment is marked Done", () => {
+  const c = (changes, requirements = []) => ({ ref: "R1.1", requirements, changes });
+  const change = (state, ids = []) => ({ state, rationale: { requirement_ids: ids } });
+  // Everything decided and answered, no ledger violation: nothing to ask.
+  assert.deepEqual(
+    view.doneBlockers(c([change("accepted", ["q1"])], [{ id: "q1", text: "a" }]), [
+      { id: "L1", status: "clean", violation_count: 0 },
+      { id: "L2", status: "skipped", violation_count: 0 },
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    view.doneBlockers(c([change("rejected"), change("user_edited")]), undefined),
+    [],
+  );
+  // The wording of the open-requirement case is the one the tab always had.
+  assert.deepEqual(view.doneBlockers(c([], [{ id: "q1", text: "state the unit" }]), []), [
+    'q1 "state the unit" has no change',
+  ]);
+  // Changes not decided in Word, and confirmed ledger rules with violations.
+  assert.deepEqual(
+    view.doneBlockers(
+      c([change("pending"), change("pending"), change("unlocated")], [{ id: "q1", text: "a" }]),
+      [
+        { id: "L1", status: "violations", violation_count: 2 },
+        { id: "L2", status: "clean", violation_count: 0 },
+        { id: "L3", status: "violations", violation_count: 1 },
+      ],
+    ),
+    [
+      'q1 "a" has no change',
+      "3 changes are not decided in Word (2 pending, 1 not found)",
+      "the ledger check has violations (L1: 2, L3: 1)",
+    ],
+  );
+  assert.deepEqual(view.doneBlockers(c([change("unlocated")]), []), [
+    "1 change is not decided in Word (1 not found)",
+  ]);
+});

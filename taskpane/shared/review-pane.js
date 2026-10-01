@@ -18,6 +18,7 @@ import {
   changeFlags,
   requirementsFromText,
   unaddressedRequirements,
+  doneBlockers,
   ledgerDraftFromChange,
   ledgerFormFromItem,
   ledgerCheckFromText,
@@ -65,7 +66,7 @@ export function initReviewPane({
     draft: [],
     backupShown: null,
     editingLedger: null, // L6: id of the ledger item loaded into the form
-    confirmDone: null, // L5: ref whose "Done" was asked once with open requirements
+    confirmDone: null, // L5: ref whose "Done" was asked once with something left open
     reqDrafts: new Map(), // ref -> requirement text typed and not saved yet (Codex review 9)
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
@@ -359,11 +360,14 @@ export function initReviewPane({
       status.addEventListener(
         "change",
         guard(async () => {
-          // L5: "Done" with requirements no change answers needs a second try.
-          if (status.value === "done" && open.length && state.confirmDone !== c.ref) {
+          // L5: "Done" needs a second try while something is left open:
+          // a requirement no change answers, a change not decided in Word,
+          // or a ledger rule in violation.
+          const left = doneBlockers(c, state.revision?.ledger);
+          if (status.value === "done" && left.length && state.confirmDone !== c.ref) {
             state.confirmDone = c.ref;
             throw new Error(
-              `${c.ref}: ${open.map((r) => `${r.id} "${r.text}"`).join(", ")} has no change. Choose Done again to mark it done anyway.`,
+              `${c.ref}: ${left.join("; ")}. Choose Done again to mark it done anyway.`,
             );
           }
           state.confirmDone = null;

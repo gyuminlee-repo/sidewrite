@@ -1712,3 +1712,76 @@ test("a Review action clicked while the stored provider is being confirmed waits
   await t.$("review-split").click();
   assert.equal(t.requests.filter((r) => r.type === "review_split").length, 2);
 });
+
+// ---- Done asks once more while something is left open ---------------------------
+const doneComment = (changes, requirements = []) => ({
+  ref: "R1.1",
+  reviewer: 1,
+  text: "State the unit.",
+  status: "in_progress",
+  requirements,
+  changes,
+  blocked: [],
+});
+const doneChange = (id, state) => ({
+  id,
+  state,
+  kind: "replace",
+  before: "b",
+  after: "a",
+  rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+});
+async function chooseDone(t) {
+  const select = findAll(t.$("review-comments"), (n) => n.tagName === "SELECT")[0];
+  select.value = "done";
+  for (const fn of select.listeners.change) await fn();
+}
+const statusSent = (t) => t.requests.filter((r) => r.type === "review_set_status");
+
+test("Done with changes not decided in Word asks once more, then marks it done", async () => {
+  const revision = {
+    comments: [doneComment([doneChange("R1.1-1", "pending"), doneChange("R1.1-2", "unlocated")])],
+    ledger: [],
+  };
+  const t = await setup({ revision });
+  await chooseDone(t);
+  assert.equal(statusSent(t).length, 0);
+  assert.equal(
+    t.$("review-message").textContent,
+    "R1.1: 2 changes are not decided in Word (1 pending, 1 not found). Choose Done again to mark it done anyway.",
+  );
+  await chooseDone(t);
+  assert.deepEqual(statusSent(t)[0].payload, { ref: "R1.1", status: "done" });
+});
+
+test("Done with a confirmed ledger rule in violation asks once more; with nothing open it is sent at once", async () => {
+  const comments = [doneComment([doneChange("R1.1-1", "accepted")])];
+  const dirty = await setup({
+    revision: {
+      comments,
+      ledger: [
+        {
+          id: "L1",
+          kind: "forbid",
+          text: "no novel",
+          scope: "manuscript",
+          check: { type: "regex", pattern: "novel", flags: "i" },
+          status: "violations",
+          violation_count: 2,
+        },
+      ],
+    },
+  });
+  await chooseDone(dirty);
+  assert.equal(statusSent(dirty).length, 0);
+  assert.equal(
+    dirty.$("review-message").textContent,
+    "R1.1: the ledger check has violations (L1: 2). Choose Done again to mark it done anyway.",
+  );
+  await chooseDone(dirty);
+  assert.equal(statusSent(dirty).length, 1);
+
+  const clean = await setup({ revision: { comments, ledger: [] } });
+  await chooseDone(clean);
+  assert.equal(statusSent(clean).length, 1);
+});
