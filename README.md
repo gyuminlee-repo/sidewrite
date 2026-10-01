@@ -28,7 +28,15 @@ Short version: if you want zero-setup and don't need machine-local context, the 
 
 ## Choosing the model
 
-A dropdown in the composer picks the model per request — **Haiku** (cheapest), **Sonnet** (balanced, the default), or **Opus** (most capable). The choice is sticky. Because programmatic usage now draws from a fixed monthly credit, this is the main cost lever: Opus costs roughly 5× Sonnet, and Sonnet roughly 3–5× Haiku, so default to Sonnet and reach for Opus only when a task genuinely needs it. The connection indicator in the top bar shows the model the agent is **actually** running (reported by the SDK, not the agent's own unreliable self-description), so you can always see what you're paying for.
+In Word, the Providers section of the Setup tab has one row for each kind of work, each with a provider and a model:
+
+- **Edits**: changes to the manuscript (Propose changes) and the chat. Claude only. Its model is the one of the dropdown in the composer: the two show and change the same value.
+- **Writing**: response drafts, and translations and questions about a selection.
+- **Judgments**: splitting a review, extracting requests, checking the ledger and forbidden expressions, reading journal guidelines.
+
+Until you choose, Edits and Writing use the best Claude model your account lists (an Opus model; Sonnet when it lists none) and Judgments use Haiku. A choice you made earlier is kept. A better model uses more of your subscription's limit: Opus costs roughly 5× Sonnet, and Sonnet roughly 3 to 5× Haiku.
+
+A line under the tabs says what each kind of work last ran on, for example `Edits: Claude · Opus 5.5   Writing: Claude · Opus 5.5   Judgments: Claude · Haiku 4.5`. It shows the model the provider reported for the request (for Claude, the one the SDK names when the run starts), not the menu choice; when another model ran than the one asked for, it says `asked for ..., ran on ...`. A click on it opens Setup. Result lines name it too (`Drafted R1.2 with Claude · Opus 5.5.`). The connection indicator in the top bar shows the model of the running chat session in the same way. The Excel pane has the composer dropdown only.
 
 ## What it looks like
 
