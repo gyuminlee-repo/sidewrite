@@ -75,9 +75,11 @@ const FOOTER =
   /^\s*(?:In compliance with data protection regulations|This (?:e-?mail|message) (?:and any|is intended|was sent|has been sent)|To ensure this e-?mail|#AU_)/i;
 
 // The line before ends inside a sentence that goes on with a number
-// ("... in Table" / "2. The legend"), so the number starts no comment.
+// ("... in Table" / "2. The legend"), so the number starts no comment. A
+// period after a whole word ends the sentence ("... in the table."); after
+// an abbreviation it does not ("... of Fig.").
 const WRAP_END =
-  /(?:\b(?:Figs?|Figures?|Tables?|Eqs?|Equations?|Refs?|Sections?|Secs?|Supplementary|lines?|pages?|steps?|and|or|of|in|to|at|from|by|than|about|approximately|approx|for|with|the)\.?|[A-Za-z]-)\s*$/i;
+  /(?:\b(?:(?:Figs?|Eqs?|Refs?|Secs?|approx)\.?|Figures?|Tables?|Equations?|Sections?|Supplementary|lines?|pages?|steps?|and|or|of|in|to|at|from|by|than|about|approximately|for|with|the)|[A-Za-z]-)\s*$/i;
 
 // What may follow a combined head ("Reviewer 1, Comment 2") on its line: the
 // end, a mark, or a new sentence. "Reviewer 1, Comment 2 was answered" is prose.
