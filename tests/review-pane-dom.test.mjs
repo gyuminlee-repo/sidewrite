@@ -731,3 +731,88 @@ test("a job still waiting when the daemon connection restarts ends with an error
   await split;
   assert.match(t.$("review-message").textContent, /connection/i);
 });
+
+// Codex review 9: a render (an event, another button) rebuilds the comment
+// cards; what the author typed and did not save must come back.
+function typeInto(node, value) {
+  node.value = value;
+  for (const fn of node.listeners.input ?? []) fn();
+}
+async function settle() {
+  for (let i = 0; i < 20; i++) await null;
+}
+
+test("unsaved requirement text survives a re-render and is cleared only by a save", async () => {
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        requirements: [{ id: "q1", text: "State the unit" }],
+        status: "in_progress",
+        changes: [],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  let failSave = true;
+  const t = await setup({
+    revision,
+    respond: {
+      review_set_requirements: () =>
+        failSave ? { ok: false, error: "disk full" } : { ok: true, revision },
+    },
+  });
+  const reqs = () => findAll(t.$("review-comments"), (n) => n.attributes.class === "review-reqs");
+  const save = () =>
+    findAll(t.$("review-comments"), (n) => n.textContent === "Save requirements")[0];
+
+  typeInto(reqs()[0], "State the unit\nGive the n");
+  t.pane.onEvent({ type: "review_event", event: "change_recorded", ref: "R1.1" });
+  await settle();
+  assert.equal(reqs()[0].value, "State the unit\nGive the n", "draft kept after an event");
+
+  await save().click(); // fails: the draft stays
+  assert.equal(reqs()[0].value, "State the unit\nGive the n", "draft kept after a failed save");
+
+  failSave = false;
+  await save().click();
+  assert.deepEqual(
+    t.requests.filter((r) => r.type === "review_set_requirements").at(-1).payload.requirements,
+    ["State the unit", "Give the n"],
+  );
+  assert.equal(reqs()[0].value, "State the unit", "saved: the stored list shows again");
+});
+
+test("split draft rows, the paste box and the ledger form survive a re-render", async () => {
+  const t = await setup({
+    revision: { comments: [], ledger: [] },
+    respond: {
+      review_split: () => {
+        queueMicrotask(() =>
+          t.pane.onEvent({
+            type: "review_event",
+            event: "job_done",
+            job_id: "j1",
+            result: SPLIT_RESULT,
+          }),
+        );
+        return { ok: true, accepted: true, job_id: "j1" };
+      },
+    },
+  });
+  t.$("review-input").value = "Reviewer 1: pasted review";
+  await t.$("review-split").click();
+  const row = () => findAll(t.$("review-draft"), (n) => n.attributes.class === "review-reqs")[0];
+  typeInto(row(), "State the unit in degrees C");
+  t.$("ledger-text").value = "Never write data shows";
+  t.$("ledger-pattern").value = "data shows";
+  t.pane.onEvent({ type: "review_event", event: "change_recorded", ref: "R1.1" });
+  await settle();
+  assert.equal(row().value, "State the unit in degrees C");
+  assert.equal(t.$("review-input").value, "Reviewer 1: pasted review");
+  assert.equal(t.$("ledger-text").value, "Never write data shows");
+  assert.equal(t.$("ledger-pattern").value, "data shows");
+});
