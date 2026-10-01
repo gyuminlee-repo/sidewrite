@@ -284,6 +284,25 @@
       "texts": {
         "R1.2": "State n."
       }
+    },
+    {
+      "name": "no cover letter and no label: the first question and its answers are one editor comment",
+      "kind": "positive",
+      "text": "1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n**********\n\n2. Review Comments to the Author\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "1. Is the work technically sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes",
+        "E.2": "2. Review Comments to the Author"
+      }
+    },
+    {
+      "name": "cover letter and first question with no label between them are one editor comment with the answers",
+      "kind": "positive",
+      "text": "Dear Author,\nPlease revise.\n\n1. Is the work technically sound?\nReviewer #1: Partly\nReviewer #2: Yes\n\n**********\n\n2. Review Comments to the Author\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2", "R2.1"],
+      "texts": {
+        "E.1": "Dear Author,\nPlease revise.\n\n1. Is the work technically sound?\nReviewer #1: Partly\nReviewer #2: Yes"
+      }
     }
   ]
 }

@@ -258,6 +258,35 @@
       "texts": {
         "E.1": "Dear Author,\nMajor comments:\nPlease shorten the abstract.\nMinor comments:\nPlease fix the typos."
       }
+    },
+    {
+      "name": "editor head with a colon right under the letter signature",
+      "kind": "positive",
+      "text": "Dear Author,\nPlease revise.\nKind regards,\nThe Editorial Office\nEditor's comments:\nShorten the abstract.\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "E.2", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Dear Author,\nPlease revise.\nKind regards,\nThe Editorial Office",
+        "E.2": "Shorten the abstract."
+      }
+    },
+    {
+      "name": "reviewer head with a colon right under a signature",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\nSincerely,\nThe office\nReviewer 2:\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "E.1", "R2.1"],
+      "texts": {
+        "E.1": "Sincerely,\nThe office",
+        "R2.1": "Add error bars."
+      }
+    },
+    {
+      "name": "a bare editor title under the signature, with more lines, stays in the letter",
+      "kind": "trap",
+      "text": "Dear Author,\nPlease revise.\nKind regards,\nAssociate Editor\nJournal of Examples\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Dear Author,\nPlease revise.\nKind regards,\nAssociate Editor\nJournal of Examples"
+      }
     }
   ]
 }
