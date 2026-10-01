@@ -504,6 +504,186 @@ test("service: an exception Word applied whose record cannot be saved does not g
   }
 });
 
+// Codex review of the recovery path (P2): Word may apply less than the call
+// asked for. "grew carefully on the substrate" -> "grew on the substrate" goes
+// in as the tracked deletion of "carefully " (narrow). When the save of that
+// change failed, only the attempt written before the call was left, and it
+// holds the full replace: a refresh read the paragraph (old words still there,
+// one of them tracked as deleted) as "the replace was rejected", and the
+// deletion in the document had no change on record.
+const B2 = "Cells grew carefully on the substrate at 30 C.";
+const A2 = "Cells grew on the substrate at 30 C.";
+const EDIT2 = {
+  comment_ref: "R1.1",
+  find: "grew carefully on the substrate",
+  replace: "grew on the substrate",
+  rationale: R,
+};
+const NARROWED = {
+  ok: true,
+  word_comment_id: 12,
+  paragraph_index: 1,
+  paragraph_id: "p1",
+  before: B2,
+  after: A2,
+  narrowed: true,
+  target_checked: true,
+};
+// The paragraph with "carefully " tracked as deleted: Word's text still has it.
+const pendingDeletion = (comments = []) => ({
+  paragraphs: [
+    { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0, tracked: [] },
+    {
+      index: 1,
+      id: "p1",
+      text: B2,
+      w_ins: 0,
+      w_del: 1,
+      tracked: [{ kind: "del", text: "carefully ", start: 11, marks: 1 }],
+    },
+  ],
+  comments,
+});
+const untouched = () => ({
+  paragraphs: [
+    { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0, tracked: [] },
+    { index: 1, id: "p1", text: B2, w_ins: 0, w_del: 0, tracked: [] },
+  ],
+  comments: [],
+});
+// Word narrows the edit, and the save of its change fails.
+async function narrowedUnsaved() {
+  const w = await world(async () => NARROWED);
+  await w.ask("review_refresh", { snapshot: untouched() });
+  saves.length = 0;
+  failSave = (n) => n === 2; // 1: the attempt, 2: the change
+  const r = await w.edit(EDIT2);
+  assert.deepEqual(
+    [r.ok, r.applied, r.code, r.kind],
+    [false, true, "AppliedNotRecorded", "delete"],
+  );
+  assert.deepEqual(w.calls[0][1].narrow, { find: "carefully ", replace: "" });
+  failSave = () => false;
+  return w;
+}
+const narrowedForm = (ch) => [
+  ch.kind,
+  ch.find,
+  ch.text,
+  ch.narrowed_from,
+  ch.context,
+  ch.word_comment_id,
+  ch.paragraph_id,
+];
+const DELETION = [
+  "delete",
+  "carefully ",
+  "",
+  { find: EDIT2.find, text: EDIT2.replace },
+  { left: "Cells grew ", right: "on the substrate" },
+  "12",
+  "p1",
+];
+
+test("service: a narrowed edit whose record failed is recorded by the same daemon as Word applied it", async () => {
+  const w = await narrowedUnsaved();
+  try {
+    // The disk is still full: the load fails, the applied result is kept.
+    failSave = () => true;
+    assert.equal((await w.ask("review_load")).ok, false);
+    assert.equal((await w.file()).changes.length, 0);
+    failSave = () => false;
+    // The next load records what Word answered, not what the call asked for.
+    const c = (await w.ask("review_load")).revision.comments[0];
+    assert.deepEqual([c.changes.length, c.blocked.length], [1, 0], JSON.stringify(c));
+    assert.deepEqual(narrowedForm(c.changes[0]), DELETION);
+    assert.deepEqual([c.changes[0].before, c.changes[0].after], [B2, A2]);
+    assert.ok(
+      w.lines.some((l) => /change recorded R1\.1-1 .*kept in memory/.test(l)),
+      w.lines.join("\n"),
+    );
+    // Once: a second load adds nothing, and the refresh reads it pending.
+    assert.equal((await w.ask("review_load")).revision.comments[0].changes.length, 1);
+    const done = await w.ask("review_refresh", {
+      snapshot: pendingDeletion([{ id: "12", paragraph_index: 1, content: COMMENT }]),
+    });
+    assert.deepEqual(
+      done.rows.map((x) => [x.change_id, x.state]),
+      [["R1.1-1", "pending"]],
+    );
+    assert.equal(done.revision.comments[0].changes.length, 1);
+    assert.deepEqual(done.external, []);
+  } finally {
+    await w.cleanup();
+  }
+});
+
+test("service: after a restart a narrowed edit in the document is not read as a rejected replace", async () => {
+  // With its rationale comment in the document: recorded in the form Word applied.
+  let w = await narrowedUnsaved();
+  try {
+    const file = await w.file();
+    const d2 = service(w.dir);
+    assert.deepEqual(
+      (await d2.ask("review_load")).revision.comments[0].blocked.map((b) => b.state),
+      ["outcome_unknown"],
+    );
+    const done = await d2.ask("review_refresh", {
+      snapshot: pendingDeletion([{ id: "12", paragraph_index: 1, content: COMMENT }]),
+    });
+    const c = done.revision.comments[0];
+    assert.deepEqual([c.changes.length, c.blocked.length], [1, 0], JSON.stringify(c));
+    const attempt = file.blocked[0].attempt.change;
+    assert.deepEqual(
+      [attempt.kind, attempt.find, attempt.narrow],
+      ["replace", EDIT2.find, { find: "carefully ", replace: "" }],
+      "the attempt on file names the narrower form Word may apply",
+    );
+    assert.deepEqual(narrowedForm(c.changes[0]), DELETION);
+    assert.equal("narrow" in c.changes[0], false);
+    assert.deepEqual(
+      done.rows.map((x) => [x.change_id, x.state]),
+      [["R1.1-1", "pending"]],
+    );
+  } finally {
+    await w.cleanup();
+  }
+
+  // Without the comment a tracked deletion of its words proves nothing (the
+  // author may have deleted them): not recorded, and not dropped as "not
+  // applied" either. It stays in the list as unanswered.
+  w = await narrowedUnsaved();
+  try {
+    const d2 = service(w.dir);
+    await d2.ask("review_load");
+    const c = (await d2.ask("review_refresh", { snapshot: pendingDeletion() })).revision
+      .comments[0];
+    assert.deepEqual(
+      [c.changes.length, c.blocked.map((b) => [b.id, b.state])],
+      [0, [["R1.1-b1", "outcome_unknown"]]],
+    );
+    assert.equal(
+      d2.lines.some((l) => /not applied/.test(l)),
+      false,
+      d2.lines.join("\n"),
+    );
+  } finally {
+    await w.cleanup();
+  }
+
+  // The paragraph as it was, nothing tracked, no comment: neither form is in
+  // the document, and the attempt goes.
+  w = await narrowedUnsaved();
+  try {
+    const d2 = service(w.dir);
+    await d2.ask("review_load");
+    const c = (await d2.ask("review_refresh", { snapshot: untouched() })).revision.comments[0];
+    assert.deepEqual([c.changes.length, c.blocked.length], [0, 0]);
+  } finally {
+    await w.cleanup();
+  }
+});
+
 async function until(fn, what, ms = 3000) {
   const end = Date.now() + ms;
   for (;;) {
