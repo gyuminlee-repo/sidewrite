@@ -593,3 +593,43 @@ test("unlocated insertion: a gone comment means rejected only when every match i
   const cleaned = { ...noId, comment_cleaned_at: "2026-09-30T00:00:00.000Z" };
   assert.equal(classifyChange(cleaned, twice("Cells grow.", "Cells grow.")).state, "unlocated");
 });
+
+// Acceptance run: a replace whose new text contains the old word was accepted
+// and one inserted word edited by hand; the old word alone used to match.
+test("replace containing its find: accepted then edited reads user_edited, not rejected", () => {
+  const before =
+    "Growth on the synthetic carbon source began after a lag of roughly one day and reached a plateau after four days. The final optical density was lower than on the reference substrate, which is consistent with a slower uptake step.";
+  const ch = {
+    id: "R1.3-1",
+    kind: "replace",
+    paragraph_index: 18,
+    paragraph_id: "P18",
+    word_comment_id: "5",
+    find: "source",
+    text: "source, followed as optical density at 600 nm,",
+    before,
+    after: before.replace("source", "source, followed as optical density at 600 nm,"),
+    context: classify.changeContext(before, "source", { kind: "replace" }),
+  };
+  const snap = (text, w_ins = 0, w_del = 0) => ({
+    paragraphs: [{ index: 18, id: "P18", text, w_ins, w_del }],
+    comments: [{ id: "5" }],
+  });
+  assert.equal(
+    classifyChange(ch, snap(ch.after.replace("followed", "tracked"))).state,
+    "user_edited",
+  );
+  assert.equal(classifyChange(ch, snap(ch.after)).state, "accepted");
+  assert.equal(classifyChange(ch, snap(ch.before)).state, "rejected");
+  assert.equal(
+    classifyChange(
+      ch,
+      snap(
+        ch.before.replace("source", "source, followed as optical density at 600 nm,source"),
+        1,
+        1,
+      ),
+    ).state,
+    "pending",
+  );
+});

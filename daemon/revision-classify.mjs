@@ -158,6 +158,11 @@ function classifyByContext(change, t, revisions) {
     const L = tailWords(left, k);
     const R = headWords(right, k);
     if (change.kind === "replace") {
+      // With no context words left, a form that contains the other ("source"
+      // inside "source, followed by ...") is found inside an edited version
+      // of the other and says nothing: an accepted then edited change read
+      // as rejected.
+      if (k === 0 && (I.includes(D) || D.includes(I))) continue;
       if (has(L + I + D + R)) return "pending";
       const a = has(L + I + R);
       const b = has(L + D + R);
