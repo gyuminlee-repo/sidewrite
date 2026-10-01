@@ -1717,6 +1717,91 @@ export async function toolTrackedEdit({
   });
 }
 
+// Review tab, "Add rationale comment": the comment of a change that was
+// applied without one (the comment step of toolTrackedEdit failed twice).
+// kind, find, text, paragraph_id, paragraph_index: the change as the daemon
+// recorded it; comment_text: the text its comment would have had.
+// The anchor, as in toolTrackedEdit: for a replace or a deletion the old
+// words (find), which are still in the paragraph while the change is
+// pending and are the place a comment survives accept and reject; when they
+// are gone (the change was accepted), the new words (text) of a replace. A
+// pure insertion: its own words. The anchor must be the only such place in
+// the paragraph; otherwise no comment is added (CommentAnchorMissing). A
+// comment with this text that is already on the paragraph is returned as it
+// is (existed: true), so a second press adds no second comment. Nothing of
+// the document text is changed.
+export async function addChangeComment({
+  kind,
+  find,
+  text,
+  paragraph_id,
+  paragraph_index,
+  comment_text,
+}) {
+  if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
+  return await Word.run(async (context) => {
+    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const k =
+      idMode === "uniqueLocalId" && paragraph_id
+        ? findIndexById(paragraphs, paragraph_id, idMode)
+        : Number.isInteger(paragraph_index) && paragraph_index < paragraphs.items.length
+          ? paragraph_index
+          : -1;
+    if (k === -1) {
+      return {
+        ok: false,
+        code: "ParagraphNotFound",
+        message: "The paragraph of the change was not found",
+      };
+    }
+    const para = paragraphs.items[k];
+    const there = await existingComment(context, para, comment_text);
+    if (there) return { ...there, existed: true };
+
+    const hitsOf = async (q) => {
+      if (typeof q !== "string" || !q.trim() || q.length > 255) return [];
+      const found = para.search(q, { matchCase: true });
+      found.load("items");
+      await context.sync();
+      return found.items;
+    };
+    const news = kind === "delete" ? [] : await hitsOf(text);
+    let olds = kind === "insert" ? [] : await hitsOf(find);
+    // The old words inside the new ones ("degrees" in "degrees Celsius")
+    // are not the old words.
+    if (olds.length && news.length === 1) {
+      const where = olds.map((r) => r.compareLocationWith(news[0]));
+      await context.sync();
+      olds = olds.filter(
+        (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
+      );
+    }
+    const anchor =
+      olds.length === 1 ? olds[0] : olds.length === 0 && news.length === 1 ? news[0] : null;
+    if (!anchor) {
+      return {
+        ok: false,
+        code: "CommentAnchorMissing",
+        message:
+          "The words of the change are not in its paragraph exactly once; no place for the comment",
+      };
+    }
+    const insert = async () => {
+      const c = anchor.insertComment(comment_text);
+      c.load("id");
+      await context.sync();
+      return { ok: true, word_comment_id: c.id, existed: false };
+    };
+    try {
+      return await insert();
+    } catch {
+      // Once more, as in afterEditApplied: the comment may be there after all.
+      const now = await existingComment(context, para, comment_text);
+      return now ? { ...now, existed: true } : await insert();
+    }
+  });
+}
+
 // The comment with this text on the paragraph, as { ok, word_comment_id },
 // or null.
 async function existingComment(context, para, comment_text) {

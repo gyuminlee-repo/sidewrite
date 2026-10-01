@@ -225,6 +225,31 @@ export function initReviewPane({
     for (const f of changeFlags(ch)) {
       wrap.append(el("span", { class: `review-flag review-flag-${f.kind}`, text: f.text }));
     }
+    // Applied without its rationale comment: the comment can be added now.
+    if (ch.comment_missing && ch.word_comment_id == null) {
+      const add = el("button", {
+        type: "button",
+        class: "btn-secondary btn-small",
+        text: "Add rationale comment",
+      });
+      add.addEventListener(
+        "click",
+        guard(async () => {
+          const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
+          const t = await ask("review_comment_text", { ref, change_id: ch.id });
+          const r = await word.addChangeComment({ ...t.change, comment_text: t.comment_text });
+          if (!r.ok)
+            throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
+          await ask("review_comment_set", {
+            ref,
+            change_id: ch.id,
+            word_comment_id: r.word_comment_id,
+          });
+          say(`${ch.id}: rationale comment added.`);
+        }),
+      );
+      wrap.append(add);
+    }
     if (ch.state === "rejected") {
       const draft = el("button", {
         type: "button",
@@ -1080,7 +1105,7 @@ export function initReviewPane({
                 !inv.unrecorded_comment_ids.length
               ) {
                 return unchecked(
-                  `${inv.uncommented.join(", ")} was applied in Word and its rationale comment could not be added; look at that change in Word, then press Refresh status.`,
+                  `${inv.uncommented.join(", ")} was applied in Word and its rationale comment could not be added; press Add rationale comment on that change, then Refresh status.`,
                 );
               }
               return unchecked(

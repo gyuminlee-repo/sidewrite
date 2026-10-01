@@ -518,6 +518,26 @@ export function addChange(rev, ref, change, now = new Date()) {
   return { revision: next, change: row };
 }
 
+// A change that was applied without its rationale comment (comment_missing)
+// got the comment later (review-service.mjs review_comment_set): its id is
+// recorded, once, and never an id another change holds.
+export function setChangeComment(rev, ref, changeId, wordCommentId) {
+  const next = clone(rev);
+  const ch = requireComment(next, ref).changes.find((x) => x.id === changeId);
+  if (!ch) throw new Error(`No change ${changeId} under ${ref}`);
+  if (ch.word_comment_id != null) {
+    throw new Error(`${changeId} already has its rationale comment`);
+  }
+  const id = wordCommentId == null ? "" : String(wordCommentId);
+  if (!id) throw new Error("a Word comment id is required");
+  if (next.comments.some((c) => c.changes.some((x) => x.word_comment_id === id))) {
+    throw new Error(`Word comment ${id} belongs to another change`);
+  }
+  ch.word_comment_id = id;
+  ch.comment_missing = null;
+  return next;
+}
+
 // ids: Word comment ids the task pane's cleanup deleted. Marks the changes
 // whose rationale comment is one of them; returns null when none is.
 export function markCommentsCleaned(rev, ids, now = new Date()) {

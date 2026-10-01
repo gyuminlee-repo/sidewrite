@@ -6,6 +6,7 @@
 //   review_load, review_split, review_save_comments, review_set_status,
 //   review_set_requirements, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
+//   review_comment_text, review_comment_set,
 //   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
 //   ledger_import, ledger_suggest, comments_backup
 // Push (daemon -> task pane, no request_id):
@@ -54,6 +55,7 @@ import {
   addExternal,
   dismissExternal,
   markCommentsCleaned,
+  setChangeComment,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -66,7 +68,12 @@ import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
-import { applyTrackedEdit, TOOL_COMMENT_PREFIX, TARGET_HASH_CAP } from "./review-tools.mjs";
+import {
+  applyTrackedEdit,
+  formatRationaleComment,
+  TOOL_COMMENT_PREFIX,
+  TARGET_HASH_CAP,
+} from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
 
 async function exists(p) {
@@ -760,6 +767,41 @@ export function createReviewService({
       const ids = Array.isArray(msg.ids) ? msg.ids : [];
       const revision = await update(d, (rev) => markCommentsCleaned(rev, ids));
       log(`[review] comments cleaned ids=${ids.length}`);
+      return { revision };
+    },
+    // A change Word applied without its rationale comment (comment_missing)
+    // gets it later, from the Review tab ("Add rationale comment"): this
+    // gives the text the comment would have had and where the change is,
+    // the task pane anchors the comment (tools-word.js addChangeComment),
+    // and review_comment_set records its id. No text of the manuscript is
+    // changed on this way.
+    async review_comment_text(msg, key) {
+      const d = at(key);
+      const ch = findComment(await load(d), msg.ref)?.changes.find((x) => x.id === msg.change_id);
+      if (!ch) throw new Error(`No change ${msg.change_id} under ${msg.ref}`);
+      if (ch.word_comment_id != null) {
+        throw new Error(`${ch.id} already has its rationale comment.`);
+      }
+      return {
+        change_id: ch.id,
+        // As applyTrackedEdit composed it for the edit (the stored rationale
+        // holds the note of an approved exception; lost facts on the last line).
+        comment_text: formatRationaleComment(msg.ref, ch.rationale, { lost: ch.lost_facts }),
+        change: {
+          kind: ch.kind,
+          find: ch.find,
+          text: ch.text,
+          paragraph_id: ch.paragraph_id,
+          paragraph_index: ch.paragraph_index,
+        },
+      };
+    },
+    async review_comment_set(msg, key) {
+      const d = at(key);
+      const revision = await update(d, (rev) =>
+        setChangeComment(rev, msg.ref, msg.change_id, msg.word_comment_id),
+      );
+      log(`[review] comment added later ${msg.change_id} comment=${msg.word_comment_id}`);
       return { revision };
     },
     async review_override(msg, key) {
