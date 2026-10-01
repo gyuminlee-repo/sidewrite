@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Review acceptance run without hands: daemon, a separate Word process with
 // a CDP port on its add-in pane, the Review tab steps, the author's Word
-// steps over COM, the feature_list verify commands, cleanup. Two flows:
-// stage 2 (main) and stage 2.5 (mainS25), chosen by --stage or --features.
+// steps over COM, the feature_list verify commands, cleanup. Three flows:
+// stage 2 (main), stage 2.5 (mainS25) and stage 3 (mainS3), chosen by
+// --stage or --features.
 // Runs from WSL; Word, its pane and COM are on Windows. See README.md.
 
 import { spawn, execFileSync } from "node:child_process";
@@ -20,20 +21,32 @@ import {
   docStem,
   exitDecision,
   featureIds,
+  exportEvidence,
   focusEvidence,
   guardEvidence,
+  insertTarget,
+  JUDGES,
   judge,
+  langEvidence,
+  ledgerEvidence,
+  lineShift,
   minimalFind,
   modelsEvidence,
   norm,
   ollamaSplitEvidence,
+  openCheckEvidence,
+  openEvidence,
+  proposalEvidence,
   proposeAllEvidence,
   providersEvidence,
   resolvedMatch,
   restartSplitEvidence,
   rewriteVerify,
+  S3_DECISIONS,
+  secondReader,
   siblingMatch,
   stageOf,
+  staleEvidence,
   staleMarkers,
   stopEvidence,
   suggestEvidence,
@@ -75,11 +88,19 @@ const { values: opt } = parseArgs({
     "plan-repo": { type: "string", default: process.env.E2E_PLAN_REPO },
     // Default /tmp/daemon-<stage>.log; --plan-dir defaults to /tmp/<stage>-run.
     "plan-log": { type: "string" },
-    // Default: the range of the stage (S2-18..S2-34, S25-30..S25-41).
+    // Default: the range of the stage (S2-18..S2-34, S25-30..S25-41,
+    // S3-30..S3-40).
     features: { type: "string" },
-    // Stage 2.5: the provider of the judgments (split, ledger suggestions),
-    // and a review text with a rule the ledger suggestions must find.
-    "judgment-provider": { type: "string", default: "ollama" },
+    // Features whose verify command runs after the cleanup (Word closed, the
+    // daemon stopped). Default for stage 3: S3-41.
+    "after-cleanup": { type: "string" },
+    // The provider of the judgments (split, ledger suggestions, and in stage 3
+    // the drafts of the letter). Stage 2.5: default ollama. Stage 3: when not
+    // given, the choice of the pane stays as it is.
+    "judgment-provider": { type: "string" },
+    // Stage 3: an existing response letter whose colours and frames are read.
+    letter: { type: "string", default: path.join(REPO, "tests/fixtures/prior_response.docx") },
+    // Stage 2.5: a review text with a rule the ledger suggestions must find.
     "rules-review": {
       type: "string",
       default: path.join(REPO, "tests/fixtures/fake_review_rules.txt"),
@@ -115,13 +136,20 @@ if (!opt["playwright-core"])
 let STAGE;
 try {
   STAGE = (opt.stage ?? stageOf(opt.features ?? defaultFeatures("s2"))).toLowerCase();
-  if (!/^s\d+$/.test(STAGE)) throw new Error(`--stage takes s2 or s25, not ${opt.stage}`);
+  if (!/^s\d+$/.test(STAGE)) throw new Error(`--stage takes s2, s25 or s3, not ${opt.stage}`);
   opt.features ??= defaultFeatures(STAGE);
   featureIds(opt.features);
 } catch (e) {
   die(e.message);
 }
-if (STAGE !== "s2" && STAGE !== "s25") die(`there is no flow for stage ${STAGE} (s2, s25)`);
+if (!["s2", "s25", "s3"].includes(STAGE)) die(`there is no flow for stage ${STAGE} (s2, s25, s3)`);
+let AFTER_CLEANUP = [];
+try {
+  const spec = opt["after-cleanup"] ?? (STAGE === "s3" ? "S3-41" : null);
+  if (spec) AFTER_CLEANUP = featureIds(spec);
+} catch (e) {
+  die(`--after-cleanup: ${e.message}`);
+}
 const PLAN_DIR = opt["plan-dir"] ?? `/tmp/${STAGE}-run`;
 const PLAN_LOG = opt["plan-log"] ?? `/tmp/daemon-${STAGE}.log`;
 
@@ -135,6 +163,8 @@ const OK_DIR = path.join(RUN, "ok");
 const STEM = docStem(STAGE);
 const DOC = path.join(RUN, `${STEM}.docx`);
 const REVISION = path.join(RUN, `${STEM}.revision.json`);
+// The manuscript as Word rendered it for the line numbers (stage 3).
+const RENDER_PDF = path.join(RUN, `${STEM}.render.pdf`);
 const LOG = opt.log ?? `/tmp/daemon-${STAGE}-e2e.log`;
 const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
 const MODE14_LOG = LOG.replace(/\.log$/, "") + "-mode14.log";
@@ -304,11 +334,11 @@ const embedTaskpane = (src, out) =>
   );
 
 // ---- verify commands -------------------------------------------------------
-function runFeatures() {
+function runFeatures(ids = featureIds(opt.features)) {
   if (!opt["feature-list"]) return;
   const list = JSON.parse(fs.readFileSync(opt["feature-list"], "utf8"));
   const features = Array.isArray(list) ? list : list.features;
-  for (const id of featureIds(opt.features)) {
+  for (const id of ids) {
     const f = features.find((x) => x.id === id);
     if (!f?.verify_command) continue;
     const cmd = rewriteVerify(f.verify_command, {
@@ -569,7 +599,7 @@ async function mainS25() {
   marker("s25-providers", providersEvidence(note("providers", pane("providers"))));
 
   // S25-32: judgments by Ollama, the review text from a file, then the split.
-  const judgeBy = opt["judgment-provider"];
+  const judgeBy = opt["judgment-provider"] ?? "ollama";
   const picked = note(
     "select-provider",
     pane("select-provider", { role: "oneshot", id: judgeBy }),
@@ -724,6 +754,355 @@ async function mainS25() {
     got: del.removed ?? del.error,
   });
   marker("s25-focus-refresh", focusEvidence(note("focus-refresh", pane("focus-refresh"))));
+}
+
+// Stage 3 (S3-30..S3-41): the response letter. The review part is the stage 2
+// procedure up to the author's decisions in Word, with S3_DECISIONS and
+// without the steps that leave something undecided (the author's own pending
+// insertion, the knob run): a pending tracked change is a warning of the
+// letter check, and S3-34 asks for none. Every feature gets its evidence file
+// under ok/, and its .ok marker only when the evidence passes.
+async function mainS3() {
+  const revisionNow = () => JSON.parse(fs.readFileSync(REVISION, "utf8"));
+  const logAt = () => readLog(LOG).length;
+  const logFrom = (at) => readLog(LOG).slice(at);
+  const row = (step, pass, got, skip = false) =>
+    rows.push({ step, result: pass ? "PASS" : skip ? "SKIP" : "FAIL", got });
+  // A step that only reads, or computes again what a second run computes the
+  // same, is run once more when it fails: one slow answer of Word or of the
+  // daemon is not a failed run. A step that writes or asks a model is not.
+  const paneTry = (step, args = {}) => {
+    const first = pane(step, args);
+    if (first.ok !== false && !first.message_error) return first;
+    (record.retries ??= []).push({ step, first });
+    save();
+    return pane(step, args);
+  };
+  // The citations with a line range, as revision.json holds them.
+  const cits = () =>
+    revisionNow().comments.flatMap((c) =>
+      c.declined
+        ? []
+        : (c.response?.citations ?? []).flatMap((x, i) =>
+            x.kind === "revised" && x.lines
+              ? [
+                  {
+                    id: `${c.ref}#${i}`,
+                    ref: c.ref,
+                    quote: x.quote,
+                    paragraph_index: x.paragraph_index,
+                    ...x.lines,
+                  },
+                ]
+              : [],
+          ),
+    );
+  // The second reader of the rendered PDF (poppler), independent of PyMuPDF.
+  const layout = () =>
+    execFileSync("pdftotext", ["-layout", RENDER_PDF, "-"], {
+      encoding: "utf8",
+      maxBuffer: 64 << 20,
+    });
+  const letters = () =>
+    fs
+      .readdirSync(RUN)
+      .filter((n) => n.startsWith(`${STEM}.response`) && n.endsWith(".docx"))
+      .sort()
+      .map((n) => `${n}:${fs.statSync(path.join(RUN, n)).mtimeMs}`);
+
+  // ---- the review, as stage 2 ----
+  note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+  if (opt.provider) {
+    note("select-provider", pane("select-provider", { role: "turn", id: opt.provider }), {
+      label: `select-provider turn=${opt.provider}`,
+      ctx: { id: opt.provider },
+    });
+    pane("open-review");
+  }
+  // The provider of the judgments also writes the drafts of the letter.
+  // Without --judgment-provider the pane's own choice stays (Claude).
+  if (opt["judgment-provider"]) {
+    const id = opt["judgment-provider"];
+    note("select-provider", pane("select-provider", { role: "oneshot", id }), {
+      label: `select-provider oneshot=${id}`,
+      ctx: { id },
+    });
+    pane("open-review");
+  }
+  note("split", pane("split", { review_file: winPath(opt.review) }));
+  note("edit-draft", pane("edit-draft", { requirements: { "R1.3": R13_REQUIREMENTS } }));
+  note("ledger-add", pane("ledger-add", { ledger_file: winPath(opt.ledger) }));
+  for (const ref of ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"]) await propose(ref);
+  note("refresh", pane("refresh"), { label: "refresh before Word" });
+
+  const plan = buildComPlan(revisionNow(), S3_DECISIONS);
+  const planFile = path.join(RUN, "com-plan.json");
+  fs.writeFileSync(planFile, JSON.stringify(plan, null, 2));
+  const applied = com("apply", ["-PlanJson", winPath(planFile)]);
+  record.word.apply = applied;
+  row(
+    "word: accept/reject/edit",
+    applied.ok,
+    (applied.results ?? [])
+      .map((x) => `${x.change_id} ${x.op}${x.error ? ` ERR ${x.error}` : ""}`)
+      .join("; "),
+  );
+  if (!applied.ok && opt["keep-on-fail"]) throw new Error("Word COM apply failed");
+  const afterWord = note("refresh", pane("refresh"), {
+    label: "refresh after Word",
+    judge: "none",
+  });
+  const badges =
+    afterWord.ok === false ? { pass: false, got: afterWord.error } : badgesMatch(afterWord);
+  row("word decisions shown on the Review tab", badges.pass, badges.got);
+
+  // ---- S3-30: the Response tab lists every comment as the reviewer wrote it ----
+  const opened = note("open-response", paneTry("open-response"));
+  marker("s3-open", openEvidence(opened, revisionNow()));
+
+  // ---- S3-31: an existing letter is read, proposed, then applied ----
+  const letter = note("load-letter", pane("load-letter", { path: winPath(opt.letter) }));
+  const beforeApply = revisionNow().profile_overrides ?? {};
+  note("apply-proposal", pane("apply-proposal"));
+  marker(
+    "s3-proposal",
+    proposalEvidence({
+      rows: letter.rows,
+      before: beforeApply,
+      after: revisionNow().profile_overrides,
+    }),
+  );
+
+  // ---- S3-32: declines with reasons, then a draft for every other comment ----
+  note(
+    "response-decline",
+    pane("response-decline", {
+      comments: [{ ref: "R1.5", reason: "No antifoam agent was used in this study." }],
+      open_requests: true,
+      request_reason: "This wording was ruled out in the previous round of review.",
+    }),
+    { ctx: { comments: ["R1.5"] } },
+  );
+  note("response-draft-all", pane("response-draft-all"));
+  const r14 = revisionNow().comments.find((c) => c.ref === "R1.4");
+  const r14Kinds = (r14?.response?.citations ?? []).map((x) => x.kind);
+  row(
+    "R1.4 cites the removal",
+    r14Kinds.includes("removed"),
+    `citations: ${r14Kinds.join(",") || "-"}`,
+    true,
+  );
+
+  // ---- S3-33: line ranges, and a second reader of the same PDF ----
+  note("response-locate", paneTry("response-locate"));
+  marker("s3-lines", secondReader(layout(), cits()));
+
+  // ---- S3-34: the checks pass ----
+  const checked = note("response-check", paneTry("response-check"));
+  marker("s3-check", {
+    pass: JUDGES["response-check"](checked).pass,
+    summary: checked.summary,
+    checks: checked.checks,
+  });
+
+  // ---- S3-35: the letter, in the colours of the profile ----
+  const exported = note("response-export", pane("response-export"));
+  const docx = path.join(RUN, `${STEM}.response.docx`);
+  let read = null;
+  try {
+    read = JSON.parse(
+      execFileSync("python3", [path.join(REPO, "tools/response_read.py"), "--docx", docx], {
+        encoding: "utf8",
+        maxBuffer: 64 << 20,
+      }),
+    );
+  } catch (e) {
+    record.response_read_error = String(e?.message ?? e);
+  }
+  marker("s3-export", exportEvidence(exported, read, docx, fs.existsSync(docx)));
+
+  // ---- S3-36: one more line in the manuscript ----
+  const before = cits();
+  const target = insertTarget(before);
+  const INSERTED = "One short line added for the line shift test.";
+  if (target == null) {
+    marker("s3-line-shift", {
+      pass: false,
+      error: "no two cited paragraphs to insert between",
+      before,
+    });
+    row("word: insert a paragraph", false, "no two cited paragraphs to insert between");
+  } else {
+    // Snapshot paragraph n is paragraph n + 1 of Word.
+    const inserted = com("insert-paragraph", ["-Text", INSERTED, "-Paragraph", String(target + 1)]);
+    record.word.insert = inserted;
+    row(
+      "word: insert a paragraph",
+      inserted.ok,
+      inserted.ok ? `before: ${inserted.next_text}` : inserted.error,
+    );
+    // The Review tab's refresh marks the answers stale; its button is only
+    // there while that tab is shown.
+    pane("open-review");
+    note("refresh", pane("refresh"), { label: "refresh after the insertion", judge: "none" });
+    const staleView = note("open-response", paneTry("open-response"), {
+      label: "open-response after the insertion",
+    });
+    note("response-locate", paneTry("response-locate"), {
+      label: "response-locate after the insertion",
+    });
+    const text = layout();
+    const at = Number(/^\s{0,3}(\d+)\s+One short line added/m.exec(text)?.[1]);
+    const shift = lineShift(
+      before,
+      cits(),
+      at,
+      (staleView.cards ?? []).some((c) => /Line numbers are older/.test(c.stale)),
+    );
+    const second = secondReader(text, cits());
+    marker("s3-line-shift", { ...shift, inserted_at: at, second, pass: shift.pass && second.pass });
+  }
+
+  // ---- S3-37: a quoted sentence edited in Word ----
+  const first = [...cits()].sort((a, b) => a.start - b.start)[0];
+  const words = String(first?.quote ?? "").split(/\s+/);
+  if (words.length < 5) {
+    marker("s3-stale", { pass: false, error: "no cited sentence of five words or more" });
+    row("word: edit a quoted sentence", false, "no cited sentence of five words or more");
+  } else {
+    // One word more after the first three words of the quoted sentence.
+    const from = words.slice(0, 4).join(" ");
+    const to = [...words.slice(0, 3), "indeed", words[3]].join(" ");
+    const replaced = com("replace-text", ["-Text", from, "-With", to]);
+    record.word.replace = replaced;
+    row(
+      "word: edit a quoted sentence",
+      replaced.ok,
+      replaced.ok ? `${from} -> ${to}` : replaced.error,
+    );
+    const at = logAt();
+    pane("open-review");
+    note("refresh", pane("refresh"), { label: "refresh after the edit", judge: "none" });
+    paneTry("open-response");
+    const failing = note("response-check", pane("response-check"), {
+      label: "response-check with a stale answer",
+      judge: "none",
+    });
+    // The author reads the answer and keeps it: saving it again clears the mark.
+    note("response-edit", pane("response-edit", { ref: first.ref }), {
+      label: `response-edit ${first.ref} (kept)`,
+    });
+    note("response-locate", paneTry("response-locate"), {
+      label: "response-locate after the edit",
+    });
+    const passing = note("response-check", paneTry("response-check"), {
+      label: "response-check after the answer was saved again",
+    });
+    marker("s3-stale", {
+      ...staleEvidence(failing, passing, first.ref),
+      ref: first.ref,
+      log_stale: (new RegExp(
+        `^\\[response\\] stale ${first.ref.replace(".", "\\.")} .*$`,
+        "m",
+      ).exec(logFrom(at)) ?? [null])[0],
+      checks_before: failing.checks,
+    });
+  }
+
+  // ---- S3-38: a forbidden expression of the response scope ----
+  const ledgerFile = path.join(RUN, "s3-response-ledger.json");
+  fs.writeFileSync(
+    ledgerFile,
+    JSON.stringify({
+      items: [
+        {
+          kind: "forbid",
+          text: "Do not write unfortunately in the response letter",
+          scope: "response",
+          check: { type: "regex", pattern: "\\bunfortunately\\b", flags: "i", expect: "absent" },
+        },
+      ],
+    }),
+  );
+  pane("open-review");
+  note("ledger-add", pane("ledger-add", { ledger_file: winPath(ledgerFile) }), {
+    label: "ledger-add (response scope)",
+    judge: "none",
+  });
+  paneTry("open-response");
+  const ref = first?.ref ?? "R1.1";
+  const edited = note("response-edit", pane("response-edit", { ref, prepend: "Unfortunately, " }), {
+    label: `response-edit ${ref} (forbidden word)`,
+  });
+  const lettersBefore = letters();
+  // Not checked first: the button still reads "Export letter (.docx)", the
+  // daemon finds the failure and holds the letter back.
+  const held = note("response-export", pane("response-export"), {
+    label: "response-export while a check fails",
+    judge: "none",
+  });
+  const exportedWhileFailing = JSON.stringify(letters()) !== JSON.stringify(lettersBefore);
+  note("response-edit", pane("response-edit", { ref, text: edited.previous_text }), {
+    label: `response-edit ${ref} (put back)`,
+  });
+  const afterLedger = note("response-check", paneTry("response-check"), {
+    label: "response-check after the word was removed",
+  });
+  marker("s3-ledger", {
+    ...ledgerEvidence(held, exportedWhileFailing, afterLedger),
+    checks: held.checks,
+    message: held.message,
+  });
+
+  // ---- S3-40: plain text; the letter opens in Word; an export meanwhile ----
+  note("response-export-text", pane("response-export", { format: "text" }));
+  const modelFile = path.join(RUN, `${STEM}.response.model.json`);
+  const modelParagraphs = fs.existsSync(modelFile)
+    ? JSON.parse(fs.readFileSync(modelFile, "utf8")).paragraphs.length
+    : null;
+  const openCheck = fs.existsSync(docx)
+    ? com("open-check", ["-Other", winPath(docx)])
+    : { ok: false, error: `no ${docx}` };
+  record.word.open_check = openCheck;
+  row(
+    "word: the letter opens without repair",
+    openCheck.ok === true,
+    openCheck.ok ? `paragraphs ${openCheck.paragraphs}` : openCheck.error,
+  );
+  const again = note("response-export", pane("response-export"), {
+    label: "response-export with the first letter open in Word",
+  });
+  const secondPath =
+    /^Exported under a new name: (.+?) \(/.exec(again.output ?? "")?.[1] ??
+    /^Exported: (.+)$/.exec(again.output ?? "")?.[1] ??
+    null;
+  if (openCheck.ok) record.word.close_other = com("close-other", ["-Other", winPath(docx)]);
+  marker("s3-open-check", openCheckEvidence(openCheck, modelParagraphs, docx, secondPath));
+
+  // ---- S3-39: the languages of the profile reach both prompts ----
+  note(
+    "response-set-lang",
+    pane("response-set-lang", { lang: "German", rationale_lang: "German" }),
+  );
+  const at = logAt();
+  note("response-draft", pane("response-draft", { ref: "R1.1" }), {
+    label: "response-draft R1.1 (German)",
+    ctx: { ref: "R1.1" },
+  });
+  const draftLine = (logFrom(at).match(/^\[response\] draft R1\.1 .*$/gm) ?? []).at(-1);
+  pane("open-review");
+  const preview = note("preview", pane("preview", { ref: "R1.1" }), {
+    label: "preview R1.1 (German)",
+    judge: "none",
+  });
+  marker("s3-lang", {
+    ...langEvidence(draftLine, preview.prompt, "German"),
+    log_line: draftLine ?? null,
+  });
+  paneTry("open-response");
+  note("response-set-lang", pane("response-set-lang", { lang: "", rationale_lang: "" }), {
+    label: "response-set-lang (the profile's own again)",
+  });
 }
 
 // Close the Word this run started (pid, with `doc` open in it). It is stopped
@@ -885,7 +1264,7 @@ async function cleanup() {
     }
     quitWord(record.word.launch_mode14?.pid, DOC14, "quit_mode14");
   }
-  if (!failed && !opt["skip-special"]) {
+  if (!failed && STAGE !== "s3" && !opt["skip-special"]) {
     try {
       if (record.cleanup.left_running?.length) throw new Error("a Word of this run is still up");
       await special();
@@ -914,7 +1293,7 @@ async function cleanup() {
 let failed = null;
 try {
   await setup();
-  await (STAGE === "s2" ? main() : mainS25());
+  await (STAGE === "s2" ? main() : STAGE === "s3" ? mainS3() : mainS25());
 } catch (e) {
   failed = e;
   record.error = String(e?.stack ?? e);
@@ -939,9 +1318,9 @@ function isolationCheck() {
 isolationCheck();
 // Before the mode-14 check starts a daemon with a log of its own.
 const mainLogs = runLogs();
-function verify() {
+function verify(ids) {
   try {
-    runFeatures();
+    runFeatures(ids);
   } catch (e) {
     record.features_error = String(e?.message ?? e);
   }
@@ -959,7 +1338,11 @@ if (STAGE === "s2") {
   verify();
   await tidy();
 } else {
-  // Cleanup first: S25-41 checks that Word and the daemon are gone.
+  // Stage 3: its features before the cleanup, then the ones of
+  // --after-cleanup (S3-41: Word and the daemon are gone). Stage 2.5: the
+  // cleanup first, S25-41 is in its range.
+  if (AFTER_CLEANUP.length)
+    verify(featureIds(opt.features).filter((id) => !AFTER_CLEANUP.includes(id)));
   await tidy();
   marker(
     `${STAGE}-cleanup`,
@@ -968,7 +1351,7 @@ if (STAGE === "s2") {
       listening: [WS_PORT, HTTP_PORT].filter(listening).length,
     }),
   );
-  verify();
+  verify(AFTER_CLEANUP.length ? AFTER_CLEANUP : undefined);
 }
 const decision = exitDecision({
   failed: !!failed,

@@ -402,7 +402,6 @@ export function initResponsePane({
     for (const ref of refs) {
       try {
         await draft(ref);
-        say(`Drafting ${done + 2}/${refs.length}...`);
       } catch (e) {
         throw new Error(`Stopped at ${ref} after ${plural(done, "draft")}: ${e.message}`);
       }

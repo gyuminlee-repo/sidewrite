@@ -8,7 +8,7 @@
 // E2E_CDP_PORT (the --remote-debugging-port given to Word),
 // E2E_PANE_ORIGIN (default http://127.0.0.1:47834).
 // Element ids come from taskpane/word/index.html and the class names from
-// taskpane/shared/review-pane.js.
+// taskpane/shared/review-pane.js and response-pane.js.
 
 const fs = require("node:fs");
 
@@ -101,6 +101,71 @@ async function view(page) {
     };
   });
 }
+
+// ---- Response tab (ids from taskpane/word/index.html, classes from
+// taskpane/shared/response-pane.js) ----
+async function clearResponse(page) {
+  await page.evaluate(() => {
+    const m = document.getElementById("response-message");
+    m.textContent = "";
+    m.hidden = true;
+  });
+}
+// As waitMessage, on the message line of the Response tab. `until` is not
+// optional here: every step names the message its own action ends with, so
+// "Drafting R1.1..." or a held click is never read as the result. An error
+// (form-error) ends the wait as well; the step then reports it.
+async function waitResponse(page, timeout, until) {
+  await page.waitForFunction(
+    (pattern) => {
+      const m = document.getElementById("response-message");
+      const t = m.textContent.trim();
+      if (t === "") return false;
+      return m.classList.contains("form-error") || new RegExp(pattern).test(t);
+    },
+    until,
+    { timeout, polling: 200 },
+  );
+  return text(page, "#response-message");
+}
+// What the Response tab shows. The comment and the answer of a card are read
+// as they are (no whitespace folded): the run compares them with revision.json.
+async function responseView(page) {
+  return page.evaluate(() => {
+    const t = (n) => (n ? n.textContent.replace(/\s+/g, " ").trim() : "");
+    const q = (s, root = document) => [...root.querySelectorAll(s)];
+    const message = document.getElementById("response-message");
+    return {
+      message: t(message),
+      message_error: message.classList.contains("form-error") && t(message) !== "",
+      next: t(document.getElementById("response-next")),
+      profile: document.getElementById("response-profile").value,
+      summary: t(document.getElementById("response-summary")),
+      checks: q("#response-checks .response-check-row").map(t),
+      export_label: t(document.getElementById("response-export")),
+      output: t(document.getElementById("response-output")),
+      proposal_rows: q("#response-proposal .response-proposal-row").map(t),
+      cards: q("#response-comments .response-card").map((c) => ({
+        ref: c.getAttribute("data-ref"),
+        comment: c.querySelector(".response-comment")?.textContent ?? "",
+        text: c.querySelector("textarea.response-text")?.value ?? "",
+        declined: t(c.querySelector(".response-declined")),
+        stale: t(c.querySelector(".response-stale")),
+        undecided: t(c.querySelector(".response-undecided")),
+        citations: q(".response-citation", c).map((x) => ({
+          line: t(x.querySelector(".response-citation-line")),
+          quote: t(x.querySelector(".response-citation-quote")),
+        })),
+        open_reqs: q(".response-req:not(.response-req-declined) > span", c).map(t),
+      })),
+    };
+  });
+}
+const responseCard = (page, ref) => page.locator(`.response-card[data-ref="${ref}"]`);
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Profile, languages and the letter reader are folded away in the pane.
+const openProfileDetails = (page) =>
+  page.evaluate(() => (document.getElementById("response-profile-details").open = true));
 
 function card(page, ref) {
   return page.locator(".review-comment", {
@@ -582,6 +647,148 @@ const steps = {
       }));
     }, ORIGIN);
     return { paragraphs };
+  },
+
+  // ---- stage 3: Response tab ----
+
+  // Show the tab, then "Refresh from the manuscript": the tab was loaded when
+  // the pane connected, before the review was split.
+  async "open-response"(page) {
+    await page.waitForFunction(
+      () => {
+        const shown = () =>
+          document.querySelector('.tab-content[data-tab="response"]')?.hidden === false;
+        if (!shown()) document.querySelector('button.tab[data-tab="response"]')?.click();
+        return shown();
+      },
+      null,
+      { timeout: 60_000, polling: 500 },
+    );
+    await clearResponse(page);
+    await page.click("#response-refresh");
+    await waitResponse(page, 120_000, "^Refreshed from the manuscript: ");
+    return responseView(page);
+  },
+
+  "response-view": responseView,
+
+  async "response-refresh"(page) {
+    await clearResponse(page);
+    await page.click("#response-refresh");
+    await waitResponse(page, 120_000, "^Refreshed from the manuscript: ");
+    return responseView(page);
+  },
+
+  // a.path: an existing response letter (.docx, Windows path). Nothing is
+  // saved by this step; rows are the proposal lines.
+  async "load-letter"(page, a) {
+    await openProfileDetails(page);
+    await clearResponse(page);
+    await page.setInputFiles("#response-letter-file", a.path);
+    await waitResponse(page, 5 * 60_000, "^Read the letter: ");
+    const v = await responseView(page);
+    return { rows: v.proposal_rows, ...v };
+  },
+
+  async "apply-proposal"(page) {
+    await openProfileDetails(page);
+    await clearResponse(page);
+    await page.click("#response-proposal-apply");
+    await waitResponse(page, 60_000, "^Applied to this paper: ");
+    return responseView(page);
+  },
+
+  // a.lang, a.rationale_lang: "" puts the profile's own language back.
+  async "response-set-lang"(page, a) {
+    await openProfileDetails(page);
+    await page.fill("#response-lang", a.lang ?? "");
+    await page.fill("#response-rationale-lang", a.rationale_lang ?? "");
+    await clearResponse(page);
+    await page.click("#response-profile-save");
+    await waitResponse(page, 60_000, "^Saved for this paper: profile ");
+    return responseView(page);
+  },
+
+  // a.comments: [{ ref, reason }] declined as a whole. a.open_requests: every
+  // request no accepted change answers is declined with a.request_reason.
+  async "response-decline"(page, a) {
+    for (const c of a.comments ?? []) {
+      const card = responseCard(page, c.ref);
+      await card.locator("input.response-decline-reason").fill(c.reason);
+      await clearResponse(page);
+      await card.locator("button", { hasText: "Decline this comment" }).click();
+      await waitResponse(page, 60_000, `^Declined ${escapeRe(c.ref)}\\.`);
+    }
+    const declined_requests = [];
+    const open = page.locator(".response-req:not(.response-req-declined)");
+    while (a.open_requests && (await open.count()) > 0) {
+      if (declined_requests.length >= 20) throw new Error("more than 20 open requests");
+      const row = open.first();
+      const label = (await row.locator("span").first().textContent()).trim();
+      await row.locator("input.response-req-reason").fill(a.request_reason);
+      await clearResponse(page);
+      await row.locator("button", { hasText: "Decline" }).click();
+      const said = await waitResponse(page, 60_000, "^Declined \\S+ of \\S+\\.$");
+      if (!/^Declined /.test(said)) throw new Error(`declining "${label}": ${said}`);
+      declined_requests.push(label);
+    }
+    return { declined_requests, ...(await responseView(page)) };
+  },
+
+  async "response-draft"(page, a) {
+    await clearResponse(page);
+    await responseCard(page, a.ref)
+      .locator("button", { hasText: /^Draft$/ })
+      .click();
+    await waitResponse(page, TURN_TIMEOUT, `^Drafted ${escapeRe(a.ref)}\\.`);
+    return responseView(page);
+  },
+
+  async "response-draft-all"(page) {
+    const cards = await page.$$eval(".response-card", (ns) => ns.length);
+    await clearResponse(page);
+    await page.click("#response-draft-all");
+    const limit = TURN_TIMEOUT * Math.max(1, cards);
+    await waitResponse(page, limit, "^(Drafted \\d+ responses?\\.$|Nothing to draft)");
+    return responseView(page);
+  },
+
+  // a.text: the whole answer; a.prepend: text put in front of the answer that
+  // is there; neither: the answer is saved as it is (read and kept).
+  async "response-edit"(page, a) {
+    const card = responseCard(page, a.ref);
+    const box = card.locator("textarea.response-text");
+    const previous_text = await box.inputValue();
+    if (a.text != null || a.prepend != null)
+      await box.fill(a.text != null ? a.text : `${a.prepend}${previous_text}`);
+    await clearResponse(page);
+    await card.locator("button", { hasText: /^Save$/ }).click();
+    await waitResponse(page, 120_000, `^Saved ${escapeRe(a.ref)}\\.$`);
+    return { previous_text, ...(await responseView(page)) };
+  },
+
+  // Word renders the manuscript to PDF; the daemon reads its line numbers.
+  async "response-locate"(page) {
+    await clearResponse(page);
+    await page.click("#response-locate");
+    await waitResponse(page, 10 * 60_000, "^Line numbers updated: ");
+    return responseView(page);
+  },
+
+  async "response-check"(page) {
+    await clearResponse(page);
+    await page.click("#response-check");
+    await waitResponse(page, 10 * 60_000, "^Checked: ");
+    return responseView(page);
+  },
+
+  // a.format "text": one plain-text file per reviewer; else the docx. Ends
+  // with "Exported..." or, while a check fails, "Not exported: ...".
+  async "response-export"(page, a) {
+    await clearResponse(page);
+    await page.click(a.format === "text" ? "#response-export-text" : "#response-export");
+    await waitResponse(page, 10 * 60_000, "^(Exported|Not exported: )");
+    return responseView(page);
   },
 
   view,
