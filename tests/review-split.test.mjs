@@ -806,8 +806,8 @@ test("each section's text before the first number is its own comment, with its o
     [
       ["R1.0", "Major comments", "The design is under-powered."],
       ["R1.1", "Minor comments", "The figures need work."],
-      ["R1.2", "Minor comments", "Add units."],
-      ["R1.3", "Minor comments", "State n."],
+      ["R1.2", "Minor comments", "1. Add units."],
+      ["R1.3", "Minor comments", "2. State n."],
     ],
   );
   // Only R1.0 is a kept preamble; the Minor text is a comment like any other.
