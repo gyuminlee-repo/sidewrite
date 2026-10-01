@@ -3,6 +3,7 @@
 Run: python3 -m unittest tests/test_marked_diff_cases.py
 """
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -209,6 +210,161 @@ class TableText(Case):
         self.assertEqual(code, 2, log)
         self.assertIn("no anchor", log)
         self.assertFalse(out.exists())
+
+
+def tool_module():
+    spec = importlib.util.spec_from_file_location("build_marked_diff", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def mark(tag, n=[900]):
+    """An empty revision element with an id, an author and a date."""
+    n[0] += 1
+    return el(tag, id=str(n[0]), author="Somebody", date="2031-01-02T03:04:05Z")
+
+
+def wrap(run, tag):
+    """Put a run inside a w:ins / w:del / w:moveFrom / w:moveTo; deleted text is w:delText, as Word writes it."""
+    w = mark(tag)
+    run._r.addprevious(w)
+    w.append(run._r)
+    if tag == "w:del":
+        for t in run._r.findall(qn("w:t")):
+            t.tag = qn("w:delText")
+    return w
+
+
+def para_mark(paragraph, tag):
+    """Mark the paragraph mark itself as inserted or deleted."""
+    ppr = paragraph._p.get_or_add_pPr()
+    rpr = el("w:rPr")
+    ppr.append(rpr)
+    rpr.append(mark(tag))
+
+
+class PendingRevisions(Case):
+    """Tracked changes that are still pending in an input are read as accepted, and do not end up among the tool's marks."""
+
+    MODES = ("color", "track_changes")
+    LEFTOVERS = ("Somebody", "w:moveFrom", "w:moveTo", "w:rPrChange", "w:pPrChange", "RangeStart", "RangeEnd")
+
+    def check(self, base, clean, old, new, changed=None):
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                accept, reject = self.accept_reject(out)
+                self.assertEqual(accept, new)
+                # A deleted sentence may be shown struck in the neighbouring paragraph (the tool keeps the old
+                # paragraph boundary as a struck line break), so the old text is compared as a whole.
+                self.assertEqual("".join(reject), "".join(old))
+                xml = doc_xml(out)
+                for word in self.LEFTOVERS:
+                    self.assertNotIn(word, xml)
+                if changed is not None:
+                    self.assertEqual(summary["insert_runs"] + summary["delete_runs"] > 0, changed)
+
+    def test_a_pending_insertion_whose_text_equals_the_baseline(self):
+        base = self.doc([P1, P2])
+        clean = self.doc([P1, P2], lambda d: wrap(d.paragraphs[1].runs[0], "w:ins"))
+        self.check(base, clean, [P1, P2], [P1, P2], changed=False)
+
+    def test_a_pending_deletion_is_text_that_is_gone(self):
+        def edit(d):
+            wrap(d.paragraphs[1].add_run(" This sentence was deleted with tracking on."), "w:del")
+
+        base = self.doc([P1, P2 + " This sentence was deleted with tracking on."])
+        clean = self.doc([P1, P2], edit)
+        self.check(base, clean, [P1, P2 + " This sentence was deleted with tracking on."], [P1, P2], changed=True)
+        # ... and when the baseline never had it, nothing is marked.
+        self.check(self.doc([P1, P2]), clean, [P1, P2], [P1, P2], changed=False)
+
+    def test_a_pending_move_is_read_at_its_new_place(self):
+        moved = " A sentence that was moved."
+
+        def edit(d):
+            p1, p2 = d.paragraphs
+            source = wrap(p1.add_run(moved), "w:moveFrom")
+            source.addprevious(el("w:moveFromRangeStart", id="50", name="move1"))
+            source.addnext(el("w:moveFromRangeEnd", id="50"))
+            target = wrap(p2.add_run(moved), "w:moveTo")
+            target.addprevious(el("w:moveToRangeStart", id="51", name="move1"))
+            target.addnext(el("w:moveToRangeEnd", id="51"))
+
+        base = self.doc([P1 + moved, P2])
+        clean = self.doc([P1, P2], edit)
+        self.check(base, clean, [P1 + moved, P2], [P1, P2 + moved], changed=True)
+        self.check(self.doc([P1, P2 + moved]), clean, [P1, P2 + moved], [P1, P2 + moved], changed=False)
+
+    def test_pending_format_changes_are_dropped(self):
+        def edit(d):
+            p = d.paragraphs[1]
+            p.runs[0].bold = True
+            change = mark("w:rPrChange")
+            change.append(el("w:rPr"))
+            p.runs[0]._r.rPr.append(change)
+            ppr = p._p.get_or_add_pPr()
+            change = mark("w:pPrChange")
+            change.append(el("w:pPr"))
+            ppr.append(change)
+
+        base = self.doc([P1, P2])
+        self.check(base, self.doc([P1, P2_NEW], edit), [P1, P2], [P1, P2_NEW], changed=True)
+        # The baseline's formatting is copied into deleted runs: its pending changes must not travel along.
+        self.check(self.doc([P1, P2], edit), self.doc([P1]), [P1, P2], [P1], changed=True)
+
+    def test_a_deleted_paragraph_mark_joins_two_paragraphs(self):
+        base = self.doc([P1 + P2, "A last paragraph."])
+        clean = self.doc([P1, P2, "A last paragraph."], lambda d: para_mark(d.paragraphs[0], "w:del"))
+        self.check(base, clean, [P1 + P2, "A last paragraph."], [P1 + P2, "A last paragraph."], changed=False)
+
+    def test_a_wholly_deleted_paragraph_is_gone(self):
+        def edit(d):
+            wrap(d.paragraphs[1].runs[0], "w:del")
+            para_mark(d.paragraphs[1], "w:del")
+            para_mark(d.paragraphs[0], "w:ins")
+
+        base = self.doc([P1, "A last paragraph."])
+        clean = self.doc([P1, P2, "A last paragraph."], edit)
+        self.check(base, clean, [P1, "A last paragraph."], [P1, "A last paragraph."], changed=False)
+
+    def test_a_deleted_table_row_is_gone(self):
+        def edit(d):
+            table([["Row one."], ["Row two, deleted."]])(d)
+            row = d.tables[0].rows[1]._tr
+            trpr = el("w:trPr")
+            trpr.append(mark("w:del"))
+            row.insert(0, trpr)
+            wrap(d.tables[0].cell(1, 0).paragraphs[0].runs[0], "w:del")
+
+        base = self.doc([P1, P2], table([["Row one."]]))
+        clean = self.doc([P1, P2], edit)
+        self.check(base, clean, [P1, P2, "Row one."], [P1, P2, "Row one."], changed=False)
+
+    def test_a_pending_cell_change_is_refused_with_a_reason(self):
+        def edit(d):
+            table([["One.", "Two."]])(d)
+            d.tables[0].cell(0, 1)._tc.get_or_add_tcPr().append(mark("w:cellDel"))
+
+        code, out, summary, log = self.run_tool(self.doc([P1, P2]), self.doc([P1, P2], edit))
+        self.assertEqual(code, 2, log)
+        self.assertIn("cellDel", log)
+        self.assertFalse(out.exists())
+
+    def test_a_document_without_pending_changes_is_not_rewritten(self):
+        xml = doc_xml(self.doc([P1, P2])).encode("utf-8")
+        got, n = tool_module().accept_revisions(xml)
+        self.assertIs(got, xml)
+        self.assertEqual(n, 0)
+
+    def test_the_summary_says_how_many_pending_changes_were_accepted(self):
+        base = self.doc([P1, P2])
+        clean = self.doc([P1, P2], lambda d: wrap(d.paragraphs[1].runs[0], "w:ins"))
+        code, out, summary, log = self.run_tool(base, clean)
+        self.assertEqual(summary["accepted_revisions"], {"baseline": 0, "clean": 1})
+        self.assertIn("pending tracked changes read as accepted: baseline 0, clean 1", log)
 
 
 if __name__ == "__main__":

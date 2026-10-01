@@ -13,7 +13,8 @@ paragraph shows the sentences that stayed. A paragraph that moved (a re-sorted r
 with its new place when it is similar enough. When sentences of several baseline paragraphs end up struck inside one
 clean paragraph, a struck line break keeps the baseline paragraph boundaries visible.
 
-What is read how: pending tracked changes are read as accepted in both files. Text that is struck through in the
+What is read how: pending tracked changes are carried out (accepted) in both files before they are compared, so the
+output holds this tool's marks only; pending cell insertions, deletions and merges are refused. Text that is struck through in the
 baseline is read as already deleted. In colour mode a clean file that already has struck-through text, or text in the
 insert colour, cannot be marked (the marks could not be told apart) and is refused.
 
@@ -135,6 +136,85 @@ def rpr_color(rpr):
         return None
     c = rpr.find(q('color'))
     return c.get(q('val')).upper() if c is not None and c.get(q('val')) else None
+
+
+# ---------------------------------------------------------------- pending tracked changes in an input
+# Both inputs are compared in their accepted state. A change that is still pending is therefore carried out on the
+# XML before anything is compared, so no mark of an input is left among the marks this tool writes.
+REV_GONE = ('del', 'moveFrom')            # content that accepting removes
+REV_KEPT = ('ins', 'moveTo')              # content that accepting keeps: only the wrapper goes
+REV_PROPERTY_CHANGES = ('rPrChange', 'pPrChange', 'sectPrChange', 'tblPrChange', 'tblPrExChange', 'tblGridChange',
+                        'trPrChange', 'tcPrChange', 'numberingChange')   # hold the old formatting: dropped
+REV_RANGE_MARKERS = ('moveFromRangeStart', 'moveFromRangeEnd', 'moveToRangeStart', 'moveToRangeEnd',
+                     'customXmlInsRangeStart', 'customXmlInsRangeEnd', 'customXmlMoveToRangeStart',
+                     'customXmlMoveToRangeEnd')                          # dropped
+REV_REFUSED = ('cellIns', 'cellDel', 'cellMerge', 'customXmlDelRangeStart', 'customXmlDelRangeEnd',
+               'customXmlMoveFromRangeStart', 'customXmlMoveFromRangeEnd')   # accepting these is not implemented
+REV_PROPERTY_PARENTS = ('rPr', 'numPr', 'trPr', 'ctrlPr')   # here ins/del is a flag on the parent, not a wrapper
+
+
+def accept_revisions(xml):
+    """(document.xml in its accepted state, number of pending revision elements carried out).
+
+    The bytes are returned as they came when the document has no pending change. Otherwise: deleted and moved-away
+    content is removed, inserted and moved-in content is unwrapped, a paragraph whose mark is deleted is joined with
+    the paragraph after it (which keeps its own properties, as in Word), a deleted table row is removed, and recorded
+    old formatting (w:rPrChange and the like) and move range markers are dropped. Pending cell insertions, deletions
+    and merges are refused."""
+    root = etree.fromstring(xml)
+    names = set(REV_GONE + REV_KEPT + REV_PROPERTY_CHANGES + REV_RANGE_MARKERS + REV_REFUSED)
+    found = [e for e in root.iter() if isinstance(e.tag, str) and e.tag.startswith('{%s}' % W_NS) and ln(e) in names]
+    if not found:
+        return xml, 0
+    refused = sorted({ln(e) for e in found if ln(e) in REV_REFUSED})
+    assert not refused, 'pending tracked changes of a kind that is not handled: %s; accept or reject them in Word first' % ', '.join(refused)
+
+    def drop(e):
+        if e.getparent() is not None:
+            e.getparent().remove(e)
+
+    flags = [e for e in found if ln(e) in REV_GONE + REV_KEPT and ln(e.getparent()) in REV_PROPERTY_PARENTS]
+    for e in flags:
+        owner, kind = e.getparent(), ln(e)
+        drop(e)
+        if kind in REV_KEPT:
+            continue
+        assert ln(owner) != 'ctrlPr', 'a pending deletion inside an equation is not handled; accept or reject it in Word first'
+        if ln(owner) == 'trPr':                       # deleted table row
+            row = owner.getparent()
+            tbl = row.getparent()
+            drop(row)
+            if tbl is not None and tbl.find(q('tr')) is None:
+                drop(tbl)
+        elif ln(owner) == 'rPr' and ln(owner.getparent()) == 'pPr':   # deleted paragraph mark
+            para = owner.getparent().getparent()
+            para.set('joined-with-next', '1')
+    flagged = {id(e) for e in flags}
+    wrappers = [e for e in found if ln(e) in REV_GONE + REV_KEPT and id(e) not in flagged]
+    for e in wrappers:
+        if ln(e) in REV_GONE:
+            drop(e)
+    for e in wrappers:
+        if ln(e) in REV_KEPT and e.getparent() is not None:
+            for ch in list(e):
+                e.addprevious(ch)
+            drop(e)
+    for e in found:
+        if ln(e) in REV_PROPERTY_CHANGES + REV_RANGE_MARKERS:
+            drop(e)
+    for para in [x for x in root.iter(q('p')) if x.get('joined-with-next')]:   # document order: a chain ends in the last one
+        del para.attrib['joined-with-next']
+        nxt = para.getnext()
+        if nxt is None or nxt.tag != q('p'):
+            continue                                  # last paragraph of a cell or before a table: the mark cannot go
+        at = 1 if len(nxt) and nxt[0].tag == q('pPr') else 0
+        for ch in [c for c in para if c.tag != q('pPr')]:
+            nxt.insert(at, ch)
+            at += 1
+        drop(para)
+    for e in [x for x in root.iter(q('rPr')) if len(x) == 0 and ln(x.getparent()) == 'pPr']:
+        drop(e)                                       # a paragraph-mark rPr that only held the flag
+    return etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True), len(found)
 
 
 # ---------------------------------------------------------------- paragraph reading
@@ -1340,6 +1420,7 @@ def run(a):
     with zipfile.ZipFile(a.baseline) as zb, zipfile.ZipFile(a.clean) as zc:
         base_xml, clean_xml = zb.read('word/document.xml'), zc.read('word/document.xml')
         styles, numids = style_ids(zc)
+    (base_xml, n_base), (clean_xml, n_clean) = accept_revisions(base_xml), accept_revisions(clean_xml)
     if MODE == 'color':
         struck, coloured = colour_conflicts(clean_xml)
         if coloured:
@@ -1349,6 +1430,7 @@ def run(a):
             raise Refused('the clean document has %d struck-through run(s), which colour mode could not tell from '
                           'deletions; use --mode track_changes' % struck)
     doc_xml, st = build_document(base_xml, clean_xml, styles, numids)
+    st['accepted_revisions'] = {'baseline': n_base, 'clean': n_clean}
     fd, tmp = tempfile.mkstemp(prefix='.marked-', suffix='.tmp', dir=out_dir)
     os.close(fd)
     try:
@@ -1418,6 +1500,8 @@ def report(a, out_path, base_xml, clean_xml, st):
           (st['n_eq'], st['n_mod'], st['n_ins'], st['n_del'], st['n_del_empty'], st['tables']))
     print('dropped: pStyle %d, numPr %d, baseline non-text elements in deleted paras %s' %
           (st['dropped_pstyle'], st['dropped_numpr'], dict(st['dropped_baseline_special'])))
+    if any(st['accepted_revisions'].values()):
+        print('pending tracked changes read as accepted: baseline %(baseline)d, clean %(clean)d' % st['accepted_revisions'])
     print('METRICS:', {k: v for k, v in m_after.items() if k != 'over90_detail'})
     mods = [x for x in st['marked'] if x[0] and x[1]]
     random.Random(SAMPLE_SEED).shuffle(mods)
@@ -1429,7 +1513,7 @@ def report(a, out_path, base_xml, clean_xml, st):
                              'PARA_MATCH_MIN_RATIO': PARA_MATCH_MIN_RATIO, 'SENT_MATCH_MIN_RATIO': SENT_MATCH_MIN_RATIO,
                              'RESCUE_MIN_RATIO': RESCUE_MIN_RATIO},
                'paragraphs': {k: st[k] for k in ('n_eq', 'n_mod', 'n_ins', 'n_del', 'n_del_empty')},
-               'tables': st['tables'],
+               'tables': st['tables'], 'accepted_revisions': st['accepted_revisions'],
                'dropped': {'pStyle': st['dropped_pstyle'], 'numPr': st['dropped_numpr'],
                            'baseline_special': dict(st['dropped_baseline_special'])},
                'metrics': {k: v for k, v in m_after.items() if k != 'over90_detail'}, 'verify_lines': lines,
@@ -1437,7 +1521,7 @@ def report(a, out_path, base_xml, clean_xml, st):
         with open(a.report, 'w' if a.overwrite else 'x', encoding='utf-8') as f:
             json.dump(rep, f, ensure_ascii=False, indent=1)
     return failed, {'checks': total, 'failures': failed, 'mode': MODE, 'insert_runs': v['insert_runs'],
-                    'delete_runs': v['delete_runs'],
+                    'delete_runs': v['delete_runs'], 'accepted_revisions': st['accepted_revisions'],
                     'paragraphs': {k: st[k] for k in ('n_eq', 'n_mod', 'n_ins', 'n_del', 'n_del_empty')}}
 
 
