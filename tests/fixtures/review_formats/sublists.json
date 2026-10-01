@@ -1,0 +1,121 @@
+{
+  "family": "sublists",
+  "cases": [
+    {
+      "name": "colon sub-list is the last thing in the block",
+      "kind": "positive",
+      "strong": false,
+      "text": "Reviewer 1:\n1. Please add:\n1. the strain\n2. the medium\n3. the temperature",
+      "refs": ["R1.1"],
+      "texts": {
+        "R1.1": "Please add:\n1. the strain\n2. the medium\n3. the temperature"
+      }
+    },
+    {
+      "name": "colon sub-list last, no reviewer head",
+      "kind": "positive",
+      "strong": false,
+      "text": "1. Please add:\n1. the strain\n2. the medium\n3. the temperature",
+      "refs": ["R1.1"]
+    },
+    {
+      "name": "capitalized sub-items last in the block",
+      "kind": "positive",
+      "strong": false,
+      "text": "Reviewer 1:\n1. Please add:\n1. Strain\n2. Medium\n3. Temperature",
+      "refs": ["R1.1"]
+    },
+    {
+      "name": "sub-list under the last of two comments",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. Please report:\n1. the strain\n2. the medium\n3. the temperature",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.2": "Please report:\n1. the strain\n2. the medium\n3. the temperature"
+      }
+    },
+    {
+      "name": "sub-items that end with a period",
+      "kind": "positive",
+      "strong": false,
+      "text": "Reviewer 1:\n1. Please add:\n1. the strain.\n2. the medium.\n3. the temperature.",
+      "refs": ["R1.1"]
+    },
+    {
+      "name": "two sub-items last in the block",
+      "kind": "positive",
+      "strong": false,
+      "text": "Reviewer 1:\n1. Please state:\n1. the strain\n2. the medium",
+      "refs": ["R1.1"]
+    },
+    {
+      "name": "sub-list last in a Minor section",
+      "kind": "positive",
+      "text": "Reviewer 1:\nMajor comments\n1. Add a control.\nMinor comments\n1. Please add:\n1. the strain\n2. the medium",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.2": "Please add:\n1. the strain\n2. the medium"
+      },
+      "sections": {
+        "R1.1": "Major comments",
+        "R1.2": "Minor comments"
+      }
+    },
+    {
+      "name": "a full sentence after lower-case sub-items is the next comment",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\n2. Please add:\n1. the optical density\n2. the wavelength\n3. The growth rate is not credible.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.2": "Please add:\n1. the optical density\n2. the wavelength",
+        "R1.3": "The growth rate is not credible."
+      }
+    },
+    {
+      "name": "the number that comes again is the next comment",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Please add:\n1. Strain\n2. Medium\n2. The growth rate is not credible.\n3. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "Please add:\n1. Strain\n2. Medium"
+      }
+    },
+    {
+      "name": "a colon line followed by the next number is no sub-list",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Please fix the following:\n2. State n.\n3. Add error bars.",
+      "refs": ["R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.1": "Please fix the following:"
+      }
+    },
+    {
+      "name": "a colon line before the first comment is the preamble",
+      "kind": "trap",
+      "text": "Reviewer 1:\nThese points must be fixed before acceptance:\n1. Add units.\n2. State n.\n3. Add error bars.",
+      "refs": ["R1.0", "R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.0": "These points must be fixed before acceptance:"
+      }
+    },
+    {
+      "name": "a question after one sub-item is the next comment",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Please check:\n1. the strain\n2. Is the medium defined? It is not stated.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Please check:\n1. the strain",
+        "R1.2": "Is the medium defined? It is not stated."
+      }
+    },
+    {
+      "name": "a colon inside the line starts no sub-list",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Please add: the strain and the medium.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Please add: the strain and the medium."
+      }
+    }
+  ]
+}

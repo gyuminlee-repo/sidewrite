@@ -1,0 +1,121 @@
+{
+  "family": "boilerplate",
+  "cases": [
+    {
+      "name": "greeting letter before the reviewers is E.1",
+      "kind": "positive",
+      "text": "Dear Dr. Author,\n\nThank you for submitting your manuscript.\n\nReviewer 1:\n1. Add units.\n2. State n.",
+      "refs": ["E.1", "R1.1", "R1.2"],
+      "texts": {
+        "E.1": "Dear Dr. Author,\n\nThank you for submitting your manuscript."
+      }
+    },
+    {
+      "name": "recommendation line before the comments is R1.0",
+      "kind": "positive",
+      "text": "Reviewer 1:\nRecommendation: Minor revision\n\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.0": "Recommendation: Minor revision"
+      }
+    },
+    {
+      "name": "signature after the last comment is a late editor block",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nSincerely,\nThe Editorial Office",
+      "refs": ["R1.1", "R1.2", "E.1"],
+      "texts": {
+        "R1.2": "State n.",
+        "E.1": "Sincerely,\nThe Editorial Office"
+      }
+    },
+    {
+      "name": "portal footer after the last comment is a late editor block",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nIn compliance with data protection regulations, you may request that we remove your registration details.",
+      "refs": ["R1.1", "R1.2", "E.1"],
+      "texts": {
+        "R1.2": "State n."
+      }
+    },
+    {
+      "name": "salutation inside a reviewer block is R1.0",
+      "kind": "positive",
+      "text": "Reviewer 1:\nDear Authors,\nThank you for the clear manuscript.\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.0": "Dear Authors,\nThank you for the clear manuscript."
+      }
+    },
+    {
+      "name": "signature between two reviewers",
+      "kind": "positive",
+      "text": "Reviewer 1:\n1. Add units.\n2. State n.\n\nBest regards,\nReviewer 1\n\nReviewer 2:\n1. Add error bars.",
+      "refs": ["R1.1", "R1.2", "E.1", "R2.1"],
+      "texts": {
+        "R1.2": "State n.",
+        "E.1": "Best regards,\nReviewer 1"
+      }
+    },
+    {
+      "name": "open review form lines (MDPI) are R1.0",
+      "kind": "positive",
+      "text": "Reviewer 1 Report\nOpen Review\n( ) I would not like to sign my review report\n(x) I would like to sign my review report\nComments and Suggestions for Authors\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"]
+    },
+    {
+      "name": "sincerely in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nSincerely, I think this paper needs more controls.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nSincerely, I think this paper needs more controls."
+      }
+    },
+    {
+      "name": "regards in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nBest regards to the authors for a clear paper, but the units are missing.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nBest regards to the authors for a clear paper, but the units are missing."
+      }
+    },
+    {
+      "name": "salutation inside a numbered comment stays there",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Dear authors, please add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Dear authors, please add units."
+      }
+    },
+    {
+      "name": "recommendation inside a comment",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nRecommendation: add a negative control.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nRecommendation: add a negative control."
+      }
+    },
+    {
+      "name": "a signature without a reviewer head stays in the last comment",
+      "kind": "trap",
+      "text": "1. Add units.\n2. State n.\nSincerely,\nThe reviewer",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.2": "State n.\nSincerely,\nThe reviewer"
+      }
+    },
+    {
+      "name": "compliance in a sentence",
+      "kind": "trap",
+      "text": "Reviewer 1:\n1. Add units.\nIn compliance with the journal guidelines, please report n.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.\nIn compliance with the journal guidelines, please report n."
+      }
+    }
+  ]
+}

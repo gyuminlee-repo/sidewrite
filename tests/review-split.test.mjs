@@ -7,6 +7,12 @@ import {
   SPLIT_SYSTEM,
   uncoveredText,
 } from "../daemon/review-split.mjs";
+import {
+  emptyRevision,
+  replaceComments,
+  restoreComment,
+  RevisionSchema,
+} from "../daemon/revision-store.mjs";
 
 const TWO_REVIEWERS = `Dear Editor,
 
@@ -548,4 +554,241 @@ test("property: random labels without drop keep every non-empty line exactly onc
       .sort();
     assert.deepEqual(got, want, `run ${run}`);
   }
+});
+
+// ---- formats: warnings, profiles and the section label ----------------------
+// The split of each layout is pinned in tests/review-formats.test.mjs.
+
+test("a reviewer block split only at blank lines warns and still asks the model", async () => {
+  const review = "Reviewer 1:\nAdd units to Table 1.\n\nState the number of replicates.\n";
+  let called = 0;
+  const r = await splitReview(review, {
+    oneshot: async () => (called++, { ok: false, error: "timed out" }),
+  });
+  assert.equal(called, 1);
+  assert.deepEqual(refsTexts(r), [
+    ["R1.1", "Add units to Table 1."],
+    ["R1.2", "State the number of replicates."],
+  ]);
+  assert.ok(
+    r.warnings.some((w) => /Reviewer 1 .*split at blank lines into R1\.1 to R1\.2/.test(w)),
+    r.warnings.join(" | "),
+  );
+  const none = await splitReview(review);
+  assert.equal(none.method, "regex");
+  assert.ok(none.warnings.some((w) => /no LLM fallback configured/.test(w)));
+});
+
+test("a signature after a reviewer is a late editor comment, with its own warning", async () => {
+  const r = await splitReview(
+    "Reviewer 1:\n1. Add units.\n2. State n.\n\nSincerely,\nThe office\n",
+  );
+  assert.equal(r.method, "regex");
+  assert.deepEqual(refsTexts(r), [
+    ["R1.1", "Add units."],
+    ["R1.2", "State n."],
+    ["E.1", "Sincerely,\nThe office"],
+  ]);
+  assert.deepEqual(r.warnings, [
+    "Editor text after a reviewer is kept as E.1. Delete it if it asks for nothing.",
+  ]);
+});
+
+test("a profile that replaces one pattern keeps the other defaults", () => {
+  const c = splitReviewRegex(
+    "Gutachter 2\nMajor comments\n1. Add units.\nMinor comments\n1. State n.",
+    { reviewerHead: String.raw`^Gutachter\s+(\d+)$` },
+  );
+  assert.deepEqual(
+    c.map((x) => [x.ref, x.section]),
+    [
+      ["R2.1", "Major comments"],
+      ["R2.2", "Minor comments"],
+    ],
+  );
+});
+
+test("a reviewer head pattern that captures no number or capital letter opens no block", () => {
+  const c = splitReviewRegex("Reviewer x\n1. Add units.\n2. State n.", {
+    reviewerHead: String.raw`^Reviewer\s+(\w+)$`,
+  });
+  assert.deepEqual(
+    c.map((x) => x.ref),
+    ["R1.1", "R1.2"],
+  );
+});
+
+test("the section label of a comment survives a save and a schema round trip", () => {
+  const split = splitReviewRegex(
+    "Reviewer 1:\nMajor comments\n1. Add units.\nMinor comments\n1. State n.",
+  );
+  let rev = replaceComments(emptyRevision("/m/paper.docx"), split);
+  assert.deepEqual(
+    rev.comments.map((c) => [c.ref, c.section]),
+    [
+      ["R1.1", "Major comments"],
+      ["R1.2", "Minor comments"],
+    ],
+  );
+  // A later save without the label (an older pane) keeps it.
+  rev = replaceComments(rev, [{ ref: "R1.2", reviewer: 1, text: "State n (edited)." }]);
+  assert.equal(RevisionSchema.parse(rev).comments[0].section, "Minor comments");
+  assert.equal("section" in splitReviewRegex("1. Add units.\n2. State n.")[0], false);
+});
+
+test("a restored comment keeps its section label", () => {
+  const rev = restoreComment(emptyRevision("/m/paper.docx"), "R1.2", {
+    reviewer: 1,
+    text: "State n.",
+    requirements: [],
+    section: "Minor comments",
+  });
+  assert.equal(rev.comments[0].section, "Minor comments");
+  const bare = restoreComment(emptyRevision("/m/paper.docx"), "R1.2");
+  assert.equal("section" in bare.comments[0], false);
+});
+
+// The label split reads the same lines as the regex split: an email quote
+// mark on every line is taken off, and full-width markers are stripped.
+test("label split: quote marks are taken off and full-width markers stripped", async () => {
+  const quoted = await splitReview("> Please add units.\n> Also state n.\n", {
+    oneshot: async (q) => {
+      assert.equal(q.prompt, splitPrompt(["Please add units.", "Also state n."]));
+      return labels("comment_start", "comment_start")();
+    },
+  });
+  assert.deepEqual(refsTexts(quoted), [
+    ["R1.1", "Please add units."],
+    ["R1.2", "Also state n."],
+  ]);
+  const wide = await splitReview("Reviewer ２：\n３． Add units.\nmore text\n", {
+    oneshot: labels(RH(2), "comment_start", "continue"),
+  });
+  assert.equal(wide.method, "llm");
+  assert.deepEqual(refsTexts(wide), [["R2.3", "Add units.\nmore text"]]);
+});
+
+// ---- lines the regex split takes out -----------------------------------------
+
+test("lines dropped as boilerplate are listed in the result and named in a warning", async () => {
+  const review =
+    "Reviewer(s)' Comments to Author:\n\nReviewer: 1\n\nComments to the Author\n1. Add units.\n2. State n.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(r.dropped, ["Reviewer(s)' Comments to Author:", "Comments to the Author"]);
+  assert.deepEqual(r.warnings, [
+    '2 boilerplate line(s) were dropped: "Reviewer(s)\' Comments to Author:", "Comments to the Author". Add them back if they ask for something.',
+  ]);
+  const clean = await splitReview(
+    "Reviewer 1: Comments to the Author\n1. Add units.\n2. State n.\n",
+  );
+  assert.deepEqual(clean.dropped, []);
+  assert.deepEqual(clean.warnings, []);
+});
+
+test("rule lines of a questionnaire letter are listed as dropped", async () => {
+  const review =
+    "Reviewers' comments:\n\n1. Is the work sound?\n\nReviewer #1: Partly\n\nReviewer #2: Yes\n\n**********\n\n2. Review Comments\n\nReviewer #1: 1) Add units.\n2) State n.\n\nReviewer #2: Please add error bars.";
+  const r = await splitReview(review);
+  assert.deepEqual(r.dropped, ["Reviewers' comments:", "**********"]);
+  assert.ok(r.warnings.some((w) => /^2 boilerplate line\(s\) were dropped/.test(w)));
+});
+
+test("the label split lists the lines the model dropped", async () => {
+  const r = await splitReview("Page 2 of 5\nPlease add units.\nAlso state n.\n", {
+    oneshot: labels("drop", "comment_start", "comment_start"),
+  });
+  assert.deepEqual(r.dropped, ["Page 2 of 5"]);
+});
+
+test("a section label that ends up on no comment is named by the check", async () => {
+  const review = "Reviewer 1:\nMajor comments\n1. Add units.\n2. State n.\n";
+  assert.deepEqual(uncoveredText(review, [{ text: "Add units." }, { text: "State n." }]), [
+    "Major comments",
+  ]);
+  assert.deepEqual(uncoveredText(review, splitReviewRegex(review)), []);
+  // A section head with nothing under it gives no comment its label; the
+  // check names it.
+  const empty = "Reviewer 1:\n1. Add units.\n2. State n.\nMinor comments\n";
+  const r = await splitReview(empty);
+  assert.deepEqual(
+    r.comments.map((c) => c.ref),
+    ["R1.1", "R1.2"],
+  );
+  assert.ok(
+    r.warnings.some((w) => /in no comment: "Minor comments"/.test(w)),
+    r.warnings.join(" | "),
+  );
+});
+
+// ---- more than one block of a reviewer ------------------------------------------
+
+test("a second block of a reviewer goes on with the numbers, with one warning per reviewer", async () => {
+  const review =
+    "Reviewer 1:\n1. Add units.\n2. State n.\n\nReviewer 2:\n1. Add error bars.\n\nReviewer 1:\nThank you for the revision.\n1. Cite the method.\n\nReviewer 2:\n1. Add a scale bar.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.section, c.text]),
+    [
+      ["R1.1", undefined, "Add units."],
+      ["R1.2", undefined, "State n."],
+      ["R2.1", undefined, "Add error bars."],
+      ["R1.3", "Block 2", "Thank you for the revision."],
+      ["R1.4", "Block 2", "1. Cite the method."],
+      ["R2.2", "Block 2", "1. Add a scale bar."],
+    ],
+  );
+  assert.deepEqual(r.warnings, [
+    "Reviewer 1 text before the first numbered comment is kept as R1.3. Delete it if it asks for nothing.",
+    "Reviewer 1 has 2 blocks; numbering was continued: block 2 is R1.3 to R1.4.",
+    "Reviewer 2 has 2 blocks; numbering was continued: block 2 is R2.2.",
+  ]);
+});
+
+test("a round line that no block follows is named by the check", async () => {
+  const r = await splitReview("Reviewer 1:\n1. Add units.\n2. State n.\n\nRound 2\n");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.text]),
+    [
+      ["R1.1", "Add units."],
+      ["R1.2", "State n."],
+    ],
+  );
+  assert.ok(
+    r.warnings.some((w) => /in no comment: "Round 2"/.test(w)),
+    r.warnings.join(" | "),
+  );
+});
+
+test("a save with an empty section clears the stored label; a save without the key keeps it", () => {
+  let rev = replaceComments(emptyRevision("/m/paper.docx"), [
+    { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "Abstract" },
+    { ref: "R1.2", reviewer: 1, text: "Expand this section.", section: "Methods" },
+  ]);
+  rev = replaceComments(rev, [
+    { ref: "R1.1", reviewer: 1, text: "Shorten this section.", section: "" },
+    { ref: "R1.2", reviewer: 1, text: "Expand this section." },
+  ]);
+  assert.equal("section" in rev.comments[0], false);
+  assert.equal(rev.comments[1].section, "Methods");
+});
+
+test("numbered comments on reviewer head lines stay with their reviewer, with no block label", async () => {
+  let called = 0;
+  const r = await splitReview(
+    "Reviewer 1: 1. Add units.\nReviewer 2: 1. Add controls.\nReviewer 1: 2. State n.\n",
+    { oneshot: async () => (called++, { ok: false, error: "off" }) },
+  );
+  assert.equal(called, 0);
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.reviewer, c.section, c.text]),
+    [
+      ["R1.1", 1, undefined, "Add units."],
+      ["R2.1", 2, undefined, "Add controls."],
+      ["R1.2", 1, undefined, "State n."],
+    ],
+  );
+  // Nothing was renumbered: no block warning.
+  assert.deepEqual(r.warnings, []);
 });

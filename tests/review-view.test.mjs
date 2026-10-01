@@ -643,3 +643,31 @@ test("ledger candidates: label says what the check does; the rule drops the cand
   );
   assert.deepEqual(Object.keys(view.candidateRule(c)), ["kind", "text", "scope", "check"]);
 });
+
+test("an open requirement of a comment under a section names the section", () => {
+  const d = view.pendingDecisions({
+    comments: [
+      {
+        ref: "R1.1",
+        section: "Abstract",
+        requirements: [{ id: "q1", text: "Shorten this section." }],
+        changes: [],
+        blocked: [],
+      },
+      {
+        ref: "R1.2",
+        requirements: [{ id: "q1", text: "Add units." }],
+        changes: [],
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  });
+  assert.deepEqual(
+    d.requirements.map((x) => x.text),
+    [
+      "R1.1 (Abstract) q1 has no change: Shorten this section.",
+      "R1.2 q1 has no change: Add units.",
+    ],
+  );
+});

@@ -331,7 +331,8 @@ export function createReviewService({
         const since = rev.snapshot?.taken_at;
         return {
           requirements: c?.requirements ?? [],
-          comment_text: c?.text ?? "",
+          // With its section label: the split took it off the comment text.
+          comment_text: [c?.section, c?.text ?? ""].filter((x) => x !== undefined).join("\n"),
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
           recent_changes: since
@@ -357,6 +358,7 @@ export function createReviewService({
             kind: "requirement_link",
             input: {
               comment: comment?.text ?? "",
+              ...(comment?.section && { section: comment.section }),
               requirements: comment?.requirements ?? [],
               find: saved.find,
               text: saved.text,
@@ -610,6 +612,7 @@ export function createReviewService({
         hold(d, msg.ref, {
           reviewer: comment.reviewer,
           text: comment.text,
+          section: comment.section,
           requirements: comment.requirements,
         }),
       );
