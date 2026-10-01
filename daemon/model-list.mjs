@@ -102,16 +102,17 @@ export function resolveModelChoice(requested, state) {
   return "sonnet";
 }
 
-// What set_model does with a choice: the model to use and whether a
-// session of that pane must be restarted to run on it. prev: the model
-// recorded for the pane, undefined on its first set_model. before, after:
-// the list as it was when the request came and as it is once it is known.
-// On the first request a session may have started meanwhile, on the choice
-// as `before` allowed it; when `after` replaces that choice, it must follow.
-export function modelChange({ prev, requested, before, after }) {
-  const running = prev ?? resolveModelChoice(requested, before);
+// What set_model does with a choice: the model to use and whether the
+// session of that pane must be restarted to run on it. after: the account's
+// list, once it is known. running: the model the pane's session was started
+// on (index.mjs session.model); null when there is no session, or one that
+// has not read its model yet (it will read the one decided here).
+// The session's own model is the measure, not what the list allowed when
+// the request came: a session started while the list was awaited can be on
+// the replacement already, and restarting it would be for nothing.
+export function modelChange({ requested, after, running = null }) {
   const model = resolveModelChoice(requested, after);
-  return { model, restart: running !== model };
+  return { model, restart: running != null && running !== model };
 }
 
 export function createModelCache({

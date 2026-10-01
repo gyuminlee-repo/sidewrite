@@ -10,40 +10,37 @@ const code = src
   .filter((l) => !l.trim().startsWith("//"))
   .join("\n");
 
-test("the HTTP server, which carries /mcp, listens on loopback only", () => {
+test("the HTTP server listens on loopback only", () => {
   assert.match(code, /http\.listen\(HTTP_PORT, "127\.0\.0\.1"/);
   assert.equal(/http\.listen\(HTTP_PORT,\s*\(/.test(code), false, "no listen on every interface");
 });
 
-test("/mcp is handled before the CORS headers, OPTIONS and the bridge token of the pane files", () => {
-  const mcp = code.indexOf('mcpPath.startsWith("/mcp/")');
-  assert.ok(mcp > 0);
-  for (const later of [
-    "Access-Control-Allow-Origin",
-    'req.method === "OPTIONS"',
-    '"/bridge-token"',
-  ]) {
-    assert.ok(code.indexOf(later) > mcp, later);
-  }
-  // A path under /mcp never falls through to the file server.
-  assert.match(code.slice(mcp, mcp + 600), /res\.writeHead\(404\)\.end\(\);\s*return;/);
-});
-
-test("the endpoint serves the review service's recorder and the daemon's own review turns", () => {
-  assert.match(code, /getReviewTurn: \(key\) => reviewTurnByKey\.get\(key\) \?\? null/);
-  assert.match(code, /trackedEditDeps: \(key\) => review\.trackedEditDeps\(key\)/);
-});
-
-test("judgments go through the router; stop and shutdown reach a CLI turn", () => {
+test("judgments go through the router", () => {
   // One handle per job: provider and model are fixed when the job starts.
   assert.match(code, /oneshotJob: \(key\) => oneshotRouter\.pin\(key\)/);
-  assert.match(code, /if \(cliTurns\.stop\(key\)\)/);
-  assert.match(code, /cliTurns\.shutdown\(\)/);
   assert.match(code, /process\.on\("SIGTERM", shutdown\)/);
 });
 
+// Codex and agy are for judgments only: the daemon has no runner that gives a
+// CLI the office tools, no HTTP route for such a run, and a review turn goes
+// to the pane's Claude session and nowhere else.
+test("a review turn goes to the Claude session only: no CLI runner and no tool route for one", () => {
+  assert.equal(/createServer\(async \(req, res\) => \{\s*const \w+Path/.test(code), false);
+  assert.equal(
+    /startsWith\("\/\w+\/"\)/.test(code),
+    false,
+    "no route of its own on the HTTP server",
+  );
+  const at = code.indexOf("pushTurn: (key, host, text, turn) => {");
+  assert.ok(at > 0);
+  const body = code.slice(at, code.indexOf("oneshot: makeOneshot()", at));
+  assert.match(body, /bridge\.pushUserMessage\(text, key\);/);
+  assert.equal(/\.start\(/.test(body), false, "nothing else is started for a review turn");
+  assert.equal(/choice/.test(body), false);
+});
+
 test("no message registers the office tools with agy outside a turn, and no flag skips an approval", () => {
-  assert.equal(/agy_mcp_connect|agyMcpAddArgs/.test(code), false);
+  assert.equal(/agy_mcp_connect|"mcp",\s*"add"/.test(code), false);
   assert.equal(
     /dangerously|skip-permissions|accept-edits|approval_policy|bypass/i.test(code),
     false,
@@ -93,15 +90,39 @@ test("a Review refresh marks saved responses stale with the rule of the Response
   assert.match(code, /import \{ markStale \} from "\.\/response-quotes\.mjs";/);
 });
 
-test("set_model: the list as it was before the wait decides whether a running session follows", () => {
+test("set_model: the model the session runs on, read after the wait, decides whether it restarts", () => {
   const at = code.indexOf("set_model: async");
-  const body = code.slice(at, at + 1200);
-  assert.match(body, /const before = modelCache\.current\(\);/);
-  assert.ok(body.indexOf("modelCache.current()") < body.indexOf("await modelCache.get()"));
+  const body = code.slice(at, at + 1400);
+  // The session's own model, read once the list is known.
+  assert.match(body, /const after = await modelCache\.get\(\);/);
+  assert.match(body, /running: sessionFor\(key\)\?\.model \?\? null/);
+  assert.ok(body.indexOf("await modelCache.get()") < body.indexOf("sessionFor(key)?.model"));
+  assert.match(body, /if \(restart\)/);
+  assert.equal(/modelCache\.current\(\)/.test(body), false, "no guess from the list as it was");
+  // The restart that corrects the stored model on the first connection keeps
+  // a first message that is still waiting; a choice made later does not.
   assert.match(
     body,
-    /modelChange\(\{\s*prev,\s*requested,\s*before,\s*after: await modelCache\.get\(\),?\s*\}\)/,
+    /restartSession\(key, host, \{\s*reason: "model_changed",\s*keepQueued: prev === undefined,?\s*\}\)/,
   );
-  assert.match(body, /if \(restart\)/);
-  assert.equal(/prev !== undefined && prev !== model/.test(body), false);
+  // The session records the model it is started on, where query() gets it.
+  assert.match(code, /session\.model = modelArgFor\(key\);/);
+  assert.match(code, /model: session\.model,/);
+  // Its definition, the session start and getModel: query() reads it nowhere else.
+  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 3);
+});
+
+test("a restart that keeps waiting input does not drop it or end its turn", () => {
+  assert.match(code, /q\.latest = \{[^}]*keepQueued[^}]*\}/);
+  assert.match(code, /keepQueued: req\.keepQueued/);
+  const at = code.indexOf("async function startSessionForFolder");
+  const body = code.slice(at, at + 900);
+  assert.match(body, /const kept = bridge\.clearUserMessages\(key, \{ keepQueued \}\);/);
+  // A message still waiting belongs to the next session: its turn is not over.
+  assert.match(
+    body,
+    /if \(!kept\) endTurnState\(key, \{ ok: false, error: "The session was restarted\." \}\);/,
+  );
+  const restart = code.slice(code.indexOf("async function restartSession"));
+  assert.match(restart.slice(0, 700), /\{ replay: false, keepQueued \}/);
 });

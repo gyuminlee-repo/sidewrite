@@ -23,7 +23,7 @@ const ROWS = [
     label: "Ollama (local)",
     available: true,
     turn_ready: false,
-    turn_note: "Judgments only: no tool loop for this provider in this stage.",
+    turn_note: "Judgments only: review turns are not offered for this provider.",
     models: [{ value: "qwen3.5:9b" }],
   },
   {
@@ -169,7 +169,7 @@ test("review turns: a stored provider that cannot run them is refused; the probe
   await d.sel.restore("k", { turn: OLLAMA, oneshot: null }, async () => ROWS);
   await assert.rejects(
     d.sel.ready("k", "turn"),
-    /^Error: The stored provider for review turns cannot be used: Ollama \(local\) cannot run review turns\. Judgments only: no tool loop.*Nothing was sent to any provider\. Choose one in Setup, Providers\.$/,
+    /^Error: The stored provider for review turns cannot be used: Ollama \(local\) cannot run review turns\. Judgments only: review turns are not offered.*Nothing was sent to any provider\. Choose one in Setup, Providers\.$/,
   );
   assert.deepEqual(await d.sel.ready("k", "oneshot"), null);
 

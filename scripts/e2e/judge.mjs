@@ -191,12 +191,6 @@ export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = t
 export const CONDITIONS = {
   // A turn that ended on a Claude usage limit.
   "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
-  // A review turn run by a CLI provider. None starts when the provider is
-  // "judgments only" (the CLI will not call the office tools unattended).
-  "S25-33": { trigger: /^\[cli-turn\] start provider=codex /m },
-  "S25-34": { trigger: /^\[cli-turn\] start provider=codex /m },
-  "S25-35": { trigger: /^\[cli-turn\] start provider=antigravity /m },
-  "S25-36": { trigger: /^\[cli-turn\] start provider=/m },
 };
 const TURN_LOGGED = /^\[agent\] turn complete \(/m;
 
@@ -439,85 +433,6 @@ export function restartSplitEvidence({ provider, split, log, decisions }) {
     judgments,
     receipt_models,
     split_message: split?.message ?? null,
-  };
-}
-
-// What the log says about the review turns of one CLI provider.
-function cliTurnLog(provider, log) {
-  const text = String(log ?? "");
-  const p = escapeRe(provider);
-  return {
-    started: new RegExp(`^\\[cli-turn\\] start provider=${p} `, "m").test(text),
-    done: new RegExp(`^\\[cli-turn\\] done provider=${p} code=0 `, "m").test(text),
-    endpoint_calls: (text.match(/^\[mcp-http\] POST route=/gm) ?? []).length,
-  };
-}
-const selectedFor = (select, provider) => select?.selected?.id === provider && !select?.refused;
-const changesOf = (revision, ref) =>
-  (revision?.comments ?? []).find((c) => c.ref === ref)?.changes ?? [];
-
-// S25-33 (Codex) and S25-35 (Antigravity): one review turn of the provider on
-// `ref`. log: the daemon log lines of that turn; revision: the file after it.
-export function cliTurnEvidence({ provider, ref, select, log, revision }) {
-  const selected = selectedFor(select, provider);
-  const l = cliTurnLog(provider, selected ? log : "");
-  const changes = changesOf(revision, ref);
-  return {
-    pass:
-      selected &&
-      l.started &&
-      l.done &&
-      l.endpoint_calls > 0 &&
-      changes.length > 0 &&
-      changes.every((c) => c.word_comment_id != null),
-    provider,
-    ref,
-    ...l,
-    changes: selected ? changes.length : 0,
-    ...(selected ? {} : { reason: refusal(select) }),
-  };
-}
-
-// S25-34: a CLI turn on a comment whose request asks for a forbidden word.
-// document_changes: recorded changes of that comment whose new text holds the
-// word (must be 0: the edit is blocked, as in a Claude turn). The tool filter
-// of a CLI turn (no writer but office_tracked_edit) is tested in
-// tests/mcp-http.test.mjs and tests/review-turn-parity.test.mjs.
-export function guardEvidence({ provider, ref, forbidden, select, log, revision }) {
-  const selected = selectedFor(select, provider);
-  const l = cliTurnLog(provider, selected ? log : "");
-  const re = new RegExp(forbidden, "i");
-  const leaked = changesOf(revision, ref).filter((c) => re.test(String(c.text ?? "")));
-  const document_changes = selected && l.done ? leaked.length : null;
-  return {
-    pass: document_changes === 0,
-    document_changes,
-    blocked: new RegExp(`^\\[review\\] blocked ${escapeRe(ref)} by=`, "m").test(String(log ?? "")),
-    provider,
-    ref,
-    ...l,
-    ...(selected ? {} : { reason: refusal(select) }),
-  };
-}
-
-// S25-36. step: the `propose-stop` pane step; processes: CLI processes of
-// the provider still running after it.
-export function stopEvidence({ select, step, log, processes }) {
-  const provider = select?.selected?.id;
-  const selected = !!provider && provider !== "claude" && !select?.refused;
-  const started = selected && cliTurnLog(provider, log).started;
-  return {
-    pass:
-      selected &&
-      started &&
-      step?.stopped === true &&
-      step?.agent_status === "Ready" &&
-      processes === 0,
-    stopped: step?.stopped === true,
-    agent_status: step?.agent_status ?? null,
-    started,
-    processes,
-    ...(selected ? {} : { reason: refusal(select) }),
   };
 }
 

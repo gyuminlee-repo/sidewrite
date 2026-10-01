@@ -206,3 +206,32 @@ test("a result for a call cut by a disconnect is handed over when it comes on th
     await bridge.close();
   }
 });
+
+// A session of a pane is replaced: the reader of the old one is turned away
+// either way. Messages that no session has read yet are dropped, or kept for
+// the next session when the restart was not the user's (index.mjs: the
+// correction of the stored model on the first connection).
+test("clearUserMessages: waiting readers are rejected; queued messages are dropped, or kept on request", async () => {
+  const bridge = createBridge({ port: 0, token: "t", allowedOrigins: [] });
+  try {
+    await waitForListening(bridge);
+    const key = "word";
+    // Dropped by default.
+    bridge.pushUserMessage("first", key);
+    assert.equal(bridge.clearUserMessages(key), 0);
+    const reader = bridge.nextUserMessage(key);
+    // Nothing queued: the reader waits, and is rejected by either form.
+    assert.equal(bridge.clearUserMessages(key, { keepQueued: true }), 0);
+    await assert.rejects(reader, /Session aborted/);
+    // Kept on request: the next reader gets it, in order.
+    bridge.pushUserMessage("first", key);
+    bridge.pushUserMessage("second", key);
+    assert.equal(bridge.clearUserMessages(key, { keepQueued: true }), 2);
+    assert.equal((await bridge.nextUserMessage(key)).text, "first");
+    assert.equal((await bridge.nextUserMessage(key)).text, "second");
+    // A pane with no queue.
+    assert.equal(bridge.clearUserMessages("excel", { keepQueued: true }), 0);
+  } finally {
+    await bridge.close();
+  }
+});

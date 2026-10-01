@@ -38,8 +38,6 @@ import { createProviderSelection, providersListReply } from "./providers/selecti
 import { chatOneshot } from "./providers/openai-compat.mjs";
 import { codexOneshot } from "./providers/codex.mjs";
 import { agyOneshot } from "./providers/agy.mjs";
-import { createMcpHttp } from "./mcp-http.mjs";
-import { createCliTurns } from "./cli-turns.mjs";
 import {
   buildQueryOptions,
   formatUsageLine,
@@ -151,27 +149,7 @@ function sendError(req, res, status, headline, requestedPath) {
   }
 }
 
-// The office tools for a CLI provider's review turn (mcp-http.mjs), set
-// once the review service exists (below). Until then /mcp/ is not served.
-let mcpHttp = null;
-
 const http = createServer(async (req, res) => {
-  // /mcp/<route> first: it has its own checks (loopback peer and Host, no
-  // Origin, the route's bearer token) and takes no part in the CORS and
-  // OPTIONS handling of the task pane files below.
-  const mcpPath = (req.url || "/").split("?")[0];
-  if (mcpPath.startsWith("/mcp/")) {
-    try {
-      if (mcpHttp && (await mcpHttp.handle(req, res, mcpPath))) return;
-    } catch (e) {
-      console.warn("[mcp-http] request failed:", e?.message ?? e);
-      if (!res.headersSent) res.writeHead(500);
-      res.end();
-      return;
-    }
-    res.writeHead(404).end();
-    return;
-  }
   // Restrictive CORS: only the taskpane's same origin (HTTP_ORIGIN) gets the
   // Access-Control-Allow-Origin header. Other origins (malicious web pages
   // running in a regular browser tab) hit a no-CORS-header response and the
@@ -408,13 +386,20 @@ async function sendTranscriptReplayTo(key, host, cwd) {
 // reaches `init`.
 const startQueue = new Map(); // key -> { running: boolean, latest: req | null }
 
-function scheduleSessionStart(cwd, sessionId, key, host, reason, { replay = true } = {}) {
+function scheduleSessionStart(
+  cwd,
+  sessionId,
+  key,
+  host,
+  reason,
+  { replay = true, keepQueued = false } = {},
+) {
   let q = startQueue.get(key);
   if (!q) {
     q = { running: false, latest: null };
     startQueue.set(key, q);
   }
-  q.latest = { cwd, resumeId: sessionId, host: host ?? null, reason, replay };
+  q.latest = { cwd, resumeId: sessionId, host: host ?? null, reason, replay, keepQueued };
   if (q.running) return; // the active runner will pick up `latest`
   q.running = true;
   setImmediate(() => runStartQueue(key));
@@ -434,6 +419,7 @@ async function runStartQueue(key) {
         key,
         host: req.host,
         replay: req.replay,
+        keepQueued: req.keepQueued,
       });
     } catch (err) {
       console.error(`[daemon] ${req.reason} session start failed:`, err?.message ?? err);
@@ -580,29 +566,17 @@ const review = createReviewService({
         "The agent is still working on the previous message. Wait until it is Ready.",
       );
     }
-    // The provider the pane chose for review turns (set_provider checked it
-    // against the probe). Claude: the pane's Agent SDK session, as before.
-    const choice = selection.choiceFor(key, "turn");
+    // A review turn is a turn of the pane's Agent SDK session: Claude is the
+    // only provider offered for review turns (probe.mjs; turnGate below has
+    // waited for the pane's confirmed choice and refuses any other).
     turnBusy.add(key);
     reviewTurnByKey.set(key, turn);
-    if (choice.id === "claude") {
-      // Same order as the user_message path in the bridge: schedule the loop,
-      // then queue the message it will consume.
-      ensureLoopForMessage(key, host).catch((e) =>
-        console.warn("[review] could not start the agent loop:", e.message),
-      );
-      bridge.pushUserMessage(text, key);
-      return;
-    }
-    // A CLI has no separate system prompt: the host instructions go in front.
-    buildSystemPromptAppend(host)
-      .then((append) => cliTurns.start(key, host, `${append}\n\n${text}`, choice, turn))
-      .catch((e) => {
-        const error = e?.message ?? String(e);
-        bridge.sendAssistantEvent({ event: "error", error }, key);
-        bridge.sendAssistantEvent({ event: "turn_complete", subtype: "error" }, key);
-        endTurnState(key, { ok: false, error });
-      });
+    // Same order as the user_message path in the bridge: schedule the loop,
+    // then queue the message it will consume.
+    ensureLoopForMessage(key, host).catch((e) =>
+      console.warn("[review] could not start the agent loop:", e.message),
+    );
+    bridge.pushUserMessage(text, key);
   },
   oneshot: makeOneshot(),
   oneshotModel: ONESHOT_MODEL,
@@ -611,10 +585,7 @@ const review = createReviewService({
   oneshotJob: (key) => oneshotRouter.pin(key),
   // A review turn starts only with a confirmed provider for review turns.
   turnGate: (key) => selection.ready(key, "turn"),
-  getModel: (key) => {
-    const t = selection.choiceFor(key, "turn");
-    return t.id === "claude" ? modelArgFor(key) : `${t.id}:${t.model ?? "default"}`;
-  },
+  getModel: (key) => modelArgFor(key),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
   // The answers of the response letter that a change of the manuscript made
   // out of date (same rule as the Response tab).
@@ -635,21 +606,6 @@ const aux = createAuxService({
   getContext: (key) => bridge.getContext(key),
   oneshotFor: (key, options) => oneshotRouter.pin(key, options),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
-});
-
-// Review turns of a CLI provider: the MCP endpoint they call and their
-// runner. A route is open only while its turn runs (cli-turns.mjs).
-mcpHttp = createMcpHttp({
-  bridge: { callTaskpaneTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key) },
-  getReviewTurn: (key) => reviewTurnByKey.get(key) ?? null,
-  trackedEditDeps: (key) => review.trackedEditDeps(key),
-});
-const cliTurns = createCliTurns({
-  mcpHttp,
-  baseUrl: HTTP_ORIGIN,
-  sendText: (text, key) => bridge.sendAssistantText(text, key),
-  sendEvent: (event, key) => bridge.sendAssistantEvent(event, key),
-  endTurn: (key, outcome) => endTurnState(key, outcome),
 });
 
 // Clear per-turn state when a turn ends for any reason. outcome: how it
@@ -778,11 +734,6 @@ const bridge = createBridge({
       // flag the session interrupted) emits turn_complete interrupted so
       // the taskpane flips to Ready and auto-restarts a resuming loop.
       // Every other pane's loop is untouched.
-      // A CLI provider's review turn first: it is not an SDK session.
-      if (cliTurns.stop(key)) {
-        reply({ type: "stop_agent_result", ok: true, request_id: msg.request_id });
-        return;
-      }
       const s = sessionFor(key);
       if (s) {
         s.interrupted = true;
@@ -891,25 +842,28 @@ const bridge = createBridge({
       // Recorded before the list is awaited, so a first message sent
       // meanwhile does not start on "sonnet"; modelArgFor checks it again.
       if (prev === undefined) modelByKey.set(key, requested);
-      const before = modelCache.current();
+      const after = await modelCache.get();
+      // Read after the wait: a session a first message started meanwhile
+      // has recorded the model it runs on (session.model).
       const { model, restart } = modelChange({
-        prev,
         requested,
-        before,
-        after: await modelCache.get(),
+        after,
+        running: sessionFor(key)?.model ?? null,
       });
       modelByKey.set(key, model);
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
       // Relaunch when the model a session of this pane runs on is not the
       // one just decided: a later choice that differs, or, on the first
       // connect, a session that a message started while the list was awaited
-      // and whose model the list then replaced. restartSession itself no-ops
-      // when there is no session.
+      // and whose model the list then replaced. On the first connect the
+      // restart is not the user's: a first message no session has read yet
+      // stays for the new one (keepQueued).
       if (restart) {
         console.log(`[daemon] model changed → ${model} (key bound); restarting loop`);
-        restartSession(key, host, { reason: "model_changed" }).catch((err) =>
-          console.warn("[daemon] restart after model change failed:", err.message),
-        );
+        restartSession(key, host, {
+          reason: "model_changed",
+          keepQueued: prev === undefined,
+        }).catch((err) => console.warn("[daemon] restart after model change failed:", err.message));
       }
     },
     set_context: async (msg, reply, key, host) => {
@@ -1246,7 +1200,7 @@ function renderContextHeader(ctx) {
 async function startSessionForFolder(
   cwd,
   resumeSessionId = null,
-  { key = null, host = null, replay = true } = {},
+  { key = null, host = null, replay = true, keepQueued = false } = {},
 ) {
   // Only when actually superseding a live session for THIS pane: abort it
   // and drain its queue (same-pane restart: workspace switch, config
@@ -1259,8 +1213,10 @@ async function startSessionForFolder(
   const prior = sessionFor(key);
   if (prior) {
     prior.abortController.abort();
-    bridge.clearUserMessages(key);
-    endTurnState(key, { ok: false, error: "The session was restarted." });
+    // keepQueued (the model correction of the first connect): a message the
+    // prior session has not read stays in the queue, and its turn with it.
+    const kept = bridge.clearUserMessages(key, { keepQueued });
+    if (!kept) endTurnState(key, { ok: false, error: "The session was restarted." });
   }
 
   const abortController = new AbortController();
@@ -1323,6 +1279,9 @@ async function startSessionForFolder(
   const RATE_LIMIT_RE =
     /(usage limit|rate limit|daily limit|weekly limit|quota|too many requests|429|limit reached|limit will reset|resets? at|upgrade to|out of (?:credits|quota))/i;
 
+  // The model this session runs on, recorded where query() is given it:
+  // set_model compares it with the model it decides.
+  session.model = modelArgFor(key);
   // Fire-and-forget; index.mjs keeps running while the agent loop iterates.
   (async () => {
     try {
@@ -1336,7 +1295,7 @@ async function startSessionForFolder(
           disallowedTools: WORD_MCP_DISALLOWED,
           canUseTool: customPermissionHandler,
           // User-chosen model (composer dropdown); always explicit.
-          model: modelArgFor(key),
+          model: session.model,
           abortController,
           // Surface the SDK CLI's stderr in the daemon log and sniff it for
           // usage-limit phrasing (see RATE_LIMIT_RE above).
@@ -1456,7 +1415,7 @@ async function switchFolder(rawCwd, key, host = null) {
 // changes to CLAUDE.md, the drafting setup, or other config loaded at
 // session-init take effect without losing conversation history. No-op if
 // that pane has no live loop.
-async function restartSession(key, host, { reason = "config_changed" } = {}) {
+async function restartSession(key, host, { reason = "config_changed", keepQueued = false } = {}) {
   const s = sessionFor(key);
   if (!s) return;
   const { cwd, sessionId } = s;
@@ -1465,7 +1424,7 @@ async function restartSession(key, host, { reason = "config_changed" } = {}) {
   // Funnel through the serialized per-key queue (not a direct
   // startSessionForFolder) so a config/model restart coalesces with any
   // concurrent post-Stop / first-message start instead of racing it.
-  scheduleSessionStart(cwd, sessionId, key, host, reason, { replay: false });
+  scheduleSessionStart(cwd, sessionId, key, host, reason, { replay: false, keepQueued });
 }
 
 function handleAgentMessage(msg, session) {
@@ -1607,14 +1566,9 @@ if (process.send) {
 }
 
 // Keep process alive even when nothing is happening.
-// A running CLI review turn is stopped first: that also takes the turn's
-// office entry (route and token) out of the agy settings.
 function shutdown() {
   console.log("\n[daemon] Shutting down");
-  const bye = () => process.exit(0);
-  const limit = setTimeout(bye, 8_000);
-  limit.unref?.();
-  cliTurns.shutdown().then(bye, bye);
+  process.exit(0);
 }
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

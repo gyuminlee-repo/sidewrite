@@ -1,13 +1,15 @@
 // Provider presets (P14), in three tiers:
 //   subscription  a CLI the user is signed in to (Claude Agent SDK, Codex,
-//                 Antigravity). Can run review turns and one-shot judgments.
+//                 Antigravity). One-shot judgments; review turns for Claude
+//                 only.
 //   local         Ollama on this machine. One-shot judgments only.
 //   key           an API key the user enters (provider-keys.json or an
 //                 environment variable). One-shot judgments only, and off
 //                 until the user turns it on: the manuscript leaves the
 //                 machine under that provider's terms.
-// Review turns need tool calls; a key or local provider has no tool loop in
-// this stage, so `roles` leaves "turn" out for them.
+// A review turn changes the manuscript through the office tools. Only the
+// Claude Agent SDK session is given them, so `roles` leaves "turn" out for
+// every other provider: Codex and Antigravity too (probe.mjs says why).
 //
 // policy: one line shown next to the provider in the task pane. "(unverified)"
 // marks a statement taken from a search summary, not from the provider's own
@@ -26,7 +28,7 @@ export const PRESETS = Object.freeze([
     id: "codex",
     tier: "subscription",
     label: "Codex CLI (ChatGPT sign-in)",
-    roles: ["turn", "oneshot"],
+    roles: ["oneshot"],
     defaultEnabled: true,
     policy: "Your ChatGPT plan terms apply.",
   },
@@ -34,7 +36,7 @@ export const PRESETS = Object.freeze([
     id: "antigravity",
     tier: "subscription",
     label: "Antigravity CLI (agy)",
-    roles: ["turn", "oneshot"],
+    roles: ["oneshot"],
     defaultEnabled: true,
     policy: "Your Google account terms apply.",
   },

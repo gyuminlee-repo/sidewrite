@@ -15,3 +15,6 @@ examples/*/CLAUDE.md
 # Local-only scratch (also gitignored).
 PORT_TO_OFFICE_ADDINS.md
 AGENTS.md
+
+# Session notes a local hook writes here; never committed.
+notes/
