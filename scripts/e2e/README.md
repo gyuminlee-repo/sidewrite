@@ -439,8 +439,9 @@ manuscript. One review turn per comment, in order; a turn that fails or runs
 longer than `--turn-minutes` is recorded and the next comment goes on. Word
 and the resident daemon are handled as in the acceptance run.
 
-Before the run a Word of its own is asked whether it opens the file as it
-is. A file Word wants to repair ends the run with "run again with --repair";
+Before the run a Word of its own is asked whether it opens the copy the run
+will use (the add-in tagged on) as it is, with the same call as the Word judge
+of the marked copies (`OpenReadOnly` in `word-own.ps1`). A file Word wants to repair ends the run with "run again with --repair";
 with `--repair` Word opens it with Open and Repair, saves a repaired copy in
 the run folder and the run uses that copy (`summary.txt` says so). The given
 file is copied once and never opened in Word itself.

@@ -11,11 +11,12 @@
 //     [--only R1.1,R2.3] [--instructions <txt>] [--forbid <txt>] \
 //     [--draft-responses] [--turn-minutes 10] [--repair]
 //
-// Before the run, a Word of its own is asked whether it opens the file as it
-// is. A file Word wants to repair ends the run ("run again with --repair");
-// with --repair Word opens it with Open and Repair and saves a repaired copy
-// in the run folder, and the run goes on with that copy (summary.txt says
-// so). The three models (Edits, Writing, Judgments) are chosen in Setup; the
+// Before the run, a Word of its own is asked whether it opens the copy the
+// run will use (the add-in tagged on) as it is. A file Word wants to repair
+// ends the run ("run again with --repair"); with --repair Word opens the
+// manuscript with Open and Repair and saves a repaired copy in the run
+// folder, the run's copy is made from that one and asked about again
+// (summary.txt says so). The three models (Edits, Writing, Judgments) are chosen in Setup; the
 // pane's own line says what ran, and a model other than the one asked for
 // fails the run.
 //
@@ -347,46 +348,66 @@ function stopOwn(pid) {
   }
 }
 
-// Does Word open the copy as it is? In a Word of its own (replay-open.ps1),
-// which is gone before the run starts. Returns the file the run uses.
-function openCheck() {
+// One run of replay-open.ps1 in a Word of its own, which is gone afterwards
+// whatever happened in it. file: what is opened; repairTo: with it, the file
+// is opened with Open and Repair and saved under that name.
+let checks = 0;
+function wordOpens(file, repairTo = null) {
   const anchor = path.join(RUN, "anchor.docx");
-  const pidFile = path.join(RUN, "open-check-pid.json");
-  fs.copyFileSync(path.join(REPO, "tests/fixtures/spike_manuscript.docx"), anchor);
+  const pidFile = path.join(RUN, `open-check-${++checks}-pid.json`);
+  if (!fs.existsSync(anchor))
+    fs.copyFileSync(path.join(REPO, "tests/fixtures/spike_manuscript.docx"), anchor);
   let r;
   try {
     r = powershell(
       "replay-open.ps1",
       [
-        ...["-Doc", winPath(SOURCE), "-Anchor", winPath(anchor)],
+        ...["-File", winPath(file), "-Anchor", winPath(anchor)],
         ...["-AllowDir", winPath(RUN), "-PidFile", winPath(pidFile)],
-        ...(opt.repair ? ["-RepairTo", winPath(REPAIRED)] : []),
+        ...(repairTo ? ["-RepairTo", winPath(repairTo)] : []),
       ],
       5 * 60_000,
     );
   } catch (e) {
     r = { ok: false, error: e.message };
   }
-  record.word.open_check = r;
-  // The Word of the check must be gone, whatever happened in it.
+  (record.word.open_checks ??= []).push({ file: path.basename(file), repair: !!repairTo, ...r });
   const pid =
     r.pid ??
     (fs.existsSync(pidFile)
       ? JSON.parse(fs.readFileSync(pidFile, "utf8").replace(/^\uFEFF/, "")).pid
       : null);
-  if (pid && wordPids().includes(pid)) record.word.open_check_stopped = stopOwn(pid);
-  if (r.opens) return { file: SOURCE, source: "opened as it is" };
-  if (r.repaired && fs.existsSync(REPAIRED))
-    return {
-      file: REPAIRED,
-      source:
-        "Word could not open the file as it is; the run used the copy Word repaired (Open and Repair)",
-    };
-  if (r.ok !== false && !opt.repair)
-    throw new Error("Word needs to repair this file; run again with --repair");
-  throw new Error(
-    `Word could not open the manuscript: ${r.repair_error ?? r.open_error ?? r.error ?? "no answer"}`,
+  if (pid && wordPids().includes(pid)) r.stopped = stopOwn(pid);
+  save();
+  return r;
+}
+
+const embed = (src) => {
+  fs.rmSync(DOC, { force: true });
+  execFileSync(
+    "python3",
+    [path.join(HERE, "embed_taskpane.py"), "--manifest", opt.manifest, "--src", src, "--out", DOC],
+    { stdio: "inherit" },
   );
+};
+
+// The copy the pane opens (the add-in tagged on, embed_taskpane.py), made
+// from the manuscript, and the check that Word opens exactly that file as it
+// is. Returns how the manuscript came to be opened, for summary.txt.
+function prepareCopy() {
+  const why = (r) => r.repair_error ?? r.open_error ?? r.error ?? "no answer";
+  embed(SOURCE);
+  const first = wordOpens(DOC);
+  if (first.opens) return "opened as it is";
+  if (first.ok === false) throw new Error(`the open check did not run: ${why(first)}`);
+  if (!opt.repair) throw new Error("Word needs to repair this file; run again with --repair");
+  const fixed = wordOpens(SOURCE, REPAIRED);
+  if (!fixed.repaired || !fs.existsSync(REPAIRED))
+    throw new Error(`Word could not repair the manuscript: ${why(fixed)}`);
+  embed(REPAIRED);
+  const second = wordOpens(DOC);
+  if (!second.opens) throw new Error(`Word does not open the repaired copy either: ${why(second)}`);
+  return "Word could not open the file as it is; the run used the copy Word repaired (Open and Repair)";
 }
 
 // ---- the run ---------------------------------------------------------------
@@ -406,29 +427,16 @@ async function setup() {
   // The manuscript is read once, into the run folder; Word only ever sees
   // copies.
   fs.copyFileSync(opt.manuscript, SOURCE);
-  const opened = openCheck();
-  record.source = opened.source;
-  save();
-  console.log(`ok    open check: ${opened.source}`);
+  // The resident daemon first: the pane of the copy that the open check
+  // opens must not find a daemon to talk to.
   resident = pauseResident();
   if (resident.paused)
     await until(() => !listening(WS_PORT) && !listening(HTTP_PORT), 10_000, "ports free");
   if (listening(WS_PORT) || listening(HTTP_PORT))
     throw new Error(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
-  // The copy the pane opens, with the add-in tagged on (embed_taskpane.py).
-  execFileSync(
-    "python3",
-    [
-      path.join(HERE, "embed_taskpane.py"),
-      "--manifest",
-      opt.manifest,
-      "--src",
-      opened.file,
-      "--out",
-      DOC,
-    ],
-    { stdio: "inherit" },
-  );
+  record.source = prepareCopy();
+  save();
+  console.log(`ok    open check: ${record.source}`);
   await startDaemon();
   const launch = powershell("word-launch.ps1", [
     "-DocPath",

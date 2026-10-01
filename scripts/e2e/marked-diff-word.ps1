@@ -75,8 +75,7 @@ function RunJob($app, $job) {
   if ((OpenNames $app) -contains $job.path) { $res.error = "the file is still open from an earlier job"; return $res }
   $doc = $null
   try {
-    # Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles)
-    $doc = $app.Documents.Open($job.path, $false, $true, $false)
+    $doc = OpenReadOnly $app $job.path
   } catch {
     $res.error = "open: " + $_.Exception.Message
     return $res

@@ -402,16 +402,64 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // eslint-disable-next-line no-control-regex
   assert.doesNotMatch(open, /[^\x00-\x7f]/);
   assert.match(open, /word-own\.ps1/);
-  assert.match(open, /QuitOwnWord \$app \$d \$p \$ours/);
-  assert.ok(open.indexOf("(Under $Doc)") < open.indexOf("Documents.Open("));
+  assert.match(open, /QuitOwnWord \$app \$anchorDoc \$p \$ours/);
+  assert.ok(open.indexOf("(Under $File)") < open.indexOf("OpenReadOnly $app $File"));
   assert.ok(open.indexOf("(Under $RepairTo)") < open.indexOf("SaveAs2("));
+  // The plain open is the one call of word-own.ps1 that the Word judge of
+  // the marked copies uses too: one place, one meaning of "Word opens it".
+  const own = read("../scripts/e2e/word-own.ps1");
+  assert.match(
+    own,
+    /function OpenReadOnly\(\$app, \[string\]\$path\) \{\s*return \$app\.Documents\.Open\(\$path, \$false, \$true, \$false\)\s*\}/,
+  );
+  const judge = read("../scripts/e2e/marked-diff-word.ps1");
+  assert.match(judge, /\$doc = OpenReadOnly \$app \$job\.path/);
+  assert.doesNotMatch(judge, /Documents\.Open\(/);
+  // The only Documents.Open written out here is the one with Open and Repair.
+  assert.equal((open.match(/Documents\.Open\(/g) ?? []).length, 1);
+  assert.match(open, /Documents\.Open\(\$File, \$false, \$true, \$false, (?:\$m, ){8}\$true\)/);
+  // An open that gives nothing usable is not "opens".
+  assert.match(open, /\$opened\.FullName -ne \$File/);
+  assert.match(open, /\$count -lt 1/);
+  // PowerShell does not tell $Doc from $doc (that made the first open check
+  // pass on a file Word cannot open): in the scripts of the replay every
+  // variable has one spelling.
+  for (const src of [open, save]) {
+    const spellings = new Map();
+    for (const [, name] of src.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      const key = name.toLowerCase();
+      if (!spellings.has(key)) spellings.set(key, new Set());
+      spellings.get(key).add(name);
+    }
+    for (const [key, set] of spellings)
+      assert.equal(set.size, 1, `$${key} is written as ${[...set].join(" and ")}`);
+  }
   assert.equal((open.match(/SaveAs2\(/g) ?? []).length, 2);
   assert.doesNotMatch(open, /\$doc\.Save\(\)/);
   // The runner copies the manuscript first and gives Word only copies; a
   // file Word must repair stops the run unless --repair is given.
   assert.ok(
     runner.indexOf("fs.copyFileSync(opt.manuscript, SOURCE)") <
-      runner.indexOf("openCheck()", runner.indexOf("async function setup")),
+      runner.indexOf("prepareCopy()", runner.indexOf("async function setup")),
+  );
+  // What is asked about is the file the run opens (the add-in tagged on),
+  // also after a repair; and the resident daemon is paused before it.
+  const prep = runner.slice(
+    runner.indexOf("function prepareCopy()"),
+    runner.indexOf("// ---- the run"),
+  );
+  assert.deepEqual(
+    [...prep.matchAll(/wordOpens\(([^)]*)\)/g)].map((m) => m[1]),
+    ["DOC", "SOURCE, REPAIRED", "DOC"],
+  );
+  assert.deepEqual(
+    [...prep.matchAll(/embed\((\w+)\)/g)].map((m) => m[1]),
+    ["SOURCE", "REPAIRED"],
+  );
+  const setupAt = runner.indexOf("async function setup");
+  assert.ok(runner.indexOf("pauseResident()", setupAt) < runner.indexOf("prepareCopy()", setupAt));
+  assert.ok(
+    runner.indexOf("prepareCopy()", setupAt) < runner.indexOf("await startDaemon()", setupAt),
   );
   // Read in two places only: the check of its name, and that copy.
   assert.equal((runner.match(/opt\.manuscript/g) ?? []).length, 2);
