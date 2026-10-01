@@ -144,7 +144,7 @@ function world(over = {}) {
         calls.push(`exists ${path}`);
         return over.credentials ?? true;
       },
-      env: { USER: "tester", HOME: "/home/tester", WSL_DISTRO_NAME: "Ubuntu", ...over.env },
+      env: { USER: "tester", HOME: "/home/u", WSL_DISTRO_NAME: "Ubuntu", ...over.env },
       nodeVersion: "v20.11.1",
     },
   };
@@ -155,7 +155,7 @@ test("collectFacts: reads each fact with one command and judges clean on a good 
   const facts = await collectFacts(w.deps);
   assert.deepEqual(facts, GOOD);
   assert.equal(failures(judgeDoctor(facts)), 0);
-  assert.ok(w.calls.includes("exists /home/tester/.claude/.credentials.json"));
+  assert.ok(w.calls.includes("exists /home/u/.claude/.credentials.json"));
   assert.ok(w.calls.includes("GET http://127.0.0.1:47834/health"));
   const ps = w.calls.find((c) => c.startsWith("powershell.exe"));
   assert.match(ps, /^powershell\.exe -NoProfile -Command /);
