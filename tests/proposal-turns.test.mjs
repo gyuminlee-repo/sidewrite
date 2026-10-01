@@ -9,7 +9,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createReviewService } from "../daemon/review-service.mjs";
-import { createProposalTurns } from "../daemon/proposal-turns.mjs";
+import { createProposalTurns, proposalTurnsFor } from "../daemon/proposal-turns.mjs";
 import { PROPOSAL_JSON_SCHEMA } from "../daemon/proposal.mjs";
 import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 import {
@@ -708,11 +708,11 @@ test("no proposals with a note is a turn that worked; proposals that all fail th
   try {
     none.start();
     await none.turnEnded();
-    assert.deepEqual(none.ended, [["k", { ok: true }]]);
-    assert.deepEqual(none.texts(), [
-      "0 proposals received.\n",
-      "Section 3 is not among the paragraphs.\n",
-    ]);
+    const notice =
+      "0 of 1 request has a proposed change; q1 has none: Section 3 is not among the paragraphs.";
+    assert.deepEqual(none.ended, [["k", { ok: true, notice }]]);
+    assert.deepEqual(none.texts(), ["0 proposals received.\n", `${notice}\n`]);
+    assert.deepEqual((await none.batch())[0].output.uncovered, ["q1"]);
   } finally {
     await none.cleanup();
   }
@@ -743,7 +743,9 @@ test("the receipt: one proposal_batch line per turn, with ids and outcomes and n
       "snapshot_taken_at",
       "stopped_at",
       "turn_id",
+      "uncovered",
     ]);
+    assert.deepEqual(b.output.uncovered, []);
     assert.deepEqual(b.output.proposals[0], {
       id: "P1",
       paragraph_id: "p1",
@@ -857,5 +859,182 @@ test("two panes run side by side; a second turn on one pane is refused; shutdown
     assert.equal(t.turns.running("k2"), false);
   } finally {
     await t.cleanup();
+  }
+});
+
+// A request of the comment that no change answers is said when the turn
+// ends, in the chat and with the end of the turn (the Review tab shows it):
+// a turn that ends as a success with a request left open would be missed.
+test("a request no change answers is named at the end of a turn that worked", async () => {
+  const two = [THREE[1], THREE[2]]; // neither names q1
+  const t = await setup({ generate: async () => reply(two) });
+  try {
+    t.start();
+    await t.turnEnded();
+    const notice = "0 of 1 request has a proposed change; q1 has none.";
+    assert.deepEqual(t.ended, [["k", { ok: true, notice }]]);
+    assert.deepEqual(t.texts(), [
+      "2 proposals received.\n",
+      "2 proposals: 2 applied.\n",
+      `${notice}\n`,
+    ]);
+    assert.deepEqual((await t.batch())[0].output.uncovered, ["q1"]);
+  } finally {
+    await t.cleanup();
+  }
+  // A note with proposals and every request answered: the note is shown alone.
+  const noted = await setup({ generate: async () => reply(THREE, "The unit was assumed.") });
+  try {
+    noted.start();
+    await noted.turnEnded();
+    assert.deepEqual(noted.ended, [["k", { ok: true }]]);
+    assert.deepEqual(noted.texts(), [
+      "3 proposals received.\n",
+      "3 proposals: 3 applied.\n",
+      "The unit was assumed.\n",
+    ]);
+  } finally {
+    await noted.cleanup();
+  }
+  // A turn that failed or was stopped says why it ended, not this.
+  const failed = await setup({ generate: async () => reply([P({ find: "not there" })]) });
+  try {
+    failed.start();
+    await failed.turnEnded();
+    assert.deepEqual(failed.ended, [["k", { ok: false, error: "No proposal could be placed." }]]);
+  } finally {
+    await failed.cleanup();
+  }
+});
+
+// What a turn would send, without sending it (Preview prompt in the Review
+// tab): the same system text and prompt as the turn itself.
+test("preview gives the request of the turn and asks nobody", async () => {
+  const t = await setup();
+  try {
+    const at = t.svc.trackedEditDeps("k").begin();
+    const p = await t.turns.preview("k", { ref: "R1.1" }, { at, selected: [], choice: CODEX });
+    assert.equal(p.ok, true);
+    assert.equal(t.asked.length, 0);
+    assert.equal(t.out.length, 0, "nothing goes to the pane");
+    t.start();
+    await t.turnEnded();
+    assert.deepEqual([p.system, p.prompt], [t.asked[0].system, t.asked[0].prompt]);
+    const sel = await t.turns.preview(
+      "k",
+      { ref: "R1.1" },
+      { at, selected: [{ index: 3 }], choice: CODEX },
+    );
+    assert.equal(sel.scope, "selection");
+    // A refusal is the answer, in the words of the turn.
+    const no = await t.turns.preview(
+      "k",
+      { ref: "R1.1" },
+      { at, selected: [], choice: { id: "ollama", model: "qwen3.5:9b" } },
+    );
+    assert.deepEqual(no, { ok: false, message: "Ollama (local) does not run proposal turns." });
+    const gone = await t.turns.preview("k", { ref: "R7.7" }, { at, selected: [], choice: CODEX });
+    assert.deepEqual(gone, { ok: false, message: "No reviewer comment R7.7." });
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// The one place where the runner meets the bridge and the review service
+// (index.mjs calls it). The bridge takes (text, key) and (event, key); the
+// review service sends its own events as (key, obj). A swapped pair would
+// send a turn's text to no pane.
+test("proposalTurnsFor: the runner's lines, events and Word calls reach the bridge in its argument order", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "proposal-wiring-"));
+  const doc = join(dir, "k.docx");
+  const seen = { text: [], event: [], tool: [], review: [], ended: [] };
+  const svc = createReviewService({
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    callTool: null,
+    pushTurn: () => {},
+    sendEvent: (key, obj) => seen.review.push([key, obj.event]),
+    log: () => {},
+    env: { ...ENV, CC_OFFICE_REVIEW_PROMPT_FORBID: "0" },
+  });
+  const ask = (type, payload) =>
+    new Promise((resolve) =>
+      svc.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+    );
+  try {
+    await ask("review_save_comments", { comments: [COMMENT] });
+    await ask("ledger_add", {
+      item: {
+        kind: "forbid",
+        text: "novel 금지",
+        check: { type: "regex", pattern: "novel", flags: "i" },
+      },
+    });
+    await withRevision(revisionPathFor(doc), doc, (rev) =>
+      setSnapshot(rev, PARAGRAPHS, new Date(Date.now() - 60_000)),
+    );
+    const asked = [];
+    let done;
+    const ended = new Promise((r) => (done = r));
+    const turns = proposalTurnsFor({
+      bridge: {
+        sendAssistantText: (...a) => seen.text.push(a),
+        sendAssistantEvent: (...a) => seen.event.push(a),
+        callTaskpaneTool: async (...a) => {
+          seen.tool.push(a);
+          return {
+            ok: true,
+            word_comment_id: 7,
+            paragraph_index: 1,
+            before: "b",
+            after: "a",
+            target_checked: true,
+          };
+        },
+      },
+      review: svc,
+      router: {
+        handleFor: (choice) => ({
+          model: `codex:${choice.model}`,
+          run: async (req) => (asked.push(req), reply([THREE[0]])),
+        }),
+      },
+      endTurn: (...a) => (seen.ended.push(a), done()),
+      env: { CC_OFFICE_PROPOSAL_TIMEOUT_MS: "1234" },
+      log: () => {},
+    });
+    await turns.start(
+      "k",
+      "word",
+      { ref: "R1.1" },
+      { at: svc.at("k"), selected: [], choice: CODEX },
+    );
+    await ended;
+    assert.deepEqual(seen.text, [
+      ["1 proposal received.\n", "k"],
+      ["1 proposal: 1 applied.\n", "k"],
+    ]);
+    assert.deepEqual(
+      seen.event.map(([e, key]) => [e.event, key]),
+      [
+        ["tool_use_announce", "k"],
+        ["turn_complete", "k"],
+      ],
+    );
+    assert.deepEqual(
+      seen.tool.map(([name, args, key]) => [name, args.find, key]),
+      [["office_tracked_edit", "30 degrees", "k"]],
+    );
+    assert.deepEqual(seen.review, [["k", "change_recorded"]]);
+    assert.deepEqual(seen.ended, [["k", { ok: true }]]);
+    // The time limit of the environment and the forbid switch of the review
+    // service (one switch for both kinds of turn) reach the request.
+    assert.equal(asked[0].timeoutMs, 1234);
+    assert.equal(
+      asked[0].prompt.includes("novel"),
+      false,
+      "forbid rules left out as for a Claude turn",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

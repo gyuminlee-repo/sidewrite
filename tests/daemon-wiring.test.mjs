@@ -108,3 +108,38 @@ test("a restart that keeps waiting input does not drop it or end its turn", () =
   const restart = code.slice(code.indexOf("async function restartSession"));
   assert.match(restart.slice(0, 700), /\{ replay: false, keepQueued \}/);
 });
+
+// Proposal turns (Codex): the review service decides per request whether the
+// pane's provider proposes, the turn it queues carries the choice, and
+// pushTurn starts the runner for it. A Stop reaches a request that has not
+// become a turn yet, then the runner, then the Claude session.
+test("a review turn of a proposing provider goes to the proposal runner; Stop and shutdown reach it", () => {
+  assert.match(
+    code,
+    /const proposalTurns = proposalTurnsFor\(\{\s*bridge,\s*review,\s*router: oneshotRouter,\s*endTurn: \(key, outcome\) => endTurnState\(key, outcome\),?\s*\}\);/,
+  );
+  // The mode is read from the registry, for the choice of the pane.
+  const dep = code.slice(code.indexOf("proposalPreview: async (key, ref, source) =>"));
+  assert.match(dep.slice(0, 700), /selection\.choiceFor\(key, "turn"\)/);
+  assert.match(dep.slice(0, 700), /turnMode === "agent"\) return null;/);
+  assert.match(dep.slice(0, 700), /turnMode !== "proposal"\) \{\s*throw new Error\(/);
+  assert.match(
+    dep.slice(0, 900),
+    /proposalTurns\.preview\(key, \{ ref \}, \{ \.\.\.source, choice \}\)/,
+  );
+  const push = code.slice(code.indexOf("pushTurn: (key, host, text, turn) =>"));
+  assert.match(push.slice(0, 1500), /if \(!turn\.choice\) \{/);
+  assert.match(
+    push.slice(0, 1500),
+    /proposalTurns\s*\.start\(key, host, turn, \{\s*at: review\.at\(key\),\s*selected: turn\.selected,\s*choice: turn\.choice,?\s*\}\)/,
+  );
+  // No CLI is started for a review turn any more.
+  assert.equal(/cliTurns\.start\(/.test(code), false);
+  const stop = code.slice(code.indexOf("stop_agent: async"));
+  assert.match(
+    stop.slice(0, 900),
+    /if \(review\.cancelStarting\(key\) \|\| proposalTurns\.stop\(key\)\) \{/,
+  );
+  assert.ok(stop.indexOf("review.cancelStarting(key)") < stop.indexOf("sessionFor(key)"));
+  assert.match(code, /proposalTurns\.shutdown\(\)/);
+});

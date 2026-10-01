@@ -2467,3 +2467,170 @@ test("ledger_check: the retry of a malformed reply runs on the pinned provider o
     await t.cleanup();
   }
 });
+
+// ---- Proposal turns (a provider without tools: Codex) -------------------------
+// The review service asks, per request, whether the pane's provider for
+// review turns proposes instead of calling tools (proposalPreview). When it
+// does, the answer holds the choice and the request that would go out.
+const BUILT = {
+  ok: true,
+  system: "SYSTEM TEXT",
+  prompt: "[Proposal turn R1.1]\n[p1] A paragraph.",
+  chars: 40,
+  scope: "manuscript",
+  shown: [{ id: "p1", index: 1 }],
+  instructionIds: [],
+  forbidIds: ["L1"],
+  omittedForbidIds: [],
+  section: null,
+};
+const CODEX_CHOICE = { id: "codex", model: "gpt-6.1-sol" };
+const PROPOSAL_PANE = { caps: ["target_hash", "proposal_turns"] };
+
+test("review_preview shows the request of a proposal turn, system text and prompt, as it would go out", async () => {
+  const asked = [];
+  let built = BUILT;
+  const t = await setup({
+    proposalPreview: async (key, ref, source) => {
+      asked.push([key, ref, source.selected, typeof source.at.path]);
+      return { choice: CODEX_CHOICE, built };
+    },
+  });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const sel = [{ id: null, index: 1, text: "A paragraph." }];
+    const r = await t.ask("review_preview", { ref: "R1.1", paragraphs: sel });
+    assert.equal(r.prompt, "SYSTEM TEXT\n\n[Proposal turn R1.1]\n[p1] A paragraph.");
+    assert.deepEqual(asked, [["k", "R1.1", sel, "string"]]);
+    assert.ok(
+      t.lines.includes(
+        "[review] prompt R1.1 instructions=- forbid=L1 omitted_forbid=- paragraphs=1 (preview)",
+      ),
+    );
+    // A request that cannot be built is said in its own words.
+    built = { ok: false, code: "TooLong", message: "The manuscript is too long for Codex." };
+    const no = await t.ask("review_preview", { ref: "R1.1" });
+    assert.deepEqual([no.ok, no.error], [false, "The manuscript is too long for Codex."]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_propose of a proposal turn: the turn carries the choice and the selection, and no prompt", async () => {
+  let built = BUILT;
+  let ctx = PROPOSAL_PANE;
+  let doc = null;
+  const t = await setup({
+    getContext: () => ({ activeDoc: doc, ...ctx }),
+    proposalPreview: async () => ({ choice: CODEX_CHOICE, built }),
+  });
+  doc = t.doc;
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const sel = [{ id: null, index: 1, text: "A paragraph." }];
+    // A request that cannot be built starts no turn: the refusal is the answer.
+    built = { ok: false, code: "NoSnapshot", message: "The manuscript has not been read yet." };
+    const no = await t.ask("review_propose", { ref: "R1.1", paragraphs: sel });
+    assert.deepEqual([no.ok, no.error], [false, "The manuscript has not been read yet."]);
+    assert.deepEqual(t.pushed, []);
+    // A task pane from before proposal turns: it has shown its author no
+    // notice of what goes to Codex. Nothing is sent.
+    built = BUILT;
+    ctx = { caps: ["target_hash"] };
+    const old = await t.ask("review_propose", { ref: "R1.1", paragraphs: sel });
+    assert.deepEqual(
+      [old.ok, old.error],
+      [
+        false,
+        "This task pane is older than the daemon and does not know the proposal turns of Codex CLI (ChatGPT sign-in), so nothing was sent. Reload the task pane (close and reopen it), then propose again.",
+      ],
+    );
+    assert.deepEqual(t.pushed, []);
+    ctx = PROPOSAL_PANE;
+    const r = await t.ask("review_propose", { ref: "R1.1", paragraphs: sel });
+    assert.equal(r.started, true);
+    assert.deepEqual(t.pushed, [
+      {
+        key: "k",
+        host: "word",
+        text: null,
+        turn: { ref: "R1.1", selected: sel, choice: CODEX_CHOICE },
+      },
+    ]);
+    assert.equal(r.revision.comments.find((c) => c.ref === "R1.1").status, "in_progress");
+  } finally {
+    await t.cleanup();
+  }
+  // A Claude turn is as before: a prompt and { ref }.
+  const claude = await setup();
+  try {
+    await claude.ask("review_save_comments", { comments: COMMENTS });
+    await claude.ask("review_propose", { ref: "R1.1" });
+    assert.deepEqual(claude.pushed[0].turn, { ref: "R1.1" });
+    assert.equal(typeof claude.pushed[0].text, "string");
+  } finally {
+    await claude.cleanup();
+  }
+});
+
+// Stop pressed while the request is still on its way to a turn (the gate
+// waits for the provider, the review file is read): no turn starts after it.
+test("cancelStarting: a review_propose stopped before its turn started starts none", async () => {
+  let open;
+  const gate = new Promise((r) => (open = r));
+  const t = await setup({ turnGate: () => gate });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    assert.equal(t.svc.cancelStarting("k"), false, "nothing is starting");
+    const asked = t.ask("review_propose", { ref: "R1.1" });
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(t.svc.cancelStarting("k"), true);
+    assert.equal(t.svc.cancelStarting("other"), false);
+    open();
+    const r = await asked;
+    assert.deepEqual([r.ok, r.error], [false, "The turn was stopped."]);
+    assert.deepEqual(t.pushed, []);
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").status, "pending");
+    // The next request is a new one; once its turn is queued, a Stop is the
+    // runner's or the session's business.
+    const again = await t.ask("review_propose", { ref: "R1.1" });
+    assert.equal(again.started, true);
+    assert.equal(t.svc.cancelStarting("k"), false);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("turnEnded passes a notice of the turn on with turn_done; the handle and the forbid switch are exported", async () => {
+  const t = await setup({ env: { ...ENV, CC_OFFICE_REVIEW_PROMPT_FORBID: "0" } });
+  try {
+    t.svc.turnEnded(
+      "k",
+      { ref: "R1.1" },
+      { ok: true, notice: "1 of 2 requests have a proposed change; q2 has none." },
+    );
+    t.svc.turnEnded("k", { ref: "R1.1" }, { ok: true });
+    assert.deepEqual(
+      t.events.filter((e) => e.event === "turn_done"),
+      [
+        {
+          type: "review_event",
+          event: "turn_done",
+          ref: "R1.1",
+          ok: true,
+          notice: "1 of 2 requests have a proposed change; q2 has none.",
+        },
+        { type: "review_event", event: "turn_done", ref: "R1.1", ok: true },
+      ],
+    );
+    const d = t.svc.at("k");
+    assert.deepEqual(
+      [d.key, d.path, d.caps],
+      ["k", join(t.dir, "paper.revision.json"), ["target_hash"]],
+    );
+    assert.equal(t.svc.includeForbid(), false);
+  } finally {
+    await t.cleanup();
+  }
+});
