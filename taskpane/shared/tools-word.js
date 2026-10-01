@@ -1,5 +1,6 @@
 /* global Word, Office */
 import { bytesToBase64 } from "./response-view.js";
+import { formatParagraphs } from "./format-runs.js";
 import {
   normalizeParaText,
   paragraphHash,
@@ -2046,6 +2047,45 @@ export async function selectCommentById(commentId) {
     c.getRange().select();
     await context.sync();
     return { selected: true };
+  });
+}
+
+// What the format checks read (format-runs.js formatParagraphs): the runs of
+// every paragraph from its OOXML, the indents Word reports for it, whether it
+// is a list item or in a table, and the cells of every table. Read only.
+// A collection of its own: a second load on the collection of
+// getParagraphsWithIds would drop what that one loaded.
+export async function readFormatSnapshot() {
+  return await Word.run(async (context) => {
+    const paragraphs = context.document.body.paragraphs;
+    paragraphs.load(
+      "items/firstLineIndent, items/leftIndent, items/isListItem, items/tableNestingLevel",
+    );
+    const tables = context.document.body.tables;
+    tables.load("items/nestingLevel, items/rowCount, items/values");
+    await context.sync();
+    const oox = paragraphs.items.map((p) => p.getOoxml());
+    await context.sync();
+    return formatParagraphs(
+      paragraphs.items.map((p, i) => ({
+        ooxml: oox[i].value,
+        first_line: p.firstLineIndent,
+        left: p.leftIndent,
+        is_list: p.isListItem,
+        table_level: p.tableNestingLevel,
+      })),
+      tables.items.map((t) => ({ level: t.nestingLevel, rows: t.rowCount, values: t.values })),
+    );
+  });
+}
+
+// The selected text, as Word gives it. Read only.
+export async function selectionText() {
+  return await Word.run(async (context) => {
+    const sel = context.document.getSelection();
+    sel.load("text");
+    await context.sync();
+    return sel.text;
   });
 }
 

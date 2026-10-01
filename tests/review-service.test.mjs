@@ -1657,8 +1657,8 @@ test("ledger_export writes <stem>.ledger.json; ledger_import adds its rules and 
     assert.deepEqual(
       file.items.map((i) => Object.keys(i).sort()),
       [
-        ["check", "kind", "scope", "text"],
-        ["check", "kind", "scope", "text"],
+        ["check", "kind", "scope", "source", "text"],
+        ["check", "kind", "scope", "source", "text"],
       ],
     );
     assert.ok(t.lines.includes(`[review] ledger export path=${x.path} count=2`));

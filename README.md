@@ -347,6 +347,18 @@ The Response tab writes the point-by-point response letter from the review on th
 | `CC_OFFICE_PYTHON`         | `python3`                 | Python executable for the letter tools.                                                                                              |
 | `CC_OFFICE_CONFIG_DIR`     | `~/.claude/office-addins` | Root of the user profile folder (`<dir>/journal_profiles`).                                                                          |
 
+### Tools tab (Word)
+
+The Tools tab never writes to the open document. A copy is a new file next to the manuscript, made from the file as it was last saved, so save before you make one.
+
+- **Selection.** Translate the selected text or ask a question about it. The answer is shown in the tab and stored nowhere.
+- **Journal guideline.** Paste the author guideline of the journal and press "Extract rules". Every rule candidate cites the guideline sentence it was taken from; the ones you keep ticked go into the instruction ledger, and a format setting goes into the profile of this paper. The box under it switches rules 2 to 4 of a review turn (nothing unrequested, no revision history in the text, facts only) for this paper (`policy_packs.review_scope` in the profile).
+- **Format and count checks.** "Run checks" reports and changes nothing: the format rules the profile turns on (italics of statistics symbols, species and gene names, subscripts, first-line indent; an empty table is always reported) and the count rules of the ledger (words of a section, keywords, figures, tables, section order). Click a finding to go to its paragraph. Italics that come from a style and not from the run itself are not seen.
+- **Marked copy.** Choose an earlier version of the manuscript and a mode (tracked changes or colours). The button runs `tools/build_marked_diff.py` with the options of the script, so both write the same file, `<manuscript>_marked.docx`. What the tool refuses is shown as the tool wrote it, with the paragraph number. Needs the Python package lxml.
+- **Anonymized copy.** Writes `<manuscript>_anonymized.docx` without author marks and file metadata and shows the report of `scripts/verify-anonymized.py`. A copy that fails the check is renamed to `.INCOMPLETE.docx`.
+
+Modules that exist in `daemon/` but are not connected to the task pane: DeepL translation, LanguageTool, the Crossref reference check, CSL styles, the consent switches for outside services, unit domain packs, the `[F.n]` and `[G.n]` comment families and the automatic format fix.
+
 **Requirements.** Python 3 on the machine the daemon runs on. Writing, reading and verifying the letter use the standard library only. Line numbers also need PyMuPDF (`pip install pymupdf`); without it the line numbers cannot be read, the line check fails, and the letter is written only with "Export anyway", without line numbers.
 
 ---

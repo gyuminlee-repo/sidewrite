@@ -90,6 +90,14 @@ export function rewriteCommand(cmd, map) {
 // "S25-30..S25-41" or "S2-18": the feature ids of one stage, in order, with
 // the number padded to two digits as the feature lists write it.
 export function featureIds(spec) {
+  // A list of ranges ("S4-30..S4-33,S4-37"): all of one stage.
+  const parts = String(spec).split(",");
+  if (parts.length > 1) {
+    const ids = parts.flatMap((p) => featureIds(p));
+    if (new Set(ids.map((id) => id.split("-")[0])).size > 1)
+      throw new Error(`--features must stay in one stage, not ${spec}`);
+    return ids;
+  }
   const ends = String(spec)
     .split("..")
     .map((s) => /^(S\d+)-(\d+)$/.exec(s.trim()));
@@ -331,7 +339,14 @@ export function proposeAllEvidence({ message, log }) {
 // What a run uses when --features is not given.
 export function defaultFeatures(stage) {
   // Stage 3: S3-41 is checked after the cleanup (--after-cleanup).
-  const known = { s2: "S2-18..S2-34", s25: "S25-30..S25-41", s3: "S3-30..S3-40" };
+  // Stage 4: only what is connected to the Tools tab (guideline rules, count
+  // and format report, selection, marked copy, anonymized copy).
+  const known = {
+    s2: "S2-18..S2-34",
+    s25: "S25-30..S25-41",
+    s3: "S3-30..S3-40",
+    s4: "S4-30..S4-33,S4-37,S4-38",
+  };
   if (!known[stage])
     throw new Error(`no default feature range for stage ${stage}: give --features`);
   return known[stage];
@@ -764,6 +779,164 @@ export function trackedPlaced(paragraphs, expected) {
 
 // Judgments of one pane step from the runner's record of it. Each returns
 // { pass, expect, got } where expect quotes the acceptance procedure.
+// ---- stage 4 (Tools tab) -----------------------------------------------------
+
+// The findings scripts/e2e/make_aux_fixture.py plants (PLANTED there), as
+// the rows of the tab word them: a statistics symbol and a species name not
+// in italics, a formula digit not in subscript, one paragraph without the
+// indent of the others, one empty table.
+export const S4_PLANTED = { italic: 2, subscript: 1, indent: 1, empty_table: 1 };
+
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// S4-33. translate, ask: the steps of the pane; before, after: the paragraphs
+// of the document (the pane's snapshot) around them; log: what the daemon
+// wrote meanwhile. A selection request starts no agent turn and calls no
+// tool, and the document reads the same afterwards.
+export function selectionEvidence({ translate, ask, before, after, log }) {
+  const answers = [translate, ask].map((s) => String(s?.selection?.[1] ?? "").trim());
+  const tool_calls = (
+    String(log ?? "").match(
+      /model called tool:|message → ensure loop|^\[agent\] turn complete/gm,
+    ) ?? []
+  ).length;
+  const document_unchanged = Array.isArray(before) && before.length > 0 && sameJson(before, after);
+  return {
+    pass:
+      answers.every(Boolean) &&
+      !translate?.message_error &&
+      !ask?.message_error &&
+      document_unchanged &&
+      tool_calls === 0,
+    tool_calls,
+    document_unchanged,
+    answer_chars: answers.map((a) => a.length),
+  };
+}
+
+// S4-30. extract, add: the steps of the pane; guideline: the text that was
+// pasted; ledgerBefore, ledgerAfter: the ledger of revision.json around the
+// add; pick: the RegExp source the kept candidate was chosen by. Every
+// candidate cites a sentence of the guideline, and the one that was kept is
+// the one rule added, with its sentence.
+export function guidelineEvidence({ extract, add, guideline, ledgerBefore, ledgerAfter, pick }) {
+  const candidates = extract?.rules ?? [];
+  const flat = (s) => String(s ?? "").replace(/\s+/g, " ");
+  const text = flat(guideline);
+  const all_cited =
+    candidates.length > 0 && candidates.every((c) => c.sentence && text.includes(c.sentence));
+  const had = new Set((ledgerBefore ?? []).map((i) => i.id));
+  const added = (ledgerAfter ?? [])
+    .filter((i) => !had.has(i.id))
+    .map((i) => ({ id: i.id, text: i.text, check: i.check, source: i.source }));
+  const one = added.length === 1 ? added[0] : null;
+  return {
+    pass:
+      all_cited &&
+      !!one &&
+      one.source?.kind === "guideline" &&
+      text.includes(flat(one.source.sentence)) &&
+      new RegExp(pick, "i").test(one.source.sentence) &&
+      /added to the ledger/.test(add?.message ?? ""),
+    candidates: candidates.length,
+    all_cited,
+    added,
+    message: add?.message ?? null,
+  };
+}
+
+// S4-31. check: the "Run checks" step; rule: the count rule that was added
+// ({ id, check }). The planted abstract is over the limit of the rule.
+export function countEvidence({ check, rule }) {
+  const row = (check?.checks ?? []).find((t) => t.startsWith(`${rule?.id}: `)) ?? null;
+  const m = /^\S+: (\d+) found, at most (\d+) allowed/.exec(row ?? "");
+  return {
+    pass:
+      rule?.check?.type === "count" &&
+      !!m &&
+      Number(m[2]) === rule.check.max &&
+      Number(m[1]) > Number(m[2]),
+    rule_id: rule?.id ?? null,
+    found: m ? Number(m[1]) : null,
+    max: m ? Number(m[2]) : null,
+    row,
+  };
+}
+
+// S4-32. The format findings of the same step are exactly the planted ones,
+// and the check changed nothing in the document (before, after: snapshots).
+export function formatEvidence({ check, planted = S4_PLANTED, before, after }) {
+  const rows = (check?.checks ?? []).filter((t) => /^Paragraph \d+: /.test(t));
+  const kind = (t) =>
+    /should be italic/.test(t)
+      ? "italic"
+      : /should be subscript/.test(t)
+        ? "subscript"
+        : /first-line indent/.test(t)
+          ? "indent"
+          : /empty table/.test(t)
+            ? "empty_table"
+            : "other";
+  const kinds = {};
+  for (const t of rows) kinds[kind(t)] = (kinds[kind(t)] ?? 0) + 1;
+  const sorted = (o) => Object.entries(o).sort(([a], [b]) => a.localeCompare(b));
+  const document_unchanged = Array.isArray(before) && before.length > 0 && sameJson(before, after);
+  return {
+    pass: sameJson(sorted(kinds), sorted(planted)) && document_unchanged,
+    findings: rows.length,
+    kinds,
+    document_unchanged,
+    rows,
+  };
+}
+
+// S4-37. modes: one entry per mode: { mode, name (the file the button
+// wrote), script_exit (the script on the same two files), equal (the two
+// outputs byte for byte) }.
+export function markedEvidence(modes) {
+  const list = modes ?? [];
+  return {
+    pass:
+      sameJson(list.map((m) => m.mode).sort(), ["color", "track_changes"]) &&
+      list.every((m) => !!m.name && m.script_exit === 0 && m.equal === true),
+    modes: list,
+  };
+}
+
+// S4-38. step: the pane step; verifier: scripts/verify-anonymized.py run by
+// the runner on the manuscript and the copy; exists: the copy is on disk.
+export function anonymizeEvidence({ step, verifier, exists }) {
+  const rows = step?.anonymized ?? [];
+  return {
+    pass:
+      exists === true &&
+      /^Written: \S+_anonymized\.docx\.$/.test(rows[0] ?? "") &&
+      rows.some((t) => /^Verifier: total 0 left; text unchanged: yes/.test(t)) &&
+      verifier?.total === 0 &&
+      verifier?.body_equal === true,
+    verifier: verifier
+      ? {
+          total: verifier.total,
+          body_equal: verifier.body_equal,
+          markup_equal: verifier.markup_equal,
+          structure_ok: verifier.structure_ok,
+        }
+      : null,
+    rows,
+  };
+}
+
+const answered = (r, head) => ({
+  pass: !r.message_error && head.test(r.selection?.[0] ?? "") && !!(r.selection?.[1] ?? "").trim(),
+  expect: "the head line and a non-empty answer under the Selection buttons",
+  got: r.message_error ? r.message : (r.selection ?? []).join(" | ").slice(0, 200),
+});
+const written = (r, rows) => ({
+  pass: !r.message_error && /^Written: \S+\.docx/.test(rows?.[0] ?? ""),
+  expect: "Written: <name>.docx ...",
+  got: r.message_error ? r.message : (rows ?? []).join(" | "),
+});
+
 export const JUDGES = {
   "open-review": (r, ctx) => ({
     pass: r.file === `Review file: ${ctx.revisionPath}`,
@@ -959,6 +1132,31 @@ export const JUDGES = {
     expect: "Auto-refreshed <time>: ... (no Refresh click)",
     got: r.after || "(the auto-refresh line did not change)",
   }),
+  // ---- stage 4 steps (Tools tab) ----
+  "open-tools": (r) => ({
+    pass: /^Saved file: \S+\.docx\. Profile: /.test(r.doc ?? ""),
+    expect: "Saved file: <name>.docx. Profile: <profile>. ...",
+    got: r.doc || r.message,
+  }),
+  "tools-translate": (r) => answered(r, /^Translation into /),
+  "tools-ask": (r) => answered(r, /^Answer /),
+  "tools-extract": (r) => ({
+    pass: !r.message_error && /^\d+ rule candidates\./.test(r.message ?? "") && r.rules.length > 0,
+    expect: "n rule candidates. (each with the guideline sentence it cites)",
+    got: `${r.message} | ${(r.rules ?? []).map((c) => c.kind).join(" | ")}`,
+  }),
+  "tools-add": (r) => ({
+    pass: !r.message_error && r.kept === 1 && /^1 rule added to the ledger/.test(r.message ?? ""),
+    expect: "1 rule added to the ledger. (one candidate kept ticked)",
+    got: `kept ${r.kept} | ${r.message}`,
+  }),
+  "tools-check": (r) => ({
+    pass: !r.message_error && /^\d+ findings\. Nothing was changed\.$/.test(r.message ?? ""),
+    expect: "n findings. Nothing was changed.",
+    got: `${r.message} | ${(r.checks ?? []).length} rows`,
+  }),
+  "tools-marked": (r) => written(r, r.marked),
+  "tools-anonymize": (r) => written(r, r.anonymized),
   // ---- stage 3 steps (Response tab) ----
   "open-response": (r) => ({
     pass:

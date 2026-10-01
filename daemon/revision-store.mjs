@@ -29,6 +29,17 @@ const RegexCheck = z.object({
   expect: z.enum(["absent", "present"]).default("absent"),
 });
 const LlmCheck = z.object({ type: z.literal("llm") });
+// A count the manuscript must keep (count-check.mjs): the words of a section,
+// the number of keywords, figures or tables, the order of sections. Checked
+// from the Tools tab, which has the headings; the review check skips it.
+const CountCheck = z.object({
+  type: z.literal("count"),
+  target: z.enum(["section_words", "keywords", "figures", "tables", "section_order"]),
+  section: z.string().min(1).optional(),
+  min: z.number().int().nonnegative().nullable().optional(),
+  max: z.number().int().nonnegative().nullable().optional(),
+  order: z.array(z.string().min(1)).optional(),
+});
 // A regex check as a rule may be entered: pattern and flags must compile
 // the way the checker compiles them (ledger-check.mjs compileCheck). Letters
 // that are each allowed can still be refused together ("ii").
@@ -224,7 +235,13 @@ const ledgerItem = (regexCheck) =>
     kind: z.enum(["instruction", "forbid"]),
     text: z.string().min(1),
     scope: z.enum(["manuscript", "response", "supplement"]).default("manuscript"),
-    check: z.discriminatedUnion("type", [regexCheck, LlmCheck]),
+    check: z.discriminatedUnion("type", [regexCheck, LlmCheck, CountCheck]),
+    // Where the rule comes from when the author did not type it: the sentence
+    // of the journal guideline it was taken from, word for word.
+    source: z
+      .object({ kind: z.literal("guideline"), sentence: z.string().min(1) })
+      .nullable()
+      .default(null),
     // skipped: outside the manuscript scope, not checked against the manuscript.
     // unsure: an LLM check could not judge some paragraphs and found no violation.
     status: z
@@ -815,7 +832,7 @@ export function removeLedgerItem(rev, id) {
 // results belong to one manuscript. tests/fixtures/review_ledger.json has the
 // same item shape, so a hand-written list imports too.
 
-const RULE_KEYS = ["kind", "text", "scope", "check"];
+const RULE_KEYS = ["kind", "text", "scope", "check", "source"];
 const ruleOf = (item) => Object.fromEntries(RULE_KEYS.map((k) => [k, item?.[k]]));
 const ruleKey = (item) => JSON.stringify(RULE_KEYS.map((k) => item[k]));
 

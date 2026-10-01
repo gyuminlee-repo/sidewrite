@@ -90,7 +90,7 @@ export function countRevisionMarks(xml) {
 // document of scripts/e2e/make_tracked_special.py; the acceptance run
 // repeats the measurement): the extracted text must equal the paragraph
 // text, or the run cannot be found in it.
-const RUN_CHAR = {
+export const RUN_CHAR = {
   noBreakHyphen: "\u001e",
   softHyphen: "\u001f",
   tab: "\t",
@@ -103,7 +103,7 @@ const RUN_CHAR = {
 const XML_TOKEN =
   /<w:(ins|del|moveTo|moveFrom)\b[^>]*?(\/?)>|<\/w:(ins|del|moveTo|moveFrom)>|<w:(?:t|delText)\b[^>]*?\/>|<w:(t|delText)\b[^>]*>([\s\S]*?)<\/w:\4>|<w:(noBreakHyphen|softHyphen|tab|ptab|br|cr|sym)\b([^>]*?)\/?>/g;
 const XML_ENTITY = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-const xmlText = (s) =>
+export const xmlText = (s) =>
   s.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (m, e) =>
     e[0] === "#"
       ? String.fromCodePoint(e[1] === "x" ? parseInt(e.slice(2), 16) : Number(e.slice(1)))
@@ -406,8 +406,10 @@ export function ledgerStatusText(item) {
   // or a failed call, a regex that does not compile): no paragraph of it is
   // taken as checked.
   if (item?.status === "error") return "check failed: nothing counts as passed";
-  if (item?.status === "skipped")
+  if (item?.status === "skipped") {
+    if (item.check?.type === "count") return "Checked in the Tools tab";
     return SKIPPED_SCOPE_LABELS[item.scope] ?? `Checked at the ${item.scope} stage`;
+  }
   return item?.status;
 }
 

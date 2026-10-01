@@ -1823,7 +1823,7 @@ test("the stage 3 flow uses only pane steps, COM actions and judges that exist, 
   const ps = read("../scripts/e2e/word-com.ps1");
   const flow = runner.slice(
     runner.indexOf("async function mainS3()"),
-    runner.indexOf("// Close the Word this run started"),
+    runner.indexOf("// Stage 4 (S4-30"),
   );
   assert.ok(flow.length > 1000);
   const names = (re) => [...new Set([...flow.matchAll(re)].map((m) => m[1]))];
@@ -1859,7 +1859,7 @@ test("the stage 3 flow uses only pane steps, COM actions and judges that exist, 
   // S3-41 is judged after the cleanup, by the marker every later stage writes.
   assert.match(runner, /marker\(\s*\`\$\{STAGE\}-cleanup\`/);
   assert.match(runner, /"after-cleanup": \{ type: "string" \}/);
-  assert.match(runner, /STAGE === "s3" \? mainS3\(\)/);
+  assert.match(runner, /s3: mainS3/);
   // No fixed wait in the stage 3 flow.
   assert.doesNotMatch(flow, /\bsleep\(/);
 });

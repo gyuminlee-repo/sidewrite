@@ -42,6 +42,7 @@
       <button class="tab" data-tab="chat" aria-current="page">Chat</button>
       <button class="tab" data-tab="review">Review</button>
       <button class="tab" data-tab="response">Response</button>
+      <button class="tab" data-tab="tools">Tools</button>
       <button class="tab" data-tab="library">Presets</button>
       <button class="tab" data-tab="setup">Setup</button>
     </nav>
@@ -286,6 +287,93 @@
             Apply to this paper
           </button>
         </details>
+      </div>
+    </section>
+
+    <!-- Tools tab content: selection, journal rules, checks, copies (tools-pane.js) -->
+    <section class="tab-content" data-tab="tools" hidden>
+      <div class="setup-content" id="tools-root">
+        <p class="setup-help" id="tools-doc"></p>
+        <div id="tools-message" hidden></div>
+
+        <div class="setup-section">
+          <h3>Selection</h3>
+          <p class="setup-help">
+            Translate the selected text or ask about it. The document is not changed.
+          </p>
+          <label>Translate into <input type="text" id="tools-lang" placeholder="Language" /></label>
+          <button type="button" class="btn-secondary btn-small" id="tools-translate">
+            Translate selection
+          </button>
+          <input type="text" id="tools-question" placeholder="Question about the selected text" />
+          <button type="button" class="btn-secondary btn-small" id="tools-ask">
+            Ask about selection
+          </button>
+          <div id="tools-selection"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>Journal guideline</h3>
+          <p class="setup-help">
+            Paste the author guideline of the journal. Every rule candidate cites the sentence it
+            was taken from. The ones you pick go into the instruction ledger (Review tab) and the
+            profile of this paper.
+          </p>
+          <textarea id="tools-guideline" rows="6" placeholder="Guideline text"></textarea>
+          <button type="button" class="btn-secondary btn-small" id="tools-rules-extract">
+            Extract rules
+          </button>
+          <div id="tools-rules"></div>
+          <button type="button" class="btn-primary btn-small" id="tools-rules-add" hidden>
+            Add selected
+          </button>
+          <label class="setting-row">
+            <input type="checkbox" id="tools-policy-scope" />
+            <div class="setting-text">
+              Review turns keep to what the reviewer asked (rules 2 to 4: nothing unrequested, no
+              revision history in the text, facts only)
+            </div>
+          </label>
+        </div>
+
+        <div class="setup-section">
+          <h3>Format and count checks</h3>
+          <p class="setup-help">
+            Reports only: nothing in the document is changed. The format rules come from the
+            profile, the count rules from the ledger. Click a finding to go to its paragraph.
+          </p>
+          <button type="button" class="btn-secondary btn-small" id="tools-check">Run checks</button>
+          <div id="tools-checks"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>Marked copy</h3>
+          <p class="setup-help">
+            Compares the saved file with an earlier version and writes a copy that shows the
+            changes. The copy is a new file next to the manuscript.
+          </p>
+          <label>Earlier version <input type="file" id="tools-baseline" accept=".docx" /></label>
+          <select id="tools-marked-mode" class="setting-select">
+            <option value="track_changes">Show as tracked changes</option>
+            <option value="color">Show in colours</option>
+          </select>
+          <button type="button" class="btn-primary btn-small" id="tools-marked-build">
+            Make marked copy
+          </button>
+          <div id="tools-marked"></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>Anonymized copy</h3>
+          <p class="setup-help">
+            Writes a copy of the saved file without author marks and file metadata, then checks the
+            copy. The text is not changed.
+          </p>
+          <button type="button" class="btn-primary btn-small" id="tools-anonymize">
+            Make anonymized copy
+          </button>
+          <div id="tools-anonymized"></div>
+        </div>
       </div>
     </section>
 

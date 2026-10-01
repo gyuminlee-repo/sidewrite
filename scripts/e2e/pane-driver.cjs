@@ -8,7 +8,7 @@
 // E2E_CDP_PORT (the --remote-debugging-port given to Word),
 // E2E_PANE_ORIGIN (default http://127.0.0.1:47834).
 // Element ids come from taskpane/word/index.html and the class names from
-// taskpane/shared/review-pane.js and response-pane.js.
+// taskpane/shared/review-pane.js, response-pane.js and tools-pane.js.
 
 const fs = require("node:fs");
 
@@ -193,6 +193,73 @@ const turnBusy = (page) =>
 // Providers section of the Setup tab (ids from taskpane/word/index.html,
 // rows from taskpane/shared/providers-pane.js). The list is asked for on
 // connect; wait until it is drawn or its message says why it is not.
+// ---- Tools tab (ids from taskpane/word/index.html, classes from
+// taskpane/shared/tools-pane.js) ----
+async function clearTools(page, box = null) {
+  await page.evaluate((id) => {
+    const m = document.getElementById("tools-message");
+    if (m) {
+      m.textContent = "";
+      m.hidden = true;
+    }
+    if (id) document.getElementById(id)?.replaceChildren();
+  }, box);
+}
+// The end of a Tools tab action: its message matches `until`, or the box
+// `box` has lines, or the message is an error (form-error).
+async function waitTools(page, timeout, { until = null, box = null }) {
+  await page.waitForFunction(
+    ([wanted, id]) => {
+      const m = document.getElementById("tools-message");
+      const t = m?.textContent.trim() ?? "";
+      if (t !== "" && m.classList.contains("form-error")) return true;
+      if (wanted && t !== "" && new RegExp(wanted).test(t)) return true;
+      return !!id && (document.getElementById(id)?.children.length ?? 0) > 0;
+    },
+    [until, box],
+    { timeout, polling: 200 },
+  );
+}
+// What the Tools tab shows.
+async function toolsView(page) {
+  return page.evaluate(() => {
+    const t = (n) => (n ? n.textContent.replace(/\s+/g, " ").trim() : "");
+    const kids = (id) => [...(document.getElementById(id)?.children ?? [])].map(t);
+    const rules = [...(document.querySelectorAll("#tools-rules label") ?? [])].map((l) => {
+      const cite = t(l.querySelector(".review-preview"));
+      return {
+        kind: t(l.querySelector(".review-reqs-line")),
+        cite,
+        sentence: /^Guideline: "(.*)"$/.exec(cite)?.[1] ?? null,
+        checked: l.querySelector("input")?.checked ?? null,
+      };
+    });
+    return {
+      doc: t(document.getElementById("tools-doc")),
+      message: t(document.getElementById("tools-message")),
+      message_error:
+        document.getElementById("tools-message")?.classList.contains("form-error") ?? false,
+      selection: kids("tools-selection"),
+      rules,
+      rule_warnings: [...(document.querySelectorAll("#tools-rules > div") ?? [])].map(t),
+      checks: kids("tools-checks"),
+      marked: kids("tools-marked"),
+      anonymized: kids("tools-anonymized"),
+    };
+  });
+}
+// Select one paragraph in Word through the pane's own module, as a click on
+// a finding does.
+async function selectParagraph(page, index) {
+  await page.evaluate(
+    async ([origin, i]) => {
+      const m = await import(`${origin}/shared/tools-word.js`);
+      await m.selectParagraphByIndex(i);
+    },
+    [ORIGIN, index],
+  );
+}
+
 async function openProviders(page) {
   await page.click('button.tab[data-tab="setup"]');
   await page.waitForFunction(
@@ -822,6 +889,109 @@ const steps = {
     await page.click(a.format === "text" ? "#response-export-text" : "#response-export");
     await waitResponse(page, 10 * 60_000, "^(Exported|Not exported: )");
     return responseView(page);
+  },
+
+  // ---- stage 4: Tools tab ----
+
+  async "open-tools"(page) {
+    await page.waitForFunction(
+      () => {
+        const shown = () =>
+          document.querySelector('.tab-content[data-tab="tools"]')?.hidden === false;
+        if (!shown()) document.querySelector('button.tab[data-tab="tools"]')?.click();
+        return shown();
+      },
+      null,
+      { timeout: 60_000, polling: 500 },
+    );
+    await page.waitForFunction(
+      () => {
+        const line = document.getElementById("tools-doc")?.textContent ?? "";
+        return line.startsWith("Saved file:") || line.startsWith("Save the document");
+      },
+      null,
+      { timeout: 60_000 },
+    );
+    return toolsView(page);
+  },
+
+  "tools-view": toolsView,
+
+  // a.paragraph: the paragraph to select in Word; a.lang: the target language.
+  async "tools-translate"(page, a) {
+    await selectParagraph(page, a.paragraph);
+    await clearTools(page, "tools-selection");
+    await page.fill("#tools-lang", a.lang);
+    await page.click("#tools-translate");
+    await waitTools(page, 5 * 60_000, { box: "tools-selection" });
+    return toolsView(page);
+  },
+
+  // a.paragraph, a.question.
+  async "tools-ask"(page, a) {
+    await selectParagraph(page, a.paragraph);
+    await clearTools(page, "tools-selection");
+    await page.fill("#tools-question", a.question);
+    await page.click("#tools-ask");
+    await waitTools(page, 5 * 60_000, { box: "tools-selection" });
+    return toolsView(page);
+  },
+
+  // a.guideline_file: the guideline text (a Windows path). Nothing is stored
+  // by this step; rules are the candidates with the sentence each cites.
+  async "tools-extract"(page, a) {
+    await clearTools(page, "tools-rules");
+    await page.fill("#tools-guideline", fs.readFileSync(a.guideline_file, "utf8"));
+    await page.click("#tools-rules-extract");
+    await waitTools(page, 5 * 60_000, { until: "rule candidates\\.|^No rule was found" });
+    return toolsView(page);
+  },
+
+  // a.keep (a RegExp source): the candidates whose cited sentence matches
+  // stay ticked, every other one is unticked; then "Add selected".
+  async "tools-add"(page, a) {
+    const kept = await page.evaluate((keep) => {
+      const re = new RegExp(keep, "i");
+      let n = 0;
+      for (const l of document.querySelectorAll("#tools-rules label") ?? []) {
+        const box = l.querySelector("input");
+        const stays = re.test(l.querySelector(".review-preview")?.textContent ?? "");
+        if (box) box.checked = stays;
+        if (stays) n++;
+      }
+      return n;
+    }, a.keep);
+    await clearTools(page);
+    await page.click("#tools-rules-add");
+    await waitTools(page, 60_000, { until: "added to the ledger" });
+    return { kept, ...(await toolsView(page)) };
+  },
+
+  async "tools-check"(page) {
+    await clearTools(page, "tools-checks");
+    await page.click("#tools-check");
+    await waitTools(page, 5 * 60_000, {
+      until: "findings\\. Nothing was changed\\.$|^The checks found nothing\\.$",
+    });
+    return toolsView(page);
+  },
+
+  // a.path: the earlier version (.docx, Windows path); a.mode: track_changes
+  // or color.
+  async "tools-marked"(page, a) {
+    await clearTools(page, "tools-marked");
+    await page.setInputFiles("#tools-baseline", a.path);
+    await page.selectOption("#tools-marked-mode", a.mode);
+    await page.click("#tools-marked-build");
+    await waitTools(page, 10 * 60_000, { box: "tools-marked" });
+    return toolsView(page);
+  },
+
+  async "tools-anonymize"(page) {
+    await clearTools(page, "tools-anonymized");
+    await page.click("#tools-anonymize");
+    await waitTools(page, 10 * 60_000, { box: "tools-anonymized" });
+    return toolsView(page);
   },
 
   view,

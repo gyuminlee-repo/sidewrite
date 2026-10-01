@@ -2,9 +2,27 @@
 
 `run-acceptance.mjs` runs a Review tab acceptance procedure end to end:
 daemon, a separate Word process, the task pane clicks, the author's Word
-steps, and the feature_list verify commands. It has three flows: stage 2
-(`S2-18..S2-34`, the default), stage 2.5 (`--stage s25`, `S25-30..S25-41`)
-and stage 3 (`--stage s3`, `S3-30..S3-41`, the response letter).
+steps, and the feature_list verify commands. It has four flows: stage 2
+(`S2-18..S2-34`, the default), stage 2.5 (`--stage s25`, `S25-30..S25-41`),
+stage 3 (`--stage s3`, `S3-30..S3-41`, the response letter) and stage 4
+(`--stage s4`, `S4-30..S4-33,S4-37,S4-38`, the Tools tab).
+
+Stage 4 opens the fake manuscript `tests/fixtures/aux_manuscript.docx`
+(`make_aux_fixture.py`, every sentence invented) with the journal profile
+the same script prints, put under `journal_profiles/` in the run folder. Its
+steps: translate a selected paragraph and ask about it (the pane's snapshot
+of the document is the same before and after, and the daemon log shows no
+agent turn and no tool call); paste `tests/fixtures/fake_guideline.txt`,
+keep the abstract word limit of the candidates and add it (it is in the
+ledger of `revision.json` with the sentence it cites); run the checks (the
+count rule reports the planted abstract, the format rules report the five
+planted findings, the document is unchanged); make the marked copy in both
+modes (each file equals what `tools/build_marked_diff.py` writes from the
+same two files); make the anonymized copy (the runner runs
+`scripts/verify-anonymized.py` on it again: total 0, same text). The
+selection and guideline steps ask the judgment provider chosen in the pane
+(`--judgment-provider` picks one). `--features` takes a list of ranges for
+this stage (`S4-30..S4-33,S4-37`).
 
 ## Prerequisites
 
@@ -316,3 +334,75 @@ paragraph text`, files under `special/`): `make_tracked_special.py` builds
 | `word-launch.ps1`    | Windows      | Word with a CDP port on its pane                                                                   |
 | `word-com.ps1`       | Windows      | accept/reject, hand edits, comments, quit                                                          |
 | `embed_taskpane.py`  | WSL          | auto-open task pane parts in a copy                                                                |
+
+## Word as the judge of the marked copy
+
+`tools/build_marked_diff.py` checks its output with its own model of "accept
+all" and "reject all". `marked-diff-word-check.mjs` asks Word instead. It needs
+no daemon, no port and no task pane.
+
+```
+node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
+```
+
+- For 98 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
+  pair covers: `PAIRS` in `marked-diff-word-lib.mjs`) it writes the baseline and
+  the clean document under `<base-dir>/mdw-<time>/pairs/<nn>/` and runs the tool
+  in both modes.
+- `marked-diff-word.ps1` starts a Word process of its own on `anchor.docx` of
+  the run folder (`/n`), finds it through the Running Object Table by that
+  path, and in that Word opens each file read-only, without a repair and
+  without dialogs. The track-changes output is opened twice: once for
+  `Revisions.AcceptAll()`, once for `Revisions.RejectAll()`. The structure is
+  read each time (the text of every paragraph, how many pictures and fields
+  it holds, the code and result of each field and the text of each equation, every table with its rows,
+  columns, cell texts, whether cells are merged (`Table.Uniform`) and where
+  each cell stands, every bookmark with its text, and the number of
+  comments, footnotes and endnotes) and the document is
+  closed without saving. The clean and the baseline document are read the
+  same way; the colour output is opened and its paragraphs and tables counted.
+- A pair passes when Word opens every file without an error and without
+  changing it on the way in, no revision is left, accept-all equals the clean
+  document, reject-all equals the baseline, and the colour output has the
+  paragraphs and tables of the track-changes output. Comments are the
+  exception on the reject side: a comment is no tracked change, so after
+  reject-all the document must still have the comments of the clean document.
+- Word is quit only when every document open in it is under the run folder;
+  the cleanup rules are those of the acceptance run above. A Word that was
+  already running is never touched.
+- `--prepare-only` writes the pairs, the tool's output and `jobs.json` and
+  stops before Word. `--only "table,break"` keeps the pairs whose name has one
+  of these texts.
+- Output: one line per pair with the first difference, `result.json` in the run
+  folder, exit code 0 only when every pair passed and the Word of the run is
+  gone.
+
+| File                         | Runs on | Does                                                                                             |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `marked-diff-word-check.mjs` | WSL     | the whole check                                                                                  |
+| `marked-diff-word-lib.mjs`   | WSL     | the pairs, the comparison, the verdict (tests: `tests/marked-diff-word-check.test.mjs`)          |
+| `marked_diff_pairs.py`       | WSL     | the docx pairs from the corpus                                                                   |
+| `marked-diff-word.ps1`       | Windows | Word: open, accept or reject all, read the structure, close without saving, quit                 |
+| `word-own.ps1`               | Windows | the Word of the run's own: start, ownership check, quit (dot-sourced by the two below and above) |
+
+### How Word writes a tracked change of an equation
+
+The tool marks an equation that is new or gone the way Word does. That
+notation was read from Word with `word-math-probe.mjs`:
+
+```
+node scripts/e2e/word-math-probe.mjs --base-dir /mnt/d/some/folder
+```
+
+In a Word process of its own (the rules of `word-own.ps1`),
+`word-math-probe.ps1` makes `base.docx` under `<base-dir>/wmp-<time>/` (five
+paragraphs, four with an equation), then `revised.docx` with Track Changes on:
+an equation deleted and another inserted, a word changed next to an equation,
+a paragraph with an equation deleted, a paragraph with an equation added, one
+character changed inside an equation. The `word/document.xml` of both files is
+written next to them and summarised: for every paragraph with an equation or a
+change mark, what stands in what, and where the change marks stand (around
+`m:oMath`, inside it, in a `w:rPr`, in `m:ctrlPr`, in the paragraph mark).
+Exit code 0 when Word made both files, all five changes ran and the Word of
+the run is gone. The summary is `mathSummary` and `markRelations` in
+`word-math-probe-lib.mjs` (tests: `tests/word-math-probe.test.mjs`).

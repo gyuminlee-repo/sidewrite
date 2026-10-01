@@ -31,3 +31,6 @@ __pycache__/
 
 # Words of the user's own that scripts/check-personal.sh also looks for
 .personal-patterns.local
+
+# Session notes a local hook writes here; never committed.
+notes/
