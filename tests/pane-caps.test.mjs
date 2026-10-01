@@ -27,6 +27,20 @@ test("the task pane names the capability the daemon asks for, and sends it in it
   const { PANE_CAPS } = await import("../taskpane/shared/tools-word.js");
   assert.equal(TARGET_HASH_CAP, "target_hash");
   assert.ok(PANE_CAPS.includes(TARGET_HASH_CAP));
+  // A pane of this build knows proposal turns: it shows the notice of
+  // what goes to their provider (providers-pane.js) before the first one.
+  const { PROPOSAL_CAP } = await import("../daemon/review-tools.mjs");
+  assert.equal(PROPOSAL_CAP, "proposal_turns");
+  assert.ok(PANE_CAPS.includes(PROPOSAL_CAP));
+  const html = await readFile(new URL("../taskpane/word/index.html", import.meta.url), "utf8");
+  for (const id of [
+    "providers-notice",
+    "providers-notice-text",
+    "providers-notice-use",
+    "providers-notice-cancel",
+  ]) {
+    assert.ok(html.includes(`id="${id}"`), id);
+  }
   const src = await readFile(new URL("../taskpane/shared/taskpane.js", import.meta.url), "utf8");
   const hello = /function sendHello\(\) \{[\s\S]*?\n\}/.exec(src)[0];
   assert.match(hello, /caps: PANE_CAPS,/);

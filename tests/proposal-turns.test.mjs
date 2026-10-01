@@ -679,8 +679,8 @@ test("refused proposals are named in the chat and do not stop the others; one ma
     );
     assert.deepEqual(t.texts(), [
       "4 proposals received.\n",
-      "P2 rejected (UnknownParagraph): paragraph p9.\n",
-      "P3 skipped (SupersededInTurn): paragraph p1.\n",
+      "P2 rejected (UnknownParagraph): paragraph p9. It names a paragraph that was not shown, so it was not sent to Word.\n",
+      "P3 skipped (SupersededInTurn): paragraph p1. A change before it in this turn already changed that text. Propose again for what is left.\n",
       "4 proposals: 2 applied, 1 rejected, 1 skipped.\n",
     ]);
     assert.ok(t.lines.includes("[proposal] rejected ref=R1.1 id=P2 code=UnknownParagraph"));
@@ -1036,5 +1036,35 @@ test("proposalTurnsFor: the runner's lines, events and Word calls reach the brid
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// What the author reads for a proposal that was not sent to Word: the code,
+// the paragraph, and what to do next.
+test("every refusal of a proposal says what happened and what to do", async () => {
+  const list = [
+    P({ find: "not there" }),
+    P({ find: "e" }),
+    P({ requirement_ids: ["q7"] }),
+    P({ text: "30 degrees" }),
+    P({ op: "insert_after", text: "" }),
+    P(),
+    P(),
+  ];
+  const t = await setup({ generate: async () => reply(list) });
+  try {
+    t.start();
+    await t.turnEnded();
+    assert.deepEqual(t.texts().slice(1, -1), [
+      "P1 rejected (FindNotInParagraph): paragraph p1. Its text is not in that paragraph, so it was not sent to Word. Propose again if the change is still needed.\n",
+      "P2 rejected (FindAmbiguous): paragraph p1. Its text is in that paragraph more than once, so it was not sent to Word. Propose again if the change is still needed.\n",
+      "P3 rejected (UnknownRequirement): paragraph p1. It names a request the comment does not list, so it was not sent to Word. Propose again if the change is still needed.\n",
+      "P4 rejected (NoChange): paragraph p1. It changes nothing.\n",
+      "P5 rejected (EmptyInsert): paragraph p1. It inserts nothing.\n",
+      "P7 rejected (Duplicate): paragraph p1. A proposal before it changes the same text.\n",
+    ]);
+    assert.equal(t.wordCalls.length, 1, "P6 alone goes to Word");
+  } finally {
+    await t.cleanup();
   }
 });

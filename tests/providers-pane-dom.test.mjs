@@ -77,8 +77,9 @@ const rows = () => [
     label: "Codex CLI",
     roles: ["turn", "oneshot"],
     available: true,
-    turn_ready: false,
-    turn_note: "Judgments only. Codex CLI will not call the office tools without an approval.",
+    turn_ready: true,
+    turn_mode: "proposal",
+    turn_note: null,
     reason: null,
     policy: "OpenAI terms.",
     models: [{ value: "gpt-6.1-sol", displayName: "GPT 6.1 Sol" }],
@@ -163,12 +164,13 @@ test("the menus list what passed; a provider that cannot be chosen is disabled a
   const t = await setup();
   assert.deepEqual(optionTexts(t.$("provider-turn")), [
     "Claude (Agent SDK)",
-    "Codex CLI (judgments only)",
+    "Codex CLI (proposals only)",
   ]);
   assert.deepEqual(
     t.$("provider-turn").children.map((o) => o.disabled),
-    [false, true],
+    [false, false],
   );
+  assert.match(t.$("provider-turn").children[1].title, /^Returns a list of proposed changes\./);
   assert.deepEqual(optionTexts(t.$("provider-oneshot")), [
     "Claude (Agent SDK)",
     "Codex CLI",
@@ -183,7 +185,7 @@ test("the menus list what passed; a provider that cannot be chosen is disabled a
   // The list under the menus: status, the reason, the data policy.
   const codex = textsOf(rowOf(t, "codex"));
   assert.ok(codex.includes("Codex CLI"));
-  assert.ok(codex.some((x) => /^Available for judgments\. Judgments only\. Codex CLI/.test(x)));
+  assert.ok(codex.includes("Available for review turns (proposals only) and judgments."));
   assert.ok(codex.includes("OpenAI terms."));
   const groq = textsOf(rowOf(t, "groq"));
   assert.ok(groq.includes("Not available: No API key"));
@@ -309,7 +311,7 @@ test("a stored choice the daemon refuses is shown and kept: no fallback to Claud
           oneshot: null,
           state: { turn: "refused", oneshot: "refused" },
           error: {
-            turn: "Codex CLI cannot run review turns. Judgments only. Codex CLI will not call the office tools.",
+            turn: "Codex CLI is not available: Not signed in (run: codex login).",
             oneshot: "Groq is not available: No API key",
           },
         }),
@@ -317,7 +319,7 @@ test("a stored choice the daemon refuses is shown and kept: no fallback to Claud
   });
   assert.equal(
     t.$("providers-message").textContent,
-    "The stored provider for review turns cannot be used: Codex CLI cannot run review turns. Judgments only. Codex CLI will not call the office tools. Review turns are stopped until you choose a provider here. " +
+    "The stored provider for review turns cannot be used: Codex CLI is not available: Not signed in (run: codex login). Review turns are stopped until you choose a provider here. " +
       "The stored provider for judgments cannot be used: Groq is not available: No API key. Judgments are stopped until you choose a provider here.",
   );
   assert.equal(t.$("providers-message").hidden, false);
@@ -444,4 +446,83 @@ test("the list request failing leaves a message and the menus as they were", asy
   });
   assert.match(t.$("providers-message").textContent, /Provider list unavailable \(Request/);
   assert.equal(t.$("provider-oneshot").children.length, 0);
+});
+
+// The first time a proposing provider (Codex) is chosen for review turns the
+// pane says what will leave the computer, and sends nothing to the daemon
+// until the author agrees. window.confirm is not used: a task pane has none.
+test("first choice of Codex for review turns: a notice, and no set_provider before Use", async () => {
+  const t = await setup();
+  const menu = t.$("provider-turn");
+  assert.equal(t.$("providers-notice").hidden, true);
+  menu.value = "codex";
+  await menu.fire("change");
+  assert.deepEqual(t.sent("set_provider"), [], "nothing is sent yet");
+  assert.equal(t.$("providers-notice").hidden, false);
+  assert.match(
+    t.$("providers-notice-text").textContent,
+    /^Review turns with Codex CLI send text off this computer/,
+  );
+  assert.match(t.$("providers-notice-text").textContent, /It does not edit the document/);
+  assert.equal(t.$("providers-notice-use").textContent, "Use Codex CLI");
+  assert.equal(t.pane.turnLabel(), null, "Claude is still the provider");
+
+  // Cancel: the menu goes back, nothing is stored, the notice comes again.
+  await t.$("providers-notice-cancel").fire("click");
+  assert.equal(t.$("providers-notice").hidden, true);
+  assert.equal(menu.value, "claude");
+  assert.deepEqual(t.sent("set_provider"), []);
+  assert.equal(t.settings.proposalNoticeSeen, undefined);
+
+  menu.value = "codex";
+  await menu.fire("change");
+  assert.equal(t.$("providers-notice").hidden, false);
+  await t.$("providers-notice-use").fire("click");
+  assert.deepEqual(t.sent("set_provider"), [{ role: "turn", id: "codex", model: null }]);
+  assert.equal(t.$("providers-notice").hidden, true);
+  assert.deepEqual(t.settings.proposalNoticeSeen, { codex: true });
+  assert.deepEqual(t.settings.turnProvider, { id: "codex", model: null });
+  assert.equal(t.pane.turnLabel(), "Proposing with Codex CLI · default model");
+
+  // From then on: no notice, for a model change or a second choice of it.
+  menu.value = "claude";
+  await menu.fire("change");
+  menu.value = "codex";
+  await menu.fire("change");
+  assert.equal(t.$("providers-notice").hidden, true);
+  assert.equal(t.sent("set_provider").length, 3);
+});
+
+test("the notice is for review turns only, and a stored choice is restored without it", async () => {
+  // Judgments: the provider is chosen as before.
+  const t = await setup();
+  const judge = t.$("provider-oneshot");
+  judge.value = "codex";
+  await judge.fire("change");
+  assert.deepEqual(t.sent("set_provider"), [{ role: "oneshot", id: "codex", model: null }]);
+  assert.equal(t.$("providers-notice").hidden, true);
+  // A choice while the notice is open for another: the open one is dropped.
+  const menu = t.$("provider-turn");
+  menu.value = "codex";
+  await menu.fire("change");
+  assert.equal(t.$("providers-notice").hidden, false);
+  menu.value = "claude";
+  await menu.fire("change");
+  assert.equal(t.$("providers-notice").hidden, true);
+  await t.$("providers-notice-use").fire("click");
+  assert.equal(
+    t.sent("set_provider").some((p) => p.role === "turn" && p.id === "codex"),
+    false,
+    "a Use press after the notice was dropped sets nothing",
+  );
+  // A stored choice of Codex for review turns (the author agreed when it was made).
+  const stored = await setup({
+    settings: {
+      turnProvider: { id: "codex", model: "gpt-6.1-sol" },
+      proposalNoticeSeen: { codex: true },
+    },
+  });
+  assert.equal(stored.$("providers-notice").hidden, true);
+  assert.equal(stored.$("provider-turn").value, "codex");
+  assert.deepEqual(stored.sent("set_provider"), []);
 });

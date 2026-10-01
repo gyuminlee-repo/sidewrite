@@ -5,6 +5,8 @@ import {
   choiceAfterProbe,
   providerStatus,
   modelRows,
+  proposalNotice,
+  PROPOSAL_TITLE,
 } from "../taskpane/shared/providers-view.js";
 
 const LIST = [
@@ -27,7 +29,7 @@ const LIST = [
     roles: ["turn", "oneshot"],
     available: true,
     turn_ready: false,
-    turn_note: "Judgments only. agy print mode denies the office tools.",
+    turn_note: "Review turns are off for it in this test.",
     reason: null,
     policy: "p",
     models: [{ value: "g", displayName: "G" }],
@@ -86,7 +88,10 @@ test("turn menu: the CLI and Claude providers, only a turn-ready one enabled; ju
     t.filter((r) => r.enabled).map((r) => r.id),
     ["claude"],
   );
-  assert.match(t.find((r) => r.id === "antigravity").note, /denies the office tools/);
+  assert.equal(
+    t.find((r) => r.id === "antigravity").note,
+    "Review turns are off for it in this test.",
+  );
   assert.equal(
     t.some((r) => r.id === "deepseek"),
     false,
@@ -105,7 +110,11 @@ test("turn menu: the CLI and Claude providers, only a turn-ready one enabled; ju
     "DeepSeek (Connection failed (ECONNRESET))",
   );
   assert.equal(o.find((r) => r.id === "ollama").text, "Ollama (local)");
-  assert.equal(t.find((r) => r.id === "antigravity").text, "agy (judgments only)");
+  // A provider that cannot be chosen says why, in full.
+  assert.equal(
+    t.find((r) => r.id === "antigravity").text,
+    "agy (Review turns are off for it in this test.)",
+  );
 });
 
 test("a stored choice that stopped passing falls back to Claude", () => {
@@ -146,7 +155,7 @@ test("the status line of a provider row", () => {
   assert.equal(by.antigravity.state, "ok");
   assert.equal(
     by.antigravity.text,
-    "Available for judgments. Judgments only. agy print mode denies the office tools.",
+    "Available for judgments. Review turns are off for it in this test.",
   );
   assert.equal(by.ollama.text, "Available for judgments.");
   assert.deepEqual(by.deepseek, {
@@ -173,4 +182,66 @@ test("model rows: the provider's list, the current one selected, a first row for
     { value: "", label: "No model listed", selected: true },
   ]);
   assert.deepEqual(modelRows(undefined, null), []);
+});
+
+// A provider that runs review turns by proposals (Codex): the menu and the
+// list say so, and the first choice of it shows what leaves the computer.
+const CODEX = {
+  id: "codex",
+  tier: "subscription",
+  label: "Codex CLI (ChatGPT sign-in)",
+  roles: ["turn", "oneshot"],
+  available: true,
+  turn_ready: true,
+  turn_mode: "proposal",
+  turn_note: null,
+  reason: null,
+  policy: "Your ChatGPT plan terms apply.",
+  models: [{ value: "gpt-6.1-sol", displayName: "GPT 6.1 Sol" }],
+};
+
+test("a proposing provider: 'proposals only' in the turn menu and the status, plain in the judgment menu", () => {
+  const list = [LIST[0], CODEX];
+  const turn = providerRows(list, "turn").find((r) => r.id === "codex");
+  assert.deepEqual(
+    [turn.text, turn.enabled, turn.note, turn.proposal],
+    ["Codex CLI (ChatGPT sign-in) (proposals only)", true, PROPOSAL_TITLE, true],
+  );
+  assert.equal(
+    PROPOSAL_TITLE,
+    "Returns a list of proposed changes. This add-in checks each one and applies it as a tracked change with a rationale comment. The CLI does not touch Word.",
+  );
+  const claude = providerRows(list, "turn").find((r) => r.id === "claude");
+  assert.deepEqual([claude.text, claude.proposal], ["Claude", false]);
+  const judge = providerRows(list, "oneshot").find((r) => r.id === "codex");
+  assert.deepEqual([judge.text, judge.proposal], ["Codex CLI (ChatGPT sign-in)", false]);
+  assert.equal(
+    providerStatus(CODEX).text,
+    "Available for review turns (proposals only) and judgments.",
+  );
+  // Not signed in: as any provider that did not pass its check.
+  const off = {
+    ...CODEX,
+    available: false,
+    turn_ready: false,
+    reason: "Not signed in (run: codex login)",
+  };
+  assert.equal(
+    providerRows([off], "turn")[0].text,
+    "Codex CLI (ChatGPT sign-in) (Not signed in (run: codex login))",
+  );
+});
+
+test("the notice before the first proposal turn says what is sent, what comes along and who edits", () => {
+  const n = proposalNotice(CODEX);
+  assert.equal(n.use, "Use Codex CLI (ChatGPT sign-in)");
+  assert.equal(
+    n.text,
+    "Review turns with Codex CLI (ChatGPT sign-in) send text off this computer, to the CLI and the service behind it: " +
+      "the reviewer comment as written, the manuscript paragraphs shown for it (your selection, or the whole manuscript), " +
+      "your author instructions and the forbidden list. The CLI adds its own global instructions (for Codex, your AGENTS.md) to every request. " +
+      "Your ChatGPT plan terms apply. " +
+      "It does not edit the document: it returns proposed changes, and this add-in checks each one and applies it as a tracked change with a rationale comment. " +
+      "Preview prompt in the Review tab shows what is sent.",
+  );
 });
