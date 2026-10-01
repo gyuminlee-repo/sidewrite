@@ -490,6 +490,149 @@
         "R1.2": "Minor comments",
         "R1.3": "Minor comments"
       }
+    },
+    {
+      "name": "no reviewer head: text under two sections before the numbers takes no number",
+      "kind": "trap",
+      "text": "General comments\nThe topic is timely.\nSpecific comments\nDetails are missing.\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      },
+      "sections": {
+        "R1.1": "Specific comments",
+        "R1.2": "Specific comments"
+      },
+      "uncovered": ["The topic is timely.", "Details are missing.", "General comments"],
+      "lost": ["The topic is timely.", "Details are missing."]
+    },
+    {
+      "name": "no reviewer head: text under one section before the numbers takes no number",
+      "kind": "trap",
+      "text": "General comments\nThe topic is timely.\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      },
+      "sections": {
+        "R1.1": "General comments",
+        "R1.2": "General comments"
+      },
+      "uncovered": ["The topic is timely."],
+      "lost": ["The topic is timely."]
+    },
+    {
+      "name": "no reviewer head: text before the numbers takes no number",
+      "kind": "trap",
+      "text": "The topic is timely.\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      },
+      "uncovered": ["The topic is timely."],
+      "lost": ["The topic is timely."]
+    },
+    {
+      "name": "no reviewer head: text under three sections before the numbers takes no number",
+      "kind": "trap",
+      "text": "General comments\nThe topic is timely.\nMajor comments\nDetails are missing.\nMinor comments\nTypos remain.\n1. Add units.\n2. State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      },
+      "sections": {
+        "R1.1": "Minor comments",
+        "R1.2": "Minor comments"
+      },
+      "uncovered": [
+        "The topic is timely.",
+        "Details are missing.",
+        "Typos remain.",
+        "General comments",
+        "Major comments"
+      ],
+      "lost": ["The topic is timely.", "Details are missing.", "Typos remain."]
+    },
+    {
+      "name": "no reviewer head: text under two sections before comment heads takes no number",
+      "kind": "trap",
+      "text": "General comments\nThe topic is timely.\nSpecific comments\nDetails are missing.\nComment 1: Add units.\nComment 2: State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      },
+      "sections": {
+        "R1.1": "Specific comments",
+        "R1.2": "Specific comments"
+      },
+      "uncovered": ["The topic is timely.", "Details are missing.", "General comments"],
+      "lost": ["The topic is timely.", "Details are missing."]
+    },
+    {
+      "name": "no reviewer head: text under two sections before bullets takes no number",
+      "kind": "trap",
+      "text": "General comments\nThe topic is timely.\nSpecific comments\nDetails are missing.\n- Add units.\n- State n.",
+      "refs": ["R1.1", "R1.2"],
+      "texts": {
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      },
+      "sections": {
+        "R1.1": "Specific comments",
+        "R1.2": "Specific comments"
+      },
+      "uncovered": ["The topic is timely.", "Details are missing.", "General comments"],
+      "lost": ["The topic is timely.", "Details are missing."]
+    },
+    {
+      "name": "with a reviewer head the same text under two sections is R1.0 and R1.1",
+      "kind": "positive",
+      "text": "Reviewer 1:\nGeneral comments\nThe topic is timely.\nSpecific comments\nDetails are missing.\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2", "R1.3"],
+      "texts": {
+        "R1.0": "The topic is timely.",
+        "R1.1": "Details are missing.",
+        "R1.2": "1. Add units.",
+        "R1.3": "2. State n."
+      },
+      "sections": {
+        "R1.0": "General comments",
+        "R1.1": "Specific comments",
+        "R1.2": "Specific comments",
+        "R1.3": "Specific comments"
+      }
+    },
+    {
+      "name": "with a reviewer head the same text under one section is R1.0",
+      "kind": "positive",
+      "text": "Reviewer 1:\nGeneral comments\nThe topic is timely.\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.0": "The topic is timely.",
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      },
+      "sections": {
+        "R1.0": "General comments",
+        "R1.1": "General comments",
+        "R1.2": "General comments"
+      }
+    },
+    {
+      "name": "with a reviewer head the same text before the numbers is R1.0",
+      "kind": "positive",
+      "text": "Reviewer 1:\nThe topic is timely.\n1. Add units.\n2. State n.",
+      "refs": ["R1.0", "R1.1", "R1.2"],
+      "texts": {
+        "R1.0": "The topic is timely.",
+        "R1.1": "Add units.",
+        "R1.2": "State n."
+      }
     }
   ]
 }

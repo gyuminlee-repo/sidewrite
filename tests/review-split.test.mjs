@@ -831,3 +831,22 @@ test("the requirement prompt gets the section of each un-numbered section text",
   assert.match(prompt, /\[R1\.0 section\] Major comments\n\[R1\.0 s1\] Please enlarge this part\./);
   assert.match(prompt, /\[R1\.1 section\] Minor comments\n\[R1\.1 s1\] Please shorten this part\./);
 });
+
+// ---- no reviewer head: dropped text takes no number -------------------------------
+
+test("without a reviewer head, text under sections before the numbers is named and takes no number", async () => {
+  const review =
+    "General comments\nThe topic is timely.\nSpecific comments\nDetails are missing.\n1. Add units.\n2. State n.\n";
+  const r = await splitReview(review);
+  assert.equal(r.method, "regex");
+  assert.deepEqual(
+    r.comments.map((c) => [c.ref, c.section, c.text]),
+    [
+      ["R1.1", "Specific comments", "Add units."],
+      ["R1.2", "Specific comments", "State n."],
+    ],
+  );
+  assert.deepEqual(r.warnings, [
+    '3 sentence(s) of the review are in no comment: "The topic is timely.", "Details are missing.", "General comments". Add them if they ask for something.',
+  ]);
+});
