@@ -332,3 +332,41 @@ test("several comments: every row names its comment", () => {
   });
   assert.deepEqual(ids(checkResponses(two)), ["answered:E.1"]);
 });
+
+test("declining needs a reason: a comment or a request declined with a blank one fails", () => {
+  const declinedComment = (reason, response = null) =>
+    good((r) => Object.assign(r.comments[0], { declined: { reason }, response, changes: [] }));
+  for (const blank of ["", "   ", "\n\t", null, undefined]) {
+    const rows = checkResponses(declinedComment(blank));
+    assert.deepEqual(ids(rows), ["declined_reason:R1.1"], JSON.stringify(blank));
+    assert.equal(rows[0].detail, "the comment is declined without a reason");
+  }
+  assert.deepEqual(ids(checkResponses(declinedComment("Outside the scope of this study."))), []);
+  // An answer text does not stand in for the reason of the decline.
+  const withText = declinedComment("", {
+    text: "We keep the wording.",
+    citations: [],
+    declined_requirements: [],
+  });
+  assert.deepEqual(ids(checkResponses(withText)), ["declined_reason:R1.1"]);
+
+  const declinedRequest = (entries) =>
+    good((r) => {
+      r.comments[0].requirements.push({ id: "q2", text: "name the supplier" });
+      r.comments[0].response.declined_requirements = entries;
+    });
+  for (const blank of ["", "  ", null, undefined]) {
+    const rows = checkResponses(declinedRequest([{ id: "q2", reason: blank }]));
+    assert.deepEqual(ids(rows), ["declined_reason:R1.1"], JSON.stringify(blank));
+    assert.equal(rows[0].detail, "q2 is declined without a reason: name the supplier");
+  }
+  assert.deepEqual(
+    ids(checkResponses(declinedRequest([{ id: "q2", reason: "Not recorded." }]))),
+    [],
+  );
+  // An entry for a request that is not in the list is not written and not checked;
+  // q2 itself is then simply unanswered.
+  assert.deepEqual(ids(checkResponses(declinedRequest([{ id: "q9", reason: "" }]))), [
+    "requirements:R1.1",
+  ]);
+});

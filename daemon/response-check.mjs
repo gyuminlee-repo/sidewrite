@@ -4,9 +4,11 @@
 //   { id, level: "fail" | "warn", ref, detail }
 // A letter may be exported when no row is a fail.
 //
-//   answered        every comment has a response or is declined with a reason
+//   answered        every comment has a response or is declined
 //   requirements    every request of a comment is answered by an accepted
-//                   change or declined with a reason
+//                   change or declined
+//   declined_reason every declined comment and declined request has a reason
+//                   that is not blank
 //   stale           the cited changes are still the accepted changes
 //   quote_exact     every quote is in its manuscript paragraph, character for
 //                   character, in the accepted view
@@ -29,6 +31,8 @@ import { normalizeParaText } from "./revision-classify.mjs";
 
 // Counted by code, never taken from the model.
 export const wordCount = (s) => (String(s ?? "").match(/\S+/g) ?? []).length;
+
+const blank = (s) => !String(s ?? "").trim();
 
 const XREF = /\b(?:Reviewer|Referee)\s*#?\s*\d/i;
 // A whole line in square brackets: the shape of a location line.
@@ -68,11 +72,16 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
     const r = c.response;
     const text = String(r?.text ?? "").trim();
     if (!text && !c.declined) add("answered", "fail", c.ref, "no response and not declined");
+    // Declining counts as an answer only with a reason the letter can print.
+    if (c.declined && blank(c.declined.reason))
+      add("declined_reason", "fail", c.ref, "the comment is declined without a reason");
 
-    const declined = new Set((r?.declined_requirements ?? []).map((d) => d.id));
+    const declined = new Map((r?.declined_requirements ?? []).map((d) => [d.id, d.reason]));
     const accepted = (c.changes ?? []).filter((ch) => CITABLE.has(ch.state));
     const answered = new Set(accepted.flatMap((ch) => ch.rationale?.requirement_ids ?? []));
     for (const q of c.requirements ?? []) {
+      if (declined.has(q.id) && blank(declined.get(q.id)))
+        add("declined_reason", "fail", c.ref, `${q.id} is declined without a reason: ${q.text}`);
       if (c.declined || declined.has(q.id) || answered.has(q.id)) continue;
       const pending = (c.changes ?? []).some(
         (ch) => ch.state === "pending" && (ch.rationale?.requirement_ids ?? []).includes(q.id),
