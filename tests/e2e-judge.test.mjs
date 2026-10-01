@@ -237,3 +237,58 @@ test("cleanupDecision: a refused quit is never force-killed, a quit that ran and
   );
   assert.equal(cleanupDecision({ ...base, pid: undefined, quit: undefined }).action, "none");
 });
+
+// Codex review (P2): a failed verify_command and features_error did not
+// change the exit code of the run.
+test("exitDecision: failed verify commands and features_error fail the run; a conditional feature is skipped only when its condition was provably absent", async () => {
+  const { exitDecision } = await import("../scripts/e2e/judge.mjs");
+  const pass = [{ step: "split", result: "PASS" }];
+  const turns = "[agent] turn complete (success) slash=false output=true\n";
+  const limited = turns + "[agent] turn complete (usage_limit) slash=false output=false\n";
+  const f = (id, exit) => ({ id, exit, command: "x" });
+  const run = (over) =>
+    exitDecision({
+      failed: false,
+      rows: pass,
+      features: [],
+      conditional: [],
+      logs: turns,
+      ...over,
+    });
+
+  assert.equal(run({ features: [f("S2-18", 0), f("S2-19", 0)] }).code, 0);
+  // A verify command that fails.
+  const bad = run({ features: [f("S2-18", 0), f("S2-20", 1)] });
+  assert.equal(bad.code, 1);
+  assert.deepEqual(
+    bad.features.map((x) => x.status),
+    ["PASS", "FAIL"],
+  );
+  assert.match(bad.reasons.join("\n"), /S2-20/);
+  // The feature list could not be read or run.
+  assert.equal(run({ featuresError: "ENOENT feature_list.json" }).code, 1);
+  // S2-27 without --conditional counts.
+  assert.equal(run({ features: [f("S2-27", 1)] }).code, 1);
+  // --conditional S2-27, no usage-limit turn in this run's log: skipped.
+  const skipped = run({ features: [f("S2-27", 1)], conditional: ["S2-27"] });
+  assert.equal(skipped.code, 0);
+  assert.equal(skipped.features[0].status, "SKIPPED-CONDITION-NOT-MET");
+  // The condition happened in this run: the failure counts.
+  const met = run({ features: [f("S2-27", 1)], conditional: ["S2-27"], logs: limited });
+  assert.deepEqual([met.code, met.features[0].status], [1, "FAIL"]);
+  // Absence is not proven by a log that shows no finished turn at all.
+  for (const logs of ["", null, "[bridge] hello received\n"]) {
+    assert.equal(run({ features: [f("S2-27", 1)], conditional: ["S2-27"], logs }).code, 1);
+  }
+  // A feature with no known condition cannot be declared conditional.
+  const unknown = run({ features: [f("S2-30", 1)], conditional: ["S2-30"] });
+  assert.deepEqual([unknown.code, unknown.features[0].status], [1, "FAIL"]);
+  // A conditional feature that passes is a pass.
+  assert.equal(
+    run({ features: [f("S2-27", 0)], conditional: ["S2-27"], logs: limited }).features[0].status,
+    "PASS",
+  );
+  // Steps and a thrown run still decide as before.
+  assert.equal(run({ rows: [{ step: "split", result: "FAIL" }] }).code, 1);
+  assert.equal(run({ failed: true }).code, 1);
+});

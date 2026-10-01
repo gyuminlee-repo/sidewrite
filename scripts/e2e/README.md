@@ -25,8 +25,19 @@ node scripts/e2e/run-acceptance.mjs \
   --playwright-core 'D:\path\to\node_modules\playwright-core' \
   --feature-list /path/to/feature_list.json \
   --plan-dir <folder the feature_list commands name> \
-  --plan-repo <repo path the feature_list commands cd into>
+  --plan-repo <repo path the feature_list commands cd into> \
+  --conditional S2-27
 ```
+
+The exit code is 0 only when every step passed, every verify command exited
+0 and the Word started by the run was closed. `--conditional <id>` (repeat
+or comma-separate) names a feature that depends on an event the run cannot
+force. Such a feature is reported `SKIPPED-CONDITION-NOT-MET` and does not
+fail the run only when its verify command failed and the event is provably
+absent from this run's daemon logs (the logs show finished turns and no
+line of the event). Known conditions (`CONDITIONS` in `judge.mjs`): `S2-27`,
+a turn that ended on a usage limit (`[agent] turn complete (usage_limit)`).
+An id without a known condition counts like any other feature.
 
 A new folder `e2e-<UTC time>` is made under `--base-dir`. It holds the tagged
 copy of the test manuscript, its revision.json and comment backup, the Windows

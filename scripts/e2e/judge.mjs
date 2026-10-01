@@ -117,6 +117,37 @@ export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = t
   };
 }
 
+// Features whose verify_command can pass only when something happened that
+// the run cannot force. trigger: the daemon log line of that event.
+export const CONDITIONS = {
+  // A turn that ended on a Claude usage limit.
+  "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
+};
+const TURN_LOGGED = /^\[agent\] turn complete \(/m;
+
+// Exit code of the run. features: [{ id, exit }] of the verify commands;
+// conditional: ids given with --conditional; logs: text of the daemon logs
+// this run wrote. A conditional feature that failed is
+// SKIPPED-CONDITION-NOT-MET only when its trigger is provably absent: the
+// logs show finished turns and none with the trigger. Otherwise it counts.
+export function exitDecision({ failed, rows, features, featuresError, conditional = [], logs }) {
+  const reasons = [];
+  if (failed) reasons.push("the run stopped on an error");
+  for (const r of rows ?? []) if (r.result === "FAIL") reasons.push(`step failed: ${r.step}`);
+  if (featuresError) reasons.push(`verify commands did not run: ${featuresError}`);
+  const text = typeof logs === "string" ? logs : "";
+  const out = (features ?? []).map((f) => {
+    if (f.exit === 0) return { ...f, status: "PASS" };
+    const cond = conditional.includes(f.id) ? CONDITIONS[f.id] : null;
+    if (cond && TURN_LOGGED.test(text) && !cond.trigger.test(text)) {
+      return { ...f, status: "SKIPPED-CONDITION-NOT-MET" };
+    }
+    reasons.push(`verify command failed: ${f.id} (exit ${f.exit})`);
+    return { ...f, status: "FAIL" };
+  });
+  return { code: reasons.length ? 1 : 0, reasons, features: out };
+}
+
 const has = (s, sub) => String(s ?? "").includes(sub);
 
 // R1.1 all Accepted, R1.2 all Rejected, R1.3 first change Edited by you.

@@ -13,6 +13,7 @@ import {
   badgesMatch,
   buildComPlan,
   cleanupDecision,
+  exitDecision,
   judge,
   minimalFind,
   rewriteCommand,
@@ -50,6 +51,9 @@ const { values: opt } = parseArgs({
     "plan-repo": { type: "string", default: process.env.E2E_PLAN_REPO },
     "plan-log": { type: "string", default: "/tmp/daemon-s2.log" },
     features: { type: "string", default: "S2-18..S2-34" },
+    // Feature ids that depend on an event the run cannot force (judge.mjs
+    // CONDITIONS). Repeat the flag or separate ids with commas.
+    conditional: { type: "string", multiple: true, default: [] },
     "skip-knob": { type: "boolean", default: false },
     // Leave Word and the daemon running when a step fails, to look at them.
     "keep-on-fail": { type: "boolean", default: false },
@@ -206,6 +210,9 @@ async function stopDaemon() {
   ).catch(() => daemon.kill("SIGKILL"));
   await until(() => !listening(WS_PORT) && !listening(HTTP_PORT), 10_000, "ports free");
 }
+// Logs this run wrote. A -knob.log of an earlier run is removed at the start,
+// so a verify command or a condition check never reads it.
+const runLogs = () => [...new Set([LOG, daemonLog])].map(readLog).join("\n");
 
 // ---- verify commands -------------------------------------------------------
 function featureIds(spec) {
@@ -266,6 +273,7 @@ async function main() {
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   if (listening(WS_PORT) || listening(HTTP_PORT))
     die(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
+  fs.rmSync(KNOB_LOG, { force: true });
 
   record.word.preexisting = wordPids();
 
@@ -476,13 +484,26 @@ if (failed && opt["keep-on-fail"]) {
 } else {
   await cleanup();
 }
+const decision = exitDecision({
+  failed: !!failed,
+  rows,
+  features: record.features,
+  featuresError: record.features_error,
+  conditional: opt.conditional.flatMap((x) => x.split(",")).filter(Boolean),
+  logs: runLogs(),
+});
+record.features = decision.features;
+record.exit = { code: decision.code, reasons: decision.reasons };
 record.finished_at = new Date().toISOString();
 save();
 console.log("\n" + table(rows));
 if (record.features.length) {
-  console.log("\nfeature  exit");
-  for (const f of record.features) console.log(`${f.id.padEnd(7)}  ${f.exit}`);
+  console.log("\nfeature  exit  status");
+  for (const f of record.features)
+    console.log(`${f.id.padEnd(7)}  ${String(f.exit).padEnd(4)}  ${f.status}`);
 }
+if (record.features_error) console.log(`\nfeatures error: ${record.features_error}`);
 console.log(`\ncleanup: ${JSON.stringify(record.cleanup)}`);
 console.log(`result: ${path.join(RUN, "result.json")}`);
-process.exit(failed || rows.some((r) => r.result === "FAIL") ? 1 : 0);
+for (const r of decision.reasons) console.error(`run-acceptance: ${r}`);
+process.exit(decision.code);
