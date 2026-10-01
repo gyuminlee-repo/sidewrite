@@ -165,7 +165,8 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // is one editor comment. A letter closing ("Sincerely,") or a portal footer
 // inside a reviewer block opens an editor block too, so a signature is not
 // part of the last comment. Until the next blank line a closing also keeps
-// the lines under it from being read as heads ("Editor-in-Chief").
+// the lines under it from being read as heads ("Editor-in-Chief"), unless
+// the line has a colon ("Editor's comments:", "Reviewer 2:").
 // A combined head ("Reviewer 1, Comment 2:", "R2C3:") opens or goes on
 // with the block of its reviewer and starts comment R1.2.
 //
@@ -178,7 +179,8 @@ export function splitReviewRegex(text, patterns = DEFAULT_PATTERNS) {
 // under its head line is a review, whatever its head-line text ("Reviewer 1:
 // First round"), so two rounds of a reviewer stay reviewer comments. Form
 // text: each run of form text (question, answers, the label between them)
-// is one editor comment with the answer lines as pasted. In such a letter a
+// is one editor comment with the answer lines as pasted; answers right
+// under the text before the first head join that text. In such a letter a
 // rule line ("**********") ends a reviewer block and is dropped. Text under
 // an unnumbered reviewer label before the first numbered head is form text
 // too.
@@ -265,7 +267,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     // text under it is form text, not the words of a reviewer.
     const open = (b) => {
       if (cur.anon && b.numbered) {
-        Object.assign(cur, { editor: true, form: true, reviewer: 0 });
+        Object.assign(cur, { editor: true, form: true, first: true, reviewer: 0 });
         gone.push(cur.head);
       }
       if (!(cur.anon && !hasText(cur.idx) && b.numbered)) blocks.push(cur);
@@ -293,7 +295,10 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
       }
       // A round line after the first reviewer: the label of the blocks below.
       const mark = line.trim().replace(/\s*[:\uFF1A]$/, "");
-      if (reviewers && !closed && ROUND_LABEL.test(fold(mark))) {
+      // Under a closing only a head with a colon is a head ("Editor's
+      // comments:"); a bare one is a line of the signature ("Editor-in-Chief").
+      const signed = closed && !/[:\uFF1A]/.test(line);
+      if (reviewers && !signed && ROUND_LABEL.test(fold(mark))) {
         over[i] = "";
         rounds.push(mark);
         round = mark;
@@ -301,7 +306,7 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
         cur.idx.push(i);
         return;
       }
-      const c = closed ? null : re.combined.exec(s);
+      const c = signed ? null : re.combined.exec(s);
       const both = c && [...c].slice(1).filter((x) => x !== undefined);
       const who = c && reviewerNumber(both[0]);
       if (who && /^\d+$/.test(both[1] ?? "") && COMBINED_REST.test(s.slice(c[0].length))) {
@@ -312,14 +317,14 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
           open({ reviewer: who, headed: true, numbered: true, combined: true, head: i, idx: [i] });
         return;
       }
-      const m = closed ? null : re.reviewer.exec(s);
+      const m = signed ? null : re.reviewer.exec(s);
       const number = m && reviewerNumber(m[1]);
-      const e = closed || number ? null : re.editor.exec(s);
+      const e = signed || number ? null : re.editor.exec(s);
       const closing = CLOSING.test(s);
       if (number) {
         over[i] = reviewerRest(m, line);
         open({ reviewer: number, headed: true, numbered: true, head: i, idx: [i] });
-      } else if (!closed && ANON_REVIEWER.test(s)) {
+      } else if (!signed && ANON_REVIEWER.test(s)) {
         over[i] = "";
         open({ reviewer: top + 1, headed: true, anon: true, head: i, idx: [i] });
       } else if (e) {
@@ -392,10 +397,14 @@ function splitBlocks(text, patterns = DEFAULT_PATTERNS) {
     over[b.head] = lines[b.head];
     Object.assign(b, { editor: true, form: true, reviewer: 0 });
   }
-  // A run of form text is one editor comment; a rule line starts a new run.
+  // A run of form text is one editor comment; a rule line or an unnumbered
+  // reviewer label starts a new run. Answers right under the text before the
+  // first head (a first question with no label over it) join that text.
   const count = blocks.length;
   blocks = blocks.reduce((list, b) => {
-    if (b.form && !b.first && list.at(-1)?.form) list.at(-1).idx.push(...b.idx);
+    const prev = list.at(-1);
+    const letter = list.length === 1 && !prev.headed && !prev.editor && hasText(prev.idx);
+    if (b.form && !b.first && (prev?.form || letter)) prev.idx.push(...b.idx);
     else list.push(b);
     return list;
   }, []);
