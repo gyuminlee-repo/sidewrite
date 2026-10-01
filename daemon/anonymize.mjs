@@ -7,20 +7,34 @@
 // "<name>_anonymized.INCOMPLETE.docx", so no file that failed the check
 // carries the name of a finished copy.
 //
-// The source is never the output, and an existing copy is never
-// overwritten (a taken name gets a time stamp).
+// The source is never the output, and no existing file is overwritten: a
+// taken name gets a time stamp and then a counter, the Python tool creates
+// its output exclusively (it refuses a name that exists by the time it
+// writes, and another name is tried), and the move to the INCOMPLETE name is
+// exclusive too.
 //
 // Not wired yet. The caller passes runPy (daemon/py-tool.mjs), the local
-// path of the saved document, existsSync and fs rename, and shows
-// ANONYMIZE_NOTICE with the report.
+// path of the saved document and existsSync, and shows ANONYMIZE_NOTICE with
+// the report.
 
 import { join, resolve } from "node:path";
-import { pyJson, pyError, siblingPath, REPO_ROOT, SAVE_FIRST } from "./doc-tools.mjs";
+import {
+  pyJson,
+  pyError,
+  siblingPath,
+  freeName,
+  outputTaken,
+  moveExclusive,
+  REPO_ROOT,
+  SAVE_FIRST,
+} from "./doc-tools.mjs";
 
 export const ANONYMIZE_NOTICE =
   "Author marks and file metadata are cleared in the copy. The text itself is not changed: a name written in the manuscript stays there. Hidden text, embedded objects and TIFF pictures are reported, not cleared.";
 
 export const anonymizedPath = (docPath, deps) => siblingPath(docPath, "anonymized", deps);
+
+const TRIES = 5;
 
 const samePath = (a, b) =>
   resolve(a) === resolve(b) || resolve(a).toLowerCase() === resolve(b).toLowerCase();
@@ -49,30 +63,40 @@ export async function runAnonymize({
   dates,
   runPy,
   exists,
-  rename,
+  move = moveExclusive,
   sameFile,
   now,
   root = REPO_ROOT,
 } = {}) {
   if (!src) return { ok: false, error: SAVE_FIRST };
-  const target = out ?? anonymizedPath(src, { exists, now });
-  if (samePath(src, target) || (sameFile && (await sameFile(src, target)))) {
-    return { ok: false, error: `The output is the same file as the document: ${target}` };
-  }
   const who = ["--author", author, "--initials", initials];
   const which = [
     ...(keep.length ? ["--keep", keep.join(",")] : []),
     ...(also.length ? ["--also", also.join(",")] : []),
   ];
-  const made = await runPy(join(root, "tools", "anonymize_docx.py"), [
-    "--in",
-    src,
-    "--out",
-    target,
-    ...who,
-    ...which,
-    ...(dates ? ["--dates", dates] : []),
-  ]);
+  // The tool creates its output exclusively. When the name that was free a
+  // moment ago is taken by the time the tool writes, another name is picked.
+  const taken = new Set();
+  const isTaken = (p) => taken.has(p) || (exists?.(p) ?? false);
+  let target;
+  let made;
+  for (let attempt = 0; attempt < TRIES; attempt++) {
+    target = out ?? anonymizedPath(src, { exists: isTaken, now });
+    if (samePath(src, target) || (sameFile && (await sameFile(src, target)))) {
+      return { ok: false, error: `The output is the same file as the document: ${target}` };
+    }
+    made = await runPy(join(root, "tools", "anonymize_docx.py"), [
+      "--in",
+      src,
+      "--out",
+      target,
+      ...who,
+      ...which,
+      ...(dates ? ["--dates", dates] : []),
+    ]);
+    if (out || !outputTaken(made)) break;
+    taken.add(target);
+  }
   if (made.code !== 0) return { ok: false, error: pyError(made) };
   const checked = await runPy(join(root, "scripts", "verify-anonymized.py"), [
     "--before",
@@ -93,17 +117,29 @@ export async function runAnonymize({
       notice: ANONYMIZE_NOTICE,
     };
   }
-  // Not verified: the copy must not keep the name of a finished one.
-  const aside = target.replace(/(\.[^./\\]+)?$/, (ext) => `.INCOMPLETE${ext}`);
-  let path = aside;
-  try {
-    await rename(target, aside);
-  } catch (e) {
+  // Not verified: the copy must not keep the name of a finished one. The
+  // move is exclusive, so an earlier set-aside copy is not replaced either.
+  const ext = /(\.[^./\\]+)?$/.exec(target)[0];
+  const stem = `${target.slice(0, target.length - ext.length)}.INCOMPLETE`;
+  let path = null;
+  let failure = null;
+  for (let attempt = 0; attempt < TRIES && !path; attempt++) {
+    const aside = freeName(stem, ext, isTaken);
+    try {
+      await move(target, aside);
+      path = aside;
+    } catch (e) {
+      failure = e;
+      if (e?.code !== "EEXIST") break;
+      taken.add(aside);
+    }
+  }
+  if (!path) {
     return {
       ok: false,
       path: target,
       report,
-      error: `The copy failed its check and could not be set aside (${String(e?.message ?? e)}). Do not use ${target}.`,
+      error: `The copy failed its check and could not be set aside (${String(failure?.message ?? failure)}). Do not use ${target}.`,
     };
   }
   if (checked.code === 1 && report) {

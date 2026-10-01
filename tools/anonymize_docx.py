@@ -45,13 +45,14 @@ declarations and everything else stay byte for byte; each edited part is then pa
 still well-formed. Pictures are edited by dropping whole metadata segments; the picture data is not touched.
 
 The output is never the source: an output path that is the source file under any name (the same path, a
-link, another spelling) is refused. The copy is written to a temporary file next to the output and moved
-into place when it is complete.
+link, another spelling) is refused. An output file that already exists is refused too, unless --overwrite
+is given; the check is made again by the write itself, which creates the name exclusively. The copy is
+written to a temporary file next to the output and moved into place when it is complete.
 
 Standard library only.
 
 Usage: anonymize_docx.py --in SOURCE.docx --out COPY.docx [--author Anonymous] [--initials A]
-       [--keep CATEGORY,...] [--also CATEGORY,...] [--dates fixed|remove]
+       [--keep CATEGORY,...] [--also CATEGORY,...] [--dates fixed|remove] [--overwrite]
 Exit code: 0 done (a JSON report on stdout), 2 refused or failed (the reason on stderr).
 """
 
@@ -61,6 +62,7 @@ import json
 import os
 import posixpath
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -527,7 +529,32 @@ def same_file(a, b):
     return os.path.exists(a) and os.path.exists(b) and os.path.samefile(a, b)
 
 
-def anonymize(src, out, author="Anonymous", initials="A", on=None, dates="fixed"):
+def place(tmp, out, overwrite=False):
+    """Move the finished temporary file to `out`. Without `overwrite` an existing `out` is never replaced:
+    the name is created exclusively (a hard link, or an exclusive copy where links are not supported), so a
+    file that appeared after the first check is refused here as well."""
+    if overwrite:
+        os.replace(tmp, out)
+        return
+    try:
+        os.link(tmp, out)
+    except FileExistsError:
+        raise Refused("the output already exists and is not overwritten: %s" % out)
+    except OSError:  # no hard links on this file system
+        try:
+            dst = open(out, "xb")
+        except FileExistsError:
+            raise Refused("the output already exists and is not overwritten: %s" % out)
+        try:
+            with dst, open(tmp, "rb") as src:
+                shutil.copyfileobj(src, dst)
+        except OSError:
+            os.unlink(out)  # this call created the file: a half-written copy is not left behind
+            raise
+    os.unlink(tmp)
+
+
+def anonymize(src, out, author="Anonymous", initials="A", on=None, dates="fixed", overwrite=False):
     """Write the anonymized copy of `src` to `out`; return the report."""
     on = {c for c, default in CATEGORIES.items() if default} if on is None else set(on)
     if not os.path.isfile(src):
@@ -537,6 +564,8 @@ def anonymize(src, out, author="Anonymous", initials="A", on=None, dates="fixed"
     out_dir = os.path.dirname(os.path.abspath(out))
     if not os.path.isdir(out_dir):
         raise Refused("the output folder does not exist: %s" % out_dir)
+    if not overwrite and os.path.lexists(out):
+        raise Refused("the output already exists and is not overwritten: %s" % out)
     if not zipfile.is_zipfile(src):
         raise Refused("not a docx (not a zip file): %s" % src)
     changed, zip_counts = {}, {}
@@ -563,7 +592,7 @@ def anonymize(src, out, author="Anonymous", initials="A", on=None, dates="fixed"
                 zout.writestr(member, data, compress_type=info.compress_type)
         if same_file(src, out):  # the output became a link to the source while the copy was written
             raise Refused("the output is the same file as the source: %s" % out)
-        os.replace(tmp, out)
+        place(tmp, out, overwrite)
     finally:
         if os.path.exists(tmp):  # anything but a completed move: leave no half-written file
             os.unlink(tmp)
@@ -598,10 +627,11 @@ def main(argv=None):
     ap.add_argument("--keep", type=categories, default=[], help="categories to leave as they are")
     ap.add_argument("--also", type=categories, default=[], help="categories to clear that are kept by default")
     ap.add_argument("--dates", choices=("fixed", "remove"), default="fixed", help="what becomes of change and comment dates")
+    ap.add_argument("--overwrite", action="store_true", help="replace the output file when it exists (default: refuse)")
     a = ap.parse_args(argv)
     on = ({c for c, default in CATEGORIES.items() if default} | set(a.also)) - set(a.keep)
     try:
-        report = anonymize(a.src, a.out, a.author, a.initials, on, a.dates)
+        report = anonymize(a.src, a.out, a.author, a.initials, on, a.dates, a.overwrite)
     except (Refused, OSError, zipfile.BadZipFile) as e:
         print(str(e), file=sys.stderr)
         return 2

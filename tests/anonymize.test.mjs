@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { copyFile, mkdtemp, readdir, readFile, rename } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,7 +131,7 @@ test("when the verifier finds something left, the copy is set aside as INCOMPLET
     src: "/work/paper.docx",
     runPy,
     root: "/repo",
-    rename: async (a, b) => moved.push([a, b]),
+    move: async (a, b) => moved.push([a, b]),
   });
   assert.equal(r.ok, false);
   assert.equal(r.path, "/work/paper_anonymized.INCOMPLETE.docx");
@@ -146,7 +146,7 @@ test("when the verifier finds something left, the copy is set aside as INCOMPLET
     src: "/work/paper.docx",
     runPy: fakePy(done({ changed: {} }), exit(1, changed)).runPy,
     root: "/repo",
-    rename: async () => {},
+    move: async () => {},
   });
   assert.match(c.error, /text changed/);
   assert.match(c.error, /missing part/);
@@ -159,7 +159,7 @@ test("a verifier that could not run leaves no file passing as checked", async ()
     src: "/work/paper.docx",
     runPy,
     root: "/repo",
-    rename: async (a, b) => moved.push([a, b]),
+    move: async (a, b) => moved.push([a, b]),
   });
   assert.deepEqual(
     [r.ok, r.path, /could not be checked/.test(r.error)],
@@ -198,14 +198,14 @@ test("with the real tools: a copy next to the source, verified, and the source u
   const src = join(dir, "paper.docx");
   await copyFile(join(ROOT, "tests", "fixtures", "review_manuscript.docx"), src);
   const before = await readFile(src);
-  const r = await runAnonymize({ src, runPy: realPy, exists: existsSync, rename, root: ROOT });
+  const r = await runAnonymize({ src, runPy: realPy, exists: existsSync, root: ROOT });
   assert.equal(r.ok, true, r.error);
   assert.equal(r.path, join(dir, "paper_anonymized.docx"));
   assert.equal(r.report.total, 0);
   assert.equal(r.report.categories.names.status, "cleared");
   assert.ok((await readFile(src)).equals(before));
   // A second run does not overwrite the first copy.
-  const again = await runAnonymize({ src, runPy: realPy, exists: existsSync, rename, root: ROOT });
+  const again = await runAnonymize({ src, runPy: realPy, exists: existsSync, root: ROOT });
   assert.equal(again.ok, true, again.error);
   assert.notEqual(again.path, r.path);
   assert.equal((await readdir(dir)).length, 3);
@@ -215,7 +215,6 @@ test("with the real tools: a copy next to the source, verified, and the source u
     out: join(dir, "kept.docx"),
     keep: ["names", "comment_authors"],
     runPy: realPy,
-    rename,
     root: ROOT,
   });
   assert.equal(kept.ok, true, kept.error);

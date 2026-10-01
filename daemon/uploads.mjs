@@ -45,8 +45,12 @@ export function createUploads({
       const path = join(dir, `${id}.docx`);
       try {
         await mkdir(dir, { recursive: true, mode: 0o700 });
-        await writeFile(path, r.bytes, { mode: 0o600 });
+        // "wx": the file is created, never replaced.
+        await writeFile(path, r.bytes, { mode: 0o600, flag: "wx" });
       } catch (e) {
+        if (e?.code === "EEXIST") {
+          return { ok: false, error: `A file for the upload id ${id} already exists.` };
+        }
         return { ok: false, error: `The upload could not be saved: ${String(e?.message ?? e)}` };
       }
       done.set(id, path);

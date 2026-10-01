@@ -19,7 +19,8 @@ insert colour, cannot be marked (the marks could not be told apart) and is refus
 
 The result is checked before it is written: accepting every mark must give the clean text and rejecting every mark
 the baseline text, paragraph by paragraph, and the check itself is tested by damaging a copy. When a check fails
-nothing is written and the exit code is 1. The output is never one of the inputs.
+nothing is written and the exit code is 1. The output is never one of the inputs, and an output or report file
+that already exists is refused unless --overwrite is given (the write creates the name exclusively).
 
 Needs lxml.
 
@@ -36,6 +37,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -980,6 +982,31 @@ def same_file(a, b):
     return os.path.exists(a) and os.path.exists(b) and os.path.samefile(a, b)
 
 
+def place(tmp, out, overwrite=False):
+    """Move the finished temporary file to `out`. Without `overwrite` an existing `out` is never replaced:
+    the name is created exclusively (a hard link, or an exclusive copy where links are not supported), so a
+    file that appeared after the first check is refused here as well."""
+    if overwrite:
+        os.replace(tmp, out)
+        return
+    try:
+        os.link(tmp, out)
+    except FileExistsError:
+        raise Refused('the output already exists and is not overwritten: %s' % out)
+    except OSError:  # no hard links on this file system
+        try:
+            dst = open(out, 'xb')
+        except FileExistsError:
+            raise Refused('the output already exists and is not overwritten: %s' % out)
+        try:
+            with dst, open(tmp, 'rb') as src:
+                shutil.copyfileobj(src, dst)
+        except OSError:
+            os.unlink(out)  # this call created the file: a half-written copy is not left behind
+            raise
+    os.unlink(tmp)
+
+
 def write_docx(clean_path, out_path, doc_xml):
     """Copy the clean zip with only word/document.xml replaced (ZipInfo, order and comment preserved)."""
     with zipfile.ZipFile(clean_path) as zin, zipfile.ZipFile(out_path, 'w') as zout:
@@ -1254,6 +1281,7 @@ def main(argv=None):
     ap.add_argument('--date', default=DATE, help='w:date for track_changes marks (xsd:dateTime)')
     ap.add_argument('--report', help='JSON report path')
     ap.add_argument('--json', action='store_true', help='print one line of JSON with the counts as the last line')
+    ap.add_argument('--overwrite', action='store_true', help='replace the output and the report when they exist (default: refuse)')
     ap.add_argument('--merge-gap', type=int, default=MERGE_GAP_TOKENS)
     ap.add_argument('--min-ratio', type=float, default=PARA_MATCH_MIN_RATIO)
     ap.add_argument('--sample', type=int, default=SAMPLE_N, help='print N changed paragraphs side by side (prints document text)')
@@ -1292,6 +1320,9 @@ def run(a):
     out_dir = os.path.dirname(os.path.abspath(a.out))
     if not os.path.isdir(out_dir):
         raise Refused('the output folder does not exist: %s' % out_dir)
+    for path in (a.out, a.report):
+        if path and not a.overwrite and os.path.lexists(path):
+            raise Refused('the output already exists and is not overwritten: %s' % path)
     if INSERT_RGB == DELETE_RGB:
         raise Refused('--insert-rgb and --delete-rgb must differ')
 
@@ -1315,7 +1346,7 @@ def run(a):
         if not failed:
             if same_file(a.clean, a.out) or same_file(a.baseline, a.out):
                 raise Refused('the output is the same file as an input: %s' % a.out)
-            os.replace(tmp, a.out)
+            place(tmp, a.out, a.overwrite)
     finally:
         if os.path.exists(tmp):  # anything but a completed move: leave no half-written file
             os.unlink(tmp)
@@ -1392,7 +1423,7 @@ def report(a, out_path, base_xml, clean_xml, st):
                            'baseline_special': dict(st['dropped_baseline_special'])},
                'metrics': {k: v for k, v in m_after.items() if k != 'over90_detail'}, 'verify_lines': lines,
                'checks': total, 'failures': failed}
-        with open(a.report, 'w', encoding='utf-8') as f:
+        with open(a.report, 'w' if a.overwrite else 'x', encoding='utf-8') as f:
             json.dump(rep, f, ensure_ascii=False, indent=1)
     return failed, {'checks': total, 'failures': failed, 'mode': MODE, 'insert_runs': v['insert_runs'],
                     'delete_runs': v['delete_runs'],

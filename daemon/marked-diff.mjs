@@ -4,7 +4,8 @@
 // --json. Its exit code decides the result: 0 the copy was written, 1 the
 // tool's own check failed and nothing was written, 2 the request was
 // refused (the reason is the tool's). The copy goes next to the document;
-// a taken name gets a time stamp, so an earlier copy is never overwritten.
+// a taken name gets a time stamp and then a counter, and the tool creates
+// its output exclusively, so an earlier copy is never overwritten.
 // Colours, mode and author come from the journal profile (colors.
 // marked_insert, colors.marked_delete, marked_mode, marked_author).
 //
@@ -17,7 +18,7 @@
 // its `source`), the local path of the document and existsSync.
 
 import { join, resolve } from "node:path";
-import { pyJson, pyError, siblingPath, REPO_ROOT, SAVE_FIRST } from "./doc-tools.mjs";
+import { pyJson, pyError, siblingPath, outputTaken, REPO_ROOT, SAVE_FIRST } from "./doc-tools.mjs";
 import { DISK_NOTICE } from "./doc-bytes.mjs";
 
 export const MARKED_NOTICE =
@@ -69,23 +70,33 @@ export async function runMarkedDiff({
   root = REPO_ROOT,
 } = {}) {
   if (!baseline) return { ok: false, error: "Choose the baseline file first." };
-  const target = out ?? markedOutPath(docPath, { exists, now });
-  if (!clean || !target) return { ok: false, error: SAVE_FIRST };
-  if (samePath(target, baseline) || samePath(target, clean)) {
-    return { ok: false, error: `The output is the same file as an input: ${target}` };
-  }
+  if (!clean || !(out ?? docPath)) return { ok: false, error: SAVE_FIRST };
   const fromProfile = profileArgs(profile);
   if (fromProfile.error) return { ok: false, error: fromProfile.error };
-  const r = await runPy(join(root, "tools", "build_marked_diff.py"), [
-    "--baseline",
-    baseline,
-    "--clean",
-    clean,
-    "--out",
-    target,
-    "--json",
-    ...fromProfile.args,
-  ]);
+  // The tool creates its output exclusively. When the name that was free a
+  // moment ago is taken by the time the tool writes, another name is picked.
+  const taken = new Set();
+  const isTaken = (p) => taken.has(p) || (exists?.(p) ?? false);
+  let target;
+  let r;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    target = out ?? markedOutPath(docPath, { exists: isTaken, now });
+    if (samePath(target, baseline) || samePath(target, clean)) {
+      return { ok: false, error: `The output is the same file as an input: ${target}` };
+    }
+    r = await runPy(join(root, "tools", "build_marked_diff.py"), [
+      "--baseline",
+      baseline,
+      "--clean",
+      clean,
+      "--out",
+      target,
+      "--json",
+      ...fromProfile.args,
+    ]);
+    if (out || !outputTaken(r)) break;
+    taken.add(target);
+  }
   const report = pyJson(r);
   if (r.code === 0 && report?.written) {
     return {

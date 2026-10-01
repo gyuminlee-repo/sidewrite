@@ -61,6 +61,8 @@ class AnonymizeDocx(unittest.TestCase):
         return r.returncode, r.stdout, r.stderr
 
     def anonymize(self, src=None, out=None, *args):
+        if out is None and self.out.exists():
+            self.out.unlink()  # the tool refuses an existing output; each run here starts without one
         return self.run_tool("--in", src or self.src, "--out", out or self.out, *args)
 
     def counts(self, rep):
@@ -325,7 +327,7 @@ class AnonymizeDocx(unittest.TestCase):
         for kw in (dict(prefix="x"), dict(quote="'")):
             with self.subTest(**kw):
                 src = fx.build(self.dir / "odd.docx", **kw)
-                out = self.dir / "odd_out.docx"
+                out = self.dir / ("odd_out_%s.docx" % "".join(kw))
                 code, _, err = self.anonymize(src, out)
                 self.assertEqual(code, 0, err)
                 rep = self.verifier.verify(src, out)
@@ -387,11 +389,34 @@ class AnonymizeDocx(unittest.TestCase):
         self.anonymize()
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["bad.docx", "paper.docx", "paper_anonymized.docx"])
 
-    def test_an_existing_output_is_replaced_whole(self):
+    def test_an_existing_output_is_refused_unless_overwrite_is_given(self):
         self.out.write_text("old")
-        code, _, err = self.anonymize()
+        code, _, err = self.run_tool("--in", self.src, "--out", self.out)
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", err)
+        self.assertEqual(self.out.read_text(), "old")
+        # A dangling link is an existing name too.
+        dangling = self.dir / "dangling.docx"
+        os.symlink(self.dir / "nowhere.docx", dangling)
+        self.assertEqual(self.run_tool("--in", self.src, "--out", dangling)[0], 2)
+        self.assertFalse((self.dir / "nowhere.docx").exists())
+        code, _, err = self.run_tool("--in", self.src, "--out", self.out, "--overwrite")
         self.assertEqual(code, 0, err)
         self.assertTrue(zipfile.is_zipfile(self.out))
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["dangling.docx", "paper.docx", "paper_anonymized.docx"])
+
+    def test_a_file_that_appears_while_the_copy_is_written_is_not_replaced(self):
+        # The first check passes (no file), then the name is taken before the copy is placed.
+        tmp = self.dir / "work.tmp"
+        tmp.write_bytes(b"new copy")
+        self.out.write_text("theirs")
+        with self.assertRaises(self.tool.Refused):
+            self.tool.place(str(tmp), str(self.out))
+        self.assertEqual(self.out.read_text(), "theirs")
+        self.assertTrue(tmp.exists())
+        free = self.dir / "free.docx"
+        self.tool.place(str(tmp), str(free))
+        self.assertEqual([free.read_bytes(), tmp.exists()], [b"new copy", False])
 
 
 if __name__ == "__main__":
