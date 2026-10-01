@@ -1187,7 +1187,14 @@ async function proposeAllSetup() {
   let pane = null;
   const turn = createTurnState({ getReviewPane: () => pane });
   const proposals = [];
+  // fail[type] = "message": the next request of that type is refused, once.
+  const fail = {};
   const sendRequest = async (type, payload) => {
+    if (fail[type]) {
+      const error = fail[type];
+      delete fail[type];
+      return { ok: false, error };
+    }
     if (type === "review_refresh") return { ok: true, rows: [], counts, external: [], revision };
     if (type === "review_propose") {
       proposals.push([payload.ref, payload.paragraphs.length]);
@@ -1221,7 +1228,7 @@ async function proposeAllSetup() {
       ...(error ? { error } : {}),
     });
   };
-  return { pane, turn, proposals, $, wait, endTurn };
+  return { pane, turn, proposals, fail, $, wait, endTurn };
 }
 
 test("Propose all sends the next review_propose only after turn_done; an error stops the queue", async () => {
@@ -1335,6 +1342,127 @@ test("Propose all: an error event without a failed turn_done does not end the wa
     await all;
     assert.match(t.$("review-message").textContent, /stopped at R1\.1: x/);
   } finally {
+    await t.pane.reload();
+  }
+});
+
+// The turn ran, but the reload or the refresh that follows its turn_done
+// failed: the pane does not know the state of that comment, so the queue stops
+// there and does not count it. What the turn recorded is saved by the daemon;
+// the message says so and names the way out.
+const unchecked = (ref, error) =>
+  `The turn for ${ref} ran and its record is saved, but the status check after it failed (${error}); press Refresh status to check again.`;
+
+test("Propose all: every turn and its status check succeed", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    for (const ref of ["R1.1", "R1.3", "R2.1"]) {
+      await t.wait();
+      t.endTurn(ref);
+    }
+    await all;
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1", "R1.3", "R2.1"],
+    );
+    assert.equal(t.$("review-message").textContent, "Propose all: 3 of 3 proposed.");
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+test("Propose all: a failed reload after the last turn is not counted as proposed", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    for (const ref of ["R1.1", "R1.3"]) {
+      await t.wait();
+      t.endTurn(ref);
+    }
+    await t.wait();
+    t.fail.review_load = "revision file is locked";
+    t.endTurn("R2.1");
+    await all;
+    assert.equal(t.proposals.length, 3);
+    assert.equal(
+      t.$("review-message").textContent,
+      `Propose all stopped at R2.1: ${unchecked("R2.1", "revision file is locked")} R2.1 is not counted: 2 of 3 proposed.`,
+    );
+    assert.doesNotMatch(t.$("review-message").textContent, /lost|undone|discarded/i);
+    assert.equal(t.$("review-propose-all").disabled, false);
+    assert.equal(t.turn.inFlight, false);
+  } finally {
+    delete t.fail.review_load;
+    await t.pane.reload();
+  }
+});
+
+test("Propose all: a failed refresh after a turn in the middle starts no other turn", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.equal(t.proposals.length, 2);
+    // Once: the refresh before the turn of R2.1 would succeed.
+    t.fail.review_refresh = "Word is busy";
+    t.endTurn("R1.3");
+    // Not `await all`: a queue that went on would wait for the turn of R2.1.
+    await t.wait();
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1", "R1.3"],
+      "R2.1 is not started",
+    );
+    assert.equal(
+      t.$("review-message").textContent,
+      `Propose all stopped at R1.3: ${unchecked("R1.3", "Word is busy")} R1.3 is not counted: 1 of 3 proposed.`,
+    );
+    assert.equal(t.$("review-propose-stop").hidden, true);
+    assert.equal(t.turn.inFlight, false);
+    await all;
+  } finally {
+    delete t.fail.review_refresh;
+    await t.pane.reload();
+  }
+});
+
+// A turn that failed stops the queue with its own error, whether the status
+// check after it worked or not.
+test("Propose all: the error of a failed turn is the one shown when its status check fails too", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.fail.review_load = "revision file is locked";
+    t.endTurn("R1.1", "Claude usage limit reached.");
+    await all;
+    assert.equal(t.proposals.length, 1);
+    assert.equal(
+      t.$("review-message").textContent,
+      "Propose all stopped at R1.1: Claude usage limit reached. 0 of 3 proposed.",
+    );
+  } finally {
+    delete t.fail.review_load;
+    await t.pane.reload();
+  }
+});
+
+test("one Propose changes: a failed status check after the turn says what to do", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    assert.deepEqual(t.proposals, [["R1.1", 0]]);
+    t.fail.review_refresh = "Word is busy";
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.equal(t.$("review-message").textContent, unchecked("R1.1", "Word is busy"));
+  } finally {
+    delete t.fail.review_refresh;
     await t.pane.reload();
   }
 });
