@@ -60,6 +60,10 @@ export const ChangeSchema = z.object({
   // change can be judged apart from others in the same paragraph. null for
   // changes recorded before this field (whole-paragraph rule).
   context: z.object({ left: z.string(), right: z.string() }).nullable().default(null),
+  // Another paragraph had the same text as this one when the change was
+  // made: the old text alone then does not say which of them this is
+  // (revision-classify.mjs locateParagraph).
+  duplicate_before: z.boolean().default(false),
   // The edit was applied but its rationale comment was not anchored: the
   // task pane error code (CommentAnchorMissing or CommentInsertFailed).
   // word_comment_id is then null.

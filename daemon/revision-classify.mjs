@@ -33,6 +33,9 @@ function byIndex(snapshot) {
 //   1. paragraph_id (Word uniqueLocalId recorded at edit time)
 //   2. the paragraph that holds the rationale comment of the change
 //   3. the only paragraph whose text equals the after or the before sentence
+//      (a change whose paragraph had an identical twin when it was made,
+//      duplicate_before: the old text counts only at the recorded index,
+//      elsewhere it may be the twin the tool never touched)
 //   4. the recorded paragraph_index, if that paragraph still matches
 // Returns { index, method }; index is null when nothing fits or the text
 // match is ambiguous (identical paragraphs), so a caller never guesses.
@@ -57,7 +60,12 @@ export function locateParagraph(change, snapshot) {
     const t = normalizeParaText(p.text);
     return t === after || t === before;
   });
-  if (same.length === 1) return { index: same[0].index, method: "text" };
+  const twin =
+    same.length === 1 &&
+    !!change.duplicate_before &&
+    normalizeParaText(same[0].text) !== after &&
+    same[0].index !== change.paragraph_index;
+  if (same.length === 1 && !twin) return { index: same[0].index, method: "text" };
   if (same.length > 1) return { index: null, method: "ambiguous" };
   const rec = idx.get(change.paragraph_index);
   if (rec && (rec.w_ins ?? 0) + (rec.w_del ?? 0) > 0) {

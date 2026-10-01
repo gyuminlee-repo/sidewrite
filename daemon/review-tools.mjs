@@ -246,6 +246,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
     if (r.ok === false && !commentMissing) return r;
     return recordApplied(deps, turn.ref, r, {
+      texts: current,
       kind,
       newText,
       narrow,
@@ -389,11 +390,18 @@ export function unknownAttempt(texts, target, ids, change) {
     paragraph_index: one ? one.index : null,
     paragraph_id: one ? (ids?.[one.index] ?? null) : null,
     before: one ? one.t : "",
+    duplicate_before: one ? hasTwin(texts, one.t) : false,
     after,
     narrowed_from: null,
     context: one ? one.ctx : null,
   };
 }
+
+// Is the paragraph text `before` there more than once?
+const hasTwin = (texts, before) => {
+  const b = normalizeParaText(before);
+  return !!b && (texts ?? []).filter((t) => normalizeParaText(t) === b).length > 1;
+};
 
 // Record a result the task pane reported as applied (ok, or applied without
 // its rationale comment) and build the tool answer.
@@ -401,7 +409,7 @@ async function recordApplied(
   deps,
   ref,
   r,
-  { kind, newText, narrow, rationale, excepted, lost, unsourced, find, commentMissing },
+  { texts, kind, newText, narrow, rationale, excepted, lost, unsourced, find, commentMissing },
 ) {
   // The task pane reports whether it could apply the narrowed range (the cut
   // find must occur once inside the located hit); otherwise the full range.
@@ -422,6 +430,7 @@ async function recordApplied(
     unsourced_terms: unsourced,
     narrowed_from: narrowed ? { find: find, text: newText } : null,
     comment_missing: commentMissing,
+    duplicate_before: hasTwin(texts, r.before),
     // Words around the range the task pane changed (revision-classify.mjs).
     context: changeContext(r.before, find, {
       kind,
