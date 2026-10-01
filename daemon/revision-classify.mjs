@@ -84,10 +84,13 @@ export function locateParagraph(change, snapshot) {
 // (L = left, R = right, D = change.find, I = change.text):
 //   replace  pending L+I+D+R (Word shows inserted then deleted text),
 //            accepted L+I+R, rejected L+D+R
-//   insert   L+I+R present (pending while revision marks remain, else
+//   insert   L+I+R present (pending while I is a tracked insertion, else
 //            accepted), L+R present: rejected
-//   delete   L+D+R present (pending while marks remain, else rejected),
-//            L+R present: accepted
+//   delete   L+D+R present (pending while D is a tracked deletion, else
+//            rejected), L+R present: accepted
+// "Tracked" is read from the paragraph's tracked runs when the snapshot
+// has them (placedRuns); a snapshot without them falls back to the
+// paragraph's revision mark total.
 // A sibling change can alter the context words, so the check is repeated
 // with fewer context words (3, 2, 1, 0) until one form alone matches, once
 // and on word boundaries (boundedMatches). For a
@@ -155,13 +158,47 @@ export function boundedMatches(text, form) {
   return out;
 }
 
-function classifyByContext(change, t, revisions) {
+// The tracked runs of a snapshot paragraph (p.tracked, from the task pane:
+// [{ kind: "ins" | "del", text, start }]) as ranges of its normalized text t:
+// [{ kind, start, end }]. A run is placed where its text occurs nearest to
+// the start it reports (Word's paragraph text and the OOXML text can differ
+// by a character or two); a run whose text is not in t is left out.
+// null: the snapshot has no per-run list (an older task pane).
+export function placedRuns(p, t) {
+  if (!Array.isArray(p?.tracked)) return null;
+  const out = [];
+  for (const run of p.tracked) {
+    const text = collapse(run.text).trim();
+    if (!text) continue;
+    let best = -1;
+    for (let i = t.indexOf(text); i !== -1; i = t.indexOf(text, i + 1)) {
+      if (best === -1 || Math.abs(i - run.start) < Math.abs(best - run.start)) best = i;
+    }
+    if (best !== -1) out.push({ kind: run.kind, start: best, end: best + text.length });
+  }
+  return out;
+}
+
+// runs: placedRuns of the paragraph, or null. With runs, a pure insertion or
+// deletion is pending only while its OWN text is tracked; without them the
+// paragraph's revision mark total decides (revisions), which reads an
+// accepted change pending while any sibling is (Codex review 16).
+function classifyByContext(change, t, revisions, runs = null) {
   const { left, right } = change.context;
   const I = collapse(change.text);
   const D = collapse(change.find);
   // Exactly one bounded match: a form found several times says nothing
   // about which occurrence is this change.
   const has = (form) => boundedMatches(t, normalizeParaText(form)).length === 1;
+  // Is the middle part of the form L + own + R (found once) still tracked?
+  const ownTracked = (kind, L, own, R) => {
+    if (!runs) return revisions > 0;
+    const form = normalizeParaText(L + own + R);
+    const at = boundedMatches(t, form)[0];
+    const a = at + collapse(L).trimStart().length;
+    const b = at + form.length - collapse(R).trimEnd().length;
+    return runs.some((r) => r.kind === kind && r.start < b && r.end > a);
+  };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
     const R = headWords(right, k);
@@ -179,12 +216,12 @@ function classifyByContext(change, t, revisions) {
     } else if (change.kind === "insert") {
       const a = has(L + I + R);
       const b = has(L + R);
-      if (a && !b) return revisions > 0 ? "pending" : "accepted";
+      if (a && !b) return ownTracked("ins", L, I, R) ? "pending" : "accepted";
       if (b && !a) return "rejected";
     } else {
       const a = has(L + R);
       const b = has(L + D + R);
-      if (b && !a) return revisions > 0 ? "pending" : "rejected";
+      if (b && !a) return ownTracked("del", L, D, R) ? "pending" : "rejected";
       if (a && !b) return "accepted";
     }
   }
@@ -235,7 +272,7 @@ export function classifyChange(change, snapshot) {
   // recorded before context existed, or no single form matched, fall
   // through to the whole-paragraph rule below.
   if (change.context) {
-    const state = classifyByContext(change, t, revisions);
+    const state = classifyByContext(change, t, revisions, placedRuns(p, t));
     if (state) return out(state);
   }
   if (revisions > 0) {

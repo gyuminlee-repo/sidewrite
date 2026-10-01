@@ -7,11 +7,14 @@ import { formatRationaleComment } from "../../daemon/review-tools.mjs";
 
 // The author's handling of the proposed changes in the acceptance procedure:
 // R1.1 accepted, R1.2 rejected, R1.3 first change accepted then one inserted
-// word edited, everything else accepted.
+// word edited, everything else accepted. R1.4 (the deletion of the flask
+// sentence) is rejected, with a tracked insertion of the author pending in
+// the same paragraph (siblingMatch).
 export const DEFAULT_DECISIONS = {
   "R1.1": "accept",
   "R1.2": "reject",
   "R1.3": ["accept_edit", "accept"],
+  "R1.4": "reject",
 };
 
 // One inserted word the author edits by hand, and what it becomes.
@@ -201,6 +204,35 @@ export function resolvedMatch(revision, word, message = "") {
         .map((x) => `${x.id} ${x.done === null ? "no comment" : x.done ? "done" : "open"}`)
         .join("; ") || "no accepted or rejected change with a comment") +
       (refused ? "; pane: not marked resolved" : ""),
+  };
+}
+
+// A change handled by the author while ANOTHER tracked change is pending in
+// its paragraph: it must show its own state, not Pending (the paragraph's
+// revision mark total used to decide), and its rationale comment must be
+// resolved. Shown on the first change of `ref`, a pure deletion that was
+// rejected or a pure insertion that was accepted; `hand` is the text of the
+// author's own tracked insertion in that paragraph, still pending in Word.
+// revision: revision.json after the refresh; view: the pane; word:
+// word-com.ps1 state.
+export function siblingMatch(revision, view, word, { ref, hand }) {
+  const ch = revision?.comments?.find((c) => c.ref === ref)?.changes?.[0];
+  const badge = view?.comments?.find((c) => c.ref === ref)?.changes?.[0]?.badge;
+  const want =
+    ch?.kind === "delete"
+      ? ["rejected", "Rejected"]
+      : ch?.kind === "insert"
+        ? ["accepted", "Accepted"]
+        : null;
+  const sibling = (word?.revisions ?? []).some((r) => r.type === 1 && has(r.text, hand.trim()));
+  const text = ch
+    ? norm(formatRationaleComment(ref, ch.rationale, { lost: ch.lost_facts ?? [] }))
+    : "";
+  const com = (word?.comments ?? []).find((c) => norm(c.text) === text);
+  return {
+    pass: !!want && sibling && ch.state === want[0] && badge === want[1] && com?.done === true,
+    expect: `${ref} first change (a pure deletion rejected, or a pure insertion accepted) reads its own state with the author's tracked "${hand.trim()}" pending in the paragraph, and its rationale comment is resolved`,
+    got: `kind ${ch?.kind ?? "-"}; state ${ch?.state ?? "-"}; badge ${badge ?? "-"}; sibling revision pending ${sibling}; comment ${com ? (com.done ? "done" : "open") : "not found"}`,
   };
 }
 

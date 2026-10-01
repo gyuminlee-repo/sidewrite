@@ -597,3 +597,73 @@ test("invariantReport: a change whose comment the cleanup removed expects no com
   const lost = view.invariantReport(rev, []);
   assert.deepEqual([lost.ok, lost.missing_comment], [false, ["R1.6-2"]]);
 });
+
+// Codex review 16: which text of a paragraph is still a tracked change, run
+// by run, read from the paragraph OOXML the snapshot already fetches.
+test("trackedRuns lists the tracked insertions and deletions of the document part, with their place", () => {
+  const part = (name, body) =>
+    `<pkg:part pkg:name="${name}"><pkg:xmlData>${body}</pkg:xmlData></pkg:part>`;
+  const pkg = (...parts) => `<pkg:package>${parts.join("")}</pkg:package>`;
+  const r = (t) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+  const ins = (t, id = 1) => `<w:ins w:id="${id}" w:author="A">${r(t)}</w:ins>`;
+  const del = (t, id = 2) =>
+    `<w:del w:id="${id}" w:author="A"><w:r><w:delText xml:space="preserve">${t}</w:delText></w:r></w:del>`;
+  const p = (...xs) => `<w:body><w:p>${xs.join("")}</w:p></w:body>`;
+  const doc = (...xs) => pkg(part("/word/document.xml", p(...xs)));
+
+  assert.deepEqual(view.trackedRuns(doc(r("Plain text only."))), []);
+  // "Cells grew [ins: well ][del: slowly ]on glucose."
+  assert.deepEqual(
+    view.trackedRuns(doc(r("Cells grew "), ins("well "), del("slowly "), r("on glucose."))),
+    [
+      { kind: "ins", text: "well ", start: 11 },
+      { kind: "del", text: "slowly ", start: 16 },
+    ],
+  );
+  // Word splits one insertion into several runs: one entry.
+  assert.deepEqual(
+    view.trackedRuns(
+      doc(r("A "), `<w:ins w:id="1">${r("new")}${r(" word")}</w:ins>`, ins(" here", 3), r(".")),
+    ),
+    [{ kind: "ins", text: "new word here", start: 2 }],
+  );
+  // The same inserted text twice: two entries, by place.
+  assert.deepEqual(
+    view.trackedRuns(doc(r("One "), ins("(n = 3) "), r("and two "), ins("(n = 3) ", 5), r("."))),
+    [
+      { kind: "ins", text: "(n = 3) ", start: 4 },
+      { kind: "ins", text: "(n = 3) ", start: 20 },
+    ],
+  );
+  // Only the document part: the tracked body of a rationale comment, a
+  // style, a header do not count. Entities are decoded. w:delText and
+  // w:instrText are no w:del / w:ins; a self-closing mark (an inserted
+  // paragraph mark in rPr) wraps no text. A deleted insertion is a deletion.
+  const tricky =
+    r("A &amp; B ") +
+    "<w:r><w:instrText>PAGE</w:instrText></w:r>" +
+    '<w:r><w:rPr><w:ins w:id="9"/></w:rPr><w:t>kept</w:t></w:r>' +
+    `<w:ins w:id="4"><w:del w:id="5"><w:r><w:delText>gone</w:delText></w:r></w:del></w:ins>` +
+    "<w:r><w:t/></w:r>" +
+    ins(" &lt;x&gt;", 6);
+  assert.deepEqual(
+    view.trackedRuns(
+      pkg(
+        part("/word/comments.xml", `<w:comment>${ins("tracked comment body")}</w:comment>`),
+        part("/word/document.xml", p(tricky)),
+        part("/word/styles.xml", del("x")),
+      ),
+    ),
+    [
+      { kind: "del", text: "gone", start: 10 },
+      { kind: "ins", text: " <x>", start: 14 },
+    ],
+  );
+  // Whitespace before a run is counted as the daemon reads the paragraph:
+  // collapsed, and without the comment anchor character.
+  assert.deepEqual(view.trackedRuns(doc(r("\u0005 A   B\t"), ins("C"))), [
+    { kind: "ins", text: "C", start: 4 },
+  ]);
+  assert.deepEqual(view.trackedRuns(null), []);
+  assert.deepEqual(view.trackedRuns("<w:p><w:r><w:t>bare</w:t></w:r></w:p>"), []);
+});

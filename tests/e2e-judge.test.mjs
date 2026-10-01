@@ -38,7 +38,7 @@ test("buildComPlan: decisions per comment, first R1.3 change edited, comment tex
       "R1.3-1:accept_edit",
       "R1.3-2:accept",
       "R1.3-3:accept",
-      "R1.4-1:accept",
+      "R1.4-1:reject",
     ],
   );
   assert.deepEqual(skipped, ["R1.5-1"]);
@@ -361,6 +361,53 @@ test("judge refresh-mode14: counts, no mismatch, and the not-resolved note for e
       "Accepted 1, rejected 0, edited 0, pending 0, not found 0. Changes 1, expected tool comments 1, found 0 (MISMATCH: missing R1.1-1, unrecorded -)" +
         note(1),
     ),
+    false,
+  );
+});
+
+// Codex review 16: a change next to another tracked change in its paragraph.
+// The author rejects the R1.4 deletion while a tracked insertion of their own
+// is pending in the same paragraph; the change must read Rejected (not
+// Pending) and its rationale comment must be resolved.
+test("siblingMatch: the handled change shows its own state while a sibling revision is pending", async () => {
+  const { siblingMatch, DEFAULT_DECISIONS } = await import("../scripts/e2e/judge.mjs");
+  assert.equal(DEFAULT_DECISIONS["R1.4"], "reject");
+  const HAND = "Checked: ";
+  const ch = change("R1.4-1", { kind: "delete", state: "rejected", text: "" });
+  const revision = { comments: [{ ref: "R1.4", changes: [ch] }] };
+  const text = formatRationaleComment("R1.4", ch.rationale, { lost: [] });
+  const view = (badge) => ({ comments: [{ ref: "R1.4", changes: [{ badge }] }] });
+  const word = (done, revisions) => ({ comments: [{ text, done }], revisions });
+  const pending = [{ type: 1, text: HAND }];
+  const ok = siblingMatch(revision, view("Rejected"), word(true, pending), {
+    ref: "R1.4",
+    hand: HAND,
+  });
+  assert.equal(ok.pass, true, ok.got);
+  // The bug: the pane says Pending and the comment stays open.
+  const bug = siblingMatch(
+    { comments: [{ ref: "R1.4", changes: [{ ...ch, state: "pending" }] }] },
+    view("Pending"),
+    word(false, pending),
+    { ref: "R1.4", hand: HAND },
+  );
+  assert.equal(bug.pass, false);
+  assert.match(bug.got, /badge Pending/);
+  // Rejected in the file but the comment is still open.
+  assert.equal(
+    siblingMatch(revision, view("Rejected"), word(false, pending), { ref: "R1.4", hand: HAND })
+      .pass,
+    false,
+  );
+  // No sibling revision left in Word: the case was not shown.
+  assert.equal(
+    siblingMatch(revision, view("Rejected"), word(true, []), { ref: "R1.4", hand: HAND }).pass,
+    false,
+  );
+  // A replace is judged by its text anyway: the case was not shown either.
+  const replace = { comments: [{ ref: "R1.4", changes: [{ ...ch, kind: "replace" }] }] };
+  assert.equal(
+    siblingMatch(replace, view("Rejected"), word(true, pending), { ref: "R1.4", hand: HAND }).pass,
     false,
   );
 });

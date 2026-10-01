@@ -18,6 +18,7 @@ import {
   minimalFind,
   norm,
   resolvedMatch,
+  siblingMatch,
   rewriteCommand,
   table,
 } from "./judge.mjs";
@@ -28,6 +29,8 @@ const WS_PORT = 47833;
 const HTTP_PORT = 47834;
 const OUTSIDE_SENTENCE =
   "Across the replicates the plateau optical density ranged from 0.82 to 0.91.";
+// The author's own tracked insertion next to the R1.4 change (siblingMatch).
+const HAND_INSERT = "Checked: ";
 const R13_REQUIREMENTS = [
   "say how growth was followed",
   "describe the synthetic carbon source as a novel substrate",
@@ -339,6 +342,25 @@ async function main() {
   const planFile = path.join(RUN, "com-plan.json");
   fs.writeFileSync(planFile, JSON.stringify(plan, null, 2));
   record.word.state_before = com("state");
+  // A tracked insertion of the author in the paragraph of the R1.4 change,
+  // left pending: R1.4 must then show its own state, not the paragraph's.
+  const r14 = plan.ops.find((o) => o.ref === "R1.4");
+  const hand = r14
+    ? com("hand-insert", [
+        "-PlanJson",
+        winPath(planFile),
+        "-ChangeId",
+        r14.change_id,
+        "-Text",
+        HAND_INSERT,
+      ])
+    : { ok: false, error: "no R1.4 change with a rationale comment" };
+  record.word.hand_insert = hand;
+  rows.push({
+    step: "word: tracked insertion next to R1.4",
+    result: hand.ok ? "PASS" : "FAIL",
+    got: hand.ok ? `revisions in the paragraph: ${hand.revisions_in_paragraph}` : hand.error,
+  });
   const applied = com("apply", ["-PlanJson", winPath(planFile)]);
   record.word.apply = applied;
   rows.push({
@@ -377,6 +399,18 @@ async function main() {
     step: "word: rationale comments resolved",
     result: resolved.pass ? "PASS" : "FAIL",
     got: resolved.got,
+  });
+  const sibling = siblingMatch(
+    JSON.parse(fs.readFileSync(REVISION, "utf8")),
+    after,
+    record.word.state_after_refresh,
+    { ref: "R1.4", hand: HAND_INSERT },
+  );
+  record.word.sibling = sibling;
+  rows.push({
+    step: "word: R1.4 next to a pending revision",
+    result: sibling.pass ? "PASS" : "FAIL",
+    got: sibling.got,
   });
   save();
 

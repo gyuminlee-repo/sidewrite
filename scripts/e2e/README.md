@@ -63,6 +63,14 @@ Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
   comment of each accepted or rejected change is resolved (row
   `word: rationale comments resolved`). The test manuscript is built in
   compatibility mode 15 for this; in mode 14 Word refuses to resolve.
+- A change next to another tracked change (row `word: R1.4 next to a pending
+revision`): before the author's steps the runner puts a tracked insertion
+  of the author (`Checked: `) at the start of the paragraph that holds the
+  R1.4 deletion and leaves it pending, then rejects R1.4. After the Refresh
+  R1.4 must read Rejected (not Pending) in revision.json and on its badge,
+  with its rationale comment resolved, while Word still lists the author's
+  insertion as a revision. The paragraph's revision mark total used to
+  decide, which kept such a change Pending.
 - Mode-14 check (`mode-14:` rows, files under `mode14/` in the run folder,
   daemon log `-mode14.log`): after the main Word is closed, the runner
   builds a compatibility mode 14 copy with

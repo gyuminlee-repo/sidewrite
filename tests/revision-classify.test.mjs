@@ -692,3 +692,152 @@ test("an untouched twin of the changed paragraph is not taken for it", () => {
     method: "text",
   });
 });
+
+// Codex review 16: several changes in one paragraph. Accepting one insertion
+// (or rejecting one deletion) read "pending" as long as any other tracked
+// change was left in the paragraph, because the paragraph's totals of
+// revision marks decided. With the tracked runs of the paragraph in the
+// snapshot (`tracked`), a change is pending only while ITS text is tracked.
+const multi = (changes, text, tracked, extra = {}) => {
+  const snapshot = {
+    paragraphs: [{ index: 3, id: "P3", text, w_ins: 0, w_del: 0, ...extra, tracked }],
+    comments: [],
+  };
+  return changes.map((ch) => classifyChange(ch, snapshot).state);
+};
+const chg = (kind, find, text, left, right) => ({
+  kind,
+  find,
+  text,
+  word_comment_id: null,
+  paragraph_index: 3,
+  paragraph_id: "P3",
+  before: "",
+  after: "",
+  context: { left, right },
+});
+const ins = (text, start) => ({ kind: "ins", text, start });
+const del = (text, start) => ({ kind: "del", text, start });
+
+test("several changes in one paragraph: each is judged by its own tracked text", () => {
+  // Two insertions after their anchors; the first was accepted.
+  const i1 = chg("insert", "at 30 °C", " in the dark", "held at 30 °C", " and shaken");
+  const i2 = chg("insert", "shaken", " at 200 rpm", "dark and shaken", ". Growth was");
+  const T1 = "Cells were held at 30 °C in the dark and shaken at 200 rpm. Growth was followed.";
+  const cases = [
+    [
+      "accept one of two inserts",
+      [i1, i2],
+      T1,
+      [ins(" at 200 rpm", 47)],
+      { w_ins: 1 },
+      ["accepted", "pending"],
+    ],
+    [
+      "both inserts pending",
+      [i1, i2],
+      T1,
+      [ins(" in the dark", 24), ins(" at 200 rpm", 47)],
+      { w_ins: 2 },
+      ["pending", "pending"],
+    ],
+    ["both inserts accepted", [i1, i2], T1, [], {}, ["accepted", "accepted"]],
+  ];
+  // Two deletions; the first was rejected (its text is back, untracked).
+  const d1 = chg("delete", " carefully", "", "Cells were", " held at 30");
+  const d2 = chg("delete", " for a long time", "", "and shaken", ". Growth was");
+  const T2 = "Cells were carefully held at 30 °C and shaken for a long time. Growth was followed.";
+  cases.push(
+    [
+      "reject one of two deletions",
+      [d1, d2],
+      T2,
+      [del(" for a long time", 45)],
+      { w_del: 1 },
+      ["rejected", "pending"],
+    ],
+    [
+      "both deletions pending",
+      [d1, d2],
+      T2,
+      [del(" carefully", 10), del(" for a long time", 45)],
+      { w_del: 2 },
+      ["pending", "pending"],
+    ],
+  );
+  // An accepted insertion right before a pending deletion.
+  const i3 = chg("insert", "at 30 °C", " in the dark", "held at 30 °C", " for a long");
+  const d3 = chg("delete", " for a long time", "", "at 30 °C", ". Growth was");
+  const T3 = "Cells were held at 30 °C in the dark for a long time. Growth was followed.";
+  cases.push(
+    [
+      "accept an insert next to a pending delete",
+      [i3, d3],
+      T3,
+      [del(" for a long time", 36)],
+      { w_del: 1 },
+      ["accepted", "pending"],
+    ],
+    [
+      "pending insert next to a rejected delete",
+      [i3, d3],
+      T3,
+      [ins(" in the dark", 24)],
+      { w_ins: 1 },
+      ["pending", "rejected"],
+    ],
+  );
+  // The same inserted text twice in the paragraph; only the second is pending.
+  const s1 = chg("insert", "replicates", " (n = 3)", "Three replicates", " were grown");
+  const s2 = chg("insert", "controls", " (n = 3)", "and controls", " were kept");
+  const T4 = "Three replicates (n = 3) were grown and controls (n = 3) were kept.";
+  cases.push(
+    [
+      "identical inserted text twice, second pending",
+      [s1, s2],
+      T4,
+      [ins(" (n = 3)", 48)],
+      { w_ins: 1 },
+      ["accepted", "pending"],
+    ],
+    [
+      "identical inserted text twice, first pending",
+      [s1, s2],
+      T4,
+      [ins(" (n = 3)", 16)],
+      { w_ins: 1 },
+      ["pending", "accepted"],
+    ],
+  );
+  // The Codex flip: the same final text, an unrelated tracked insertion of
+  // the author elsewhere in the paragraph.
+  cases.push(
+    [
+      "unrelated tracked insertion in the paragraph",
+      [i1],
+      "Note: cells were held at 30 °C in the dark and shaken.",
+      [ins("Note: ", 0)],
+      { w_ins: 1 },
+      ["accepted"],
+    ],
+    // A run whose reported place is a little off is still found by its text.
+    [
+      "run offset off by a few characters",
+      [i1, i2],
+      T1,
+      [ins(" at 200 rpm", 44)],
+      { w_ins: 1 },
+      ["accepted", "pending"],
+    ],
+  );
+  for (const [name, changes, text, tracked, counts, want] of cases) {
+    assert.deepEqual(multi(changes, text, tracked, counts), want, name);
+  }
+  console.log(`multi-change paragraph corpus: ${cases.length} cases`);
+
+  // A snapshot of an older task pane has no `tracked`: the paragraph totals
+  // decide, as before (one pending sibling makes the accepted one pending).
+  assert.deepEqual(multi([i1, i2], T1, undefined, { w_ins: 1 }), ["pending", "pending"]);
+  assert.deepEqual(multi([i1, i2], T1, undefined, { w_ins: 0 }), ["accepted", "accepted"]);
+  assert.deepEqual(multi([d1, d2], T2, undefined, { w_del: 1 }), ["pending", "pending"]);
+});

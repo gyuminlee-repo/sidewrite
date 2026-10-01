@@ -54,6 +54,67 @@ export function countRevisionMarks(xml) {
   return { w_ins: (s.match(W_INS) || []).length, w_del: (s.match(W_DEL) || []).length };
 }
 
+// The text of a paragraph that is still a tracked change, run by run:
+// [{ kind: "ins" | "del", text, start }] in document order, from the
+// document part of the paragraph's OOXML package (the tracked body of a
+// rationale comment in /word/comments.xml does not count, as above).
+// kind "del": w:delText, or text inside w:del / w:moveFrom (a deleted
+// insertion is a deletion). kind "ins": other text inside w:ins / w:moveTo.
+// start: where the run begins in the paragraph text as the daemon reads it
+// (comment anchors dropped, whitespace collapsed, no leading space).
+// Neighbouring runs of one kind are one entry. The paragraph totals
+// (countRevisionMarks) cannot say WHICH change is still pending when a
+// paragraph holds several (Codex review 16); this can.
+const XML_TOKEN =
+  /<w:(ins|del|moveTo|moveFrom)\b[^>]*?(\/?)>|<\/w:(ins|del|moveTo|moveFrom)>|<w:(?:t|delText)\b[^>]*?\/>|<w:(t|delText)\b[^>]*>([\s\S]*?)<\/w:\4>|<w:(tab|br|cr)\b[^>]*?\/?>/g;
+const XML_ENTITY = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+const xmlText = (s) =>
+  s.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (m, e) =>
+    e[0] === "#"
+      ? String.fromCodePoint(e[1] === "x" ? parseInt(e.slice(2), 16) : Number(e.slice(1)))
+      : XML_ENTITY[e],
+  );
+
+export function trackedRuns(xml) {
+  const s = String(xml ?? "");
+  const at = s.indexOf(DOC_PART);
+  if (at === -1) return [];
+  const end = s.indexOf("</pkg:part>", at);
+  const doc = s.slice(at, end === -1 ? undefined : end);
+  const depth = { ins: 0, del: 0 };
+  const side = { ins: "ins", moveTo: "ins", del: "del", moveFrom: "del" };
+  const runs = [];
+  let raw = "";
+  let last = null; // the entry the previous text went into, with where it ended
+  for (const m of doc.matchAll(XML_TOKEN)) {
+    if (m[1]) {
+      if (!m[2]) depth[side[m[1]]] += 1;
+      continue;
+    }
+    if (m[3]) {
+      depth[side[m[3]]] = Math.max(0, depth[side[m[3]]] - 1);
+      continue;
+    }
+    const text = m[4] ? xmlText(m[5]) : m[6] === "tab" ? "\t" : m[6] ? "\n" : "";
+    if (!text) continue;
+    const kind = m[4] === "delText" || depth.del > 0 ? "del" : depth.ins > 0 ? "ins" : null;
+    if (kind && last && last.kind === kind && last.end === raw.length) {
+      last.run.text += text;
+      last.end += text.length;
+    } else if (kind) {
+      const start = raw
+        .replace(/\u0005/g, "")
+        .replace(/\s+/g, " ")
+        .trimStart().length;
+      const run = { kind, text, start };
+      runs.push(run);
+      last = { kind, run, end: raw.length + text.length };
+    }
+    raw += text;
+  }
+  return runs;
+}
+
 // Same prefix as daemon/review-tools.mjs TOOL_COMMENT_PREFIX.
 export const TOOL_COMMENT_RE = /^\s*\[(?:R\d+|E)\.\d+\]/;
 

@@ -8,6 +8,9 @@
 #   state           comments (with done = resolved) and revisions of the document
 #   apply           -PlanJson <file>: accept or reject the tracked changes of
 #                   each rationale comment, optionally edit one inserted word
+#   hand-insert     -PlanJson <file> -ChangeId <id> -Text <s>: a tracked
+#                   insertion by the author at the start of the paragraph
+#                   that holds this change, left pending
 #   delete-text     -Text <s>: delete its first occurrence, track changes off
 #   add-comment     -Text <s> [-Paragraph <n>]: a comment by the Word user
 #   quit            -AllowDir <dir> -ExpectPid <n>: close without saving when
@@ -18,6 +21,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Action,
   [string]$PlanJson,
   [string]$Text,
+  [string]$ChangeId,
   [int]$Paragraph = 2,
   [string]$AllowDir,
   [int]$ExpectPid = 0
@@ -132,6 +136,20 @@ switch ($Action) {
       $results += $res
     }
     Out ([ordered]@{ ok = (@($results | Where-Object { $_.error }).Count -eq 0); results = $results })
+  }
+  "hand-insert" {
+    $plan = Get-Content -Raw -Encoding UTF8 $PlanJson | ConvertFrom-Json
+    $op = @($plan.ops | Where-Object { $_.change_id -eq $ChangeId }) | Select-Object -First 1
+    if (-not $op) { Out ([ordered]@{ ok = $false; error = "no plan op $ChangeId" }); break }
+    $want = Norm $op.comment_text
+    $c = @(CommentList | Where-Object { $_.text -eq $want }) | Select-Object -First 1
+    if (-not $c) { Out ([ordered]@{ ok = $false; error = "rationale comment not found" }); break }
+    $para = $c.com.Scope.Paragraphs.Item(1).Range
+    $was = $d.TrackRevisions
+    $d.TrackRevisions = $true
+    try { $d.Range($para.Start, $para.Start).InsertBefore($Text) } finally { $d.TrackRevisions = $was }
+    $inPara = @(RevList | Where-Object { $_.start -ge $para.Start -and $_.end -le $c.com.Scope.Paragraphs.Item(1).Range.End })
+    Out ([ordered]@{ ok = $true; change_id = $ChangeId; inserted = $Text; revisions_in_paragraph = $inPara.Count })
   }
   "delete-text" {
     $r = $d.Content
