@@ -38,7 +38,7 @@ import {
   deleteToolComments,
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
-import { createTurnState } from "./turn-state.js";
+import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import {
   toolExcelGetSelectedRange,
   toolExcelListSheets,
@@ -712,6 +712,8 @@ async function handleServerMessage(msg) {
       if (msg.event === "error" || msg.event === "auth_error") {
         reviewPane?.onTurnError?.(msg.error);
       }
+      // The Review tab refreshes its status after any turn (auto-refresh.js).
+      if (TURN_END_EVENTS.has(msg.event)) reviewPane?.onAnyTurnEnded?.();
       if (msg.event === "tool_use_announce") {
         appendToolUse(msg.tool, msg.input);
         setAgentStatus("working", statusForTool(msg.tool));

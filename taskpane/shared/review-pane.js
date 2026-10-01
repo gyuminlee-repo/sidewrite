@@ -33,6 +33,7 @@ import {
   queueRefs,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
+import { createAutoRefresh } from "./auto-refresh.js";
 
 const UNKNOWN_HINT =
   "Word did not answer; this exception may already be applied. Refresh status, then check the paragraph.";
@@ -71,6 +72,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     candidates: [], // P15: ledger rule candidates of the last suggestion, each with `picked`
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
+    reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
   };
 
   function el(tag, props = {}, ...kids) {
@@ -574,6 +576,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   // Start the review turn of one comment. `release` (from onTurnStarted) ends
   // the turn taken for it when the request fails.
   async function proposeRef(ref, release, useSelection) {
+    state.reviewTurnOpen = true;
     try {
       const paragraphs = useSelection ? await word.selectionParagraphs() : [];
       // A fresh snapshot first: outside changes are caught before the turn
@@ -582,7 +585,9 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       const done = state.turnsDone;
       const r = await ask("review_propose", { ref, paragraphs });
       if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);
+      else if (state.turnsDone !== done) state.reviewTurnOpen = false; // its turn_done came first
     } catch (e) {
+      state.reviewTurnOpen = false;
       release?.();
       throw e;
     }
@@ -675,7 +680,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     state.path = r.path;
   }
 
-  async function refresh() {
+  const refresh = () => refreshWith(say);
+  // report(text, bad): where the counts go. The message line for a refresh
+  // the author or a turn asked for, the small line for an automatic one.
+  async function refreshWith(report) {
     const snapshot = await word.collectReviewSnapshot();
     const r = await ask("review_refresh", { snapshot });
     // Word refuses Comment.resolved in a document in compatibility mode
@@ -694,7 +702,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     const outside = r.external?.length
       ? ` Outside changes: ${r.external.length} (list under Comments and changes).`
       : "";
-    say(
+    report(
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
         (inv.ok
@@ -953,6 +961,40 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     }),
   );
 
+  // ---- P15: automatic refresh ----------------------------------------------------
+  // After any turn of the pane and when the pane gets the focus back
+  // (auto-refresh.js). A review turn is left to its turn_done, which
+  // refreshes already. The result goes to the small line under the file
+  // name; the cards are rebuilt only when something changed, so a box the
+  // author is typing in keeps the focus.
+  const statusKey = () =>
+    JSON.stringify([state.revision?.comments, state.revision?.external, state.revision?.ledger]);
+  function autoNote(text, bad = false) {
+    const n = $("review-auto");
+    n.textContent = text;
+    n.classList.toggle("form-error", bad);
+  }
+  const auto = createAutoRefresh({
+    isBusy: () =>
+      isTurnInFlight() ||
+      queue.running ||
+      state.reviewTurnOpen ||
+      !state.revision?.comments?.length,
+    async run() {
+      const before = statusKey();
+      const at = new Date().toLocaleTimeString();
+      await refreshWith((text, bad) => autoNote(`Auto-refreshed ${at}: ${text}`, bad));
+      if (statusKey() !== before) render();
+    },
+    onError: (e) => autoNote(`Auto-refresh failed: ${e?.message ?? e}`, true),
+  });
+  if (typeof window !== "undefined") {
+    window.addEventListener?.("focus", () => auto.trigger("focus"));
+  }
+  document.addEventListener?.("visibilitychange", () => {
+    if (!document.hidden) auto.trigger("focus");
+  });
+
   render(); // loaded on "welcome" (taskpane.js calls reload once connected)
 
   return {
@@ -961,6 +1003,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         jobDone(msg);
       } else if (msg.event === "turn_done") {
         state.turnsDone += 1;
+        state.reviewTurnOpen = false;
         stopProgress();
         load()
           .then(refresh)
@@ -990,12 +1033,18 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     onTurnError(error) {
       failWaits(error || "The turn ended with an error.");
     },
+    // Any turn of the pane ended (taskpane.js, TURN_END_EVENTS).
+    onAnyTurnEnded: () => auto.trigger("turn"),
     // A new connection (welcome) means no turn of this pane is running any
     // more: a daemon restart never sends turn_done, so clear the progress line.
     // Jobs of the old connection are ended with an error first, and so is a
     // "Propose all" run waiting for its turn.
     reload: () =>
-      (dropJobs(), endAllWaits(CONNECTION_LOST), stopProgress(), load())
+      (dropJobs(),
+      endAllWaits(CONNECTION_LOST),
+      (state.reviewTurnOpen = false),
+      stopProgress(),
+      load())
         .catch((e) => say(e.message, true))
         .finally(render),
   };

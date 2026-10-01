@@ -1116,3 +1116,49 @@ test("Propose all: an error that comes after turn_done still stops the queue and
     await t.pane.reload();
   }
 });
+
+// P15: the status refreshes by itself when the pane gets the focus back and
+// when any turn ends, without touching the message line.
+test("auto refresh: focus and a turn end refresh quietly; not while there are no comments", async () => {
+  const listeners = {};
+  globalThis.window = { addEventListener: (ev, fn) => (listeners[ev] = fn) };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const wait = () => new Promise((r) => setTimeout(r, 5));
+  const refreshes = (t) => t.requests.filter((r) => r.type === "review_refresh").length;
+  const word = { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) };
+  try {
+    const revision = {
+      comments: [
+        { ref: "R1.1", reviewer: 1, text: "x", status: "pending", changes: [], blocked: [] },
+      ],
+      ledger: [],
+    };
+    const t = await setup({
+      revision,
+      word,
+      respond: {
+        review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+      },
+    });
+    t.$("review-message").textContent = "KEEP";
+    listeners.focus();
+    await wait();
+    assert.equal(refreshes(t), 1);
+    assert.equal(t.$("review-message").textContent, "KEEP", "the message line is not replaced");
+    assert.match(t.$("review-auto").textContent, /^Auto-refreshed .*Accepted 0, rejected 0/);
+    listeners.focus(); // again at once: too soon
+    await wait();
+    assert.equal(refreshes(t), 1);
+    assert.equal(t.pane.onAnyTurnEnded(), "started"); // a chat turn ended
+    await wait();
+    assert.equal(refreshes(t), 2);
+
+    const empty = await setup({ revision: { comments: [], ledger: [] }, word });
+    listeners.focus();
+    assert.equal(empty.pane.onAnyTurnEnded(), "busy");
+    await wait();
+    assert.equal(refreshes(empty), 0);
+  } finally {
+    delete globalThis.window;
+  }
+});
