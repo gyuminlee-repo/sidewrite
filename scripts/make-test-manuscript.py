@@ -7,9 +7,14 @@ margin line numbers for scripts/pdf-line-map.py.
 
 All text is invented filler. It names no real study, person, or institution.
 
-Usage: python3 scripts/make-test-manuscript.py [--variant review] [output.docx]
+Usage: python3 scripts/make-test-manuscript.py [--variant review] [--compat 14] [output.docx]
 Default output: tests/fixtures/spike_manuscript.docx
 (--variant review: tests/fixtures/review_manuscript.docx)
+
+The document is written in compatibility mode 15 (Word 2013 and later). The
+python-docx default template stores mode 14 (Word 2010), and in that mode
+Word refuses to mark a comment resolved. --compat 14 keeps the old mode for
+a test of that refusal; give it an output path outside tests/fixtures.
 
 The review variant is the same text with ledger violations planted for the
 stage-2 acceptance test (see PLANTS) and one comment by the author.
@@ -129,8 +134,19 @@ def enable_line_numbers(section):
     sect_pr.append(ln)
 
 
-def build(out_path, variant="spike"):
+def set_compatibility_mode(doc, mode):
+    """Set w:compatSetting compatibilityMode in word/settings.xml."""
+    compat = doc.settings.element.find(qn("w:compat"))
+    for cs in compat.findall(qn("w:compatSetting")):
+        if cs.get(qn("w:name")) == "compatibilityMode":
+            cs.set(qn("w:val"), str(mode))
+            return
+    raise ValueError("the template has no compatibilityMode setting")
+
+
+def build(out_path, variant="spike", compat=15):
     doc = Document()
+    set_compatibility_mode(doc, compat)
     normal = doc.styles["Normal"]
     normal.font.name = "Times New Roman"
     normal.font.size = Pt(12)
@@ -177,10 +193,13 @@ def build(out_path, variant="spike"):
 def main(argv):
     args = argv[1:]
     variant = "spike"
+    compat = 15
     if args[:2] == ["--variant", "review"]:
         variant, args = "review", args[2:]
+    if args[:1] == ["--compat"]:
+        compat, args = int(args[1]), args[2:]
     out = Path(args[0]) if args else (REVIEW_OUT if variant == "review" else DEFAULT_OUT)
-    print(build(out, variant))
+    print(build(out, variant, compat))
 
 
 if __name__ == "__main__":

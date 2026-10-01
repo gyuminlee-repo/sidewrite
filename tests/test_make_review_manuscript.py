@@ -69,5 +69,44 @@ class ReviewVariant(unittest.TestCase):
         self.assertNotIn("novel", text)
 
 
+def compat_mode(path):
+    """compatibilityMode value stored in word/settings.xml, or None."""
+    with zipfile.ZipFile(path) as z:
+        xml = z.read("word/settings.xml").decode("utf-8")
+    m = re.search(r'<w:compatSetting\b[^>]*w:name="compatibilityMode"[^>]*>', xml)
+    return re.search(r'w:val="(\d+)"', m.group(0)).group(1) if m else None
+
+
+class CompatibilityMode(unittest.TestCase):
+    """Word refuses Comment.resolved in a document whose compatibilityMode is
+    14 (Word 2010), the value in the python-docx default template. The
+    builder writes 15 so the fixtures can show a resolved rationale comment."""
+
+    def test_both_variants_are_mode_15(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for variant in ("spike", "review"):
+                out = mtm.build(Path(tmp) / f"{variant}.docx", variant)
+                self.assertEqual(compat_mode(out), "15", variant)
+
+    def test_committed_fixtures_are_mode_15(self):
+        for name in ("spike_manuscript.docx", "review_manuscript.docx"):
+            self.assertEqual(compat_mode(ROOT / "tests" / "fixtures" / name), "15", name)
+
+    def test_compat_14_is_only_on_request(self):
+        # The acceptance run builds a mode-14 copy in its run folder to show
+        # that a refresh still reports its counts when Word refuses the resolve.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = mtm.build(Path(tmp) / "old.docx", "review", compat=14)
+            self.assertEqual(compat_mode(out), "14")
+            mtm.main(["x", "--variant", "review", "--compat", "14", str(Path(tmp) / "cli.docx")])
+            self.assertEqual(compat_mode(Path(tmp) / "cli.docx"), "14")
+            # Same text as the mode-15 build.
+            new = mtm.build(Path(tmp) / "new.docx", "review")
+            self.assertEqual(
+                [p.text for p in Document(out).paragraphs],
+                [p.text for p in Document(new).paragraphs],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
