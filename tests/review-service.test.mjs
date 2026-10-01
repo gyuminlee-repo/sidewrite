@@ -2697,3 +2697,50 @@ test("review_preview and the turn carry the overview of the other comments", asy
   assert.equal(/\n- R1\.1 \[/.test(r.prompt), false, "not the comment of the turn itself");
   await t.cleanup();
 });
+
+// The manuscript of the last status refresh goes into the turn. The daemon
+// is told what a turn was given (manuscriptGiven) and asked what the session
+// of the pane already has (manuscriptSeen), so a later turn gets the changed
+// paragraphs only.
+test("the turn carries the manuscript of the last refresh; a later turn of the same session only what changed", async () => {
+  const given = [];
+  let seen = null;
+  const t = await setup({
+    manuscriptSeen: () => seen,
+    manuscriptGiven: (key, hashes) => given.push([key, hashes.length]),
+  });
+  await t.ask("review_save_comments", {
+    comments: [{ ref: "R1.1", reviewer: 1, text: "State the unit." }],
+  });
+  const para = (text, index) => ({
+    index,
+    id: `p${index}`,
+    text,
+    reviewed_text: text,
+    w_ins: 0,
+    w_del: 0,
+  });
+  await t.ask("review_refresh", {
+    snapshot: { paragraphs: ["Title of the paper", "Held at 30 degrees."].map(para), comments: [] },
+  });
+  const first = await t.ask("review_preview", { ref: "R1.1", paragraphs: [] });
+  assert.match(first.prompt, /^Manuscript, as it reads with every tracked change applied/);
+  assert.match(first.prompt, /\n\[p1\] Held at 30 degrees\.\n\n\[Review turn R1\.1\]\n/);
+  assert.deepEqual(given, [], "a preview gives nothing to the session");
+  const r = await t.ask("review_propose", { ref: "R1.1", paragraphs: [] });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(given, [["k", 2]]);
+  assert.ok(t.lines.some((l) => /^\[review\] prompt R1\.1 .* manuscript=full:2$/.test(l)));
+  // The session has it now.
+  const { manuscriptBlock } = await import("../daemon/review-prompt.mjs");
+  seen = manuscriptBlock({
+    paragraphs: ["Title of the paper", "Held at 30 degrees."],
+    ids: null,
+  }).hashes;
+  const later = await t.ask("review_preview", { ref: "R1.1", paragraphs: [] });
+  assert.match(
+    later.prompt,
+    /^The manuscript was given earlier in this conversation with its paragraph ids; it reads the same now\.\n\n\[Review turn R1\.1\]/,
+  );
+  await t.cleanup();
+});
