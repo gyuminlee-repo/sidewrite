@@ -478,6 +478,8 @@ export function unaddressedRequirements(comment) {
 // with the status of their last check).
 //   - requirements no change answers (L5)
 //   - changes not decided in Word: pending, or not found in the document
+//   - changes applied without their rationale comment (invariantReport's
+//     `uncommented`), and edits Word did not answer (outcome_unknown)
 //   - ledger rules whose last check found violations
 export function doneBlockers(comment, ledger) {
   const out = [];
@@ -493,6 +495,18 @@ export function doneBlockers(comment, ledger) {
       `${total} ${total === 1 ? "change is" : "changes are"} not decided in Word (${parts.filter(Boolean).join(", ")})`,
     );
   }
+  const bare = (comment?.changes ?? []).filter(
+    (ch) => ch.word_comment_id == null && !!ch.comment_missing,
+  );
+  if (bare.length)
+    out.push(
+      `${bare.length} ${bare.length === 1 ? "change has" : "changes have"} no rationale comment in Word (${bare.map((ch) => ch.id).join(", ")})`,
+    );
+  const unknown = (comment?.blocked ?? []).filter((b) => b.state === "outcome_unknown");
+  if (unknown.length)
+    out.push(
+      `${unknown.length} ${unknown.length === 1 ? "edit" : "edits"} got no answer from Word and may be applied (${unknown.map((b) => b.id).join(", ")})`,
+    );
   const dirty = (ledger ?? []).filter((i) => i.status === "violations");
   if (dirty.length)
     out.push(

@@ -118,6 +118,17 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
         `${undecided.join(", ")}: decide them in Word; only accepted changes are cited`,
       );
 
+    // An edit that was sent to Word and never answered may be in the
+    // manuscript with no record of it: the letter cannot cite it.
+    const unknown = (c.blocked ?? []).filter((b) => b.state === "outcome_unknown").length;
+    if (unknown)
+      add(
+        "unknown_edits",
+        "warn",
+        c.ref,
+        `${unknown} edit(s) got no answer from Word and may be in the manuscript without a record; settle them on the Review tab`,
+      );
+
     // quote_changed is the quote_exact axis and lines_old the lines axis below.
     const staleNow = staleReasons(c, snapshot, render).includes("change_state");
     if (staleNow)

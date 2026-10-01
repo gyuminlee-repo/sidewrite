@@ -315,3 +315,25 @@ test("exportMessage: the path, and that an existing file was kept", () => {
     "Not exported: 2 failed. Fix them, or press Export anyway.",
   );
 });
+
+test("undecidedText: an edit Word did not answer is told on the card as well", () => {
+  const c = {
+    changes: [{ state: "pending" }],
+    blocked: [
+      { id: "B1", state: "outcome_unknown" },
+      { id: "B2", state: "blocked" },
+    ],
+  };
+  assert.equal(
+    undecidedText(c),
+    "Decision left in Word: 1 pending. Only accepted changes are cited. 1 edit got no answer from Word: settle it on the Review tab.",
+  );
+  assert.equal(
+    undecidedText({
+      changes: [],
+      blocked: [{ state: "outcome_unknown" }, { state: "outcome_unknown" }],
+    }),
+    "2 edits got no answer from Word: settle them on the Review tab.",
+  );
+  assert.equal(undecidedText({ changes: [], blocked: [{ state: "blocked" }] }), "");
+});

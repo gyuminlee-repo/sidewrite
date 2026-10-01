@@ -145,9 +145,19 @@ export function undecidedText(comment) {
   const parts = [pending && `${pending} pending`, unlocated && `${unlocated} not found`].filter(
     Boolean,
   );
-  return parts.length
-    ? `Decision left in Word: ${parts.join(", ")}. Only accepted changes are cited.`
-    : "";
+  // Sent to Word and not answered (outcome_unknown): it may be in the
+  // manuscript with no record, so the letter cannot cite it.
+  const unknown = (comment?.blocked ?? []).filter((b) => b.state === "outcome_unknown").length;
+  return [
+    parts.length
+      ? `Decision left in Word: ${parts.join(", ")}. Only accepted changes are cited.`
+      : "",
+    unknown
+      ? `${count(unknown, "edit")} got no answer from Word: settle ${unknown === 1 ? "it" : "them"} on the Review tab.`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }
 
 // The one thing to do next. revision: revision.json as the daemon sent it;

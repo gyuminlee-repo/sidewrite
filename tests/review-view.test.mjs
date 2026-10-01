@@ -918,3 +918,68 @@ test("doneBlockers: what is still open when a comment is marked Done", () => {
     "1 change is not decided in Word (1 not found)",
   ]);
 });
+
+test("doneBlockers: a change without its rationale comment and an edit Word did not answer are open too", () => {
+  const done = (more) => ({
+    ref: "R1.1",
+    requirements: [],
+    changes: [{ id: "R1.1-1", state: "accepted", word_comment_id: "7", rationale: {} }],
+    blocked: [],
+    ...more,
+  });
+  assert.deepEqual(view.doneBlockers(done({}), []), []);
+  // Applied in Word, the comment could not be added (invariantReport.uncommented).
+  const bare = {
+    state: "accepted",
+    word_comment_id: null,
+    comment_missing: "2026-01-01T00:00:00Z",
+    rationale: {},
+  };
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        changes: [
+          { id: "R1.1-1", ...bare },
+          { id: "R1.1-2", ...bare },
+        ],
+      }),
+      [],
+    ),
+    ["2 changes have no rationale comment in Word (R1.1-1, R1.1-2)"],
+  );
+  assert.deepEqual(view.doneBlockers(done({ changes: [{ id: "R1.1-1", ...bare }] }), []), [
+    "1 change has no rationale comment in Word (R1.1-1)",
+  ]);
+  // A comment that was there and was cleaned away on purpose is not that.
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        changes: [
+          {
+            id: "R1.1-1",
+            state: "accepted",
+            word_comment_id: "7",
+            comment_missing: "x",
+            rationale: {},
+          },
+        ],
+      }),
+      [],
+    ),
+    [],
+  );
+  // Sent to Word and not answered: it may be in the document with no record.
+  assert.deepEqual(
+    view.doneBlockers(
+      done({
+        blocked: [
+          { id: "B1", state: "outcome_unknown", blocked_by: [] },
+          { id: "B2", state: "blocked", blocked_by: ["L2"] },
+          { id: "B3", state: "applying", blocked_by: [] },
+        ],
+      }),
+      [],
+    ),
+    ["1 edit got no answer from Word and may be applied (B1)"],
+  );
+});

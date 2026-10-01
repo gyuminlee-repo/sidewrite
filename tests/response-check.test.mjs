@@ -487,3 +487,32 @@ test("an answer marked stale fails until it is written again, even when its cita
   });
   assert.deepEqual(ids(checkResponses(declined)), []);
 });
+
+test("an edit Word did not answer is a warning: it may be in the manuscript with no record", () => {
+  const withBlocked = (blocked) => good((r) => (r.comments[0].blocked = blocked));
+  const rows = checkResponses(
+    withBlocked([
+      { id: "B1", state: "outcome_unknown", blocked_by: [] },
+      { id: "B2", state: "outcome_unknown", blocked_by: ["L2"] },
+      { id: "B3", state: "blocked", blocked_by: ["L2"] },
+    ]),
+  );
+  assert.deepEqual(ids(rows), []);
+  assert.deepEqual(ids(rows, "warn"), ["unknown_edits:R1.1"]);
+  assert.equal(
+    rows[0].detail,
+    "2 edit(s) got no answer from Word and may be in the manuscript without a record; settle them on the Review tab",
+  );
+  // An edit that a ledger rule refused, or one that is with Word now, is not that.
+  assert.deepEqual(
+    checkResponses(withBlocked([{ id: "B3", state: "blocked", blocked_by: ["L2"] }])),
+    [],
+  );
+  // A change applied without its rationale comment is on record and is cited
+  // like any other: nothing to tell in the letter check.
+  const bare = good((r) => {
+    r.comments[0].changes[0].word_comment_id = null;
+    r.comments[0].changes[0].comment_missing = "2026-01-01T00:00:00Z";
+  });
+  assert.deepEqual(checkResponses(bare), []);
+});
