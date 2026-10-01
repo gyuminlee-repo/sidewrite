@@ -44,8 +44,9 @@ const good = () => ({
   color: job(shape([]), { raw: { paragraphs: 4, tables: 1 } }),
 });
 
-test("the selection is fixed, 30 to 80 pairs, and covers every kind of change", () => {
-  assert.ok(PAIRS.length >= 30 && PAIRS.length <= 80, String(PAIRS.length));
+test("the selection is fixed, 30 to 100 pairs, and covers every kind of change", () => {
+  assert.ok(PAIRS.length >= 30 && PAIRS.length <= 100, String(PAIRS.length));
+  for (const k of ["wrapper", "link-paragraph"]) assert.ok(KINDS.includes(k), k);
   for (const k of [
     "cell-merge",
     "picture",
@@ -95,7 +96,7 @@ test("two equal structures do not differ; bookmarks count only when asked", () =
   );
 });
 
-test("the first difference names the paragraph and shows 80 characters of both texts", () => {
+test("the first difference names the paragraph and shows both texts from there", () => {
   const long = "x".repeat(200);
   const d = compareStructure(
     shape(["One.\r", `${long}\r`]),
@@ -103,7 +104,7 @@ test("the first difference names the paragraph and shows 80 characters of both t
   );
   assert.equal(
     d,
-    `paragraph 2: expected ${JSON.stringify(`A page break\u000c${long}`.slice(0, 80))}, got ${JSON.stringify(long.slice(0, 80))}`,
+    `paragraph 2: expected len 214, got len 201, first difference at 0: expected ${JSON.stringify(`A page break\u000c${long}`.slice(0, 40))}, got ${JSON.stringify(long.slice(0, 40))}`,
   );
   assert.ok(d.includes("\\f"), "a control character is shown, not printed");
   assert.equal(show("a\u000bb"), '"a\\u000bb"');
@@ -114,7 +115,7 @@ test("the first difference names the paragraph and shows 80 characters of both t
 test("a paragraph too many or too few is named with its place and its text", () => {
   assert.equal(
     compareStructure(shape(["One.\r", "\r", "Two.\r"]), shape(["One.\r", "Two.\r"])),
-    'paragraph 2: expected "Two.\\r", got "\\r"',
+    'paragraph 2: expected len 5, got len 1, first difference at 0: expected "Two.\\r", got "\\r"',
   );
   assert.equal(
     compareStructure(shape(["One.\r", "Two.\r", "\r"]), shape(["One.\r", "Two.\r"])),
@@ -124,6 +125,24 @@ test("a paragraph too many or too few is named with its place and its text", () 
     compareStructure(shape(["One.\r"]), shape(["One.\r", "Two.\r"])),
     'paragraph count: expected 2, got 1; paragraph 2 is missing: "Two.\\r"',
   );
+});
+
+test("two long texts that differ late are shown around the first difference, with their lengths", () => {
+  // What Word reported for a content control that was left behind empty: five spaces at the very end.
+  const text = `${"The heavy garden follows the market before the rain number 5. ".repeat(3)}a controlled phrase.`;
+  assert.equal(text.length, 206);
+  assert.equal(
+    compareStructure(shape([`${text}     \r`]), shape([`${text}\r`])),
+    'paragraph 1: expected len 207, got len 212, first difference at 206: expected " the rain number 5. a controlled phrase.\\r", got " the rain number 5. a controlled phrase.     \\r"',
+  );
+  // A difference in the middle: forty characters before it and forty after it.
+  const other = `${text.slice(0, 100)}X${text.slice(101)}`;
+  const d = compareStructure(shape([other]), shape([text]));
+  assert.match(
+    d,
+    /^paragraph 1: expected len 206, got len 206, first difference at 100: expected "/,
+  );
+  assert.equal(d.split('expected "')[1].split('"')[0].length, 80);
 });
 
 test("tables are compared by their number, rows, columns and cell texts", () => {
@@ -139,7 +158,7 @@ test("tables are compared by their number, rows, columns and cell texts", () => 
   );
   assert.equal(
     compareStructure(t(1, 1, ["x"]), t(1, 1, ["a"])),
-    'table 1 cell 1: expected "a", got "x"',
+    'table 1 cell 1: expected len 1, got len 1, first difference at 0: expected "a", got "x"',
   );
 });
 
@@ -156,7 +175,7 @@ test("tables are compared by where their cells stand, so a merge that is left be
   // Merged across in one, merged down in the other: neither is uniform.
   assert.equal(
     compareStructure(t(false, ["1,1", "2,1", "2,2"]), t(false, ["1,1", "1,2", "2,2"])),
-    'table 1 cell position 2: expected "1,2", got "2,1"',
+    'table 1 cell position 2: expected len 3, got len 3, first difference at 0: expected "1,2", got "2,1"',
   );
   // A report without these fields (an older script) compares as before.
   const old = shape(["p\r"], [{ rows: 2, columns: 2, cells: ["a", "b", "c", "d"] }]);
@@ -187,7 +206,7 @@ test("paragraphs are compared by the code and the result of their fields", () =>
   assert.equal(compareStructure(p(cite("[1]"), ""), p(cite("[1]"), "")), null);
   assert.equal(
     compareStructure(p(cite("[2]"), ""), p(cite("[1]"), "")),
-    `paragraph fields 1: expected ${show(cite("[1]"))}, got ${show(cite("[2]"))}`,
+    `paragraph fields 1: expected len 29, got len 29, first difference at 26: expected ${show(cite("[1]"))}, got ${show(cite("[2]"))}`,
   );
   // A report without the codes (an older script) compares as before.
   assert.equal(

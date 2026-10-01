@@ -57,6 +57,8 @@ export const KINDS = [
   "comment",
   "content-control",
   "simple-field",
+  "wrapper",
+  "link-paragraph",
 ];
 
 // The pairs, by their name in tests/marked_diff_corpus.py, with the kinds each
@@ -135,6 +137,22 @@ export const PAIRS = [
   ["a word changed in a paragraph with a simple field", ["simple-field"]],
   ["a simple field added to a paragraph", ["simple-field"]],
   ["a word changed in a paragraph with a content control", ["content-control"]],
+  ["a paragraph with a content control added", ["content-control", "paragraph-added"]],
+  ["a paragraph with a content control deleted", ["content-control", "paragraph-deleted"]],
+  ["a content control only in the baseline, the paragraph changed", ["content-control"]],
+  ["a content control added to a paragraph", ["content-control"]],
+  ["a word changed in a paragraph with a smartTag wrapper", ["wrapper"]],
+  ["a paragraph with a smartTag wrapper added", ["wrapper", "paragraph-added"]],
+  ["a smartTag wrapper only in the baseline, the paragraph changed", ["wrapper"]],
+  ["a word changed in a paragraph with a dir wrapper", ["wrapper"]],
+  ["a paragraph with a dir wrapper added", ["wrapper", "paragraph-added"]],
+  ["a paragraph with a dir wrapper deleted", ["wrapper", "paragraph-deleted"]],
+  ["a word changed in a paragraph with a bdo wrapper", ["wrapper"]],
+  ["a paragraph with a bdo wrapper added", ["wrapper", "paragraph-added"]],
+  ["a bdo wrapper only in the baseline, the paragraph changed", ["wrapper"]],
+  ["a paragraph with a link added", ["link-paragraph", "paragraph-added"]],
+  ["a paragraph with a link deleted", ["link-paragraph", "paragraph-deleted"]],
+  ["a link reworded", ["link"]],
 ].map(([name, covers]) => ({ name, covers }));
 
 // Kinds of KINDS that no pair covers.
@@ -144,12 +162,20 @@ export const uncovered = (pairs = PAIRS) =>
 // The first 80 characters of a text, with control characters made visible.
 export const show = (text) => JSON.stringify(String(text ?? "").slice(0, 80));
 
+// Where two texts differ: their lengths, the place of the first difference,
+// and forty characters before and after it of each.
+function textDifference(got, want) {
+  const [g, w] = [String(got ?? ""), String(want ?? "")];
+  let k = 0;
+  while (k < g.length && k < w.length && g[k] === w[k]) k++;
+  const near = (text) => show(text.slice(Math.max(0, k - 40), k + 40));
+  return `expected len ${w.length}, got len ${g.length}, first difference at ${k}: expected ${near(w)}, got ${near(g)}`;
+}
+
 function firstTextDifference(what, got, want) {
   const n = Math.min(got.length, want.length);
   for (let i = 0; i < n; i++) {
-    if (got[i] !== want[i]) {
-      return `${what} ${i + 1}: expected ${show(want[i])}, got ${show(got[i])}`;
-    }
+    if (got[i] !== want[i]) return `${what} ${i + 1}: ${textDifference(got[i], want[i])}`;
   }
   if (got.length !== want.length) {
     const more = got.length > want.length;

@@ -121,7 +121,7 @@ no daemon, no port and no task pane.
 node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
 ```
 
-- For 73 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
+- For 89 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
   pair covers: `PAIRS` in `marked-diff-word-lib.mjs`) it writes the baseline and
   the clean document under `<base-dir>/mdw-<time>/pairs/<nn>/` and runs the tool
   in both modes.
