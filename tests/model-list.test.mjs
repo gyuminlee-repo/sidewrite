@@ -259,7 +259,12 @@ test("refusalFallback: the log line and the pane event of a model_refusal_fallba
 // other model.
 test("declineStep and staysOnFallback: one more try after the first refusal, then the document stays", async () => {
   const { declineStep, staysOnFallback } = await import("../daemon/model-list.mjs");
-  const f = { asked: "opus", original: "claude-opus-5-5", fallback: "claude-opus-5", category: "bio" };
+  const f = {
+    asked: "opus",
+    original: "claude-opus-5-5",
+    fallback: "claude-opus-5",
+    category: "bio",
+  };
   const first = declineStep(undefined, f);
   assert.deepEqual(first, { ...f, count: 1, stay: false });
   assert.equal(staysOnFallback(first, "opus"), null);
@@ -279,4 +284,3 @@ test("declineStep and staysOnFallback: one more try after the first refusal, the
   assert.equal(staysOnFallback(second, "sonnet"), null);
   assert.equal(staysOnFallback(undefined, "opus"), null);
 });
-

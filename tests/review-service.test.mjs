@@ -2800,11 +2800,22 @@ test("the receipt of a recorded change names the model the session runs on", asy
     await t.ask("review_save_comments", { comments: COMMENTS });
     const deps = {
       ...t.svc.trackedEditDeps("k"),
-      call: async () => ({ ok: true, word_comment_id: 5, paragraph_index: 2, before: "b", after: "a" }),
+      call: async () => ({
+        ok: true,
+        word_comment_id: 5,
+        paragraph_index: 2,
+        before: "b",
+        after: "a",
+      }),
     };
     const r = await applyTrackedEdit(
       deps,
-      { comment_ref: "R1.1", find: "degrees", replace: "°C", rationale: { what: "w", why: "y", addresses: "a" } },
+      {
+        comment_ref: "R1.1",
+        find: "degrees",
+        replace: "°C",
+        rationale: { what: "w", why: "y", addresses: "a" },
+      },
       { ref: "R1.1" },
     );
     assert.equal(r.ok, true, r.message);
@@ -2814,4 +2825,3 @@ test("the receipt of a recorded change names the model the session runs on", asy
     await t.cleanup();
   }
 });
-
