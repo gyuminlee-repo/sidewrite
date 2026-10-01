@@ -221,6 +221,9 @@ const Comment = z.object({
   requirement_seq: z.number().int().nonnegative().nullable().default(null),
   blocked_seq: z.number().int().nonnegative().nullable().default(null),
   questions: z.array(Question).default([]),
+  // Words the comment names, from the requirement labelling
+  // (taskpane/shared/named-terms.js adds what the text itself quotes).
+  named_terms: z.array(z.string()).default([]),
   // Paragraph ids the last turn of this comment named as still holding the
   // term it changed (review-prompt.mjs sameTermReport).
   same_term_at: z.array(z.string()).default([]),
@@ -524,6 +527,9 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       questions: old ? clone(old.questions ?? []) : [],
       requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
       same_term_at: old ? clone(old.same_term_at ?? []) : [],
+      named_terms: Array.isArray(c.named_terms)
+        ? c.named_terms.filter((t) => typeof t === "string")
+        : clone(old?.named_terms ?? []),
     });
     const row = list[list.length - 1];
     row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });

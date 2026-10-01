@@ -1011,6 +1011,8 @@ export function initReviewPane({
           // earlier save (a missing key would keep it).
           section: (c.section ?? "").trim(),
           requirements: requirementsFromText(c.requirementsText),
+          // The terms the split's labelling found the comment to name.
+          ...(Array.isArray(c.named_terms) ? { named_terms: c.named_terms } : {}),
         };
       });
       const r = await ask("review_save_comments", { comments });

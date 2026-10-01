@@ -1115,7 +1115,7 @@ export function requirementParts(sentence, decisions) {
 }
 
 export const REQUIREMENT_SYSTEM =
-  "You sort the sentences of peer-review comments. Label every sentence exactly once: one type, or cuts and types where cut marks are shown. Do not return any text of the review. Reply with JSON only.";
+  "You sort the sentences of peer-review comments. Label every sentence exactly once: one type, or cuts and types where cut marks are shown. Do not return any text of the review other than the named terms asked for. Reply with JSON only.";
 
 export const REQUIREMENT_TYPES = ["request", "other"];
 
@@ -1146,6 +1146,9 @@ export function requirementPrompt(items) {
           'A "[ref section]" line names the part of the review the comment is under. It is context, not a sentence: give it no label.',
         ]
       : []),
+    // The words the reviewer objects to (taskpane/shared/named-terms.js): the
+    // turn of the comment is shown every place the manuscript has them.
+    'Also return "terms":[{"ref":"R1.2","terms":["<word or short phrase>"]}]: for each comment, the wording of the manuscript that the reviewer objects to (wrong, unsupported, too strong, overused, undefined, to be replaced or removed): the word itself, 1 to 3 words exactly as the comment writes them (\"essential\", \"trade-off\"), not a whole claim and not something to add; at most 5; leave a comment out when it names none.',
     "Sentences:",
     ...items.flatMap((it) => [
       ...(it.section ? [`[${it.ref} section] ${it.section}`] : []),
@@ -1209,6 +1212,32 @@ function validSentenceLabels(json, items) {
   return out;
 }
 
+// The terms the reply names per ref, as { ref: [terms] }: strings of 2 to
+// 60 characters and at most 5 words that the text of that comment holds
+// (any case), at most 5. (Asked for 1 to 3 words; Haiku without thinking
+// often gives the phrase of the claim, which is kept: it is looked for as
+// written.)
+// Anything else in the reply is passed over; the labels do not depend on it.
+function namedTermsOf(json, items, textOf) {
+  const out = {};
+  for (const row of Array.isArray(json?.terms) ? json.terms : []) {
+    if (!row || typeof row !== "object" || !items.some((it) => it.ref === row.ref)) continue;
+    const text = String(textOf(row.ref) ?? "").toLowerCase();
+    const terms = (Array.isArray(row.terms) ? row.terms : [])
+      .filter((t) => typeof t === "string")
+      .map((t) => t.replace(/\s+/g, " ").trim())
+      .filter(
+        (t) =>
+          t.length >= 2 &&
+          t.length <= 60 &&
+          t.split(" ").length <= 5 &&
+          text.includes(t.toLowerCase()),
+      );
+    if (terms.length) out[row.ref] = [...new Set(terms)].slice(0, 5);
+  }
+  return out;
+}
+
 // The most sentences one request labels. A real review of 25 comments in one
 // request ran into the time limit of a one-shot (120 s) and left every
 // comment without requirements. The size alone did not help: with its
@@ -1264,6 +1293,7 @@ export async function extractRequirements(comments, { oneshot, log = () => {} } 
   const batches = requirementBatches(items);
   const refsOf = (list) => list.map((it) => it.ref).join(", ");
   const texts = {};
+  const named = {};
   const warnings = [];
   const inputs = [];
   for (const [n, batch] of batches.entries()) {
@@ -1288,6 +1318,10 @@ export async function extractRequirements(comments, { oneshot, log = () => {} } 
     }
     const labelled = validSentenceLabels(r.json, batch);
     Object.assign(texts, labelled);
+    Object.assign(
+      named,
+      namedTermsOf(r.json, batch, (ref) => comments.find((c) => c.ref === ref)?.text),
+    );
     const left = batch.filter((it) => !labelled[it.ref]);
     log(
       `${head} labelled=${batch.length - left.length}/${batch.length}` +
@@ -1305,7 +1339,13 @@ export async function extractRequirements(comments, { oneshot, log = () => {} } 
   if (!Object.keys(texts).length) return { ...none, warnings, asked: true, input };
   return {
     comments: comments.map((c) =>
-      texts[c.ref] ? { ...c, requirements: numberRequirements([], texts[c.ref]) } : c,
+      texts[c.ref]
+        ? {
+            ...c,
+            requirements: numberRequirements([], texts[c.ref]),
+            ...(named[c.ref] && { named_terms: named[c.ref] }),
+          }
+        : c,
     ),
     warnings,
     asked: true,

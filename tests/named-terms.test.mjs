@@ -139,7 +139,7 @@ test("prompt: the block of named terms with their places, and the rule that ever
     comment: { ...comment, text: "Shorten it." },
     fence: "F1",
   }).text;
-  assert.equal(none.includes("Terms this comment names"), false);
+  assert.equal(none.includes("Terms this comment names, and every place they occur"), false);
   const rule = REVIEW_RULES.find((r) => r.startsWith("The reviewer's own words come first"));
   assert.ok(rule);
   assert.match(rule, /headings, figure and table legends and the methods/);

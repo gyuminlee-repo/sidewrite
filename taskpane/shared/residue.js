@@ -24,6 +24,8 @@
 // front of these lines goes what the turn itself said is left
 // (comment.same_term_at, from its last line "Same term still at: ...").
 
+import { namedTerms, namedTermLines } from "./named-terms.js";
+
 const STOP = new Set(
   (
     "about above after again against along already also although among another around because been before being below " +
@@ -90,10 +92,15 @@ export function stillPresent(comment, paragraphs, { maxPlaces = 15, maxTerms = 3
 
 // The lines of the card. snapshot: revision.snapshot ({ paragraphs, ids }).
 export function stillPresentLines(comment, snapshot) {
-  const named = comment?.same_term_at ?? [];
-  const head = named.length
-    ? [`The turn says the same term is still at: ${named.join(", ")}.`]
-    : [];
+  const said = comment?.same_term_at ?? [];
+  const head = said.length ? [`The turn says the same term is still at: ${said.join(", ")}.`] : [];
+  // The terms the reviewer named, once a turn has made changes: where they
+  // still stand. A comment that names terms gets these lines in place of the
+  // removed-word lines (named-terms.js); one that names none keeps those.
+  const turnRan = (comment?.changes ?? []).length > 0;
+  if (namedTerms(comment).length) {
+    return [...(turnRan ? namedTermLines(comment, snapshot) : []), ...head];
+  }
   return [...head, ...computedLines(comment, snapshot)];
 }
 

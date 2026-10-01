@@ -264,3 +264,28 @@ test("the paragraphs the turn itself named come first in the card lines", () => 
     [],
   );
 });
+
+// A comment that names its terms: the card shows where those still stand
+// (taskpane/shared/named-terms.js) in place of the removed-word lines, and
+// only once a turn has made changes.
+test("a comment that names terms: its card lines are the places those terms still stand", () => {
+  const paper = ["Gene A is essential.", "Figure 1. An essential gene.", "Growth was followed."];
+  const comment = {
+    ref: "R1.1",
+    text: 'The word "essential" is not supported.',
+    changes: [ch("R1.1-1", "is essential for", "was associated with")],
+    same_term_at: ["p1"],
+  };
+  assert.deepEqual(stillPresentLines(comment, { paragraphs: paper, ids: null }), [
+    'The reviewer names "essential": still present in 2 places: p0 (body), p1 (caption).',
+    "The turn says the same term is still at: p1.",
+  ]);
+  // Before any turn of the comment: nothing yet.
+  assert.deepEqual(
+    stillPresentLines(
+      { ...comment, changes: [], same_term_at: [] },
+      { paragraphs: paper, ids: null },
+    ),
+    [],
+  );
+});
