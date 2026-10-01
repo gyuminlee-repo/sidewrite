@@ -1,7 +1,9 @@
 // One-shot judgments over an OpenAI-compatible /chat/completions endpoint
 // (Ollama and the key-tier providers, P14). The same contract as
 // oneshot.mjs runOneshot: { ok, text, json?, error?, limited? }, and it
-// never throws. No tools, no stream, temperature 0.
+// never throws. No tools, no stream, temperature 0. body and jsonBody are
+// request fields of the provider's preset (registry.mjs): body goes into
+// every request, jsonBody only when JSON is expected.
 //
 // The API key goes into the Authorization header and nowhere else; a server
 // that echoes it in an error message has it cut out of the returned error.
@@ -27,7 +29,17 @@ async function errorDetail(res) {
 }
 
 export async function chatOneshot(
-  { baseUrl, apiKey = null, model, system, prompt, expectJson = true, timeoutMs = 120_000 },
+  {
+    baseUrl,
+    apiKey = null,
+    model,
+    system,
+    prompt,
+    expectJson = true,
+    timeoutMs = 120_000,
+    body = null,
+    jsonBody = null,
+  },
   { fetchFn = fetch } = {},
 ) {
   if (!model) return { ok: false, error: "Choose a model for this provider first." };
@@ -44,6 +56,7 @@ export async function chatOneshot(
   // came: a server that answers 200 and then stalls is a timeout too. The
   // abort also ends a body read that is under way.
   let content;
+  let finish;
   try {
     let res;
     try {
@@ -61,6 +74,8 @@ export async function chatOneshot(
           ],
           temperature: 0,
           stream: false,
+          ...body,
+          ...(expectJson ? jsonBody : null),
         }),
         signal: abort.signal,
       });
@@ -77,7 +92,9 @@ export async function chatOneshot(
         : { ok: false, error };
     }
     try {
-      content = (await res.json())?.choices?.[0]?.message?.content;
+      const choice = (await res.json())?.choices?.[0];
+      content = choice?.message?.content;
+      finish = choice?.finish_reason;
     } catch {
       if (abort.signal.aborted) return timedOut;
       return { ok: false, error: "the reply was not JSON from the server" };
@@ -87,6 +104,15 @@ export async function chatOneshot(
   }
   if (typeof content !== "string") return { ok: false, error: "the reply had no message" };
   const text = stripThinking(content);
+  // Nothing was written and the server says the output ran out: the reply is
+  // not a wrong answer, there is none.
+  if (!text && finish === "length") {
+    return {
+      ok: false,
+      error:
+        "the model stopped before it wrote an answer (finish_reason length; a thinking model can use its whole output on thinking)",
+    };
+  }
   if (!expectJson) return { ok: true, text };
   const json = parseJsonReply(text);
   if (json === undefined) return { ok: false, error: "reply was not JSON", text };

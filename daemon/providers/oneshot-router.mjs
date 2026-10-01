@@ -40,7 +40,14 @@ export function createOneshotRouter({
     if (preset.id === "codex") return codex({ ...req, model: choice.model });
     if (preset.id === "antigravity") return antigravity({ ...req, model: choice.model });
     if (preset.tier === "local") {
-      return http({ ...req, baseUrl: preset.baseUrl, apiKey: null, model: choice.model });
+      return http({
+        ...req,
+        baseUrl: preset.baseUrl,
+        apiKey: null,
+        model: choice.model,
+        ...(preset.body && { body: preset.body }),
+        ...(preset.jsonBody && { jsonBody: preset.jsonBody }),
+      });
     }
     const stored = await keys.get(preset.id);
     if (!stored?.key) {

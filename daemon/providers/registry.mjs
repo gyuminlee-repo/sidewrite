@@ -46,6 +46,11 @@ export const PRESETS = Object.freeze([
     defaultEnabled: true,
     baseUrl: "http://localhost:11434/v1",
     policy: "Runs on this computer; text never leaves this machine.",
+    // Request fields (openai-compat.mjs). A thinking model (qwen3.5) spends
+    // its whole output on thinking and leaves the answer empty: a judgment
+    // is asked without thinking, and as a JSON object when JSON is expected.
+    body: { reasoning_effort: "none" },
+    jsonBody: { response_format: { type: "json_object" } },
   },
   {
     id: "openrouter",

@@ -125,3 +125,44 @@ async function stalledBody(scenario) {
   );
   return JSON.parse(stdout);
 }
+
+// A thinking model on Ollama (qwen3.5:9b, first run against Word): the
+// thinking went to message.reasoning, used up the output and left content
+// empty with finish_reason "length". That is not "reply was not JSON".
+test("an answer cut off before any content names the cause", async () => {
+  const cut = {
+    choices: [{ finish_reason: "length", message: { content: "", reasoning: "..." } }],
+  };
+  const r = await chatOneshot(REQ, { fetchFn: reply(200, cut) });
+  assert.deepEqual(r, {
+    ok: false,
+    error:
+      "the model stopped before it wrote an answer (finish_reason length; a thinking model can use its whole output on thinking)",
+  });
+  // An answer that is there is judged as before, whatever the finish reason.
+  const full = { choices: [{ finish_reason: "length", message: { content: '{"a":1}' } }] };
+  assert.deepEqual((await chatOneshot(REQ, { fetchFn: reply(200, full) })).json, { a: 1 });
+});
+
+// What a provider wants in every request (body) and in a request for JSON
+// (jsonBody) comes from its preset; without them the request is as before.
+test("body fields of the preset are sent; those for JSON only when JSON is expected", async () => {
+  const f = reply(200, { choices: [{ message: { content: "{}" } }] });
+  const extra = {
+    body: { reasoning_effort: "none" },
+    jsonBody: { response_format: { type: "json_object" } },
+  };
+  await chatOneshot({ ...REQ, ...extra }, { fetchFn: f });
+  assert.equal(reply.seen.body.reasoning_effort, "none");
+  assert.deepEqual(reply.seen.body.response_format, { type: "json_object" });
+  await chatOneshot({ ...REQ, ...extra, expectJson: false }, { fetchFn: f });
+  assert.equal(reply.seen.body.reasoning_effort, "none");
+  assert.equal("response_format" in reply.seen.body, false);
+  await chatOneshot(REQ, { fetchFn: f });
+  assert.deepEqual(Object.keys(reply.seen.body).sort(), [
+    "messages",
+    "model",
+    "stream",
+    "temperature",
+  ]);
+});

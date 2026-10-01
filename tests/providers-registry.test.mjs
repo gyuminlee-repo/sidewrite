@@ -45,3 +45,14 @@ test("base URLs: https for hosted key presets, none for the custom one, loopback
   assert.match(presetById("ollama").baseUrl, /^http:\/\/localhost:11434\//);
   assert.equal(Object.isFrozen(PRESETS), true);
 });
+
+// Request fields of a preset (openai-compat.mjs body, jsonBody). Only Ollama
+// has them: other servers refuse fields they do not know.
+test("only the Ollama preset carries request fields of its own", () => {
+  const ollama = presetById("ollama");
+  assert.deepEqual(ollama.body, { reasoning_effort: "none" });
+  assert.deepEqual(ollama.jsonBody, { response_format: { type: "json_object" } });
+  for (const p of PRESETS) {
+    if (p.id !== "ollama") assert.equal("body" in p || "jsonBody" in p, false, p.id);
+  }
+});

@@ -59,7 +59,15 @@ test("the request is passed on whole; Claude keeps the chosen alias, the others 
   assert.deepEqual(calls[1], ["agy", { ...req, model: "gemini-3.8-flash-high" }]);
   assert.deepEqual(calls[2], [
     "http",
-    { ...req, baseUrl: "http://localhost:11434/v1", apiKey: null, model: "qwen3.5:9b" },
+    {
+      ...req,
+      baseUrl: "http://localhost:11434/v1",
+      apiKey: null,
+      model: "qwen3.5:9b",
+      // Ollama: no thinking for a judgment, and a JSON object when asked.
+      body: { reasoning_effort: "none" },
+      jsonBody: { response_format: { type: "json_object" } },
+    },
   ]);
   assert.equal((await router.pin("c")).model, "sonnet");
   assert.equal((await router.pin("g")).model, "antigravity:gemini-3.8-flash-high");
