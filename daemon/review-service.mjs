@@ -667,6 +667,8 @@ export function createReviewService({
     const profile = await profileOf(d, rev);
     const built = buildReviewPrompt({
       comment,
+      // What the other comments of the review ask and what is on record for them.
+      others: rev.comments,
       paragraphs: Array.isArray(paragraphs) ? paragraphs : [],
       ledger: rev.ledger,
       lang: profile.rationale_lang,

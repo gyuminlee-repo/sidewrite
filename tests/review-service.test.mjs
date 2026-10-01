@@ -220,8 +220,10 @@ test("propose: ledger goes into the prompt, C3 log line, turn pushed with the re
     assert.match(t.pushed[0].text, /- \[L1\] in vitro 하이픈 금지/);
     assert.match(t.pushed[0].text, /- \[L2\] novel 금지/);
     assert.ok(
-      t.lines.includes(
-        "[review] prompt R1.3 instructions=L1 forbid=L2 omitted_forbid=- paragraphs=1",
+      t.lines.some((l) =>
+        l.startsWith(
+          "[review] prompt R1.3 instructions=L1 forbid=L2 omitted_forbid=- paragraphs=1 overview=",
+        ),
       ),
     );
     assert.equal(r.revision.comments[1].status, "in_progress");
@@ -238,8 +240,10 @@ test("CC_OFFICE_REVIEW_PROMPT_FORBID=0 omits the forbid list (acceptance-test kn
     await t.ask("review_propose", { ref: "R1.3" });
     assert.ok(!t.pushed[0].text.includes("[L1]"));
     assert.ok(
-      t.lines.includes(
-        "[review] prompt R1.3 instructions=- forbid=- omitted_forbid=L1 paragraphs=0",
+      t.lines.some((l) =>
+        l.startsWith(
+          "[review] prompt R1.3 instructions=- forbid=- omitted_forbid=L1 paragraphs=0 overview=",
+        ),
       ),
     );
   } finally {
