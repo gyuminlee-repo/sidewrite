@@ -163,7 +163,7 @@ test("real bridge: a plain request is answered, a draft is accepted and ends in 
     });
     assert.deepEqual([accepted.ok, accepted.accepted], [true, true]);
     await w.writing();
-    assert.deepEqual(w.pinned, [{ claudeModel: "sonnet" }]);
+    assert.deepEqual(w.pinned, [{ role: "writing" }]);
     w.release({ ok: true, json: { response: "We now state the unit." } });
     const done = await until(
       () => w.frames.find((f) => f.type === "response_event" && f.job_id === accepted.job_id),

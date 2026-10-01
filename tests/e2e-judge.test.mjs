@@ -492,7 +492,7 @@ test("providersEvidence: one entry per provider from the judgment menu, with the
         { id: "claude", text: "Claude (Agent SDK)", enabled: true, note: "" },
         {
           id: "codex",
-          text: "Codex CLI (judgments only)",
+          text: "Codex CLI (not for edits)",
           enabled: false,
           note: "Judgments only. x",
         },
@@ -579,12 +579,12 @@ test("judge: the stage 2.5 pane steps", () => {
       ok: true,
       selected: { id: "claude", model: null },
       message: "",
-      refused: "Codex CLI (judgments only)",
+      refused: "Codex CLI (not for edits)",
     },
     { id: "codex" },
   );
   assert.equal(refused.pass, false);
-  assert.match(refused.got, /Codex CLI \(judgments only\)/);
+  assert.match(refused.got, /Codex CLI \(not for edits\)/);
 
   const loaded = {
     ok: true,
@@ -1769,6 +1769,7 @@ test("the response steps wait for the message their own action ends with, with n
     "Declined q2 of R1.3.",
     "Drafted R1.1.",
     "Drafted 4 responses.",
+    "Drafted 4 responses with Claude · Opus 5.5.",
     "Nothing to draft: every comment has a response or is declined.",
     "Saved R1.1.",
     "Line numbers updated: 3/3 quotes located.",
@@ -1800,8 +1801,8 @@ test("the response steps wait for the message their own action ends with, with n
     "Saved for this paper: profile ",
     "Declined ${c.ref}.",
     "Declined ${q.id} of ${c.ref}.",
-    "Drafted ${ref}.",
-    'Drafted ${plural(done, "response")}.',
+    'Drafted ${ref}${withModel(usedLabel("writing"))}.',
+    'Drafted ${plural(done, "response")}${withModel(usedLabel("writing"))}.',
     "Nothing to draft",
     "Saved ${c.ref}.",
     "Line numbers updated: ",
@@ -1956,4 +1957,15 @@ test("second reader: one line, a hyphen at the line end, a page break and lines 
     read(gap, "Growth reached a plateau after four days in every flask.", 40, 42),
     false,
   );
+});
+
+// The result lines of the pane may name what ran ("... with Claude · Opus
+// 5.5."): the judges take both forms.
+test("judges take a result line with or without the model that ran", () => {
+  const one = (message) => judge("response-draft", { ok: true, message }, { ref: "R1.1" }).pass;
+  assert.equal(one("Drafted R1.1."), true);
+  assert.equal(one("Drafted R1.1 with Claude · Opus 5.5."), true);
+  assert.equal(one("Drafted R1.1 with Claude · Opus 5.5. 1 check fails for it: x."), true);
+  assert.equal(one("Drafted R1.10."), false);
+  assert.equal(one("Drafting R1.1..."), false);
 });

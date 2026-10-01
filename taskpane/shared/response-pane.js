@@ -28,12 +28,18 @@ const CONNECTION_LOST =
 const EXPORT_LABEL = "Export letter (.docx)";
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+// " with Claude · Opus 5.5" for a result line, or "" when it is not known.
+const withModel = (label) => (label ? ` with ${label}` : "");
+
 export function initResponsePane({
   sendRequest,
   word,
   // () => the request that confirms the stored providers while it is under
   // way (providers-pane.js whenRestored), else null.
   providersReady = () => null,
+  // (role) => what the last request of that kind of work really ran on
+  // ("Claude · Opus 5.5"), or null when the pane does not know (taskpane.js).
+  usedLabel = () => null,
 }) {
   const root = document.getElementById("response-root");
   if (!root) return { onEvent() {}, reload: async () => {} }; // Excel pane: no Response tab
@@ -300,7 +306,7 @@ export function initResponsePane({
             say(`Translating ${c.ref}...`);
             await askJob("response_translate", { ref: c.ref });
             changed();
-            say(`Translated ${c.ref}.`);
+            say(`Translated ${c.ref}${withModel(usedLabel("writing"))}.`);
           }),
       ),
     );
@@ -405,7 +411,7 @@ export function initResponsePane({
     const fails = (r.checks ?? []).filter((x) => x.level === "fail");
     say(
       [
-        `Drafted ${ref}.`,
+        `Drafted ${ref}${withModel(usedLabel("writing"))}.`,
         fails.length ? `${plural(fails.length, "check")} fail for it: ${fails[0].detail}.` : "",
         ...(r.warnings ?? []),
       ]
@@ -429,7 +435,7 @@ export function initResponsePane({
       }
       done += 1;
     }
-    say(`Drafted ${plural(done, "response")}.`);
+    say(`Drafted ${plural(done, "response")}${withModel(usedLabel("writing"))}.`);
   }
 
   async function refresh() {

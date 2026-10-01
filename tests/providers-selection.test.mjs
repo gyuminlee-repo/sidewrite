@@ -52,12 +52,17 @@ test("a pane starts with no confirmed choice; a choice is per pane and per role"
   assert.deepEqual(sel.get("a"), {
     turn: null,
     oneshot: null,
-    state: { turn: "restoring", oneshot: "restoring" },
-    error: { turn: null, oneshot: null },
+    writing: null,
+    state: { turn: "restoring", writing: "restoring", oneshot: "restoring" },
+    error: { turn: null, writing: null, oneshot: null },
   });
   sel.set("a", "oneshot", { id: "ollama", model: "qwen3.5:9b" }, ROWS);
   assert.deepEqual(sel.get("a").oneshot, { id: "ollama", model: "qwen3.5:9b" });
-  assert.deepEqual(sel.get("a").state, { turn: "restoring", oneshot: "ready" });
+  assert.deepEqual(sel.get("a").state, {
+    turn: "restoring",
+    writing: "restoring",
+    oneshot: "ready",
+  });
   assert.equal(sel.get("b").state.oneshot, "restoring");
   sel.set("a", "turn", { id: "claude" }, ROWS);
   assert.deepEqual(sel.choiceFor("a", "turn"), { id: "claude", model: null });
@@ -86,7 +91,7 @@ test("only a provider that passed its check can be chosen, and the refusal says 
   // Nothing was stored by a refused choice.
   assert.deepEqual(
     [sel.get("a").turn, sel.get("a").oneshot, sel.get("a").state],
-    [null, null, { turn: "restoring", oneshot: "restoring" }],
+    [null, null, { turn: "restoring", writing: "restoring", oneshot: "restoring" }],
   );
 });
 
@@ -126,4 +131,46 @@ test("the reply for the pane: rows and the pane's selection, and no key in it", 
   const out = JSON.stringify(providersListReply(leaky, sel.get("a")));
   assert.equal(out.includes("sk-secret"), false, "fields that could hold a key are not passed on");
   assert.equal(JSON.parse(out).providers[0].has_key, true);
+});
+
+// Writing (response drafts, translations, questions) is a role of its own:
+// its provider is chosen apart from the one of the judgments.
+test("writing is a role of its own: any available provider, a model where one is needed", async () => {
+  const sel = createProviderSelection({ waitMs: 20 });
+  sel.set("a", "oneshot", { id: "ollama", model: "qwen3.5:9b" }, ROWS);
+  assert.equal(sel.get("a").writing, null);
+  assert.equal(sel.get("a").state.writing, "restoring");
+  sel.set("a", "writing", { id: "claude", model: "sonnet" }, ROWS);
+  assert.deepEqual(await sel.ready("a", "writing"), { id: "claude", model: "sonnet" });
+  assert.deepEqual(await sel.ready("a", "oneshot"), { id: "ollama", model: "qwen3.5:9b" });
+  // Codex writes, though it runs no review turn.
+  sel.set("a", "writing", { id: "codex", model: "gpt-6.1-sol" }, ROWS);
+  assert.deepEqual(sel.choiceFor("a", "writing"), { id: "codex", model: "gpt-6.1-sol" });
+  assert.throws(() => sel.set("a", "writing", { id: "ollama" }, ROWS), /Choose a model for Ollama/);
+  assert.throws(
+    () => sel.set("a", "writing", { id: "deepseek", model: "x" }, ROWS),
+    /DeepSeek is not available/,
+  );
+  // Restored with the others; nothing stored is the default (null: Claude
+  // with the best model, oneshot-router.mjs), and a pane of an older build
+  // that sends no writing choice gets it too.
+  const b = createProviderSelection({ waitMs: 20 });
+  b.begin("k");
+  const out = await b.restore(
+    "k",
+    { turn: null, writing: { id: "ollama", model: "qwen3.5:9b" }, oneshot: null },
+    async () => ROWS,
+  );
+  assert.deepEqual(out.writing, { id: "ollama", model: "qwen3.5:9b" });
+  b.begin("old");
+  const old = await b.restore("old", { turn: null, oneshot: null }, async () => ROWS);
+  assert.deepEqual([old.state.writing, old.writing], ["ready", null]);
+  assert.equal(await b.ready("old", "writing"), null);
+  // Refused as any stored choice: the request of that role sends nothing.
+  b.begin("bad");
+  await b.restore("bad", { writing: { id: "deepseek", model: "x" } }, async () => ROWS);
+  await assert.rejects(
+    b.ready("bad", "writing"),
+    /The stored provider for writing cannot be used: DeepSeek is not available/,
+  );
 });

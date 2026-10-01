@@ -59,7 +59,22 @@ test("a provider key is passed to the key store and nowhere else", () => {
 // confirmed it in this connection.
 test("judgments and review turns wait for the pane's confirmed provider; hello starts over", () => {
   // The router asks the selection, which waits and throws: never the sync default.
-  assert.match(code, /getChoice: \(key\) => selection\.ready\(key, "oneshot"\)/);
+  assert.match(code, /getChoice: \(key, role\) => selection\.ready\(key, role\)/);
+  // Writing without a model of its own: the best Claude model of the account.
+  assert.match(
+    code,
+    /claudeDefault: \(role\) =>\s*role === "writing" \? bestClaudeModel\(modelCache\.current\(\)\) : ONESHOT_MODEL/,
+  );
+  // The stored writing choice is restored with the other two.
+  assert.match(
+    code,
+    /\{ turn: pick\(msg\.turn\), writing: pick\(msg\.writing\), oneshot: pick\(msg\.oneshot\) \}/,
+  );
+  // A session with no model chosen runs on the best one, not on sonnet.
+  assert.match(
+    code,
+    /return resolveModelChoice\(modelByKey\.get\(key\), modelCache\.current\(\)\);/,
+  );
   assert.match(code, /turnGate: \(key\) => selection\.ready\(key, "turn"\)/);
   // A new connection has no confirmed choice.
   const hello = code.slice(code.indexOf("async function onPaneConnect"));
@@ -125,4 +140,19 @@ test("a restart that keeps waiting input does not drop it or end its turn", () =
   );
   const restart = code.slice(code.indexOf("async function restartSession"));
   assert.match(restart.slice(0, 700), /\{ replay: false, keepQueued \}/);
+});
+
+// What runs is told to the pane as it runs, not as it was chosen.
+test("the pane is told what each request ran on: one-shots by the router, the session by its init", () => {
+  assert.match(
+    code,
+    /onUsed: \(key, used\) =>\s*bridge\.sendToTaskpane\(\{ type: "model_used", \.\.\.used \}, key\)/,
+  );
+  // The session: the model query() was given and the one the CLI says it runs.
+  const at = code.indexOf('event: "session_init"');
+  const ev = code.slice(at, at + 200);
+  assert.match(ev, /model: msg\.model,/);
+  assert.match(ev, /asked: session\?\.model \?\? null,/);
+  // No option of the session or of a one-shot lowers thinking or effort.
+  assert.equal(/\b(thinking|effort|maxThinkingTokens)\s*:/.test(code), false);
 });

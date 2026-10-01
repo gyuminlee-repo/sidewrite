@@ -47,6 +47,14 @@
       <button class="tab" data-tab="setup">Setup</button>
     </nav>
 
+    <!-- What each kind of work last ran on (model-line.js); a click opens Setup. -->
+    <button
+      type="button"
+      class="models-line"
+      id="models-line"
+      title="What each kind of work last ran on. Click to choose the provider and model in Setup."
+    ></button>
+
     <!-- Chat tab content -->
     <section class="tab-content" data-tab="chat">
       <main id="messages" class="messages"></main>
@@ -71,7 +79,7 @@
           <select
             id="composer-model"
             class="composer-model"
-            title="Model — cheaper models use less of your monthly Claude credit"
+            title="Model of edits and the chat. A better model uses more of your subscription's limit"
           >
             <option value="haiku">Haiku · cheapest</option>
             <option value="sonnet">Sonnet · balanced</option>
@@ -417,21 +425,38 @@
         <div class="setup-section" id="providers-root">
           <h3>Providers</h3>
           <p class="setup-help">
-            Which program proposes changes (review turns) and which one makes the short judgments
-            (splitting a review, checking requirements and the ledger). Only a provider that passed
-            its check can be chosen; the list below says why another cannot. API keys stay on this
-            computer, in the daemon's key file.
+            Which program and model do each kind of work. Only a provider that passed its check can
+            be chosen; the list below says why another cannot. A better model uses more of your
+            subscription's limit. API keys stay on this computer, in the daemon's key file.
           </p>
           <div class="setting-row">
             <div class="setting-text">
-              <div>Review turns</div>
+              <div>Edits</div>
+              <small class="setup-help"
+                >Changes to the manuscript (Propose changes) and the chat. Claude only. The model is
+                the one of the chat box.</small
+              >
               <select id="provider-turn" class="setting-select"></select>
               <select id="provider-turn-model" class="setting-select"></select>
             </div>
           </div>
           <div class="setting-row">
             <div class="setting-text">
+              <div>Writing</div>
+              <small class="setup-help"
+                >Response drafts, and translations and questions about a selection.</small
+              >
+              <select id="provider-writing" class="setting-select"></select>
+              <select id="provider-writing-model" class="setting-select"></select>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-text">
               <div>Judgments</div>
+              <small class="setup-help"
+                >Splitting a review, extracting requests, checking the ledger and forbidden
+                expressions, reading journal guidelines. A fast, cheap model is enough.</small
+              >
               <select id="provider-oneshot" class="setting-select"></select>
               <select id="provider-oneshot-model" class="setting-select"></select>
             </div>

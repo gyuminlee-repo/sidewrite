@@ -75,6 +75,41 @@ test("fetch: rejection and timeout fall back to aliases", async () => {
   assert.match(b.error, /timed out/);
 });
 
+// Edits and Writing default to the best model the account can use: a row of
+// the Opus family when the list has one, else sonnet.
+test("bestClaudeModel: the Opus row of the list, else sonnet; nothing asked for resolves to it", async () => {
+  const { bestClaudeModel, modelChange } = await import("../daemon/model-list.mjs");
+  const row = (value, resolvedModel = null) => ({ value, displayName: value, resolvedModel });
+  const withOpus = {
+    source: "sdk",
+    models: [row("sonnet", "claude-sonnet-5-5"), row("opus", "claude-opus-5-5"), row("haiku")],
+  };
+  assert.equal(bestClaudeModel(withOpus), "opus");
+  // Named by its id only, or only in what the row resolves to.
+  assert.equal(
+    bestClaudeModel({ source: "sdk", models: [row("sonnet"), row("claude-opus-5-5")] }),
+    "claude-opus-5-5",
+  );
+  assert.equal(
+    bestClaudeModel({ source: "sdk", models: [row("big", "claude-opus-5-5"), row("sonnet")] }),
+    "big",
+  );
+  const sdk = { source: "sdk", models: normalizeModels(SDK) };
+  assert.equal(bestClaudeModel(sdk), "sonnet", "an account without an Opus model");
+  // The list is not known: the alias, which query() always takes.
+  assert.equal(bestClaudeModel({ source: "fallback", models: FALLBACK_MODELS }), "opus");
+  assert.equal(bestClaudeModel(null), "sonnet");
+  // No model asked for (a pane that stored none) is the best one.
+  assert.equal(resolveModelChoice("", withOpus), "opus");
+  assert.equal(resolveModelChoice(null, sdk), "sonnet");
+  assert.deepEqual(modelChange({ requested: "", after: withOpus, running: "sonnet" }), {
+    model: "opus",
+    restart: true,
+  });
+  // A model that was asked for and is not listed is still replaced by sonnet.
+  assert.equal(resolveModelChoice("gpt-5", withOpus), "sonnet");
+});
+
 test("resolveModelChoice: listed, alias, explicit id on fallback, else sonnet", () => {
   const sdk = { source: "sdk", models: normalizeModels(SDK) };
   assert.equal(resolveModelChoice("fable", sdk), "fable");

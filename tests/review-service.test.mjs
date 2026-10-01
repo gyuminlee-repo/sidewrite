@@ -220,8 +220,10 @@ test("propose: ledger goes into the prompt, C3 log line, turn pushed with the re
     assert.match(t.pushed[0].text, /- \[L1\] in vitro 하이픈 금지/);
     assert.match(t.pushed[0].text, /- \[L2\] novel 금지/);
     assert.ok(
-      t.lines.includes(
-        "[review] prompt R1.3 instructions=L1 forbid=L2 omitted_forbid=- paragraphs=1",
+      t.lines.some((l) =>
+        l.startsWith(
+          "[review] prompt R1.3 instructions=L1 forbid=L2 omitted_forbid=- paragraphs=1 overview=",
+        ),
       ),
     );
     assert.equal(r.revision.comments[1].status, "in_progress");
@@ -238,8 +240,10 @@ test("CC_OFFICE_REVIEW_PROMPT_FORBID=0 omits the forbid list (acceptance-test kn
     await t.ask("review_propose", { ref: "R1.3" });
     assert.ok(!t.pushed[0].text.includes("[L1]"));
     assert.ok(
-      t.lines.includes(
-        "[review] prompt R1.3 instructions=- forbid=- omitted_forbid=L1 paragraphs=0",
+      t.lines.some((l) =>
+        l.startsWith(
+          "[review] prompt R1.3 instructions=- forbid=- omitted_forbid=L1 paragraphs=0 overview=",
+        ),
       ),
     );
   } finally {
@@ -2674,4 +2678,22 @@ test("ledger_check: the retry of a malformed reply runs on the pinned provider o
   } finally {
     await t.cleanup();
   }
+});
+
+// The turn of one comment is told what the other comments of the review ask
+// and what is on record for them.
+test("review_preview and the turn carry the overview of the other comments", async () => {
+  const t = await setup();
+  await t.ask("review_save_comments", {
+    comments: [
+      { ref: "R1.1", reviewer: 1, text: "State the unit." },
+      { ref: "R1.2", reviewer: 1, text: "Name the antifoam agent." },
+    ],
+  });
+  const r = await t.ask("review_preview", { ref: "R1.1", paragraphs: [] });
+  assert.equal(r.ok, true, r.error);
+  assert.match(r.prompt, /\nOther comments of this review, for context/);
+  assert.match(r.prompt, /\n- R1\.2 \[no change on record\] "Name the antifoam agent\."\n/);
+  assert.equal(/\n- R1\.1 \[/.test(r.prompt), false, "not the comment of the turn itself");
+  await t.cleanup();
 });

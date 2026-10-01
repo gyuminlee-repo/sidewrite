@@ -61,7 +61,11 @@ test("a judgment asked before the pane's stored choice arrived waits for it and 
   const early = d.router.forKey("k")(REQ); // Split, clicked at once
   await tick();
   assert.deepEqual(d.calls, [], "nothing goes anywhere while the choice is not confirmed");
-  assert.deepEqual(d.sel.get("k").state, { turn: "restoring", oneshot: "restoring" });
+  assert.deepEqual(d.sel.get("k").state, {
+    turn: "restoring",
+    writing: "restoring",
+    oneshot: "restoring",
+  });
   // The pane's stored choice arrives; the probe it is checked against is slow.
   let probed;
   const rows = new Promise((r) => (probed = r));
@@ -72,7 +76,7 @@ test("a judgment asked before the pane's stored choice arrived waits for it and 
   assert.equal(d.sel.get("k").state.turn, "ready");
   assert.deepEqual(await d.sel.ready("k", "turn"), { id: "claude", model: null });
   probed(ROWS);
-  assert.deepEqual((await restored).state, { turn: "ready", oneshot: "ready" });
+  assert.deepEqual((await restored).state, { turn: "ready", writing: "ready", oneshot: "ready" });
   assert.deepEqual(await early, { ok: true, text: "h" });
   assert.deepEqual(d.calls, [["http", "http://localhost:11434/v1", "qwen3.5:9b"]]);
 });
@@ -131,7 +135,7 @@ test("no stored choice at all: the documented default applies, Claude with its j
   const out = await d.sel.restore("k", { turn: null, oneshot: null }, () => {
     throw new Error("no probe is needed for the defaults");
   });
-  assert.deepEqual(out.state, { turn: "ready", oneshot: "ready" });
+  assert.deepEqual(out.state, { turn: "ready", writing: "ready", oneshot: "ready" });
   assert.deepEqual(await d.router.forKey("k")(REQ), { ok: true, text: "c" });
   assert.deepEqual(d.calls, [["claude", "haiku"]]);
 });

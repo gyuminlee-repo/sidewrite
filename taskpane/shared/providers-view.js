@@ -7,29 +7,28 @@
 // or Claude may run with its own default.
 const needsModel = (row) => row?.tier === "local" || row?.tier === "key";
 
-// The rows of one menu. role "turn": the providers that can run review turns
-// at all, enabled when turn_ready. role "oneshot": every provider, enabled
-// when available. A row that cannot be chosen says why in its text.
+// The rows of one menu: every provider. role "turn" (edits of the
+// manuscript): enabled when turn_ready. role "writing" and "oneshot"
+// (judgments): enabled when available. A row that cannot be chosen says why:
+// shortly in its text, in full in its note.
 export function providerRows(list, role) {
-  return (list ?? [])
-    .filter((r) => role !== "turn" || (r.roles ?? []).includes("turn"))
-    .map((r) => {
-      const enabled = role === "turn" ? !!r.turn_ready : !!r.available;
-      const note = enabled
-        ? ""
-        : !r.available
-          ? (r.reason ?? "not available")
-          : (r.turn_note ?? r.reason ?? "not ready for review turns");
-      const short = enabled ? "" : !r.available ? note : "judgments only";
-      return {
-        id: r.id,
-        label: r.label,
-        text: short ? `${r.label} (${short})` : r.label,
-        enabled,
-        note,
-        policy: r.policy ?? "",
-      };
-    });
+  return (list ?? []).map((r) => {
+    const enabled = role === "turn" ? !!r.turn_ready : !!r.available;
+    const note = enabled
+      ? ""
+      : !r.available
+        ? (r.reason ?? "not available")
+        : (r.turn_note ?? r.reason ?? "not ready for review turns");
+    const short = enabled ? "" : !r.available ? note : "not for edits";
+    return {
+      id: r.id,
+      label: r.label,
+      text: short ? `${r.label} (${short})` : r.label,
+      enabled,
+      note,
+      policy: r.policy ?? "",
+    };
+  });
 }
 
 // A stored choice ({ id, model } or null) against a fresh list: kept when the
@@ -72,8 +71,9 @@ export function providerStatus(r) {
   return { state: "ok", text, keyNote };
 }
 
-// The rows of a model menu for the chosen provider.
-export function modelRows(row, current) {
+// The rows of a model menu for the chosen provider. defaultLabel: the text
+// of the first row of a provider that runs without a model being named.
+export function modelRows(row, current, defaultLabel = "Default model") {
   if (!row) return [];
   const models = (row.models ?? []).map((m) => ({
     value: m.value,
@@ -83,5 +83,5 @@ export function modelRows(row, current) {
   if (needsModel(row)) {
     return models.length ? models : [{ value: "", label: "No model listed", selected: true }];
   }
-  return [{ value: "", label: "Default model", selected: !current }, ...models];
+  return [{ value: "", label: defaultLabel, selected: !current }, ...models];
 }

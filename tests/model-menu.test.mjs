@@ -62,3 +62,18 @@ test("display name: the SDK name when listed, else the family in title case", ()
   assert.equal(modelDisplayName("claude-zephyr-7", L), "Zephyr"); // a family not known today
   assert.equal(modelDisplayName("", L), "");
 });
+
+// One value for the model of edits, wherever it is shown or chosen (the chat
+// box and Setup): the stored choice, else the default the daemon answered
+// with, else the alias the daemon takes for the best model.
+test("editsModelValue: the stored choice, else the daemon's default, else opus", async () => {
+  const { editsModelValue, ALIAS_MODELS } = await import("../taskpane/shared/model-menu.js");
+  assert.equal(editsModelValue("fable", "opus"), "fable");
+  assert.equal(editsModelValue(null, "claude-opus-5-5"), "claude-opus-5-5");
+  assert.equal(editsModelValue("", null), "opus");
+  // The rows both menus show before the account's list is known.
+  assert.deepEqual(
+    modelMenuOptions(ALIAS_MODELS, "opus").map((r) => r.value),
+    ["haiku", "sonnet", "opus"],
+  );
+});

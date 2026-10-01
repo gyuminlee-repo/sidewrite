@@ -62,6 +62,9 @@ export function initReviewPane({
   // () => the request that confirms the stored providers while it is under
   // way (providers-pane.js whenRestored), else null.
   providersReady = () => null,
+  // (role) => what the last request of that kind of work really ran on
+  // ("Claude · Opus 5.5"), or null when the pane does not know (taskpane.js).
+  usedLabel = () => null,
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -789,7 +792,11 @@ export function initReviewPane({
     const notCounted = r.done.at(-1)?.unchecked ? `${r.failed} is not counted: ` : "";
     if (r.failed) say(`Propose all stopped at ${r.failed}: ${r.error} ${notCounted}${tail}`, true);
     else if (r.stopped) say(`Propose all stopped before ${r.next}. ${tail}`);
-    else say(`Propose all: ${tail}`);
+    else {
+      // What the turns ran on, when the pane knows it.
+      const ran = usedLabel("turn");
+      say(`Propose all${ran ? ` with ${ran}` : ""}: ${tail}`);
+    }
     render();
     showQueueButtons();
   });
