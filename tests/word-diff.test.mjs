@@ -12,11 +12,11 @@ const AFTER =
 test("rewriteSegments: only the words that differ, each found once when its turn comes", () => {
   const { segments, error } = rewriteSegments(BEFORE, AFTER);
   assert.equal(error, undefined);
-  // The places that changed: two in the first sentence, the unit, the last sentence.
-  assert.equal(segments.length, 4);
+  // The places that changed: the first sentence, the unit, the last sentence.
+  assert.equal(segments.length, 3);
   assert.equal(applySegments(BEFORE, segments), AFTER);
   // The unit: widened by the words before it until it is found once.
-  assert.deepEqual(segments[2], { find: "30 C", replace: "30 °C" });
+  assert.deepEqual(segments[1], { find: "30 C", replace: "30 °C" });
   // The sentence in the middle is in no edit.
   assert.equal(
     segments.some((s) => s.find.includes("The mutant grew at 0.21")),

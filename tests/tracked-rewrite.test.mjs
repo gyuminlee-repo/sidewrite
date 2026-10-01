@@ -144,8 +144,8 @@ test("a rewrite goes in as the edits of the words that differ, last first, with 
     const r = await applyTrackedRewrite(t.deps, ARGS, TURN);
     assert.equal(r.ok, true, r.message);
     assert.equal(t.paras[1], NEW, "the fake document reads the new paragraph");
-    assert.equal(t.calls.length, 4);
-    assert.equal(r.parts, 4);
+    assert.equal(t.calls.length, 3);
+    assert.equal(r.parts, 3);
     // From the last to the first: each find lies before the one applied before it.
     const at = t.calls.map((c) => PARAS[1].indexOf(c.find.slice(0, 12)));
     assert.deepEqual(
@@ -165,15 +165,14 @@ test("a rewrite goes in as the edits of the words that differ, last first, with 
       [
         [true, undefined],
         [true, undefined],
-        [true, undefined],
       ],
     );
     // Every call was checked against the paragraph as it read then (the fake
     // refuses another hash), under the paragraph of the rewrite.
     assert.ok(t.calls.every((c) => c.expected_paragraph.index === 1 && c.paragraph_hint === "p1"));
-    // On record: four changes, one comment id, one rewrite id.
+    // On record: three changes, one comment id, one rewrite id.
     const changes = (await t.rev()).comments[0].changes;
-    assert.equal(changes.length, 4);
+    assert.equal(changes.length, 3);
     assert.deepEqual(new Set(changes.map((ch) => ch.word_comment_id)), new Set(["41"]));
     assert.equal(new Set(changes.map((ch) => ch.rewrite_id)).size, 1);
     assert.ok(changes[0].rewrite_id);
@@ -185,12 +184,12 @@ test("a rewrite goes in as the edits of the words that differ, last first, with 
     // The paragraph as the daemon has it now is the new one.
     const rev = await t.rev();
     assert.equal(currentTexts(rev.snapshot.paragraphs, [...changes].sort(byCreated))[1], NEW);
-    assert.ok(t.lines.includes("[review] rewrite R1.1 paragraph=1 parts=4 applied=4"));
-    // The report of the Review tab: four changes, one comment expected, and that is in order.
+    assert.ok(t.lines.includes("[review] rewrite R1.1 paragraph=1 parts=3 applied=3"));
+    // The report of the Review tab: three changes, one comment expected, and that is in order.
     const inv = view.invariantReport(rev, [{ id: "41", content: t.calls[0].comment_text }]);
     assert.deepEqual(
       [inv.changes, inv.expected_comments, inv.tool_comments, inv.ok],
-      [4, 1, 1, true],
+      [3, 1, 1, true],
     );
   } finally {
     await t.cleanup();
@@ -270,14 +269,14 @@ test("a part Word refuses stops the rewrite: what is in the document is on recor
   const t = await world({ failAt: 3 });
   try {
     const r = await applyTrackedRewrite(t.deps, ARGS, TURN);
-    assert.deepEqual([r.ok, r.code, r.applied_parts, r.parts], [false, "RewriteStopped", 2, 4]);
+    assert.deepEqual([r.ok, r.code, r.applied_parts, r.parts], [false, "RewriteStopped", 2, 3]);
     assert.equal(t.calls.length, 3);
     assert.equal((await t.rev()).comments[0].changes.length, 2);
-    assert.match(r.message, /2 of 4 parts are in the document/);
+    assert.match(r.message, /2 of 3 parts are in the document/);
     assert.match(r.message, /Do not send the rewrite again/);
     assert.equal(r.paragraph_now, t.paras[1]);
     assert.ok(
-      t.lines.includes("[review] rewrite R1.1 paragraph=1 parts=4 applied=2 stopped=NotFound"),
+      t.lines.includes("[review] rewrite R1.1 paragraph=1 parts=3 applied=2 stopped=NotFound"),
     );
   } finally {
     await t.cleanup();

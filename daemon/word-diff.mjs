@@ -19,8 +19,8 @@
 // (a piece that occurs more than once and cannot be widened).
 //
 // Words are compared as written (case and all); white space counts as one
-// space. Differences separated by nothing but white space or one mark are
-// one edit. Assumed: paragraphs of some hundred words (the table of the
+// space. Differences with at most two unchanged words between them are one
+// edit. Assumed: paragraphs of some hundred words (the table of the
 // longest common subsequence has words(before) x words(after) cells).
 
 import { tokens } from "./edit-facts.mjs";
@@ -63,11 +63,13 @@ function hunks(a, b) {
     }
   }
   close();
-  // Differences with no word between them are one.
+  // Differences with at most two unchanged words between them are one: a
+  // sentence that changed in most of its words reads better as one change
+  // than as a row of single words struck out and put in.
   const merged = [];
   for (const h of out) {
     const last = merged.at(-1);
-    if (last && !a.slice(last.a1, h.a0).some(isWord)) {
+    if (last && a.slice(last.a1, h.a0).filter(isWord).length <= 2) {
       last.a1 = h.a1;
       last.b1 = h.b1;
     } else merged.push({ ...h });
