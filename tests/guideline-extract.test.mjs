@@ -5,6 +5,7 @@ import {
   extractGuidelineRules,
   candidatesFromLabels,
   guidelinePrompt,
+  numbersIn,
   htmlToText,
   fetchGuidelineText,
   GUIDELINE_SYSTEM,
@@ -103,6 +104,30 @@ test("a number that is not in the cited sentence rejects the count rule; the sen
     sentences: [count({ target: "section_words", section: "abstract", max: 300 }), ...others(3, 2)],
   });
   assert.match(r.warnings[0], /300/);
+});
+
+test("a thousands separator does not change a number: 1,000, 1 000 and 1000 are one number", () => {
+  assert.deepEqual(numbersIn("at most 1,000 words"), [1000]);
+  assert.deepEqual(numbersIn("at most 1 000 words or 12 000 characters"), [1000, 12000]);
+  assert.deepEqual(
+    numbersIn("between 4 and 6 keywords, 250 words, 1,250,000 bytes"),
+    [4, 6, 250, 1250000],
+  );
+  // Decimals and version-like numbers are not whole numbers of the sentence.
+  assert.deepEqual(numbersIn("a 2.5 cm margin, size 1,5 and section 3.2.1"), []);
+  const rule = (max) => ({ target: "section_words", section: "abstract", max });
+  const check = (sentence, max) =>
+    candidatesFromLabels([sentence], { sentences: [count(rule(max))] }).candidates[0].check.type;
+  for (const written of ["1,000", "1 000", "1 000", "1 000", "1000"]) {
+    assert.equal(check(`The abstract has at most ${written} words.`, 1000), "count", written);
+  }
+  // A part of a grouped number is not that number.
+  for (const max of [100, 1, 0, 10000]) {
+    assert.equal(check("The abstract has at most 1,000 words.", max), "llm", String(max));
+    assert.equal(check("The abstract has at most 1 000 words.", max), "llm", String(max));
+  }
+  assert.equal(check("The abstract has at most 1.000 words.", 1000), "llm");
+  assert.equal(check("The abstract has at most 2.5 pages.", 2), "llm");
 });
 
 test("a section order must name sections that the sentence names", () => {

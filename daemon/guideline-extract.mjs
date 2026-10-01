@@ -100,12 +100,21 @@ function unsupported(rule, sentence) {
     const absent = rule.order.filter((name) => !lower.includes(name));
     return absent.length ? `section ${absent.join(", ")}` : null;
   }
+  const written = numbersIn(sentence);
   for (const n of [rule.min, rule.max]) {
-    if (n !== undefined && !new RegExp(`(?<![\\d.,])${n}(?![\\d]|[.,]\\d)`).test(sentence)) {
-      return `number ${n}`;
-    }
+    if (n !== undefined && !written.includes(n)) return `number ${n}`;
   }
   return null;
+}
+
+// The whole numbers a sentence writes in digits. "1,000", "1 000" (also with
+// a no-break space) and "1000" are one number; its parts ("1", "000", "100")
+// are not numbers of the sentence. A number with a decimal point or comma
+// ("2.5", "1,5", "1.000") is left out: it cannot be read as a whole number
+// with certainty.
+export function numbersIn(sentence) {
+  const re = /(?<![\d.,])(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?!\d|[.,]\d)/g;
+  return [...String(sentence ?? "").matchAll(re)].map((m) => Number(m[0].replace(/[,\s]/g, "")));
 }
 
 const none = () => ({ candidates: [], warnings: [GUIDELINE_WARNING] });
