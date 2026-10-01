@@ -1536,3 +1536,40 @@ test("review_comments_cleaned marks the change; refresh then keeps it and report
     await t.cleanup();
   }
 });
+
+// Codex review (P2): delete L1, add another forbid rule, and it was numbered
+// L1 again. The edit blocked by the old L1 still said blocked_by ["L1"], so
+// approving that exception applied text the NEW rule forbids.
+test("an exception approved for a deleted forbid rule does not cover a rule added later", async () => {
+  const t = await setup();
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    await t.ask("ledger_add", { item: NOVEL });
+    const deps = { ...t.svc.trackedEditDeps("k"), call: async () => ({ ok: true }) };
+    const R = { what: "w", why: "y", addresses: "a" };
+    const first = await applyTrackedEdit(
+      deps,
+      { comment_ref: "R1.3", find: "substrate", replace: "novel substrate", rationale: R },
+      { ref: "R1.3" },
+    );
+    assert.deepEqual(first.blocked_by, ["L1"]);
+    await t.ask("ledger_remove", { id: "L1" });
+    const added = await t.ask("ledger_add", {
+      item: {
+        kind: "forbid",
+        text: "substrate 를 novel 이라 부르지 않는다",
+        check: { type: "regex", pattern: "novel substrate", flags: "i" },
+      },
+    });
+    assert.equal(added.item.id, "L2");
+    const r = await t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.equal(r.applied, false);
+    assert.deepEqual(r.result.blocked_by, ["L2"]);
+    assert.equal(t.calls.length, 0); // nothing was sent to Word
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments[1].changes.length, 0);
+    assert.equal(rev.ledger_seq, 2);
+  } finally {
+    await t.cleanup();
+  }
+});

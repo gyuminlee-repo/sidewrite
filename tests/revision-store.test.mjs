@@ -314,10 +314,11 @@ test("L5 a requirement id that a recorded change cites is never given out again"
     { ref: "R1.1", reviewer: 1, text: "x", requirements: ["use Celsius"] },
     { ref: "R1.2", reviewer: 1, text: "Rename the extract." },
   ]);
-  assert.deepEqual(rev.comments[0].requirements, [{ id: "q2", text: "use Celsius" }]);
+  // q2 was removed with no change citing it; it is still not given out again.
+  assert.deepEqual(rev.comments[0].requirements, [{ id: "q3", text: "use Celsius" }]);
   assert.deepEqual(
     unaddressedRequirements(rev.comments[0]).map((r) => r.id),
-    ["q2"],
+    ["q3"],
   );
 });
 
@@ -457,6 +458,133 @@ test("L5 requirement ids that blocked, applying and unanswered edits cite are ne
   ]);
   assert.deepEqual(
     rev.comments[0].requirements.map((r) => r.id),
-    ["q1", "q5"], // q5 was listed, cited by none, and removed: free again
+    ["q1", "q6"], // q5 was listed, cited by none, and removed: still never given out again
   );
+});
+
+// Codex review (P2): ids are never given out twice. A counter in the file
+// outlives the item, so a stale reference (a blocked edit, an open pane, a
+// running turn that was told q2) can never mean a newer item.
+test("ledger ids are not reused after the highest item is deleted", () => {
+  const forbid = { kind: "forbid", text: "x", check: { type: "llm" } };
+  let r = addLedgerItem(base(), forbid);
+  assert.deepEqual([r.item.id, r.revision.ledger_seq], ["L1", 1]);
+  let rev = removeLedgerItem(r.revision, "L1");
+  r = addLedgerItem(rev, forbid);
+  assert.deepEqual([r.item.id, r.revision.ledger_seq], ["L2", 2]);
+  rev = removeLedgerItem(r.revision, "L2");
+  assert.equal(RevisionSchema.parse(rev).ledger_seq, 2); // survives a save
+  assert.equal(addLedgerItem(rev, forbid).item.id, "L3");
+});
+
+test("requirement ids and blocked-edit ids are not reused after the highest one is removed", () => {
+  let rev = setRequirements(base(), "R1.1", ["one", "two"]);
+  rev = setRequirements(rev, "R1.1", ["one"]); // q2 removed, cited by nothing
+  rev = setRequirements(rev, "R1.1", ["one", "other"]);
+  assert.deepEqual(
+    rev.comments[0].requirements.map((q) => q.id),
+    ["q1", "q3"],
+  );
+  // Through the comment list (Save comments) path too, and a text that
+  // stays keeps its id.
+  rev = replaceComments(rev, [{ ref: "R1.1", reviewer: 1, text: "x", requirements: ["other"] }]);
+  rev = replaceComments(rev, [
+    { ref: "R1.1", reviewer: 1, text: "x", requirements: ["other", "third"] },
+  ]);
+  assert.deepEqual(
+    rev.comments[0].requirements.map((q) => q.id),
+    ["q3", "q4"],
+  );
+  // A comment list saved without requirements keeps the counter.
+  rev = replaceComments(rev, [{ ref: "R1.1", reviewer: 1, text: "y" }]);
+  assert.equal(rev.comments[0].requirement_seq, 4);
+
+  const args = { find: "a", replace: "b", rationale };
+  let b = addBlocked(rev, "R1.1", { args, blocked_by: ["L1"] });
+  assert.equal(b.blocked.id, "R1.1-b1");
+  rev = takeBlocked(b.revision, "R1.1", "R1.1-b1").revision;
+  b = addBlocked(rev, "R1.1", { args, blocked_by: ["L1"] });
+  assert.equal(b.blocked.id, "R1.1-b2");
+});
+
+test("a revision file without the counters gets them on load from every id it names", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rev-seq-"));
+  try {
+    const path = join(dir, "paper.revision.json");
+    const cites = (ids) => ({
+      find: "a",
+      replace: "b",
+      rationale: { ...rationale, requirement_ids: ids },
+    });
+    const old = {
+      version: 1,
+      manuscript: "/m/paper.docx",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      comments: [
+        {
+          ref: "R1.1",
+          reviewer: 1,
+          text: "t",
+          requirements: [{ id: "q1", text: "one" }],
+          changes: [
+            {
+              ...change(),
+              id: "R1.1-1",
+              created_at: "2026-01-01T00:00:00.000Z",
+              override_of: ["L4"],
+            },
+          ],
+          // L3 and L7 are gone from the ledger; q5 from the requirements.
+          blocked: [
+            {
+              id: "R1.1-b3",
+              args: cites(["q5"]),
+              blocked_by: ["L3"],
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+            {
+              id: "R1.1-b4",
+              args: cites([]),
+              blocked_by: ["L1"],
+              created_at: "2026-01-01T00:00:00.000Z",
+              state: "outcome_unknown",
+              attempt: {
+                tool_call_id: null,
+                unknown_at: "2026-01-01T00:00:00.000Z",
+                comment_text: "x",
+                change: { override_of: ["L7"] },
+              },
+            },
+          ],
+        },
+        { ref: "R1.2", reviewer: 1, text: "u" },
+      ],
+      ledger: [{ id: "L1", kind: "forbid", text: "x", check: { type: "llm" } }],
+    };
+    await writeFile(path, JSON.stringify(old), "utf8");
+    const rev = await loadRevision(path, "/m/paper.docx");
+    assert.equal(rev.ledger_seq, 7);
+    assert.deepEqual(
+      rev.comments.map((c) => [c.requirement_seq, c.blocked_seq]),
+      [
+        [5, 4],
+        [0, 0],
+      ],
+    );
+    const forbid = { kind: "forbid", text: "y", check: { type: "llm" } };
+    assert.equal(addLedgerItem(rev, forbid).item.id, "L8");
+    assert.equal(setRequirements(rev, "R1.1", ["one", "new"]).comments[0].requirements[1].id, "q6");
+    assert.equal(
+      addBlocked(rev, "R1.1", { args: cites([]), blocked_by: ["L1"] }).blocked.id,
+      "R1.1-b5",
+    );
+    // Saved, the counters stay although the references may go later.
+    const saved = await saveRevision(path, rev);
+    assert.equal(JSON.parse(await readFile(path, "utf8")).ledger_seq, 7);
+    assert.equal(saved.comments[0].requirement_seq, 5);
+    // Not yet migrated objects (no load in between) give the same ids.
+    assert.equal(addLedgerItem(RevisionSchema.parse(old), forbid).item.id, "L8");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
