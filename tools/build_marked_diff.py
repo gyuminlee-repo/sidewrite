@@ -116,9 +116,17 @@ def rpr_key(rpr, _cache={}):
     return _cache[k][1]
 
 
+OFF_VALUES = ('0', 'false', 'off')   # w:val of an on/off property that switches it off; absent or anything else is on
+
+
+def is_on(el):
+    """True when an on/off property element (w:strike, w:b, ...) is there and not switched off by its w:val."""
+    return el is not None and el.get(q('val')) not in OFF_VALUES
+
+
 def is_struck(rpr):
-    """True when an rPr carries strike or dstrike."""
-    return rpr is not None and (rpr.find(q('strike')) is not None or rpr.find(q('dstrike')) is not None)
+    """True when an rPr switches strike or dstrike on (<w:strike w:val="0"/> is not struck)."""
+    return rpr is not None and (is_on(rpr.find(q('strike'))) or is_on(rpr.find(q('dstrike'))))
 
 
 def rpr_color(rpr):
