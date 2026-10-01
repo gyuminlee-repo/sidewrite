@@ -37,6 +37,10 @@ METHOD_NEW = "Samples were drawn every four hours and the optical density was re
 RESULT = "Growth began after a lag of one day and reached a plateau after four days in every repeat."
 GONE = "This sentence about an invented side experiment was removed by the authors in the revision."
 ADDED = "A new invented paragraph on the limits of the placeholder design was added by the authors."
+OLD_LIMITS = "Only one flask was run in the invented design and the plate reader was not calibrated before the run."
+NEW_LIMITS = ("Limits: one flask, and the plate reader was not calibrated. Every optical density of the "
+              "invented design is therefore indicative, should not be compared between days, and says "
+              "nothing about a second flask that was never run.")
 CLOSING = "No real data are in this document, which exists for a software test only."
 CLOSING_TOOL = "No real data are in this document, which exists only for a software test."
 
@@ -88,6 +92,20 @@ class Reference(unittest.TestCase):
     def test_equal_documents_have_no_change_and_empty_paragraphs_do_not_count(self):
         self.assertEqual(rc.reference_changes(BEFORE, list(BEFORE)), [])
         self.assertEqual(rc.reference_changes([INTRO, "", RESULT], [INTRO, RESULT, ""]), [])
+
+    def test_a_paragraph_written_anew_is_one_row_of_its_own_kind(self):
+        self.assertLess(rc.ratio(OLD_LIMITS, NEW_LIMITS), rc.PAIR_MIN)
+        self.assertGreaterEqual(rc.word_ratio(OLD_LIMITS, NEW_LIMITS), rc.REWRITE_MIN)
+        rows = rc.reference_changes([INTRO, OLD_LIMITS, GONE, RESULT], [INTRO, ADDED, NEW_LIMITS, RESULT])
+        self.assertEqual(
+            [(r["kind"], r["paragraph_index_before"], r["paragraph_index_after"]) for r in rows],
+            [("rewritten", 1, 2), ("deleted", 2, None), ("inserted", None, 1)],
+        )
+        self.assertEqual((rows[0]["before"], rows[0]["after"]), (OLD_LIMITS, NEW_LIMITS))
+        self.assertGreaterEqual(rows[0]["similarity"], rc.REWRITE_MIN)
+        # Two paragraphs with nothing in common stay a deletion and an insertion.
+        self.assertEqual([r["kind"] for r in rc.reference_changes([INTRO, GONE], [INTRO, ADDED])],
+                         ["deleted", "inserted"])
 
     def test_a_rewritten_paragraph_next_to_a_new_one_is_paired_with_its_own(self):
         rows = rc.reference_changes([INTRO, METHOD, RESULT], [INTRO, ADDED, METHOD_NEW, RESULT])
@@ -141,20 +159,24 @@ class EndToEnd(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             counts = json.loads(r.stdout)
             self.assertEqual(
-                {k: counts[k] for k in ("paragraphs_before", "paragraphs_after", "modified", "deleted",
-                                         "inserted", "tool_paragraphs", "tool_unplaced", "both")},
-                {"paragraphs_before": 5, "paragraphs_after": 5, "modified": 1, "deleted": 1,
+                {k: counts[k] for k in ("paragraphs_before", "paragraphs_after", "modified", "rewritten",
+                                         "deleted", "inserted", "tool_paragraphs", "tool_unplaced", "both")},
+                {"paragraphs_before": 5, "paragraphs_after": 5, "modified": 1, "rewritten": 0, "deleted": 1,
                  "inserted": 1, "tool_paragraphs": 2, "tool_unplaced": 0, "both": 1},
             )
             self.assertNotIn("flasks", r.stdout)
             ref = json.loads((out / "reference_changes.json").read_text(encoding="utf-8"))
             self.assertEqual([x["kind"] for x in ref], ["modified", "deleted", "inserted"])
             md = (out / "compare.md").read_text(encoding="utf-8")
-            self.assertIn("- Changed by the authors: 1 modified, 1 deleted, 1 inserted", md)
-            self.assertIn("- Of the paragraphs the authors modified or deleted, also changed by the tool: 1 of 2 (50%)", md)
+            self.assertIn("- Changed by the authors: 1 modified, 0 rewritten, 1 deleted, 1 inserted", md)
+            self.assertIn(
+                "- Of the paragraphs the authors modified, rewrote or deleted, also changed by the tool: 1 of 2 (50%)", md)
+            self.assertIn(
+                "- The same, by what the authors did: modified 1 of 1 (100%), rewritten n/a, deleted 0 of 1 (0%)", md)
             self.assertIn("- Of the paragraphs the tool changed, also changed by the authors: 1 of 2 (50%)", md)
             both = md.split("## Changed by both")[1].split("## ")[0]
-            self.assertIn("| 2 | R1.1 | %s | %s | %s |" % (METHOD, METHOD_NEW, METHOD.replace("six", "four")), both)
+            self.assertIn("| 2 | R1.1 | modified | %s | %s | %s |"
+                          % (METHOD, METHOD_NEW, METHOD.replace("six", "four")), both)
             only_ref = md.split("## Changed by the authors only")[1].split("## ")[0]
             self.assertIn("| 3 | deleted | %s | (empty) |" % GONE, only_ref)
             self.assertIn("| after 4 | inserted | (empty) | %s |" % ADDED, only_ref)

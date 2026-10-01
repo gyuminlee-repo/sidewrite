@@ -8,7 +8,9 @@ import {
   changesReport,
   keepRefPattern,
   ledgerFromLines,
+  otherModels,
   parseOnly,
+  readModelLine,
   responsesReport,
   ruleLines,
   summaryText,
@@ -99,7 +101,22 @@ test("how a turn ended: ok, failed, timeout, or no turn at all", () => {
     log: "[agent] init session a (model: m1)\n[review] turn done R1.1",
     seconds: 41,
   });
-  assert.deepEqual(ok, { outcome: "ok", reason: null, seconds: 41, model: "m1" });
+  assert.deepEqual(ok, {
+    outcome: "ok",
+    reason: null,
+    seconds: 41,
+    model: "m1",
+    model_line: null,
+    other_model: false,
+  });
+  // The pane's line right after the turn says what the edits ran on.
+  const said = (line) =>
+    turnResult("R1.1", { step: { ok: true }, log: "[review] turn done R1.1", seconds: 1, line });
+  assert.deepEqual([said(LINE).model_line, said(LINE).other_model], ["Claude · Opus 9", false]);
+  assert.deepEqual(
+    [said(DRIFT).model_line, said(DRIFT).other_model],
+    ["asked for Claude · Opus 9, ran on Claude · Sonnet 9", true],
+  );
   // The session was started for an earlier comment: the model comes from the caller.
   assert.equal(
     turnResult("R1.1", {
@@ -133,6 +150,52 @@ test("how a turn ended: ok, failed, timeout, or no turn at all", () => {
   assert.equal(broken.outcome, "failed");
   const none = turnResult("R1.5", { step: { ok: true }, log: "", seconds: 2 });
   assert.equal(none.outcome, "no_turn");
+});
+
+const LINE =
+  "Edits: Claude · Opus 9   Writing: Claude · Opus 9 (not used yet)   Judgments: Claude · Haiku 9";
+const DRIFT =
+  "Edits: asked for Claude · Opus 9, ran on Claude · Sonnet 9   Writing: Claude · Opus 9 (last request failed)   Judgments: Claude · Haiku 9 (next: Claude · Sonnet 9)";
+
+test("the pane's model line is read apart: used or not, another model, a failed request", () => {
+  assert.deepEqual(readModelLine(LINE), {
+    edits: { text: "Claude · Opus 9", used: true, other: false, failed: false },
+    writing: { text: "Claude · Opus 9 (not used yet)", used: false, other: false, failed: false },
+    judgments: { text: "Claude · Haiku 9", used: true, other: false, failed: false },
+  });
+  const d = readModelLine(DRIFT);
+  assert.deepEqual(
+    [d.edits.other, d.writing.failed, d.judgments.other, d.judgments.used],
+    [true, true, false, true],
+  );
+  assert.deepEqual(otherModels(LINE), []);
+  assert.deepEqual(otherModels(DRIFT), [
+    "edits: asked for Claude · Opus 9, ran on Claude · Sonnet 9",
+  ]);
+  assert.deepEqual(readModelLine(""), {});
+  assert.deepEqual(otherModels(undefined), []);
+});
+
+// The words of the line are the ones the pane writes (model-line.js).
+test("the model line the pane writes is the one this reads", async () => {
+  const { modelLineText } = await import("../taskpane/shared/model-line.js");
+  const line = modelLineText(
+    {
+      turn: {
+        used: { provider: "claude", asked: "opus", ran: "claude-sonnet-9" },
+        choice: { provider: "claude", model: "opus" },
+      },
+      writing: { used: null, choice: { provider: "claude", model: "opus" } },
+      oneshot: {
+        used: { provider: "ollama", asked: "tiny", ran: "tiny", ok: false },
+        choice: { provider: "ollama", model: "tiny" },
+      },
+    },
+    null,
+  );
+  const r = readModelLine(line);
+  assert.deepEqual(Object.keys(r), ["edits", "writing", "judgments"]);
+  assert.deepEqual([r.edits.other, r.writing.used, r.judgments.failed], [true, false, true]);
 });
 
 const change = (id, more = {}) => ({
@@ -236,16 +299,23 @@ test("responses.json: the answer and what it cites, for the comments that have o
   ]);
 });
 
-test("summary.txt: counts and times, no text of the manuscript", () => {
+test("summary.txt: counts, times and models, no text of the manuscript", () => {
+  const turn = (more) => ({
+    reason: null,
+    model: "m1",
+    model_line: "Claude · Opus 9",
+    other_model: false,
+    ...more,
+  });
   const report = changesReport(REVISION, HEADINGS, {
-    "R1.1": { outcome: "ok", reason: null, seconds: 41, model: "m1" },
-    "R1.2": { outcome: "timeout", reason: "x", seconds: 600, model: "m1" },
+    "R1.1": turn({ outcome: "ok", seconds: 41 }),
+    "R1.2": turn({ outcome: "timeout", reason: "x", seconds: 600 }),
   });
   const text = summaryText(report, {
     seconds: 700,
     saved: true,
-    model: "opus",
-    judgmentModel: null,
+    models: { asked: { edits: "opus", writing: null, judgments: "haiku" }, line: LINE },
+    source: "opened as it is",
     responses: 1,
   });
   assert.equal(
@@ -257,20 +327,44 @@ test("summary.txt: counts and times, no text of the manuscript", () => {
       "comments without a change: 1",
       "requirements no change names: 1",
       "turns that did not end well: 1 (R1.2 timeout)",
-      "turn model asked for: opus",
-      "turn models used: m1",
-      "judgment model asked for: (the pane's own)",
+      "models asked for: edits opus, writing (the pane's own), judgments haiku",
+      `models that ran, as the pane says: ${LINE}`,
+      "models that ran, from the daemon log: m1",
+      "another model than asked: no",
       "turn time: 641 s",
       "total time: 700 s",
       "copy saved with its tracked changes: yes",
+      "manuscript: opened as it is",
       "responses drafted: 1",
       "",
     ].join("\n"),
   );
   assert.ok(!text.includes("value"));
-  const bare = summaryText([], { seconds: 3, saved: false, model: "opus", judgmentModel: "haiku" });
+  // Another model than the one asked for is said as a failure: at the end of
+  // the run, or after one turn.
+  const drift = summaryText(report, {
+    seconds: 1,
+    saved: true,
+    models: { asked: { edits: "opus" }, line: DRIFT },
+  });
+  assert.match(
+    drift,
+    /another model than asked: FAILED \(edits: asked for Claude · Opus 9, ran on Claude · Sonnet 9\)\n/,
+  );
+  const one = changesReport(REVISION, HEADINGS, {
+    "R1.1": turn({ outcome: "ok", seconds: 1, other_model: true }),
+  });
+  assert.match(
+    summaryText(one, { seconds: 1, saved: true, models: { asked: { edits: "opus" }, line: LINE } }),
+    /another model than asked: FAILED \(turn R1\.1\)\n/,
+  );
+  const bare = summaryText([], {
+    seconds: 3,
+    saved: false,
+    models: { asked: { edits: "opus" }, line: "" },
+  });
   assert.match(bare, /copy saved with its tracked changes: NO\n$/);
-  assert.match(bare, /judgment model asked for: haiku/);
+  assert.match(bare, /models that ran, as the pane says: -\n/);
 });
 
 test("replay.mjs asks only for pane steps and Windows scripts that exist, and names no path of its own", () => {
@@ -281,7 +375,15 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   assert.ok(steps.length >= 10, steps.join(","));
   const has = (src, s) => new RegExp(`\\n  (?:async )?"?${s}"?(?:\\(page|: )`).test(src);
   for (const s of steps) assert.ok(has(base, s) || has(extra, s), `pane step ${s}`);
-  for (const s of ["set-model", "headings", "stop-turn"]) assert.ok(has(extra, s), s);
+  for (const s of ["set-model", "models-line", "headings", "stop-turn"])
+    assert.ok(has(extra, s), s);
+  // The models are chosen in Setup, not in the menu of the chat box (it is
+  // not shown on the Review tab).
+  assert.doesNotMatch(extra, /selectOption\("#composer-model"/);
+  assert.match(extra, /selectOption\("#provider-turn-model"/);
+  const html = read("../taskpane/word/index.html");
+  for (const id of ["provider-turn", "provider-turn-model", "models-line", "stop-agent"])
+    assert.ok(html.includes(`id="${id}"`), id);
   // The files copied to the run folder are in the repository.
   for (const [, name] of runner.matchAll(/"((?:[a-z-]+)\.(?:cjs|ps1))"/g))
     assert.doesNotThrow(() => read(`../scripts/e2e/${name}`), name);
@@ -294,6 +396,26 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // eslint-disable-next-line no-control-regex
   assert.doesNotMatch(save, /[^\x00-\x7f]/);
   assert.match(runner, /"-Action",\s*"quit"/);
+  // The open check: a Word of its own (word-own.ps1), nothing opened or
+  // saved outside the run folder, the given file never written.
+  const open = read("../scripts/e2e/replay-open.ps1");
+  // eslint-disable-next-line no-control-regex
+  assert.doesNotMatch(open, /[^\x00-\x7f]/);
+  assert.match(open, /word-own\.ps1/);
+  assert.match(open, /QuitOwnWord \$app \$d \$p \$ours/);
+  assert.ok(open.indexOf("(Under $Doc)") < open.indexOf("Documents.Open("));
+  assert.ok(open.indexOf("(Under $RepairTo)") < open.indexOf("SaveAs2("));
+  assert.equal((open.match(/SaveAs2\(/g) ?? []).length, 2);
+  assert.doesNotMatch(open, /\$doc\.Save\(\)/);
+  // The runner copies the manuscript first and gives Word only copies; a
+  // file Word must repair stops the run unless --repair is given.
+  assert.ok(
+    runner.indexOf("fs.copyFileSync(opt.manuscript, SOURCE)") <
+      runner.indexOf("openCheck()", runner.indexOf("async function setup")),
+  );
+  // Read in two places only: the check of its name, and that copy.
+  assert.equal((runner.match(/opt\.manuscript/g) ?? []).length, 2);
+  assert.match(runner, /run again with --repair/);
   assert.match(runner, /pauseResident\(\)/);
   // No input path is written into the code: they come as arguments.
   for (const src of [runner, extra, save, read("../scripts/e2e/replay-compare.py")])

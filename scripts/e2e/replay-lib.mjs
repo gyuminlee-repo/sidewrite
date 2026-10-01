@@ -69,7 +69,8 @@ export function turnFromLog(log, ref) {
 // One comment of the run: { step, log, seconds } of its propose step.
 // outcome: "ok", "failed" (the turn ended with an error: limit, refusal,
 // crash), "timeout" (the pane step gave up), "no_turn" (no turn was seen).
-export function turnResult(ref, { step, log, seconds, model = null }) {
+// line: the pane's model line right after the turn (readModelLine).
+export function turnResult(ref, { step, log, seconds, model = null, line = null }) {
   const t = turnFromLog(log, ref);
   let outcome = "ok";
   let reason = null;
@@ -84,8 +85,43 @@ export function turnResult(ref, { step, log, seconds, model = null }) {
     outcome = "no_turn";
     reason = "the daemon logged no end of a review turn for this comment";
   }
-  return { outcome, reason, seconds, model: t.model ?? model };
+  const edits = line === null ? null : (readModelLine(line).edits ?? null);
+  return {
+    outcome,
+    reason,
+    seconds,
+    model: t.model ?? model,
+    model_line: edits?.text ?? null,
+    other_model: edits?.other ?? false,
+  };
 }
+
+// The line of the pane that says what each kind of work last ran on
+// (taskpane/shared/model-line.js modelLineText), read apart:
+//   "Edits: Claude · Opus   Writing: asked for X, ran on Y   Judgments: Z (not used yet)"
+// -> { edits: { text, used, other, failed }, writing: ..., judgments: ... }
+// used: a request of that kind was sent; other: it ran on another model than
+// the one asked for; failed: its last request failed.
+export function readModelLine(line) {
+  const out = {};
+  for (const part of String(line ?? "").split(/\s{3,}/)) {
+    const m = /^(Edits|Writing|Judgments): (.*)$/.exec(part.trim());
+    if (!m) continue;
+    out[m[1].toLowerCase()] = {
+      text: m[2],
+      used: !/\(not used yet\)$/.test(m[2]),
+      other: /^asked for .+, ran on /.test(m[2]),
+      failed: /\(last request failed\)$/.test(m[2]),
+    };
+  }
+  return out;
+}
+
+// The kinds of work that ran on another model than the one asked for.
+export const otherModels = (line) =>
+  Object.entries(readModelLine(line))
+    .filter(([, v]) => v.other)
+    .map(([k, v]) => `${k}: ${v.text}`);
 
 // changes.json: per comment its requirements, the changes that were recorded
 // and the requirements no change names.
@@ -144,9 +180,14 @@ export function responsesReport(revision) {
 }
 
 // summary.txt: counts and times only, no text of the manuscript.
-export function summaryText(report, { seconds, saved, model, judgmentModel, responses = null }) {
+//   models: { asked: { edits, writing, judgments }, line } (line: the pane's
+//   own line at the end of the run); source: how the manuscript was opened.
+export function summaryText(report, { seconds, saved, models, source = null, responses = null }) {
   const turns = report.filter((c) => c.turn);
   const bad = turns.filter((c) => c.turn.outcome !== "ok");
+  const asked = models?.asked ?? {};
+  const other = otherModels(models?.line);
+  const drifted = turns.filter((c) => c.turn.other_model);
   const lines = [
     `comments: ${report.length}`,
     `turns run: ${turns.length}`,
@@ -154,13 +195,19 @@ export function summaryText(report, { seconds, saved, model, judgmentModel, resp
     `comments without a change: ${report.filter((c) => !c.changes.length).length}`,
     `requirements no change names: ${report.reduce((n, c) => n + c.unmet_requirements.length, 0)}`,
     `turns that did not end well: ${bad.length}${bad.length ? ` (${bad.map((c) => `${c.ref} ${c.turn.outcome}`).join(", ")})` : ""}`,
-    `turn model asked for: ${model}`,
-    `turn models used: ${[...new Set(turns.map((c) => c.turn.model).filter(Boolean))].join(", ") || "-"}`,
-    `judgment model asked for: ${judgmentModel ?? "(the pane's own)"}`,
+    `models asked for: edits ${asked.edits ?? "-"}, writing ${asked.writing ?? "(the pane's own)"}, judgments ${asked.judgments ?? "(the pane's own)"}`,
+    `models that ran, as the pane says: ${models?.line || "-"}`,
+    `models that ran, from the daemon log: ${[...new Set(turns.map((c) => c.turn.model).filter(Boolean))].join(", ") || "-"}`,
+    `another model than asked: ${
+      other.length || drifted.length
+        ? `FAILED (${[...other, ...drifted.map((c) => `turn ${c.ref}`)].join("; ")})`
+        : "no"
+    }`,
     `turn time: ${turns.reduce((n, c) => n + (c.turn.seconds ?? 0), 0)} s`,
     `total time: ${seconds} s`,
     `copy saved with its tracked changes: ${saved ? "yes" : "NO"}`,
   ];
+  if (source) lines.push(`manuscript: ${source}`);
   if (responses !== null) lines.push(`responses drafted: ${responses}`);
   return `${lines.join("\n")}\n`;
 }

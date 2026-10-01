@@ -12,7 +12,10 @@ Writes
   reference_changes.json  the paragraphs that differ between --before and
                           --after: [{ kind, paragraph_index_before,
                           paragraph_index_after, before, after, similarity }]
-                          kind: "modified", "deleted" or "inserted"
+                          kind: "modified" (the same paragraph, edited),
+                          "rewritten" (a removed and an added paragraph that
+                          share enough words to be one paragraph written
+                          anew), "deleted" or "inserted"
   compare.md              counts, then four lists: paragraphs both changed
                           (before, the authors' text, the tool's text),
                           paragraphs only the authors changed, paragraphs only
@@ -48,6 +51,9 @@ FALLBACK = MC + "Fallback"
 
 # Two paragraphs are "the same paragraph, changed" from this similarity on.
 PAIR_MIN = 0.5
+# A removed and an added paragraph are "one paragraph, rewritten" from this
+# share of common words on (in order, among what PAIR_MIN left unpaired).
+REWRITE_MIN = 0.3
 # A tool change is placed on a paragraph by its text from this similarity on.
 PLACE_MIN = 0.6
 
@@ -106,11 +112,17 @@ def ratio(a, b):
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
-def pair_block(before, after):
-    """Pairs (i, j, similarity) inside one block of unequal paragraphs, in
-    order, so that the similarities add up to the most; a pair needs PAIR_MIN."""
+def word_ratio(a, b):
+    """How much of their words two texts share, in order (0 to 1)."""
+    return difflib.SequenceMatcher(None, a.lower().split(), b.lower().split(), autojunk=False).ratio()
+
+
+def pair_block(before, after, score=ratio, least=PAIR_MIN):
+    """Pairs (i, j, similarity) of two lists of paragraphs, in order, so that
+    the similarities add up to the most; a pair needs `least`."""
+    PAIR_MIN = least
     n, m = len(before), len(after)
-    sim = [[ratio(before[i], after[j]) for j in range(m)] for i in range(n)]
+    sim = [[score(before[i], after[j]) for j in range(m)] for i in range(n)]
     best = [[0.0] * (m + 1) for _ in range(n + 1)]
     for i in range(n - 1, -1, -1):
         for j in range(m - 1, -1, -1):
@@ -162,7 +174,22 @@ def reference_changes(before, after):
                 "after": ta,
                 "similarity": s,
             })
-    return out
+    return pair_rewritten(out)
+
+
+def pair_rewritten(rows):
+    """A second pass over what is left as deleted and inserted: in document
+    order, a removed and an added paragraph that share REWRITE_MIN of their
+    words become one row of kind "rewritten"."""
+    gone = [r for r in rows if r["kind"] == "deleted"]
+    new = [r for r in rows if r["kind"] == "inserted"]
+    pairs = pair_block([r["before"] for r in gone], [r["after"] for r in new], word_ratio, REWRITE_MIN)
+    drop = set()
+    for i, j, s in pairs:
+        gone[i].update(kind="rewritten", paragraph_index_after=new[j]["paragraph_index_after"],
+                       after=new[j]["after"], similarity=round(s, 3))
+        drop.add(id(new[j]))
+    return [r for r in rows if id(r) not in drop]
 
 
 def place_tool_changes(report, before):
@@ -231,25 +258,29 @@ def compare_md(before, after, reference, placed, unplaced, tool_given):
         "## Counts",
         "",
         "- Paragraphs with text: %d before, %d after" % (sum(1 for t in before if t), sum(1 for t in after if t)),
-        "- Changed by the authors: %d modified, %d deleted, %d inserted"
-        % (count("modified"), count("deleted"), count("inserted")),
+        "- Changed by the authors: %d modified, %d rewritten, %d deleted, %d inserted"
+        % (count("modified"), count("rewritten"), count("deleted"), count("inserted")),
     ]
     if tool_given:
         out += [
             "- Paragraphs changed by the tool: %d" % len(placed),
             "- Tool changes not placed on a paragraph: %d" % len(unplaced),
             "- Changed by both: %d" % len(both),
-            "- Of the paragraphs the authors modified or deleted, also changed by the tool: %s"
+            "- Of the paragraphs the authors modified, rewrote or deleted, also changed by the tool: %s"
             % share(len(both), len(in_before)),
+            "- The same, by what the authors did: %s"
+            % ", ".join("%s %s" % (k, share(sum(1 for i in both if ref_index[i]["kind"] == k),
+                                            sum(1 for r in in_before if r["kind"] == k)))
+                        for k in ("modified", "rewritten", "deleted")),
             "- Of the paragraphs the tool changed, also changed by the authors: %s"
             % share(len(both), len(placed)),
             "",
             "## Changed by both",
             "",
             table(
-                ["Paragraph", "Comments", "Before", "Authors", "Tool"],
-                [[str(i), ", ".join(placed[i]["refs"]), cell(before[i]),
-                  cell(ref_index[i]["after"]) if ref_index[i]["kind"] == "modified" else "(deleted)",
+                ["Paragraph", "Comments", "Authors did", "Before", "Authors", "Tool"],
+                [[str(i), ", ".join(placed[i]["refs"]), ref_index[i]["kind"], cell(before[i]),
+                  cell(ref_index[i]["after"]) if ref_index[i]["kind"] != "deleted" else "(deleted)",
                   cell(placed[i]["after"])] for i in both],
             ) if both else "None.",
             "",
@@ -306,7 +337,8 @@ def main(argv=None):
         json.dumps(reference, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (out / "compare.md").write_text(
         compare_md(before, after, reference, placed, unplaced, bool(a.tool)), encoding="utf-8")
-    kinds = {k: sum(1 for r in reference if r["kind"] == k) for k in ("modified", "deleted", "inserted")}
+    kinds = {k: sum(1 for r in reference if r["kind"] == k)
+             for k in ("modified", "rewritten", "deleted", "inserted")}
     # Counts only on the screen: no text of the manuscript.
     print(json.dumps({
         "paragraphs_before": sum(1 for t in before if t),

@@ -418,9 +418,9 @@ node scripts/e2e/replay.mjs \
   --manuscript /path/to/before.docx --review /path/to/review.txt \
   --base-dir /mnt/d/path/to/test-root \
   --playwright-core 'D:\path\to\node_modules\playwright-core' \
-  [--model opus] [--judgment-model haiku] [--only R1.1,R2.3] \
-  [--instructions rules.txt] [--forbid forbid.txt] [--draft-responses] \
-  [--turn-minutes 10]
+  [--model opus] [--writing-model opus] [--judgment-model haiku] \
+  [--only R1.1,R2.3] [--instructions rules.txt] [--forbid forbid.txt] \
+  [--draft-responses] [--turn-minutes 10] [--repair]
 
 python3 scripts/e2e/replay-compare.py \
   --before /path/to/before.docx --after /path/to/submitted.docx \
@@ -439,12 +439,24 @@ manuscript. One review turn per comment, in order; a turn that fails or runs
 longer than `--turn-minutes` is recorded and the next comment goes on. Word
 and the resident daemon are handled as in the acceptance run.
 
+Before the run a Word of its own is asked whether it opens the file as it
+is. A file Word wants to repair ends the run with "run again with --repair";
+with `--repair` Word opens it with Open and Repair, saves a repaired copy in
+the run folder and the run uses that copy (`summary.txt` says so). The given
+file is copied once and never opened in Word itself.
+
+`--model`, `--writing-model` and `--judgment-model` are chosen in Setup
+(Providers: Edits, Writing, Judgments; Claude). `summary.txt` and each turn
+of `changes.json` hold what the pane's own line says the work ran on; a model
+other than the one asked for is marked FAILED and the exit code is 1.
+
 `--instructions` and `--forbid` are text files with one rule per line (`#`
 starts a note); each line becomes a ledger rule the model checks.
 
 `replay-compare.py` uses the standard library only. It writes
 `reference_changes.json` (the paragraphs that differ between the two clean
-files: modified, deleted, inserted) and `compare.md` (counts, then the
+files: modified, rewritten, deleted, inserted; "rewritten" is a removed and
+an added paragraph that share enough words) and `compare.md` (counts, then the
 paragraphs changed by both, by the authors only, by the tool only, and the
 tool changes it could not place on a paragraph). Without `--tool` it writes
 the authors' side only.

@@ -48,27 +48,53 @@ const turnBusy = (page) =>
 const steps = {
   ...base.steps,
 
-  // a.model: an alias or model id of the model menu under the composer. A
-  // model the menu does not list is not chosen: `refused` says so and lists
+  // a.model: the model of Edits (Setup, Providers: the model menu of the
+  // Edits row, which holds the value of the chat box). Edits run on Claude;
+  // another provider chosen there is put back to Claude first. A model the
+  // menu does not list is not chosen: `refused` says so and `values` lists
   // what the menu has.
   async "set-model"(page, a) {
-    const menu = await base.steps.models(page);
-    const values = menu.options.map((o) => o.value);
-    if (!values.includes(a.model)) {
-      return { selected: menu.selected, refused: `the model menu has no ${a.model}`, values };
+    await page.click('button.tab[data-tab="setup"]');
+    await page.waitForFunction(
+      () => (document.getElementById("provider-turn-model")?.options.length ?? 0) > 0,
+      null,
+      { timeout: 120_000, polling: 200 },
+    );
+    const provider = await page.evaluate(
+      () => document.getElementById("provider-turn")?.value ?? null,
+    );
+    if (provider !== "claude") {
+      const done = await base.steps["select-provider"](page, { role: "turn", id: "claude" });
+      if (done.refused) return { selected: null, refused: done.refused, values: [] };
+    }
+    const read = () =>
+      page.evaluate(() => {
+        const m = document.getElementById("provider-turn-model");
+        return { selected: m?.value ?? null, values: [...(m?.options ?? [])].map((o) => o.value) };
+      });
+    const menu = await read();
+    if (!menu.values.includes(a.model)) {
+      return { ...menu, refused: `the Edits model menu has no ${a.model}` };
     }
     if (menu.selected !== a.model) {
-      await page.selectOption("#composer-model", a.model);
+      await page.selectOption("#provider-turn-model", a.model);
+      // The menu is drawn again with the value the chat box now has.
       await page.waitForFunction(
-        (want) => document.getElementById("composer-model")?.value === want,
+        (want) => document.getElementById("provider-turn-model")?.value === want,
         a.model,
-        { timeout: 30_000 },
+        { timeout: 30_000, polling: 200 },
       );
     }
-    const selected = await page.evaluate(
-      () => document.getElementById("composer-model")?.value ?? null,
+    return read();
+  },
+
+  // The line above the tabs that says what each kind of work last ran on
+  // (taskpane/shared/model-line.js).
+  async "models-line"(page) {
+    const line = await page.evaluate(
+      () => document.getElementById("models-line")?.textContent ?? "",
     );
-    return { selected, values };
+    return { line };
   },
 
   // The headings of the document, from the pane's own module (what the

@@ -7,9 +7,17 @@
 //   node scripts/e2e/replay.mjs --manuscript <docx> --review <txt> \
 //     --base-dir <folder on a Windows drive, WSL path> \
 //     --playwright-core '<Windows path of a playwright-core package>' \
-//     [--model opus] [--judgment-model <alias>] [--only R1.1,R2.3] \
-//     [--instructions <txt>] [--forbid <txt>] [--draft-responses] \
-//     [--turn-minutes 10]
+//     [--model opus] [--writing-model <alias>] [--judgment-model <alias>] \
+//     [--only R1.1,R2.3] [--instructions <txt>] [--forbid <txt>] \
+//     [--draft-responses] [--turn-minutes 10] [--repair]
+//
+// Before the run, a Word of its own is asked whether it opens the file as it
+// is. A file Word wants to repair ends the run ("run again with --repair");
+// with --repair Word opens it with Open and Repair and saves a repaired copy
+// in the run folder, and the run goes on with that copy (summary.txt says
+// so). The three models (Edits, Writing, Judgments) are chosen in Setup; the
+// pane's own line says what ran, and a model other than the one asked for
+// fails the run.
 //
 // The manuscript and the review are only read. Everything is written to a
 // new folder <base-dir>/replay-<UTC time>/:
@@ -31,8 +39,8 @@
 // (the same Windows scripts, the same rules: only the Word this run started
 // is closed, the resident daemon is stopped for the run and started again).
 // A turn that fails or runs out of time does not end the run.
-// Exit code: 0 when the flow ran to its end and the copy was saved, else 1;
-// 2 for bad arguments.
+// Exit code: 0 when the flow ran to its end, the copy was saved and every
+// kind of work ran on the model asked for, else 1; 2 for bad arguments.
 
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -45,6 +53,7 @@ import {
   changesReport,
   keepRefPattern,
   ledgerFromLines,
+  otherModels,
   parseOnly,
   responsesReport,
   summaryText,
@@ -63,11 +72,16 @@ const { values: opt } = parseArgs({
     review: { type: "string" },
     "base-dir": { type: "string", default: process.env.E2E_BASE_DIR },
     "playwright-core": { type: "string", default: process.env.E2E_PLAYWRIGHT_CORE },
-    // The model of the review turns (the menu under the composer).
+    // The Claude models of the three kinds of work (Setup, Providers): Edits
+    // (the review turns), Writing (response drafts), Judgments (split,
+    // requirements, checks). Writing and Judgments not given: the pane's own
+    // choice stays.
     model: { type: "string", default: "opus" },
-    // The Claude model of the judgments (split, requirements, drafts).
-    // Not given: the pane's own choice stays.
+    "writing-model": { type: "string" },
     "judgment-model": { type: "string" },
+    // Let Word repair a file it does not open as it is (Open and Repair), and
+    // run on the repaired copy.
+    repair: { type: "boolean", default: false },
     only: { type: "string" },
     instructions: { type: "string" },
     forbid: { type: "string" },
@@ -107,6 +121,9 @@ const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").sl
 const RUN = path.resolve(opt["base-dir"], `replay-${stamp}`);
 const TOOLS = path.join(RUN, "tools");
 const DOC = path.join(RUN, "manuscript.docx");
+// The manuscript as it was given, and what Word made of it with --repair.
+const SOURCE = path.join(RUN, "source.docx");
+const REPAIRED = path.join(RUN, "source_repaired.docx");
 const REVISION = path.join(RUN, "manuscript.revision.json");
 const LOG = path.join(RUN, "daemon.log");
 const winPath = (p) => execFileSync("wslpath", ["-w", p], { encoding: "utf8" }).trim();
@@ -297,11 +314,79 @@ function quitWord(pid) {
       console.error(`replay: Word ${pid} could not be stopped: ${e.message}`);
     }
   }
+  if (d.action === "leave" && !quit?.refused) {
+    // Word did not answer the quit at all (a dialog holds it, or COM refused
+    // the call). It is the process this run started, on the copy of this
+    // run: it is stopped, or it would stay behind with the copy locked.
+    record.cleanup.forced = stopOwn(pid);
+    record.cleanup.failed = !record.cleanup.forced;
+    return;
+  }
   if (d.action === "leave") {
     record.cleanup.left_running = { pid, reason: d.reason };
     console.error(`replay: ${d.reason}`);
   }
   record.cleanup.failed = d.fail;
+}
+
+// Stop a Word process this run started (never one that ran before it).
+function stopOwn(pid) {
+  if (!pid || (record.word.preexisting ?? []).includes(pid)) return false;
+  try {
+    execFileSync("powershell.exe", [
+      "-NoProfile",
+      "-Command",
+      `Stop-Process -Id ${Number(pid)} -Force -ErrorAction SilentlyContinue`,
+    ]);
+    console.error(`replay: Word ${pid} of this run did not answer and was stopped`);
+    return true;
+  } catch (e) {
+    record.cleanup.stop_error = e.message;
+    console.error(`replay: Word ${pid} could not be stopped: ${e.message}`);
+    return false;
+  }
+}
+
+// Does Word open the copy as it is? In a Word of its own (replay-open.ps1),
+// which is gone before the run starts. Returns the file the run uses.
+function openCheck() {
+  const anchor = path.join(RUN, "anchor.docx");
+  const pidFile = path.join(RUN, "open-check-pid.json");
+  fs.copyFileSync(path.join(REPO, "tests/fixtures/spike_manuscript.docx"), anchor);
+  let r;
+  try {
+    r = powershell(
+      "replay-open.ps1",
+      [
+        ...["-Doc", winPath(SOURCE), "-Anchor", winPath(anchor)],
+        ...["-AllowDir", winPath(RUN), "-PidFile", winPath(pidFile)],
+        ...(opt.repair ? ["-RepairTo", winPath(REPAIRED)] : []),
+      ],
+      5 * 60_000,
+    );
+  } catch (e) {
+    r = { ok: false, error: e.message };
+  }
+  record.word.open_check = r;
+  // The Word of the check must be gone, whatever happened in it.
+  const pid =
+    r.pid ??
+    (fs.existsSync(pidFile)
+      ? JSON.parse(fs.readFileSync(pidFile, "utf8").replace(/^\uFEFF/, "")).pid
+      : null);
+  if (pid && wordPids().includes(pid)) record.word.open_check_stopped = stopOwn(pid);
+  if (r.opens) return { file: SOURCE, source: "opened as it is" };
+  if (r.repaired && fs.existsSync(REPAIRED))
+    return {
+      file: REPAIRED,
+      source:
+        "Word could not open the file as it is; the run used the copy Word repaired (Open and Repair)",
+    };
+  if (r.ok !== false && !opt.repair)
+    throw new Error("Word needs to repair this file; run again with --repair");
+  throw new Error(
+    `Word could not open the manuscript: ${r.repair_error ?? r.open_error ?? r.error ?? "no answer"}`,
+  );
 }
 
 // ---- the run ---------------------------------------------------------------
@@ -312,16 +397,25 @@ async function setup() {
     "replay-driver.cjs",
     "word-com.ps1",
     "word-launch.ps1",
+    "word-own.ps1",
+    "replay-open.ps1",
     "replay-save.ps1",
   ])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
+  record.word.preexisting = wordPids();
+  // The manuscript is read once, into the run folder; Word only ever sees
+  // copies.
+  fs.copyFileSync(opt.manuscript, SOURCE);
+  const opened = openCheck();
+  record.source = opened.source;
+  save();
+  console.log(`ok    open check: ${opened.source}`);
   resident = pauseResident();
   if (resident.paused)
     await until(() => !listening(WS_PORT) && !listening(HTTP_PORT), 10_000, "ports free");
   if (listening(WS_PORT) || listening(HTTP_PORT))
     throw new Error(`port ${WS_PORT} or ${HTTP_PORT} is in use; stop that daemon first`);
-  record.word.preexisting = wordPids();
-  // The copy: the source is opened for reading only (embed_taskpane.py).
+  // The copy the pane opens, with the add-in tagged on (embed_taskpane.py).
   execFileSync(
     "python3",
     [
@@ -329,7 +423,7 @@ async function setup() {
       "--manifest",
       opt.manifest,
       "--src",
-      opt.manuscript,
+      opened.file,
       "--out",
       DOC,
     ],
@@ -361,17 +455,27 @@ function must(step, result) {
 const turns = {};
 let saved = false;
 let drafted = null;
+// What the pane says each kind of work ran on, at the end of the run.
+let modelsLine = "";
+const otherModel = () =>
+  otherModels(modelsLine).length > 0 || Object.values(turns).some((t) => t.other_model);
 
 async function main() {
   must("open-review", pane("open-review"));
-  must("set-model", pane("set-model", { model: opt.model }));
-  if (opt["judgment-model"]) {
-    must(
-      "select-provider",
-      pane("select-provider", { role: "oneshot", id: "claude", model: opt["judgment-model"] }),
+  // The three kinds of work, chosen in Setup (Providers).
+  must("set-model (Edits)", pane("set-model", { model: opt.model }));
+  for (const [role, name] of [
+    ["writing", "writing-model"],
+    ["oneshot", "judgment-model"],
+  ]) {
+    if (!opt[name]) continue;
+    const r = must(
+      `select-provider (${role})`,
+      pane("select-provider", { role, id: "claude", model: opt[name] }),
     );
-    must("open-review", pane("open-review"));
+    if (r.message) throw new Error(`select-provider (${role}): ${r.message}`);
   }
+  must("open-review", pane("open-review"));
 
   must("split", pane("split", { review_file: winPath(path.resolve(opt.review)) }));
   const draft = must("edit-draft", pane("edit-draft", { keep_ref: keepRefPattern(ONLY) }));
@@ -405,6 +509,7 @@ async function main() {
       log: log.slice(at),
       seconds: step.seconds ?? Math.round((Date.now() - t0) / 1000),
       model: turnFromLog(log, ref).model,
+      line: pane("models-line").line ?? null,
     });
     record.turns = turns;
     save();
@@ -423,6 +528,7 @@ async function main() {
     }
   }
 
+  modelsLine = note("models-line", pane("models-line")).line ?? "";
   const headings = note("headings", pane("headings")).headings ?? [];
   // Our copy: it is saved as it is, tracked changes and comments in it.
   const done = note(
@@ -446,8 +552,15 @@ function writeReports(headings = []) {
     summaryText(report, {
       seconds: Math.round((Date.now() - started) / 1000),
       saved,
-      model: opt.model,
-      judgmentModel: opt["judgment-model"] ?? null,
+      models: {
+        asked: {
+          edits: opt.model,
+          writing: opt["writing-model"] ?? null,
+          judgments: opt["judgment-model"] ?? null,
+        },
+        line: modelsLine,
+      },
+      source: record.source ?? null,
       responses: opt["draft-responses"] ? (drafted ?? 0) : null,
     }),
   );
@@ -482,4 +595,4 @@ if (fs.existsSync(RUN)) save();
 const summary = path.join(RUN, "summary.txt");
 if (fs.existsSync(summary)) console.log(`\n${fs.readFileSync(summary, "utf8")}`);
 console.log(`run folder: ${RUN}`);
-process.exit(!failed && saved && !record.cleanup.failed ? 0 : 1);
+process.exit(!failed && saved && !otherModel() && !record.cleanup.failed ? 0 : 1);
