@@ -1894,6 +1894,38 @@ test("review_split: the split and the requirement extraction after it run on one
   }
 });
 
+// Codex review of stage 2.5: a review turn waits for the pane's confirmed
+// provider like a judgment does. Without one it fails before anything is
+// built or queued: no turn goes to a provider the pane did not confirm.
+test("review_propose asks the turn gate first; a refusal starts no turn and changes nothing", async () => {
+  let gate = async () => {
+    throw new Error(
+      "The stored provider for review turns cannot be used: Codex CLI is not available.",
+    );
+  };
+  const t = await setup({ turnGate: (key) => gate(key) });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    const r = await t.ask("review_propose", { ref: "R1.1" });
+    assert.deepEqual(
+      [r.ok, r.error],
+      [false, "The stored provider for review turns cannot be used: Codex CLI is not available."],
+    );
+    assert.deepEqual(t.pushed, [], "no turn was queued");
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").status, "pending");
+    // Once the provider is confirmed the same request starts the turn.
+    const seen = [];
+    gate = async (key) => void seen.push(key);
+    const ok = await t.ask("review_propose", { ref: "R1.1" });
+    assert.equal(ok.started, true);
+    assert.deepEqual(seen, ["k"]);
+    assert.equal(t.pushed.length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // Codex review 14: a normal tracked edit Word applied while the connection
 // dropped left nothing in the file: the attempt was only in memory, no late
 // result came, and the refresh recovery read blocked exceptions only. The

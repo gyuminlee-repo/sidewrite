@@ -115,7 +115,18 @@ const rows = () => [
   },
 ];
 
-async function setup({ settings = {}, respond = {}, list = rows() } = {}) {
+const confirmed = (p, over = {}) => ({
+  ok: true,
+  selection: {
+    turn: p.turn ?? { id: "claude", model: null },
+    oneshot: p.oneshot ?? null,
+    state: { turn: "ready", oneshot: "ready" },
+    error: { turn: null, oneshot: null },
+    ...over,
+  },
+});
+
+async function setup({ settings = {}, respond = {}, list = rows(), connect = true } = {}) {
   globalThis.document = fakeDocument();
   const { initProvidersPane } = await import("../taskpane/shared/providers-pane.js");
   const requests = [];
@@ -124,6 +135,8 @@ async function setup({ settings = {}, respond = {}, list = rows() } = {}) {
     requests.push({ type, payload, opts });
     if (respond[type]) return respond[type](payload);
     if (type === "providers_list") return { ok: true, providers: list, selection: {} };
+    // The daemon confirms what the pane stored (selection.mjs restore).
+    if (type === "restore_providers") return confirmed(payload);
     return { ok: true };
   };
   const pane = initProvidersPane({
@@ -131,7 +144,11 @@ async function setup({ settings = {}, respond = {}, list = rows() } = {}) {
     settings,
     saveSettings: (s) => saved.push(JSON.stringify(s)),
   });
-  await pane.reload();
+  // As taskpane.js: the stored choices right after hello, the list on welcome.
+  if (connect) {
+    await pane.restoreStored();
+    await pane.reload();
+  }
   const $ = (id) => document.getElementById(id);
   const sent = (type) => requests.filter((r) => r.type === type).map((r) => r.payload);
   return { pane, requests, saved, settings, $, sent };
@@ -184,10 +201,13 @@ test("the menus list what passed; a provider that cannot be chosen is disabled a
     findAll(t.$("providers-list"), (n) => n.tagName === "#TEXT").map((n) => n.textContent),
     [],
   );
-  // Nothing was sent but the list request: the defaults are the daemon's own.
+  // The stored choices first (none here: the daemon's defaults), then the list.
   assert.deepEqual(
-    t.requests.map((r) => r.type),
-    ["providers_list"],
+    t.requests.map((r) => [r.type, r.payload]),
+    [
+      ["restore_providers", { turn: null, oneshot: null }],
+      ["providers_list", {}],
+    ],
   );
 });
 
@@ -236,34 +256,120 @@ test("a refused choice is shown and not stored; the menu goes back", async () =>
   assert.equal(t.saved.length, 0);
 });
 
-test("a stored choice is sent again after a reconnect; one that stopped passing goes back to Claude", async () => {
-  const kept = await setup({
+// Codex review of stage 2.5: the stored choice must reach the daemon before
+// anything can be asked of it, and a choice that cannot be used is shown,
+// never replaced by Claude behind the user's back.
+test("the stored choices go to the daemon right after hello, before and without the provider list", async () => {
+  let answer;
+  const t = await setup({
+    connect: false,
     settings: { oneshotProvider: { id: "ollama", model: "gemma4:12b" } },
+    respond: { restore_providers: (p) => new Promise((r) => (answer = () => r(confirmed(p)))) },
   });
-  assert.deepEqual(kept.sent("set_provider"), [
-    { role: "oneshot", id: "ollama", model: "gemma4:12b" },
-  ]);
-  assert.equal(kept.$("provider-oneshot").value, "ollama");
-  assert.equal(kept.$("provider-oneshot-model").value, "gemma4:12b");
+  const restoring = t.pane.restoreStored();
+  assert.deepEqual(
+    t.requests.map((r) => [r.type, r.payload]),
+    [["restore_providers", { turn: null, oneshot: { id: "ollama", model: "gemma4:12b" } }]],
+  );
+  // Until the daemon answers, the Review tab holds its requests (whenRestored).
+  assert.equal(t.pane.restoring(), true);
+  assert.equal(
+    t.$("providers-message").textContent,
+    "Waiting for the daemon to confirm the stored providers. Judgments and review turns start after that.",
+  );
+  let released = false;
+  t.pane.whenRestored().then(() => (released = true));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(released, false);
+  answer();
+  await restoring;
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.pane.restoring(), released], [false, true]);
+  assert.equal(t.pane.whenRestored(), null, "nothing to wait for any more");
+  assert.equal(t.$("providers-message").textContent, "");
+  // The list comes later; the menus then show the confirmed choice.
+  await t.pane.reload();
+  assert.equal(t.$("provider-oneshot").value, "ollama");
+  assert.equal(t.$("provider-oneshot-model").value, "gemma4:12b");
+  assert.deepEqual(t.sent("set_provider"), [], "restore is the only message that sets it");
+  assert.deepEqual(t.settings.oneshotProvider, { id: "ollama", model: "gemma4:12b" });
+});
 
-  const gone = await setup({
-    settings: {
-      oneshotProvider: { id: "groq", model: "x" },
-      turnProvider: { id: "codex", model: "gpt-6.1-sol" },
+test("a stored choice the daemon refuses is shown and kept: no fallback to Claude, the menu stays on it", async () => {
+  const stored = {
+    oneshotProvider: { id: "groq", model: "x" },
+    turnProvider: { id: "codex", model: "gpt-6.1-sol" },
+  };
+  const t = await setup({
+    settings: structuredClone(stored),
+    respond: {
+      restore_providers: (p) =>
+        confirmed(p, {
+          turn: null,
+          oneshot: null,
+          state: { turn: "refused", oneshot: "refused" },
+          error: {
+            turn: "Codex CLI cannot run review turns. Judgments only. Codex CLI will not call the office tools.",
+            oneshot: "Groq is not available: No API key",
+          },
+        }),
     },
   });
-  assert.deepEqual(gone.sent("set_provider"), [
-    { role: "turn", id: "claude", model: null },
-    { role: "oneshot", id: "claude", model: null },
-  ]);
-  assert.equal(gone.settings.oneshotProvider, null);
-  assert.equal(gone.settings.turnProvider, null);
-  assert.match(gone.$("providers-message").textContent, /Codex CLI can no longer run review turns/);
-  assert.match(
-    gone.$("providers-message").textContent,
-    /Groq is no longer available for judgments/,
+  assert.equal(
+    t.$("providers-message").textContent,
+    "The stored provider for review turns cannot be used: Codex CLI cannot run review turns. Judgments only. Codex CLI will not call the office tools. Review turns are stopped until you choose a provider here. " +
+      "The stored provider for judgments cannot be used: Groq is not available: No API key. Judgments are stopped until you choose a provider here.",
   );
-  assert.equal(gone.$("provider-oneshot").value, "claude");
+  assert.equal(t.$("providers-message").hidden, false);
+  // The menus stay on the stored choices, which their rows mark as not usable.
+  assert.equal(t.$("provider-oneshot").value, "groq");
+  assert.equal(t.$("provider-turn").value, "codex");
+  assert.equal(t.$("provider-oneshot").children[3].textContent, "Groq (No API key)");
+  // Nothing was changed for the user: no Claude was set, the settings are as stored.
+  assert.deepEqual(t.sent("set_provider"), []);
+  assert.deepEqual(t.settings, stored);
+  assert.equal(t.saved.length, 0);
+  // Picking a provider that passes ends it.
+  const sel = t.$("provider-oneshot");
+  sel.value = "ollama";
+  await sel.fire("change");
+  assert.deepEqual(t.sent("set_provider"), [
+    { role: "oneshot", id: "ollama", model: "qwen3.5:9b" },
+  ]);
+  assert.match(t.$("providers-message").textContent, /^The stored provider for review turns/);
+  assert.doesNotMatch(t.$("providers-message").textContent, /for judgments cannot/);
+});
+
+test("no answer to the stored choices: the pane says so and stops waiting; the choice is not dropped", async () => {
+  const t = await setup({
+    settings: { oneshotProvider: { id: "ollama", model: "gemma4:12b" } },
+    respond: {
+      restore_providers: () => {
+        throw new Error('Request "restore_providers" timed out');
+      },
+    },
+  });
+  assert.equal(
+    t.$("providers-message").textContent,
+    'The daemon did not confirm the stored providers (Request "restore_providers" timed out). Judgments and review turns are stopped until it does: reopen the pane, or choose a provider here.',
+  );
+  assert.equal(t.pane.restoring(), false);
+  assert.deepEqual(t.settings.oneshotProvider, { id: "ollama", model: "gemma4:12b" });
+  assert.equal(t.$("provider-oneshot").value, "ollama");
+});
+
+test("after a daemon restart the same stored choices are sent again, unchanged", async () => {
+  const settings = { oneshotProvider: { id: "ollama", model: "gemma4:12b" }, turnProvider: null };
+  const first = await setup({ settings });
+  // The daemon restarts; the pane reconnects with the settings it kept.
+  const second = await setup({ settings });
+  for (const t of [first, second]) {
+    assert.deepEqual(t.sent("restore_providers"), [
+      { turn: null, oneshot: { id: "ollama", model: "gemma4:12b" } },
+    ]);
+    assert.equal(t.requests[0].type, "restore_providers");
+    assert.equal(t.$("provider-oneshot").value, "ollama");
+  }
 });
 
 test("a key goes to the daemon once, the box is emptied, and no setting or other request holds it", async () => {

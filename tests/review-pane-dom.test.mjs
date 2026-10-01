@@ -54,7 +54,7 @@ function findAll(node, pred, out = []) {
   return out;
 }
 
-async function setup({ revision, word = {}, respond = {} }) {
+async function setup({ revision, word = {}, respond = {}, providersReady }) {
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
   const requests = [];
@@ -68,6 +68,7 @@ async function setup({ revision, word = {}, respond = {} }) {
     word,
     onTurnStarted() {},
     isTurnInFlight: () => false,
+    providersReady,
   });
   await pane.reload();
   return { pane, requests, $: (id) => document.getElementById(id) };
@@ -1303,4 +1304,35 @@ test("Preview prompt and Propose changes send the same paragraphs under the sele
   assert.deepEqual(sent("review_preview")[1], { ref: "R1.1", paragraphs: [] });
   assert.deepEqual(sent("review_preview")[1], sent("review_propose")[1]);
   assert.equal(selectionReads, 2);
+});
+
+// Codex review of stage 2.5: right after a reconnect the daemon has not yet
+// confirmed the provider the pane stored. A Review action clicked then is
+// held, with a line that says why, and sent once the daemon answered.
+test("a Review action clicked while the stored provider is being confirmed waits, then runs", async () => {
+  let confirm;
+  let pending = new Promise((r) => (confirm = r));
+  const t = await setup({
+    revision: { comments: [], ledger: [] },
+    providersReady: () => pending,
+    respond: {
+      review_split: () => ({ ok: false, error: "split was asked" }),
+    },
+  });
+  t.$("review-input").value = "Reviewer 1\nComment 1: Use SI units.";
+  const clicked = t.$("review-split").click();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(
+    t.$("review-message").textContent,
+    "Waiting for the daemon to confirm the stored provider choice...",
+  );
+  assert.equal(t.requests.filter((r) => r.type === "review_split").length, 0, "held, not sent");
+  pending = null; // the daemon answered
+  confirm();
+  await clicked;
+  assert.equal(t.requests.filter((r) => r.type === "review_split").length, 1);
+  assert.equal(t.$("review-message").textContent, "split was asked");
+  // Nothing to wait for: the next click goes straight through.
+  await t.$("review-split").click();
+  assert.equal(t.requests.filter((r) => r.type === "review_split").length, 2);
 });

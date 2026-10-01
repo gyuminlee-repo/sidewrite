@@ -978,3 +978,60 @@ test("the rules review of the stage 2.5 run yields the candidate its suggest ste
   assert.equal(labels.length, 1);
   assert.match(labels[0], /^Forbidden, must not match \/cell-free extract\/i: /);
 });
+
+// Codex review of stage 2.5: Ollama stored as the judgment provider, the
+// daemon restarted mid-run, Split clicked at once. log: the daemon log from
+// the restart on; decisions: the receipts written after it.
+test("restartSplitEvidence: after a daemon restart the split used the stored provider and no Claude judgment was made", async () => {
+  const { restartSplitEvidence } = await import("../scripts/e2e/judge.mjs");
+  const split = {
+    ok: true,
+    message: "Split by regex: 7 comment(s). Edit, then Save.",
+    draft_refs: [],
+  };
+  const log = [
+    "[daemon] Ready",
+    "[providers] restore turn=ready oneshot=ready provider=ollama",
+    "[providers] judgment provider=ollama model=ollama:qwen3.5:9b",
+  ].join("\n");
+  const decisions = '{"kind":"requirement_extract","model":"ollama:qwen3.5:9b"}\n';
+  const e = restartSplitEvidence({ provider: "ollama", split, log, decisions });
+  assert.deepEqual(
+    [e.pass, e.restored, e.judgments, e.receipt_models],
+    [true, true, { ollama: 1 }, ["ollama:qwen3.5:9b"]],
+  );
+  // A judgment by Claude after the restart, in the log or in a receipt, fails it.
+  const leaked = `${log}\n[providers] judgment provider=claude model=haiku`;
+  assert.equal(
+    restartSplitEvidence({ provider: "ollama", split, log: leaked, decisions }).pass,
+    false,
+  );
+  assert.equal(
+    restartSplitEvidence({
+      provider: "ollama",
+      split,
+      log,
+      decisions: decisions + '{"kind":"comment_split","model":"haiku"}\n',
+    }).pass,
+    false,
+  );
+  // The split must have run on the provider, and the stored choice must have been restored.
+  assert.equal(
+    restartSplitEvidence({ provider: "ollama", split, log: "[daemon] Ready", decisions: "" }).pass,
+    false,
+  );
+  const refused = log.replace("oneshot=ready provider=ollama", "oneshot=refused provider=-");
+  assert.equal(
+    restartSplitEvidence({ provider: "ollama", split, log: refused, decisions }).pass,
+    false,
+  );
+  const failed = {
+    ok: true,
+    message: "The task pane has not confirmed its provider for judgments (waited 45 s).",
+    draft_refs: [],
+  };
+  assert.equal(
+    restartSplitEvidence({ provider: "ollama", split: failed, log, decisions }).pass,
+    false,
+  );
+});

@@ -377,6 +377,42 @@ export function ollamaSplitEvidence({ select, split, decisions }) {
   };
 }
 
+// The stored judgment provider across a daemon restart (Codex review of
+// stage 2.5). split: the `split` step clicked as soon as the pane was back;
+// log: the daemon log from the restart on; decisions: the receipts written
+// after it. pass: the stored choice was restored, the split's judgments ran
+// on that provider, and neither the log nor a receipt shows another one
+// (Claude is the default it must not fall back to).
+export function restartSplitEvidence({ provider, split, log, decisions }) {
+  const text = String(log ?? "");
+  const judgments = {};
+  for (const m of text.matchAll(/^\[providers\] judgment provider=(\S+) /gm)) {
+    judgments[m[1]] = (judgments[m[1]] ?? 0) + 1;
+  }
+  const receipt_models = [];
+  for (const line of String(decisions ?? "").split("\n")) {
+    const m = /"model":"([^"]*)"/.exec(line);
+    if (m && !receipt_models.includes(m[1])) receipt_models.push(m[1]);
+  }
+  const restored = new RegExp(
+    `^\\[providers\\] restore .*oneshot=ready provider=${escapeRe(provider)}$`,
+    "m",
+  ).test(text);
+  return {
+    pass:
+      /^Split by /.test(String(split?.message ?? "")) &&
+      restored &&
+      judgments[provider] > 0 &&
+      Object.keys(judgments).every((id) => id === provider) &&
+      receipt_models.length > 0 &&
+      receipt_models.every((m) => m.startsWith(`${provider}:`)),
+    restored,
+    judgments,
+    receipt_models,
+    split_message: split?.message ?? null,
+  };
+}
+
 // What the log says about the review turns of one CLI provider.
 function cliTurnLog(provider, log) {
   const text = String(log ?? "");

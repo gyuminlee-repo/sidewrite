@@ -30,6 +30,7 @@ import {
   proposeAllEvidence,
   providersEvidence,
   resolvedMatch,
+  restartSplitEvidence,
   rewriteVerify,
   stageOf,
   staleMarkers,
@@ -243,8 +244,10 @@ const count = (f, re) => (readLog(f).match(re) ?? []).length;
 
 let daemon = null;
 let daemonLog = LOG;
-async function startDaemon(logFile, extraEnv = {}) {
-  const fd = fs.openSync(logFile, "w");
+// append: keep the log and write on (a restart in the middle of a run).
+async function startDaemon(logFile, extraEnv = {}, { append = false } = {}) {
+  const from = append ? readLog(logFile).length : 0;
+  const fd = fs.openSync(logFile, append ? "a" : "w");
   daemon = spawn(process.execPath, ["daemon/index.mjs"], {
     cwd: REPO,
     env: { ...process.env, CC_OFFICE_DEBUG: "1", ...extraEnv },
@@ -252,7 +255,7 @@ async function startDaemon(logFile, extraEnv = {}) {
   });
   daemonLog = logFile;
   await until(
-    () => readLog(logFile).includes("HTTP server listening") && listening(WS_PORT),
+    () => readLog(logFile).slice(from).includes("HTTP server listening") && listening(WS_PORT),
     30_000,
     "daemon",
   );
@@ -547,6 +550,34 @@ async function mainS25() {
       decisions: readLog(path.join(RUN, `${STEM}.decisions.jsonl`)),
     }),
   );
+
+  // The stored judgment provider across a daemon restart: the daemon comes
+  // back with no choice for this pane, the pane reconnects and Split is
+  // clicked at once. Its judgments must run on the stored provider; a
+  // judgment by Claude here would be text sent where the user did not choose.
+  await stopDaemon();
+  const restartAt = logAt();
+  const decisionsFile = path.join(RUN, `${STEM}.decisions.jsonl`);
+  const receiptsAt = readLog(decisionsFile).length;
+  await startDaemon(LOG, {}, { append: true });
+  await until(
+    () => logFrom(restartAt).includes(`active doc: ${winPath(DOC)}`),
+    120_000,
+    "pane reconnect",
+  );
+  const again = note("split", pane("split"), { label: "split right after a daemon restart" });
+  const restart = restartSplitEvidence({
+    provider: judgeBy,
+    split: again,
+    log: logFrom(restartAt),
+    decisions: readLog(decisionsFile).slice(receiptsAt),
+  });
+  marker("s25-restart-split", restart);
+  rows.push({
+    step: "no judgment by another provider after the restart",
+    result: restart.pass ? "PASS" : "FAIL",
+    got: `restored=${restart.restored} judgments=${JSON.stringify(restart.judgments)} receipts=${restart.receipt_models.join(",")}`,
+  });
   note("edit-draft", pane("edit-draft", { requirements: { "R1.3": R13_REQUIREMENTS } }));
 
   // S25-39: the ledger from a file, out to <stem>.ledger.json, and in again.

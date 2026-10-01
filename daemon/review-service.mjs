@@ -174,6 +174,10 @@ export function createReviewService({
   // while the job runs applies to the next job. The default is the two
   // arguments above, for every pane.
   oneshotJob = async () => ({ run: oneshot, model: oneshotModel }),
+  // P14: asked before a review turn is built or queued; it resolves when
+  // the pane's provider for review turns is confirmed and throws otherwise
+  // (providers/selection.mjs ready). The request then fails with that text.
+  turnGate = async () => {},
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -596,6 +600,7 @@ export function createReviewService({
       return { prompt: built.text };
     },
     async review_propose(msg, key, host) {
+      await turnGate(key);
       const d = at(key);
       const { built, comment } = await buildFor(d, msg.ref, msg.paragraphs);
       pushTurn(key, host, built.text, { ref: msg.ref });

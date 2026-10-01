@@ -47,7 +47,15 @@ const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 // "Propose all": the longest wait for the end of one review turn.
 const TURN_WAIT_MS = 30 * 60_000;
 
-export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
+export function initReviewPane({
+  sendRequest,
+  word,
+  onTurnStarted,
+  isTurnInFlight,
+  // () => the request that confirms the stored providers while it is under
+  // way (providers-pane.js whenRestored), else null.
+  providersReady = () => null,
+}) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
   const $ = (id) => document.getElementById(id);
@@ -122,6 +130,14 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     (fn) =>
     async (...a) => {
       try {
+        // Right after a (re)connect the daemon has not confirmed the stored
+        // provider yet: the action waits for that instead of being sent to a
+        // daemon that would have to guess.
+        const confirming = providersReady();
+        if (confirming) {
+          say("Waiting for the daemon to confirm the stored provider choice...");
+          await confirming;
+        }
         say("");
         await fn(...a);
       } catch (e) {

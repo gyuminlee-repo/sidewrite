@@ -651,6 +651,8 @@ function wsConnect() {
   ws.onopen = () => {
     wsReady = true;
     sendHello();
+    // The stored provider choices, before anything can ask for a judgment.
+    providersPane?.restoreStored();
     for (const r of unsentResults.drain()) ws.send(JSON.stringify(r));
     // Record the sticky model for this pane key right after the hello
     // binds it, so the lazy first-message session start uses it.
@@ -738,8 +740,6 @@ async function handleServerMessage(msg) {
       refreshWorkspaceFromDaemon();
       reviewPane?.reload();
       loadModelMenu();
-      // Also sends the stored provider choices again (the daemon keeps them
-      // per connection).
       providersPane?.reload();
       break;
 
@@ -1203,6 +1203,7 @@ Office.onReady((info) => {
     reviewPane = initReviewPane({
       sendRequest,
       isTurnInFlight: () => turn.inFlight,
+      providersReady: () => providersPane?.whenRestored() ?? null,
       // Called before review_propose is sent; the returned release ends
       // this turn if the request fails and no later turn has begun.
       onTurnStarted: (note) => {

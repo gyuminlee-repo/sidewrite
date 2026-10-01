@@ -11,10 +11,8 @@ import { providerRows, choiceAfterProbe, providerStatus, modelRows } from "./pro
 const $ = (id) => document.getElementById(id);
 const ROLES = ["turn", "oneshot"];
 const SETTING = { turn: "turnProvider", oneshot: "oneshotProvider" };
-const DROPPED = {
-  turn: (label) => `${label} can no longer run review turns; review turns use Claude.`,
-  oneshot: (label) => `${label} is no longer available for judgments; judgments use Claude.`,
-};
+const WORDS = { turn: "review turns", oneshot: "judgments" };
+const STOPPED = { turn: "Review turns", oneshot: "Judgments" };
 // The probe starts CLIs and calls servers; a choice waits for it.
 const TIMEOUT = { timeoutMs: 60_000 };
 // The one key provider without a fixed server: it takes a URL with its key.
@@ -31,8 +29,13 @@ function el(tag, { text, cls, ...props } = {}, kids = []) {
 
 export function initProvidersPane({ sendRequest, settings, saveSettings }) {
   let list = [];
-  // What the daemon holds for this pane, as far as the pane told it.
+  // What the menus show: the choice the daemon confirmed, or the stored one
+  // it refused (the notes then say so).
   const sel = { turn: { id: "claude", model: null }, oneshot: { id: "claude", model: null } };
+  // Why a stored choice is not in use, per role, and a daemon that gave no
+  // answer. Shown until the user picks a provider that passes.
+  const notes = { turn: null, oneshot: null, daemon: null };
+  let waiting = null; // the restore_providers request under way
 
   const ask = (type, payload) =>
     sendRequest(type, payload, TIMEOUT).then(
@@ -46,6 +49,9 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
     m.textContent = text ?? "";
     m.hidden = !text;
   }
+
+  const showNotes = () =>
+    message([notes.daemon, notes.turn, notes.oneshot].filter(Boolean).join(" "));
 
   function store(role, choice) {
     // Claude without a model is the daemon's default: nothing to remember.
@@ -140,31 +146,46 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
     }
     sel[role] = { id, model };
     store(role, sel[role]);
-    message("");
+    notes[role] = null;
+    showNotes();
     render();
     return true;
   }
 
-  // After a (re)connect the daemon has its defaults for this pane: send the
-  // stored choices again, each checked against the fresh list first.
-  async function restore() {
-    const notes = [];
-    for (const role of ROLES) {
-      const stored = settings[SETTING[role]] ?? null;
-      const c = choiceAfterProbe(stored, list, role);
-      sel[role] = { id: c.id, model: c.model };
-      if (c.dropped) {
-        notes.push(DROPPED[role](labelOf(c.dropped)));
-        store(role, sel[role]);
+  // Right after hello, before the provider list and whatever else: tell the
+  // daemon which providers this pane stored. Until it answers the daemon
+  // sends nothing of this pane anywhere (daemon/providers/selection.mjs), and
+  // the Review tab holds its requests (whenRestored). A stored choice the
+  // daemon refuses is shown and kept: the menus stay on it and nothing is
+  // switched to Claude for the user.
+  function restoreStored() {
+    const stored = Object.fromEntries(ROLES.map((r) => [r, settings[SETTING[r]] ?? null]));
+    for (const role of ROLES) sel[role] = stored[role] ?? { id: "claude", model: null };
+    notes.turn = notes.oneshot = null;
+    const mine = ask("restore_providers", stored).then((r) => {
+      if (waiting !== mine) return; // a newer connection asked again
+      waiting = null;
+      if (!r.ok || !r.selection?.state) {
+        const why = r.error ?? "no answer";
+        notes.daemon = `The daemon did not confirm the stored providers (${why}). Judgments and review turns are stopped until it does: reopen the pane, or choose a provider here.`;
+      } else {
+        notes.daemon = null;
+        for (const role of ROLES) {
+          if (r.selection.state[role] !== "refused") continue;
+          const why = String(r.selection.error?.[role] ?? "it was refused").replace(/\.$/, "");
+          notes[role] =
+            `The stored provider for ${WORDS[role]} cannot be used: ${why}. ` +
+            `${STOPPED[role]} are stopped until you choose a provider here.`;
+        }
       }
-      if (!stored) continue;
-      const r = await ask("set_provider", { role, ...sel[role] });
-      if (!r.ok) {
-        notes.push(r.error ?? `The stored provider for ${role} was refused.`);
-        sel[role] = { id: "claude", model: null };
-      }
-    }
-    message(notes.join(" "));
+      showNotes();
+      render();
+    });
+    waiting = mine;
+    message(
+      "Waiting for the daemon to confirm the stored providers. Judgments and review turns start after that.",
+    );
+    return mine;
   }
 
   async function reload({ refresh = false } = {}) {
@@ -174,7 +195,6 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
       return;
     }
     list = r.providers;
-    await restore();
     render();
   }
 
@@ -185,7 +205,7 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
       return;
     }
     if (Array.isArray(r.providers)) list = r.providers;
-    message("");
+    showNotes();
     render();
   }
 
@@ -203,6 +223,11 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
 
   return {
     reload,
+    restoreStored,
+    restoring: () => waiting !== null,
+    // The request the Review tab waits for before it asks the daemon for a
+    // judgment or a review turn; null when there is nothing to wait for.
+    whenRestored: () => waiting,
     // For the status line of a review turn; null when Claude runs it.
     turnLabel() {
       if (sel.turn.id === "claude") return null;

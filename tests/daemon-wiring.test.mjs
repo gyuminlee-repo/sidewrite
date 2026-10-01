@@ -57,3 +57,17 @@ test("a provider key is passed to the key store and nowhere else", () => {
     ['await providerKeys.set(String(msg.id ?? ""), { key: msg.key, base_url: msg.base_url });'],
   );
 });
+
+// Codex review of stage 2.5: the daemon uses a provider only once the pane
+// confirmed it in this connection.
+test("judgments and review turns wait for the pane's confirmed provider; hello starts over", () => {
+  // The router asks the selection, which waits and throws: never the sync default.
+  assert.match(code, /getChoice: \(key\) => selection\.ready\(key, "oneshot"\)/);
+  assert.match(code, /turnGate: \(key\) => selection\.ready\(key, "turn"\)/);
+  // A new connection has no confirmed choice.
+  const hello = code.slice(code.indexOf("async function onPaneConnect"));
+  assert.match(hello.slice(0, 300), /selection\.begin\(key\)/);
+  // The stored choices are restored against the probe, by their own message.
+  assert.match(code, /restore_providers: async/);
+  assert.match(code, /selection\.restore\(\s*key,/);
+});

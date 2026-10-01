@@ -46,18 +46,25 @@ const ROWS = [
   },
 ];
 
-test("defaults: Claude for both roles; a choice is per pane and per role", () => {
+test("a pane starts with no confirmed choice; a choice is per pane and per role", () => {
   const sel = createProviderSelection();
-  assert.deepEqual(sel.get("a"), { turn: { id: "claude", model: null }, oneshot: null });
-  assert.equal(sel.choiceFor("a", "oneshot"), null);
+  // Nothing is assumed for a pane that has not said what it uses.
+  assert.deepEqual(sel.get("a"), {
+    turn: null,
+    oneshot: null,
+    state: { turn: "restoring", oneshot: "restoring" },
+    error: { turn: null, oneshot: null },
+  });
   sel.set("a", "oneshot", { id: "ollama", model: "qwen3.5:9b" }, ROWS);
-  assert.deepEqual(sel.choiceFor("a", "oneshot"), { id: "ollama", model: "qwen3.5:9b" });
-  assert.equal(sel.choiceFor("b", "oneshot"), null);
+  assert.deepEqual(sel.get("a").oneshot, { id: "ollama", model: "qwen3.5:9b" });
+  assert.deepEqual(sel.get("a").state, { turn: "restoring", oneshot: "ready" });
+  assert.equal(sel.get("b").state.oneshot, "restoring");
+  sel.set("a", "turn", { id: "claude" }, ROWS);
   assert.deepEqual(sel.choiceFor("a", "turn"), { id: "claude", model: null });
   sel.set("a", "oneshot", { id: "claude" }, ROWS);
   assert.deepEqual(sel.choiceFor("a", "oneshot"), { id: "claude", model: null });
   sel.drop("a");
-  assert.equal(sel.choiceFor("a", "oneshot"), null);
+  assert.equal(sel.get("a").state.oneshot, "restoring");
 });
 
 test("only a provider that passed its check can be chosen, and the refusal says why", () => {
@@ -77,7 +84,10 @@ test("only a provider that passed its check can be chosen, and the refusal says 
   assert.throws(() => sel.set("a", "oneshot", { id: "nope" }, ROWS), /Unknown provider nope/);
   assert.throws(() => sel.set("a", "chat", { id: "claude" }, ROWS), /Unknown role chat/);
   // Nothing was stored by a refused choice.
-  assert.deepEqual(sel.get("a"), { turn: { id: "claude", model: null }, oneshot: null });
+  assert.deepEqual(
+    [sel.get("a").turn, sel.get("a").oneshot, sel.get("a").state],
+    [null, null, { turn: "restoring", oneshot: "restoring" }],
+  );
 });
 
 test("the model must be one the provider lists; a provider without a list takes any name or none", () => {

@@ -477,6 +477,9 @@ function noteSuccessfulTurn(key) {
 // (onUserMessage → ensureLoopForMessage).
 async function onPaneConnect(key, host, doc) {
   if (!key) return;
+  // No provider is confirmed for this connection until the pane says which
+  // one it stored (restore_providers) or the user picks one.
+  selection.begin(key);
   // Resolve this pane's workspace from the open document's own folder,
   // server-side and immediately — deterministic, no loop start. Without
   // this, cwdForKey() falls back to matterFolder (the daemon's launch
@@ -559,7 +562,9 @@ const oneshotRouter = createOneshotRouter({
   antigravity: (req) => agyOneshot(req),
   http: (req) => chatOneshot(req),
   keys: providerKeys,
-  getChoice: (key) => selection.choiceFor(key, "oneshot"),
+  // Waits for the pane's confirmed choice and throws when there is none:
+  // the router then answers with that error and sends nothing anywhere.
+  getChoice: (key) => selection.ready(key, "oneshot"),
   log: console.log,
 });
 
@@ -601,6 +606,8 @@ const review = createReviewService({
   // Judgments go to the provider the pane chose (default: Claude, haiku),
   // fixed for each job when it starts.
   oneshotJob: (key) => oneshotRouter.pin(key),
+  // A review turn starts only with a confirmed provider for review turns.
+  turnGate: (key) => selection.ready(key, "turn"),
   getModel: (key) => {
     const t = selection.choiceFor(key, "turn");
     return t.id === "claude" ? modelArgFor(key) : `${t.id}:${t.model ?? "default"}`;
@@ -797,6 +804,29 @@ const bridge = createBridge({
         ok: true,
         request_id: msg.request_id,
         ...providersListReply(rows, selection.get(key)),
+      });
+    },
+    // The pane's stored choices, sent right after hello and before any
+    // provider list: { turn, oneshot }, each { id, model } or null. Until
+    // this is answered no judgment and no review turn of the pane goes
+    // anywhere (selection.mjs). The probe is asked only for a stored choice.
+    restore_providers: async (msg, reply, key) => {
+      const pick = (c) =>
+        c && typeof c === "object" && c.id ? { id: c.id, model: c.model } : null;
+      const state = await selection.restore(
+        key,
+        { turn: pick(msg.turn), oneshot: pick(msg.oneshot) },
+        () => probeCache.get(),
+      );
+      console.log(
+        `[providers] restore turn=${state.state.turn} oneshot=${state.state.oneshot}` +
+          ` provider=${state.oneshot?.id ?? (state.state.oneshot === "ready" ? "claude" : "-")}`,
+      );
+      reply({
+        type: "restore_providers_result",
+        ok: true,
+        request_id: msg.request_id,
+        selection: state,
       });
     },
     provider_set_key: async (msg, reply, key) => {
