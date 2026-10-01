@@ -246,14 +246,23 @@ export function createProposalTurns({
       }
       const args = toTrackedEditArgs(ref, row.proposal);
       sendEvent({ event: "tool_use_announce", tool: PROPOSAL_TOOL, input: args }, key);
-      // A Stop during this call is read after it: what Word did is recorded.
+      // The last look at Stop is where the edit leaves for Word: between the
+      // head of this loop and that point lie file reads and the write of the
+      // attempt. A Stop answered before it sends nothing (applyTrackedEdit
+      // takes the attempt off the file again). A Stop during the call itself
+      // is read after it: what Word did is recorded.
+      const toWord = (name, a) => {
+        if (t.stopped) throw Object.assign(new Error(STOPPED), { code: "TurnStopped" });
+        return call(name, a, key);
+      };
       const r = await Promise.resolve()
-        .then(() => applyEdit({ ...deps, call: (name, a) => call(name, a, key) }, args, { ref }))
+        .then(() => applyEdit({ ...deps, call: toWord }, args, { ref }))
         .then(undefined, (e) => ({
           ok: false,
-          code: "ToolError",
+          code: e?.code === "TurnStopped" ? "TurnStopped" : "ToolError",
           message: String(e?.message ?? e),
         }));
+      if (r?.code === "TurnStopped") return void (t.stoppedAt = row.id);
       row.change_id = r?.change_id ?? null;
       if (r?.ok && !r.comment_missing) {
         row.outcome = "applied";
