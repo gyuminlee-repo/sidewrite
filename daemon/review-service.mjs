@@ -311,7 +311,8 @@ export function createReviewService({
         const since = rev.snapshot?.taken_at;
         return {
           requirements: c?.requirements ?? [],
-          comment_text: c?.text ?? "",
+          // With its section label: the split took it off the comment text.
+          comment_text: [c?.section, c?.text ?? ""].filter((x) => x !== undefined).join("\n"),
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
           recent_changes: since
