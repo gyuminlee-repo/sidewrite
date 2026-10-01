@@ -7,7 +7,7 @@
 //   review_set_requirements, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
 //   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
-//   ledger_import, comments_backup
+//   ledger_import, ledger_suggest, comments_backup
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
 //     | "late_result_recorded" | "job_done", ... }
@@ -59,6 +59,7 @@ import {
 import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental } from "./ledger-check.mjs";
+import { suggestLedger } from "./ledger-suggest.mjs";
 import { snapshotTexts, outsideChanges } from "./doc-diff.mjs";
 import { applyTrackedEdit, TOOL_COMMENT_PREFIX } from "./review-tools.mjs";
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
@@ -135,7 +136,7 @@ export const keptWarning = (refs) =>
 // Requests that may run model calls one after another (a split and its
 // requirement extraction; a ledger check of up to 20 batches per rule). The
 // regex-only path takes the same route: one reply shape per request type.
-const JOB_TYPES = new Set(["review_split", "ledger_check"]);
+const JOB_TYPES = new Set(["review_split", "ledger_check", "ledger_suggest"]);
 
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
 
@@ -662,6 +663,40 @@ export function createReviewService({
         added_ids: added.map((i) => i.id),
         revision,
       };
+    },
+    // P15: rule candidates from the review text (ledger-suggest.mjs). Nothing
+    // is stored: the author picks candidates in the pane, which sends them
+    // back through ledger_import. Uses the one-shot of this service; the
+    // provider routing of P14 replaces `oneshot` and `oneshotModel` here.
+    async ledger_suggest(msg, key) {
+      const text = String(msg.text ?? "");
+      if (!text.trim()) throw new Error("Paste or load the review text first.");
+      const r = await suggestLedger(text, { oneshot });
+      log(
+        `[review] ledger suggest method=${r.method} candidates=${r.candidates.length} warnings=${r.warnings.length}`,
+      );
+      // A receipt only when the model was asked; sentence numbers, no text.
+      if (r.asked) {
+        await receipt(key, [
+          decisionRecord({
+            kind: "ledger_suggest",
+            input: r.input,
+            model: oneshotModel,
+            output: {
+              method: r.method,
+              candidates: r.candidates.length,
+              labels: r.candidates.map((c) => ({
+                i: c.sentence_index,
+                kind: c.kind,
+                check: c.check.type,
+                why: c.why,
+              })),
+              warnings: r.warnings.length,
+            },
+          }),
+        ]);
+      }
+      return { candidates: r.candidates, method: r.method, warnings: r.warnings };
     },
     async ledger_check(msg, key) {
       // Taken on arrival, before the file read: a check that reads the file

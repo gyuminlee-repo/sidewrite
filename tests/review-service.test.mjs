@@ -1579,3 +1579,66 @@ test("ledger_export writes <stem>.ledger.json; ledger_import adds its rules and 
     await t.cleanup();
   }
 });
+
+test("ledger_suggest is a job: candidates from the review text, one receipt, nothing stored", async () => {
+  const { SUGGEST_SYSTEM } = await import("../daemon/ledger-suggest.mjs");
+  const systems = [];
+  const t = await setup({
+    oneshot: async (req) => {
+      systems.push(req.system);
+      return {
+        ok: true,
+        json: {
+          labels: [
+            { i: 0, type: "none" },
+            { i: 2, type: "instruction" },
+          ],
+        },
+      };
+    },
+    oneshotModel: "haiku",
+  });
+  try {
+    const text = 'Reviewer 1\nDo not use "novel".\nUse SI units throughout.';
+    let first = null;
+    await new Promise((resolve) =>
+      t.svc.handlers.ledger_suggest(
+        { type: "ledger_suggest", request_id: "q7", text },
+        (r) => ((first = r), resolve()),
+        "k",
+        "word",
+      ),
+    );
+    assert.deepEqual([first.accepted, typeof first.job_id], [true, "string"]);
+
+    const r = await t.ask("ledger_suggest", { text });
+    assert.deepEqual([r.ok, r.method], [true, "regex+llm"]);
+    assert.deepEqual(
+      r.candidates.map((c) => [c.kind, c.check.type, c.text]),
+      [
+        ["forbid", "regex", 'Do not use "novel".'],
+        ["instruction", "llm", "Use SI units throughout."],
+      ],
+    );
+    assert.deepEqual([...new Set(systems)], [SUGGEST_SYSTEM]);
+    assert.ok(t.lines.includes("[review] ledger suggest method=regex+llm candidates=2 warnings=0"));
+
+    await new Promise((res) => setTimeout(res, 20)); // the first job's receipt
+    const raw = await readFile(join(t.dir, "paper.decisions.jsonl"), "utf8");
+    assert.equal(raw.includes("novel"), false, "no review text in the receipt");
+    const log = await readDecisions(t.dir);
+    assert.deepEqual(
+      log.map((x) => [x.kind, x.model, x.output.candidates]),
+      [
+        ["ledger_suggest", "haiku", 2],
+        ["ledger_suggest", "haiku", 2],
+      ],
+    );
+    assert.equal((await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).ledger.length, 0);
+
+    const empty = await t.ask("ledger_suggest", { text: "  " });
+    assert.deepEqual([empty.ok, /review text/.test(empty.error)], [false, true]);
+  } finally {
+    await t.cleanup();
+  }
+});

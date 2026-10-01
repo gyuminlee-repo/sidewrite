@@ -605,3 +605,25 @@ test("ledger file: JSON with an items array, anything else is an error message",
   assert.match(view.ledgerImportFromJson('{"items":{}}').error, /items/);
   assert.match(view.ledgerImportFromJson('{"items":[]}').error, /no items/);
 });
+
+test("ledger candidates: label says what the check does; the rule drops the candidate fields", () => {
+  const c = {
+    kind: "forbid",
+    text: 'Do not use "novel".',
+    scope: "manuscript",
+    check: { type: "regex", pattern: "novel", flags: "i", expect: "absent" },
+    why: "forbid cue",
+    sentence_index: 1,
+    picked: true,
+  };
+  assert.equal(view.candidateLabel(c), 'Forbidden, must not match /novel/i: Do not use "novel".');
+  assert.equal(
+    view.candidateLabel({ kind: "instruction", text: "Use SI units.", check: { type: "llm" } }),
+    "Instruction, LLM check: Use SI units.",
+  );
+  assert.match(
+    view.candidateLabel({ ...c, kind: "instruction", check: { ...c.check, expect: "present" } }),
+    /^Instruction, must keep \/novel\/i/,
+  );
+  assert.deepEqual(Object.keys(view.candidateRule(c)), ["kind", "text", "scope", "check"]);
+});

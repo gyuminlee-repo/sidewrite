@@ -904,3 +904,63 @@ test("ledger: Export shows the file path; Import sends the items and reports add
   assert.match(t.$("review-message").textContent, /not JSON/);
   assert.equal(t.requests.filter((r) => r.type === "ledger_import").length, 1);
 });
+
+test("ledger suggestions: a checklist from the review text; Add selected imports the ticked rules", async () => {
+  const revision = { comments: [], ledger: [] };
+  const cue = {
+    kind: "forbid",
+    text: 'Do not use "novel".',
+    scope: "manuscript",
+    check: { type: "regex", pattern: "novel", flags: "i", expect: "absent" },
+    why: "forbid cue",
+    sentence_index: 1,
+  };
+  const model = {
+    kind: "instruction",
+    text: "Use SI units throughout.",
+    scope: "manuscript",
+    check: { type: "llm" },
+    why: "model label",
+    sentence_index: 2,
+  };
+  let t = null;
+  t = await setup({
+    revision,
+    respond: {
+      ledger_suggest: () => {
+        queueMicrotask(() =>
+          t.pane.onEvent({
+            type: "review_event",
+            event: "job_done",
+            job_id: "j5",
+            result: { ok: true, method: "regex+llm", candidates: [cue, model], warnings: [] },
+          }),
+        );
+        return { ok: true, accepted: true, job_id: "j5" };
+      },
+      ledger_import: () => ({ ok: true, added: 2, skipped: 0, revision }),
+    },
+  });
+  t.$("review-input").value = "Reviewer 1 ...";
+  await t.$("ledger-suggest-review").click();
+  assert.equal(t.requests.find((r) => r.type === "ledger_suggest").payload.text, "Reviewer 1 ...");
+  const boxes = () => findAll(t.$("ledger-candidates"), (n) => n.attributes.type === "checkbox");
+  // A cue-based candidate starts ticked, a model label does not.
+  assert.deepEqual(
+    boxes().map((b) => b.checked),
+    [true, false],
+  );
+  assert.equal(t.$("ledger-candidates-actions").hidden, false);
+  assert.match(t.$("review-message").textContent, /2 candidate rule\(s\)/);
+
+  boxes()[1].checked = true;
+  await fire(boxes()[1], "change");
+  await t.$("ledger-candidates-add").click();
+  const strip = ({ kind, text, scope, check }) => ({ kind, text, scope, check });
+  assert.deepEqual(t.requests.find((r) => r.type === "ledger_import").payload, {
+    doc: { items: [strip(cue), strip(model)] },
+    mode: "append",
+  });
+  assert.equal(boxes().length, 0, "the list is cleared once added");
+  assert.equal(t.$("ledger-candidates-actions").hidden, true);
+});

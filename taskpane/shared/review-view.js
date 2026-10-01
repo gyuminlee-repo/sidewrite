@@ -471,3 +471,21 @@ export function ledgerImportFromJson(text) {
   if (!data.items.length) return { ok: false, error: "The ledger file has no items." };
   return { ok: true, doc: { items: data.items }, count: data.items.length };
 }
+
+// ---- P15: ledger rule candidates from the review text ---------------------------
+
+// The rule fields of a candidate (ledger_suggest), as ledger_import takes them.
+export function candidateRule({ kind, text, scope, check }) {
+  return { kind, text, scope, check };
+}
+
+// "Forbidden, must not match /novel/i: <sentence>"
+export function candidateLabel(c) {
+  const kind = c.kind === "forbid" ? "Forbidden" : "Instruction";
+  const k = c.check ?? {};
+  const check =
+    k.type === "regex"
+      ? `${k.expect === "present" ? "must keep" : "must not match"} /${k.pattern}/${k.flags ?? ""}`
+      : "LLM check";
+  return `${kind}, ${check}: ${c.text}`;
+}

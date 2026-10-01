@@ -28,6 +28,8 @@ import {
   reviewTextFromFile,
   REVIEW_FILE_MAX_BYTES,
   ledgerImportFromJson,
+  candidateRule,
+  candidateLabel,
 } from "./review-view.js";
 
 const UNKNOWN_HINT =
@@ -60,6 +62,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     timer: null,
     jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
+    candidates: [], // P15: ledger rule candidates of the last suggestion, each with `picked`
   };
 
   function el(tag, props = {}, ...kids) {
@@ -470,6 +473,26 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       : "Add";
   }
 
+  // P15: candidate rules from the review text, one checkbox each.
+  function renderCandidates() {
+    const box = $("ledger-candidates");
+    box.replaceChildren();
+    for (const c of state.candidates) {
+      const tick = el("input", { type: "checkbox" });
+      tick.checked = c.picked;
+      tick.addEventListener("change", () => (c.picked = tick.checked));
+      box.append(
+        el(
+          "label",
+          { class: "review-ledger-item" },
+          tick,
+          el("span", { text: ` ${candidateLabel(c)}` }),
+        ),
+      );
+    }
+    $("ledger-candidates-actions").hidden = state.candidates.length === 0;
+  }
+
   // L7: everything that waits for the author in one box.
   function renderDecisions() {
     const d = pendingDecisions(state.revision);
@@ -543,6 +566,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     renderDraft();
     renderComments();
     renderLedger();
+    renderCandidates();
     renderDecisions();
     renderExternal();
     showProgress();
@@ -734,6 +758,36 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       const r = ledgerImportFromJson(text);
       if (!r.ok) throw new Error(r.error);
       await importLedger(r.doc);
+    }),
+  );
+  // P15: rule candidates from the review text in the paste box. The daemon
+  // stores none of them; "Add selected" sends the ticked ones as an import.
+  $("ledger-suggest-review").addEventListener(
+    "click",
+    guard(async () => {
+      const r = await askJob("ledger_suggest", { text: $("review-input").value });
+      // A candidate from a cue in the text starts ticked; one only the model
+      // labelled waits for the author's tick.
+      state.candidates = r.candidates.map((c) => ({ ...c, picked: c.why !== "model label" }));
+      say(
+        `${r.candidates.length} candidate rule(s) by ${r.method}. Tick the ones to keep, then Add selected.` +
+          (r.warnings?.length ? ` ${r.warnings.join(" ")}` : ""),
+      );
+    }),
+  );
+  $("ledger-candidates-add").addEventListener(
+    "click",
+    guard(async () => {
+      const items = state.candidates.filter((c) => c.picked).map(candidateRule);
+      if (!items.length) throw new Error("Tick at least one candidate rule.");
+      await importLedger({ items });
+      state.candidates = [];
+    }),
+  );
+  $("ledger-candidates-clear").addEventListener(
+    "click",
+    guard(() => {
+      state.candidates = [];
     }),
   );
   // Tell the daemon which rationale comments the cleanup removed, so their
