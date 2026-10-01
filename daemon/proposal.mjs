@@ -263,13 +263,14 @@ export function checkProposal(p, { texts, ids, shown, requirements = [] }) {
 
 // Every proposal of a reply: [{ id, proposal, code }], code null when it can
 // be applied. One refused proposal does not stop the others. Duplicate: the
-// same find in the same paragraph as a proposal before it.
+// same find in the same paragraph as a proposal before it that can be
+// applied (a refused one changes nothing).
 export function checkProposals(proposals, ctx) {
   const seen = new Set();
   return proposals.map((proposal) => {
     const key = `${proposal.paragraph_id}\0${fold(proposal.find)}`;
     const code = checkProposal(proposal, ctx) ?? (seen.has(key) ? "Duplicate" : null);
-    seen.add(key);
+    if (!code) seen.add(key);
     return { id: proposal.id, proposal, code };
   });
 }

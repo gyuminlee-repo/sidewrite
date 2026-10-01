@@ -60,6 +60,27 @@ const HINTS = {
   SnapshotChanged: () => "The status was refreshed while the turn ran. Propose again.",
 };
 
+// What the author is told about a proposal that was not sent to Word, by
+// the code of the check that refused it (proposal.mjs checkProposal).
+const REFUSALS = {
+  UnknownParagraph: "It names a paragraph that was not shown, so it was not sent to Word.",
+  FindNotInParagraph:
+    "Its text is not in that paragraph, so it was not sent to Word. Propose again if the change is still needed.",
+  FindAmbiguous:
+    "Its text is in that paragraph more than once, so it was not sent to Word. Propose again if the change is still needed.",
+  TargetMismatch:
+    "Word would edit another paragraph than the one it names, so it was not sent. Propose again if the change is still needed.",
+  UnknownRequirement:
+    "It names a request the comment does not list, so it was not sent to Word. Propose again if the change is still needed.",
+  NoChange: "It changes nothing.",
+  EmptyInsert: "It inserts nothing.",
+  Duplicate: "A proposal before it changes the same text.",
+  SupersededInTurn:
+    "A change before it in this turn already changed that text. Propose again for what is left.",
+};
+const refusalLine = (row, word) =>
+  `${row.id} ${word} (${row.code}): paragraph ${row.proposal.paragraph_id}. ${REFUSALS[row.code] ?? "It was not sent to Word."}\n`;
+
 // outcome of a proposal -> its words in the summary line, in this order.
 const OUTCOME_WORDS = [
   ["applied", "applied"],
@@ -202,7 +223,7 @@ export function createProposalTurns({
     t.note = read.note; // shown at the end of the turn
     sendText(`${plural(t.rows.length)} received.\n`, key);
     for (const row of t.rows.filter((x) => x.code)) {
-      sendText(`${row.id} rejected (${row.code}): paragraph ${row.proposal.paragraph_id}.\n`, key);
+      sendText(refusalLine(row, "rejected"), key);
       log(`[proposal] rejected ref=${ref} id=${row.id} code=${row.code}`);
     }
 
@@ -219,7 +240,7 @@ export function createProposalTurns({
       if (checkProposal(row.proposal, checkCtx(await deps.getReviewContext(ref, d)))) {
         row.outcome = "skipped";
         row.code = "SupersededInTurn";
-        sendText(`${row.id} skipped (${row.code}): paragraph ${row.proposal.paragraph_id}.\n`, key);
+        sendText(refusalLine(row, "skipped"), key);
         log(`[proposal] skipped ref=${ref} id=${row.id} code=${row.code}`);
         continue;
       }

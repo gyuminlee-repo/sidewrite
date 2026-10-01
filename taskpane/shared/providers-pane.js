@@ -6,7 +6,13 @@
 // sent once in provider_set_key and the box emptied before the answer comes;
 // it is never put in the settings, a message or any other request.
 
-import { providerRows, choiceAfterProbe, providerStatus, modelRows } from "./providers-view.js";
+import {
+  providerRows,
+  choiceAfterProbe,
+  providerStatus,
+  modelRows,
+  proposalNotice,
+} from "./providers-view.js";
 
 const $ = (id) => document.getElementById(id);
 const ROLES = ["turn", "oneshot"];
@@ -36,6 +42,10 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
   // answer. Shown until the user picks a provider that passes.
   const notes = { turn: null, oneshot: null, daemon: null };
   let waiting = null; // the restore_providers request under way
+  // The choice of a proposing provider for review turns that waits for the
+  // author's answer to its notice ({ id, model }), or null. Nothing of it is
+  // sent to the daemon before "Use".
+  let pending = null;
 
   const ask = (type, payload) =>
     sendRequest(type, payload, TIMEOUT).then(
@@ -136,6 +146,39 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
     $("providers-root").setAttribute("data-selection", JSON.stringify(sel));
   }
 
+  // The first choice of a proposing provider (Codex) for review turns: say
+  // what will leave the computer and wait for Use or Cancel. An inline row:
+  // a task pane has no window.confirm. Asked once per provider
+  // (settings.proposalNoticeSeen); a stored choice is restored without it.
+  function hideNotice() {
+    pending = null;
+    $("providers-notice").hidden = true;
+  }
+  function needsNotice(role, id) {
+    const row = list.find((r) => r.id === id);
+    return role === "turn" && row?.turn_mode === "proposal" && !settings.proposalNoticeSeen?.[id];
+  }
+  function showNotice(choice) {
+    const n = proposalNotice(list.find((r) => r.id === choice.id));
+    pending = choice;
+    $("providers-notice-text").textContent = n.text;
+    $("providers-notice-use").textContent = n.use;
+    $("providers-notice").hidden = false;
+  }
+  hideNotice();
+  $("providers-notice-use").addEventListener("click", () => {
+    if (!pending) return undefined;
+    const c = pending;
+    hideNotice();
+    settings.proposalNoticeSeen = { ...(settings.proposalNoticeSeen ?? {}), [c.id]: true };
+    saveSettings(settings);
+    return choose("turn", c.id, c.model);
+  });
+  $("providers-notice-cancel").addEventListener("click", () => {
+    hideNotice();
+    render(); // the menu goes back to the provider in use
+  });
+
   // Send one choice. A refusal is shown and nothing changes.
   async function choose(role, id, model) {
     const r = await ask("set_provider", { role, id, model });
@@ -213,6 +256,8 @@ export function initProvidersPane({ sendRequest, settings, saveSettings }) {
     $(`provider-${role}`).addEventListener("change", (e) => {
       // The provider's first model where it needs one, else its default.
       const c = choiceAfterProbe({ id: e.target.value, model: null }, list, role);
+      if (role === "turn") hideNotice(); // a notice still open was for another choice
+      if (needsNotice(role, c.id)) return showNotice({ id: c.id, model: c.model });
       return choose(role, c.id, c.model);
     });
     $(`provider-${role}-model`).addEventListener("change", (e) =>

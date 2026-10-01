@@ -1527,7 +1527,11 @@ export async function toolHeaderFooter({ which, text }) {
 // expected_before_hash before it edits. The daemon sends office_tracked_edit
 // only to a pane that names it (review-tools.mjs TARGET_HASH_CAP): a pane
 // loaded before the daemon was updated would apply the edit unchecked.
-export const PANE_CAPS = ["target_hash"];
+// proposal_turns: this pane knows review turns of a provider that proposes
+// (Codex) and shows what is sent to it before the first one
+// (providers-pane.js). The daemon starts no such turn for a pane that does
+// not name it (review-tools.mjs PROPOSAL_CAP).
+export const PANE_CAPS = ["target_hash", "proposal_turns"];
 
 // Tool: office_tracked_edit. Always tracked, whatever the
 // track-changes mode setting (taskpane.js dispatches it without writeArgs()).

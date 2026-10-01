@@ -1073,6 +1073,19 @@ body {
   padding: 4px 0;
 }
 
+/* What a proposing provider is sent, shown before its first review turn. */
+.providers-notice {
+  border: 1px solid var(--status-err);
+  border-radius: 4px;
+  font-size: 12px;
+  margin: 6px 0;
+  padding: 6px 8px;
+}
+
+.providers-notice p {
+  margin: 0 0 6px;
+}
+
 .path-row {
   display: flex;
   flex-wrap: wrap;

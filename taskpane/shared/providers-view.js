@@ -1,26 +1,36 @@
 // Providers section of the Setup tab (P14): pure helpers over the daemon's
 // providers_list rows ({ id, tier, label, roles, available, turn_ready,
-// turn_note, reason, policy, models, has_key, key_source, default_enabled }).
+// turn_mode, turn_note, reason, policy, models, has_key, key_source,
+// default_enabled }). turn_mode "proposal": the provider is given no tools
+// in a review turn; it returns proposed changes and the daemon applies them.
 // DOM glue is in providers-pane.js.
 
 // A local or key provider is called over HTTP and needs a model name; a CLI
 // or Claude may run with its own default.
 const needsModel = (row) => row?.tier === "local" || row?.tier === "key";
 
+// The tooltip of a proposing provider in the review turn menu.
+export const PROPOSAL_TITLE =
+  "Returns a list of proposed changes. This add-in checks each one and applies it as a tracked change with a rationale comment. The CLI does not touch Word.";
+
 // The rows of one menu. role "turn": the providers that can run review turns
 // at all, enabled when turn_ready. role "oneshot": every provider, enabled
-// when available. A row that cannot be chosen says why in its text.
+// when available. A row that cannot be chosen says why in its text; a
+// proposing provider says "proposals only" (proposal: true).
 export function providerRows(list, role) {
   return (list ?? [])
     .filter((r) => role !== "turn" || (r.roles ?? []).includes("turn"))
     .map((r) => {
       const enabled = role === "turn" ? !!r.turn_ready : !!r.available;
+      const proposal = role === "turn" && enabled && r.turn_mode === "proposal";
       const note = enabled
-        ? ""
+        ? proposal
+          ? PROPOSAL_TITLE
+          : ""
         : !r.available
           ? (r.reason ?? "not available")
           : (r.turn_note ?? r.reason ?? "not ready for review turns");
-      const short = enabled ? "" : !r.available ? note : "judgments only";
+      const short = enabled ? (proposal ? "proposals only" : "") : note;
       return {
         id: r.id,
         label: r.label,
@@ -28,8 +38,25 @@ export function providerRows(list, role) {
         enabled,
         note,
         policy: r.policy ?? "",
+        proposal,
       };
     });
+}
+
+// What the author is told before the first review turn of a proposing
+// provider: what leaves the computer, what the CLI adds, and who edits.
+// { text, use: the label of the button that agrees }.
+export function proposalNotice(row) {
+  return {
+    use: `Use ${row.label}`,
+    text:
+      `Review turns with ${row.label} send text off this computer, to the CLI and the service behind it: ` +
+      "the reviewer comment as written, the manuscript paragraphs shown for it (your selection, or the whole manuscript), " +
+      "your author instructions and the forbidden list. The CLI adds its own global instructions (for Codex, your AGENTS.md) to every request. " +
+      (row.policy ? `${row.policy} ` : "") +
+      "It does not edit the document: it returns proposed changes, and this add-in checks each one and applies it as a tracked change with a rationale comment. " +
+      "Preview prompt in the Review tab shows what is sent.",
+  };
 }
 
 // A stored choice ({ id, model } or null) against a fresh list: kept when the
@@ -65,7 +92,9 @@ export function providerStatus(r) {
     };
   }
   const text = r.turn_ready
-    ? "Available for review turns and judgments."
+    ? r.turn_mode === "proposal"
+      ? "Available for review turns (proposals only) and judgments."
+      : "Available for review turns and judgments."
     : (r.roles ?? []).includes("turn") && r.turn_note
       ? `Available for judgments. ${r.turn_note}`
       : "Available for judgments.";
