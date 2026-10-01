@@ -109,6 +109,27 @@ A tray icon (menu bar on macOS, system tray on Windows) appears. First launch of
 
 > **Daemon-only debugging.** To see daemon output in the terminal, run `npm run dev` instead of `npm start` (skips the Electron shell).
 
+### Windows with WSL2: the daemon without a terminal
+
+For a checkout inside WSL2 (with systemd) used from Word on the same PC. After this, the daemon runs from Windows logon on and Word shows the add-in; no terminal and no tray app is needed.
+
+```bash
+npm install
+bash scripts/install/install.sh      # set up; run again any time, it skips what is in place
+node scripts/install/doctor.mjs      # what is in place, what is not, and the command that mends it
+bash scripts/install/daemon-service.sh logs     # follow the daemon log
+bash scripts/install/daemon-service.sh status
+bash scripts/install/uninstall.sh    # take it all back
+```
+
+What `install.sh` sets up, all for the current user and without administrator rights:
+
+- a systemd user service that starts this checkout's daemon, restarts it when it fails, and keeps running without a login (linger). It uses the Claude login in your WSL home; log in once with `claude` first.
+- the Word manifest under `%APPDATA%\Draftspect\manifests` and its value under the `WEF\Developer` registry key (the same as the tray app's _Install_). Restart Word afterwards.
+- a scheduled task that starts WSL at Windows logon, so the service is up when Word opens.
+
+It installs no package and sets no environment variable. Run it again after moving the checkout or changing the Node version: the service is bound to both. Do not run the tray app (`npm start`) at the same time; both want ports 47833/47834.
+
 ---
 
 ## How it works
