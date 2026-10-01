@@ -281,7 +281,7 @@ export function staleReasons(comment, snapshot, render) {
 //     one the line numbers were read from
 // Run it after applyStates on the same snapshot. Both the Review refresh and
 // the Response tab mark with this function.
-const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
+export const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
 export function markStale(rev, snapshot) {
   const next = structuredClone(rev);
   for (const c of next.comments ?? []) {

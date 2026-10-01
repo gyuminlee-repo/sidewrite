@@ -51,7 +51,14 @@ import {
   profileDirs,
   regexProblems,
 } from "./journal-profile.mjs";
-import { citationsFor, keepLines, markStale, snapshotHash, viewText } from "./response-quotes.mjs";
+import {
+  STALE_ORDER,
+  citationsFor,
+  keepLines,
+  markStale,
+  snapshotHash,
+  viewText,
+} from "./response-quotes.mjs";
 import { applyLineResults, lineRequests, locate, savePdf } from "./response-lines.mjs";
 import { buildLetterModel, letterPlainText } from "./response-model.mjs";
 import { checkResponses, summarize, wordCount } from "./response-check.mjs";
@@ -102,6 +109,17 @@ export function usableHeadings(headings, snapshot) {
   }
   return { headings: out, dropped };
 }
+
+// What a draft is written from, as one value per stale mark: the sentences
+// the letter quotes for the comment, and its changes with their states (the
+// prompt lists each change as in the manuscript, revised by hand, or not in
+// it). Compared when the draft is saved (response_draft).
+const draftInput = (c) => ({
+  quote_changed: JSON.stringify(
+    (c.response?.citations ?? []).map((x) => [x.kind, x.quote, x.problem]),
+  ),
+  change_state: JSON.stringify((c.changes ?? []).map((ch) => [ch.id, ch.state])),
+});
 
 // States, then citations, then stale marks, from one snapshot. Pure.
 //   - a change is cited only while it is in the manuscript (accepted or
@@ -523,6 +541,7 @@ export function createResponseService({
       const comment = findComment(before, ref);
       if (!comment) throw new Error(`No reviewer comment ${ref}`);
       const L = profile.response_letter;
+      const written = draftInput(comment);
       const built = buildResponsePrompt({
         comment,
         profile,
@@ -538,17 +557,28 @@ export function createResponseService({
         gloss = g.ok ? String(g.text ?? "").trim() : "";
         if (!gloss) warnings.push(`translation failed: ${g.error ?? "empty answer"}`);
       }
+      // The model took its time: another request may have read the document
+      // again since (a sentence edited, a change decided). The draft is kept,
+      // and what it was not written for is marked, as a refresh marks it.
+      let moved = [];
       const revision = await update(d, (rev) => {
-        if (!findComment(rev, ref)) throw new Error(`No reviewer comment ${ref}`);
+        const now = findComment(rev, ref);
+        if (!now) throw new Error(`No reviewer comment ${ref}`);
+        const input = draftInput(now);
+        moved = Object.keys(written).filter((k) => input[k] !== written[k]);
         const next = setResponse(rev, ref, { text: drafted.text, gloss, source: "model" });
         const r = findComment(next, ref).response;
-        return setCitations(
-          next,
-          ref,
-          r.citations,
-          r.stale.filter((s) => s === "lines_old"),
-        );
+        const stale = moved.length
+          ? STALE_ORDER.filter((s) => moved.includes(s) || r.stale.includes(s))
+          : r.stale.filter((s) => s === "lines_old");
+        return setCitations(next, ref, r.citations, stale);
       });
+      if (moved.length) {
+        log(`[response] draft ${ref} input changed: ${moved.join(",")}`);
+        warnings.push(
+          "The manuscript changed while this answer was drafted. Read it, then save or draft it again.",
+        );
+      }
       const words = wordCount(drafted.text);
       await receipt(d, [
         decisionRecord({

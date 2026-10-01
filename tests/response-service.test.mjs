@@ -929,3 +929,88 @@ test("the headings a request brought are logged by number and level, never by te
   );
   await t.cleanup();
 });
+
+// ---- the marks of an answer that is out of date -----------------------------------
+
+// A model that answers only when told to, so the manuscript can change while
+// it writes.
+function heldModel(answer = draftOk) {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const m = model(async () => {
+    await gate;
+    return answer;
+  });
+  const asked = async () => {
+    while (!m.requests.length) await new Promise((r) => setTimeout(r, 2));
+  };
+  return { ...m, release, asked };
+}
+const EDITED = snapshotOf({ text: AFTER.replace("30 °C", "32 °C") });
+const staleRows = (rows) => rows.filter((x) => x.id === "stale").map((x) => x.detail.split(":")[0]);
+
+test("response_draft: the manuscript changed while the model wrote, so the draft is saved as out of date", async () => {
+  const m = heldModel({ ok: true, json: { response: "The temperature is now given as 30 °C." } });
+  const t = await setup({ job: m.job });
+  const drafting = t.ask("response_draft", { ref: "R1.1", ...WITH_DOC });
+  await m.asked();
+  // The author edits the sentence in Word and a pane reads the document again.
+  const seen = await t.ask("response_state", { snapshot: EDITED, headings: HEADINGS });
+  assert.match(seen.revision.comments[0].response.citations[0].quote, /held at 32 °C/);
+  m.release();
+  const r = await drafting;
+  assert.equal(r.ok, true, r.error);
+  const c = r.revision.comments[0];
+  // The answer is kept (it cost a model call), with the marks of what moved.
+  assert.equal(c.response.text, "The temperature is now given as 30 °C.");
+  assert.match(c.response.citations[0].quote, /held at 32 °C/);
+  assert.deepEqual(c.response.stale, ["quote_changed", "change_state"]);
+  assert.deepEqual(staleRows(r.checks), ["quote_changed", "change_state"]);
+  assert.match(r.warnings.join(" "), /manuscript changed while .* was drafted/);
+  assert.ok(t.lines.includes("[response] draft R1.1 input changed: quote_changed,change_state"));
+
+  // Updating the line numbers does not make it pass: the marks stay.
+  const located = await t.ask("response_locate", {
+    snapshot: EDITED,
+    headings: HEADINGS,
+    pdf_base64: PDF,
+  });
+  assert.deepEqual(located.revision.comments[0].response.stale, ["quote_changed", "change_state"]);
+  const checked = await t.ask("response_check", { snapshot: EDITED, headings: HEADINGS });
+  assert.deepEqual(staleRows(checked.checks), ["quote_changed", "change_state"]);
+  assert.deepEqual(
+    checked.checks.filter((x) => x.level === "fail").map((x) => x.id),
+    ["stale", "stale"],
+  );
+  const held = await t.ask("response_export", { snapshot: EDITED, headings: HEADINGS });
+  assert.equal(held.exported, false);
+  await t.cleanup();
+});
+
+test("response_draft: a change decided while the model wrote marks the draft; a refresh that changed nothing does not", async () => {
+  // Drafted while the change was pending ("nothing was revised"), accepted meanwhile.
+  const m = heldModel();
+  const t = await setup({ job: m.job });
+  const drafting = t.ask("response_draft", { ref: "R1.1", snapshot: PENDING, headings: HEADINGS });
+  await m.asked();
+  await t.ask("response_state", WITH_DOC);
+  m.release();
+  const r = await drafting;
+  assert.deepEqual(r.revision.comments[0].response.stale, ["quote_changed", "change_state"]);
+  await t.cleanup();
+
+  // The same document read again while the model wrote: nothing to mark.
+  const m2 = heldModel();
+  const t2 = await setup({ job: m2.job });
+  const again = t2.ask("response_draft", { ref: "R1.1", ...WITH_DOC });
+  await m2.asked();
+  await t2.ask("response_state", WITH_DOC);
+  m2.release();
+  const r2 = await again;
+  assert.deepEqual([r2.revision.comments[0].response.stale, r2.warnings], [[], []]);
+  assert.equal(
+    t2.lines.some((l) => l.includes("input changed")),
+    false,
+  );
+  await t2.cleanup();
+});
