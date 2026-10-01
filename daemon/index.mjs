@@ -560,6 +560,7 @@ const oneshotRouter = createOneshotRouter({
   http: (req) => chatOneshot(req),
   keys: providerKeys,
   getChoice: (key) => selection.choiceFor(key, "oneshot"),
+  log: console.log,
 });
 
 const review = createReviewService({
@@ -597,9 +598,9 @@ const review = createReviewService({
   },
   oneshot: makeOneshot(),
   oneshotModel: ONESHOT_MODEL,
-  // Judgments go to the provider the pane chose (default: Claude, haiku).
-  oneshotFor: (key) => oneshotRouter.forKey(key),
-  oneshotModelFor: (key) => oneshotRouter.modelLabel(key),
+  // Judgments go to the provider the pane chose (default: Claude, haiku),
+  // fixed for each job when it starts.
+  oneshotJob: (key) => oneshotRouter.pin(key),
   getModel: (key) => {
     const t = selection.choiceFor(key, "turn");
     return t.id === "claude" ? modelArgFor(key) : `${t.id}:${t.model ?? "default"}`;

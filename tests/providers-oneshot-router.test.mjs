@@ -26,9 +26,9 @@ test("routes by the pane's choice and labels the model for receipts", async () =
     ["codex", "gpt-6.1-sol"],
     ["claude", "haiku"],
   ]);
-  assert.equal(router.modelLabel("a"), "groq:llama-x");
-  assert.equal(router.modelLabel("b"), "codex:gpt-6.1-sol");
-  assert.equal(router.modelLabel("z"), "haiku");
+  assert.equal((await router.pin("a")).model, "groq:llama-x");
+  assert.equal((await router.pin("b")).model, "codex:gpt-6.1-sol");
+  assert.equal((await router.pin("z")).model, "haiku");
 });
 
 function make(choices, over = {}) {
@@ -61,9 +61,9 @@ test("the request is passed on whole; Claude keeps the chosen alias, the others 
     "http",
     { ...req, baseUrl: "http://localhost:11434/v1", apiKey: null, model: "qwen3.5:9b" },
   ]);
-  assert.equal(router.modelLabel("c"), "sonnet");
-  assert.equal(router.modelLabel("g"), "antigravity:gemini-3.8-flash-high");
-  assert.equal(router.modelLabel("o"), "ollama:qwen3.5:9b");
+  assert.equal((await router.pin("c")).model, "sonnet");
+  assert.equal((await router.pin("g")).model, "antigravity:gemini-3.8-flash-high");
+  assert.equal((await router.pin("o")).model, "ollama:qwen3.5:9b");
 });
 
 test("a key provider without a key, a custom server without a URL and an unknown provider are error results", async () => {
@@ -80,7 +80,7 @@ test("a key provider without a key, a custom server without a URL and an unknown
   assert.match((await router.forKey("u")(req)).error, /No API key/);
   assert.deepEqual(await router.forKey("x")(req), { ok: false, error: "Unknown provider nope" });
   assert.equal(calls.length, 0, "nothing was sent anywhere, and nothing fell back to Claude");
-  assert.equal(router.modelLabel("x"), "nope:m");
+  assert.equal((await router.pin("x")).model, "nope:m");
 
   const custom = make(
     { u: { id: "openai-compatible", model: "m" } },
@@ -123,6 +123,63 @@ test("the choice is read when the request runs, a failing key store is an error 
   choices.p = { id: "gemini", model: "gemini-x" };
   await shot({ system: "", prompt: "" });
   assert.equal(calls.at(-1)[1].apiKey, SECRET);
-  assert.equal(router.modelLabel("p").includes(SECRET), false);
-  assert.equal(router.modelLabel("p"), "gemini:gemini-x");
+  assert.equal((await router.pin("p")).model.includes(SECRET), false);
+  assert.equal((await router.pin("p")).model, "gemini:gemini-x");
+});
+
+// Codex review of stage 2.5: a job with several requests (a ledger check in
+// batches, a split with its requirement extraction) must not change provider
+// half way, and its receipts must name the provider that ran it.
+test("pin: one job keeps its provider and model while the pane's choice changes", async () => {
+  const choices = { p: { id: "ollama", model: "qwen3.5:9b" } };
+  const lines = [];
+  const { router, calls } = make(choices, { log: (l) => lines.push(l) });
+  const job = await router.pin("p");
+  assert.deepEqual([job.provider, job.model], ["ollama", "ollama:qwen3.5:9b"]);
+  await job.run({ system: "", prompt: "batch 1" });
+  choices.p = { id: "codex", model: "gpt-6.1-sol" }; // changed in the pane mid-job
+  await job.run({ system: "", prompt: "batch 2" });
+  choices.p = null; // back to the default
+  await job.run({ system: "", prompt: "batch 3" });
+  assert.deepEqual(
+    calls.map((c) => [c[0], c[1].model, c[1].prompt]),
+    [
+      ["http", "qwen3.5:9b", "batch 1"],
+      ["http", "qwen3.5:9b", "batch 2"],
+      ["http", "qwen3.5:9b", "batch 3"],
+    ],
+  );
+  assert.equal(job.model, "ollama:qwen3.5:9b");
+  // The next job takes the choice of its own start.
+  const next = await router.pin("p");
+  assert.deepEqual([next.provider, next.model], ["claude", "haiku"]);
+  // One log line per request, naming the provider and no text of the request.
+  assert.deepEqual(
+    lines,
+    Array(3).fill("[providers] judgment provider=ollama model=ollama:qwen3.5:9b"),
+  );
+});
+
+test("pin: a choice that cannot be resolved sends nothing anywhere and every request is that error", async () => {
+  const lines = [];
+  const { router, calls } = make(
+    {},
+    {
+      getChoice: async () => {
+        throw new Error("The task pane has not confirmed its provider for judgments yet.");
+      },
+      log: (l) => lines.push(l),
+    },
+  );
+  const job = await router.pin("p");
+  assert.deepEqual([job.provider, job.model], [null, "none"]);
+  const r = await job.run({ system: "", prompt: "secret manuscript text" });
+  assert.deepEqual(r, {
+    ok: false,
+    error: "The task pane has not confirmed its provider for judgments yet.",
+  });
+  assert.deepEqual(await router.forKey("p")({ system: "", prompt: "x" }), r);
+  assert.equal(calls.length, 0, "no provider was called, Claude included");
+  assert.equal(lines.join("\n").includes("secret manuscript"), false);
+  assert.ok(lines.every((l) => l.startsWith("[providers] judgment refused: ")));
 });

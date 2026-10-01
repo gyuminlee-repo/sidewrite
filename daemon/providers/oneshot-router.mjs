@@ -1,25 +1,37 @@
 // One-shot judgments go to the provider the pane chose (P14).
 //
 // getChoice(key) is the pane's choice for the "oneshot" role: { id, model },
-// or null for the default (Claude, haiku). forKey(key) gives a function with
-// the contract of oneshot.mjs runOneshot ({ ok, text, json?, error?,
-// limited? }, never throws); the choice is read each time it runs, so a
-// change in the pane applies to the next request.
+// or null for the default (Claude, haiku). It may be async, and it may throw
+// when the pane has no confirmed choice (selection.mjs ready()).
 //
-// Nothing here falls back to another provider: a provider that cannot be
-// used (no key, no server URL, unknown id) is an error result, so the text
-// of a manuscript never goes somewhere the user did not choose.
+// pin(key) resolves the choice ONCE and gives { provider, model, run }: the
+// handle of one job (a split with its requirement extraction, a ledger check
+// with all its batches). Every run(req) of the handle goes to that provider
+// and model, and `model` is the label its decision receipts carry
+// ("<provider>:<model>", or the bare alias for Claude as before this stage).
+// A change of the choice in the pane applies to the next pin. run has the
+// contract of oneshot.mjs runOneshot ({ ok, text, json?, error?, limited? },
+// never throws). forKey(key) is a single request: it pins and runs.
 //
-// modelLabel(key) is the model name written into decision receipts:
-// "<provider>:<model>", or the bare alias for Claude as before this stage.
+// Nothing here falls back to another provider: a choice that cannot be
+// resolved, or a provider that cannot be used (no key, no server URL,
+// unknown id), is an error result, so the text of a manuscript never goes
+// somewhere the user did not choose.
 
 import { presetById } from "./registry.mjs";
 
 const CLAUDE_DEFAULT_MODEL = "haiku";
 
-export function createOneshotRouter({ claude, codex, antigravity, http, keys, getChoice }) {
-  async function run(key, req) {
-    const choice = getChoice(key);
+export function createOneshotRouter({
+  claude,
+  codex,
+  antigravity,
+  http,
+  keys,
+  getChoice,
+  log = () => {},
+}) {
+  async function send(choice, req) {
     if (!choice || choice.id === "claude") {
       return claude({ ...req, model: choice?.model ?? CLAUDE_DEFAULT_MODEL });
     }
@@ -42,16 +54,38 @@ export function createOneshotRouter({ claude, codex, antigravity, http, keys, ge
     return http({ ...req, baseUrl, apiKey: stored.key, model: choice.model });
   }
 
+  async function pin(key) {
+    let choice;
+    try {
+      choice = (await getChoice(key)) ?? null;
+    } catch (e) {
+      // No confirmed choice: every request of this job is an error, and
+      // nothing is sent to any provider.
+      const error = String(e?.message ?? e);
+      log(`[providers] judgment refused: ${error}`);
+      return { provider: null, model: "none", run: async () => ({ ok: false, error }) };
+    }
+    const provider = choice?.id ?? "claude";
+    const model =
+      provider === "claude"
+        ? (choice?.model ?? CLAUDE_DEFAULT_MODEL)
+        : `${provider}:${choice.model ?? "default"}`;
+    return {
+      provider,
+      model,
+      run(req) {
+        // One line per request, with no text of it.
+        log(`[providers] judgment provider=${provider} model=${model}`);
+        return send(choice, req).then(
+          (r) => r,
+          (e) => ({ ok: false, error: String(e?.message ?? e) }),
+        );
+      },
+    };
+  }
+
   return {
-    forKey: (key) => (req) =>
-      run(key, req).then(
-        (r) => r,
-        (e) => ({ ok: false, error: String(e?.message ?? e) }),
-      ),
-    modelLabel(key) {
-      const choice = getChoice(key);
-      if (!choice || choice.id === "claude") return choice?.model ?? CLAUDE_DEFAULT_MODEL;
-      return `${choice.id}:${choice.model ?? "default"}`;
-    },
+    pin,
+    forKey: (key) => (req) => pin(key).then((h) => h.run(req)),
   };
 }

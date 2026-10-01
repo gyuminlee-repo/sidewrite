@@ -1751,11 +1751,10 @@ test("ledger_suggest is a job: candidates from the review text, one receipt, not
 test("review_split uses the pane's one-shot and its model label", async () => {
   const used = [];
   const t = await setup({
-    oneshotFor: (key) => async () => (
-      used.push(key),
-      { ok: true, json: { lines: [] }, text: "{}" }
-    ),
-    oneshotModelFor: (key) => `ollama:qwen3.5:9b@${key}`,
+    oneshotJob: async (key) => ({
+      run: async () => (used.push(key), { ok: true, json: { lines: [] }, text: "{}" }),
+      model: `ollama:qwen3.5:9b@${key}`,
+    }),
   });
   try {
     await t.ask("review_split", { text: "Reviewer 1\nOne comment only." });
@@ -1781,8 +1780,10 @@ test("ledger_check and ledger_suggest use the pane's one-shot too; the default s
       throw new Error("the default one-shot was used");
     },
     oneshotModel: "haiku",
-    oneshotFor: (key) => (key === "k" ? routed : null),
-    oneshotModelFor: (key) => `codex:gpt-6.1-sol@${key}`,
+    oneshotJob: async (key) => ({
+      run: key === "k" ? routed : null,
+      model: `codex:gpt-6.1-sol@${key}`,
+    }),
   });
   try {
     await t.ask("ledger_add", {
@@ -1803,6 +1804,91 @@ test("ledger_check and ledger_suggest use the pane's one-shot too; the default s
       "ledger_suggest",
     ]);
     assert.ok(log.every((r) => r.model === "codex:gpt-6.1-sol@k"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Codex review of stage 2.5: the provider of a job is taken once, when the
+// job starts. A choice changed in the pane while the job runs applies to the
+// next job; every request and every receipt of this one is the first choice.
+test("a ledger check in several batches stays on the provider it started with, and its receipts say so", async () => {
+  let choice = "ollama:qwen3.5:9b";
+  const pins = [];
+  const calls = [];
+  const t = await setup({
+    oneshot: async () => {
+      throw new Error("the default one-shot was used");
+    },
+    // As oneshot-router.mjs pin(): the choice of this moment, kept by the handle.
+    oneshotJob: async () => {
+      const mine = choice;
+      pins.push(mine);
+      return {
+        model: mine,
+        run: async () => {
+          calls.push(mine);
+          choice = "codex:gpt-6.1-sol"; // the pane changes it while the job runs
+          return { ok: true, text: "{}", json: { violations: [] } };
+        },
+      };
+    },
+  });
+  try {
+    for (const text of ["Use SI units", "Write numbers below ten as words"]) {
+      await t.ask("ledger_add", { item: { kind: "instruction", text, check: { type: "llm" } } });
+    }
+    const paragraphs = Array.from({ length: 3 }, (_, i) => ({
+      index: i,
+      text: `Paragraph ${i} is ten feet long.`,
+      reviewed_text: `Paragraph ${i} is ten feet long.`,
+    }));
+    const check = await t.ask("ledger_check", { snapshot: { paragraphs }, full: true });
+    assert.equal(check.ok, true);
+    assert.equal(pins.length, 1, "the provider was resolved once for the whole job");
+    assert.ok(calls.length >= 2, `several requests in one job (${calls.length})`);
+    assert.deepEqual([...new Set(calls)], ["ollama:qwen3.5:9b"]);
+    const log = await readDecisions(t.dir);
+    assert.ok(log.length >= 2);
+    assert.deepEqual([...new Set(log.map((r) => r.model))], ["ollama:qwen3.5:9b"]);
+    // The next job starts with the choice as it is then.
+    await t.ask("ledger_check", { snapshot: { paragraphs }, full: true });
+    assert.deepEqual(pins, ["ollama:qwen3.5:9b", "codex:gpt-6.1-sol"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_split: the split and the requirement extraction after it run on one provider", async () => {
+  let choice = "ollama:qwen3.5:9b";
+  const pins = [];
+  const calls = [];
+  const t = await setup({
+    oneshotJob: async () => {
+      const mine = choice;
+      pins.push(mine);
+      return {
+        model: mine,
+        run: async (req) => {
+          calls.push(mine);
+          choice = "codex:gpt-6.1-sol";
+          // The split: both lines start a comment. The extraction then fails.
+          if (!req.prompt.includes("\nLines:\n")) return { ok: false, error: "the model is down" };
+          const lines = [1, 2].map((n) => ({ n, type: "comment_start" }));
+          return { ok: true, json: { lines }, text: "{}" };
+        },
+      };
+    },
+  });
+  try {
+    // No reviewer heading: the regex split fails and the model is asked, then
+    // the requirements of the comments are asked for.
+    await t.ask("review_split", { text: "The units are missing.\nThe figure is unclear." });
+    assert.equal(pins.length, 1);
+    assert.ok(calls.length >= 2, `split and extraction (${calls.length})`);
+    assert.deepEqual([...new Set(calls)], ["ollama:qwen3.5:9b"]);
+    const log = await readDecisions(t.dir);
+    assert.deepEqual([...new Set(log.map((r) => r.model))], ["ollama:qwen3.5:9b"]);
   } finally {
     await t.cleanup();
   }

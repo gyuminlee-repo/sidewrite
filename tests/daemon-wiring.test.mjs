@@ -35,8 +35,8 @@ test("the endpoint serves the review service's recorder and the daemon's own rev
 });
 
 test("judgments go through the router; stop and shutdown reach a CLI turn", () => {
-  assert.match(code, /oneshotFor: \(key\) => oneshotRouter\.forKey\(key\)/);
-  assert.match(code, /oneshotModelFor: \(key\) => oneshotRouter\.modelLabel\(key\)/);
+  // One handle per job: provider and model are fixed when the job starts.
+  assert.match(code, /oneshotJob: \(key\) => oneshotRouter\.pin\(key\)/);
   assert.match(code, /if \(cliTurns\.stop\(key\)\)/);
   assert.match(code, /cliTurns\.shutdown\(\)/);
   assert.match(code, /process\.on\("SIGTERM", shutdown\)/);

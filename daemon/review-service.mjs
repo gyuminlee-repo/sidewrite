@@ -165,11 +165,15 @@ export function createReviewService({
   // Model names for decision receipts: the one-shot model, and the model of
   // the drafting session of a pane (getModel(key)). null when unknown.
   oneshotModel = null,
-  // P14: the one-shot of a pane and its receipt label, when judgments go to
-  // the provider chosen in that pane (providers/oneshot-router.mjs). The
-  // defaults are the two arguments above, for every pane.
-  oneshotFor = () => oneshot,
-  oneshotModelFor = () => oneshotModel,
+  // P14: the one-shot of ONE JOB of a pane, when judgments go to the
+  // provider chosen in that pane (providers/oneshot-router.mjs pin):
+  // async (key) => { run, model }. A job (a split with its requirement
+  // extraction, a ledger check with all its batches, a suggestion) asks for
+  // it once, when it starts; every request of the job goes through `run`
+  // and every receipt carries `model`, so a provider changed in the pane
+  // while the job runs applies to the next job. The default is the two
+  // arguments above, for every pane.
+  oneshotJob = async () => ({ run: oneshot, model: oneshotModel }),
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -515,9 +519,10 @@ export function createReviewService({
       const d = at(key);
       const text = String(msg.text ?? "");
       // A receipt only when the model was asked (a regex split is no LLM decision).
-      // Taken once: a change of provider in the pane applies to the next request.
-      const shot = oneshotFor(key);
-      const shotModel = oneshotModelFor(key);
+      // Provider and model of this job, for the split and the extraction after it.
+      const job = await oneshotJob(key);
+      const shot = job.run;
+      const shotModel = job.model;
       let asked = false;
       const ask =
         shot &&
@@ -811,8 +816,9 @@ export function createReviewService({
       const text = String(msg.text ?? "");
       if (!text.trim()) throw new Error("Paste or load the review text first.");
       const d = at(key); // before the model call: the receipt goes next to this document
-      const shotModel = oneshotModelFor(key);
-      const r = await suggestLedger(text, { oneshot: oneshotFor(key) });
+      const job = await oneshotJob(key);
+      const shotModel = job.model;
+      const r = await suggestLedger(text, { oneshot: job.run });
       log(
         `[review] ledger suggest method=${r.method} candidates=${r.candidates.length} warnings=${r.warnings.length}`,
       );
@@ -856,9 +862,11 @@ export function createReviewService({
       const paragraphs = msg.snapshot?.paragraphs ?? [];
       // L10: changed paragraphs only unless msg.full (the "Full check" button).
       const decisions = [];
-      const shotModel = oneshotModelFor(key);
+      // Every batch of this check runs on the provider and model of its start.
+      const job = await oneshotJob(key);
+      const shotModel = job.model;
       const outcomes = await checkLedgerIncremental(items, paragraphs, {
-        oneshot: oneshotFor(key),
+        oneshot: job.run,
         full: msg.full === true,
         onDecision: (x) =>
           decisions.push(
