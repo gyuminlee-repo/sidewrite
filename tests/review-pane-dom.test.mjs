@@ -2291,3 +2291,72 @@ test("a single Propose changes ends with a line: how many changes, for which com
     await t.pane.reload();
   }
 });
+
+// What the model asked the author instead of guessing (office_ask_author):
+// on the card of the comment, each with a box for the answer.
+test("a comment card shows the questions for the author; Save answer sends the answer", async () => {
+  const card = (questions) => ({
+    ref: "R1.1",
+    reviewer: 1,
+    text: "The run time does not agree.",
+    requirements: [{ id: "q1", text: "make the run time consistent" }],
+    status: "in_progress",
+    changes: [],
+    blocked: [],
+    questions,
+  });
+  const revision = {
+    comments: [
+      card([
+        {
+          id: "a1",
+          requirement_id: "q1",
+          question: "Which run time is right?",
+          why: "Two values.",
+          answer: "",
+          answered_at: null,
+        },
+        {
+          id: "a2",
+          requirement_id: null,
+          question: "How many flasks?",
+          why: "Not said.",
+          answer: "12",
+          answered_at: "2026-01-01T00:00:00Z",
+        },
+      ]),
+      { ...card([]), ref: "R1.2" },
+    ],
+    ledger: [],
+  };
+  const t = await setup({ revision });
+  const all = () => findAll(t.$("review-comments"), () => true);
+  const texts = all().map((n) => n.textContent);
+  assert.equal(
+    texts.filter((x) => x === "Questions for the author").length,
+    1,
+    "only on the card that has some",
+  );
+  assert.ok(texts.includes("a1 (q1): Which run time is right?"));
+  assert.ok(texts.includes("Why it is asked: Two values."));
+  assert.ok(texts.includes("a2: How many flasks?"));
+  const answers = () => all().filter((n) => n.attributes.class === "review-answer");
+  assert.deepEqual(
+    answers().map((n) => n.value),
+    ["", "12"],
+  );
+  typeInto(answers()[0], "3,020 hours.");
+  // The pane is told a question was noted: it loads again, the draft stays.
+  t.pane.onEvent({ type: "review_event", event: "comment_noted", ref: "R1.1" });
+  await settle();
+  assert.equal(t.requests.filter((r) => r.type === "review_load").length, 2);
+  assert.equal(answers()[0].value, "3,020 hours.");
+  await all()
+    .filter((n) => n.textContent === "Save answer")[0]
+    .click();
+  assert.deepEqual(t.requests.filter((r) => r.type === "review_question_answer").at(-1).payload, {
+    ref: "R1.1",
+    id: "a1",
+    answer: "3,020 hours.",
+  });
+});
