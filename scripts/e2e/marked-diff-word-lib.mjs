@@ -3,8 +3,13 @@
 // how one pair is judged. No Word, no files.
 //
 // A structure is what marked-diff-word.ps1 reads from an open document:
-// { paragraphs: [text], tables: [{ rows, columns, cells: [text] }],
-//   bookmarks: [{ name, text }] }. The texts are Word's own (Range.Text), so
+// { paragraphs: [text], inline: [n], fields: [n],
+//   tables: [{ rows, columns, uniform, cells: [text], at: ["row,column"] }],
+//   bookmarks: [{ name, text }] }. inline and fields are, for every
+// paragraph, the number of its inline shapes (pictures, objects) and of its
+// fields. uniform is Word's Table.Uniform (false when cells are merged), at
+// the row and column index of every cell: a cell that was merged into the
+// one above it is not there. The texts are Word's own (Range.Text), so
 // a paragraph ends in "\r", a cell in "\r\u0007", and breaks are the control
 // characters U+000B (line), U+000C (page) and U+000E (column). Both sides of
 // every comparison come from Word, so these conventions cancel out.
@@ -37,6 +42,9 @@ export const KINDS = [
   "bookmark",
   "pending-changes",
   "footnote-header",
+  "cell-merge",
+  "picture",
+  "field",
 ];
 
 // The pairs, by their name in tests/marked_diff_corpus.py, with the kinds each
@@ -82,6 +90,11 @@ export const PAIRS = [
   ["a bookmark in a changed paragraph", ["bookmark"]],
   ["a pending insertion in the clean file", ["pending-changes"]],
   ["a footnote and a header, change elsewhere", ["footnote-header"]],
+  ["a cell merged across two columns", ["cell-merge"]],
+  ["a cell merged down a column", ["cell-merge"]],
+  ["a merged cell split again", ["cell-merge"]],
+  ["a paragraph with a picture added", ["picture", "paragraph-added"]],
+  ["a paragraph with a field added", ["field", "paragraph-added"]],
 ].map(([name, covers]) => ({ name, covers }));
 
 // Kinds of KINDS that no pair covers.
@@ -106,11 +119,28 @@ function firstTextDifference(what, got, want) {
   return null;
 }
 
+// The first paragraph whose count of pictures or fields differs.
+function firstCountDifference(what, got, want) {
+  for (let i = 0; i < want.length; i++) {
+    if (got[i] !== want[i]) {
+      return `paragraph ${i + 1} ${what}: expected ${want[i]}, got ${got[i]}`;
+    }
+  }
+  return null;
+}
+
 // What differs between two structures, as one line, or null. `bookmarks`:
 // compare them too (the accept side: the output carries the clean document's).
 export function compareStructure(got, want, { bookmarks = true } = {}) {
   const paragraphs = firstTextDifference("paragraph", got.paragraphs ?? [], want.paragraphs ?? []);
   if (paragraphs) return paragraphs;
+  for (const [key, what] of [
+    ["inline", "pictures"],
+    ["fields", "fields"],
+  ]) {
+    const d = firstCountDifference(what, got[key] ?? [], want[key] ?? []);
+    if (d) return d;
+  }
   const [gt, wt] = [got.tables ?? [], want.tables ?? []];
   if (gt.length !== wt.length) return `table count: expected ${wt.length}, got ${gt.length}`;
   for (let i = 0; i < wt.length; i++) {
@@ -119,6 +149,11 @@ export function compareStructure(got, want, { bookmarks = true } = {}) {
         return `table ${i + 1} ${key}: expected ${wt[i][key]}, got ${gt[i][key]}`;
       }
     }
+    if (gt[i].uniform !== wt[i].uniform) {
+      return `table ${i + 1} uniform (no merged cells): expected ${wt[i].uniform}, got ${gt[i].uniform}`;
+    }
+    const at = firstTextDifference(`table ${i + 1} cell position`, gt[i].at ?? [], wt[i].at ?? []);
+    if (at) return at;
     const cell = firstTextDifference(`table ${i + 1} cell`, gt[i].cells ?? [], wt[i].cells ?? []);
     if (cell) return cell;
   }

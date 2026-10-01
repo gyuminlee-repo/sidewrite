@@ -57,16 +57,28 @@ function AppProcessId($app) {
 # What the comparison needs of an open document, in Word's own terms.
 function Shape($doc) {
   $paras = @()
-  foreach ($x in $doc.Paragraphs) { $paras += [string]$x.Range.Text }
+  $inline = @()
+  $fields = @()
+  foreach ($x in $doc.Paragraphs) {
+    $paras += [string]$x.Range.Text
+    $inline += [int]$x.Range.InlineShapes.Count
+    $fields += [int]$x.Range.Fields.Count
+  }
   $tables = @()
   foreach ($t in $doc.Tables) {
+    # Rows and columns are only counted, cells are read through the range of the table:
+    # a single row or column of a table with merged cells cannot be reached.
     $cells = @()
-    foreach ($c in $t.Range.Cells) { $cells += [string]$c.Range.Text }
-    $tables += [ordered]@{ rows = [int]$t.Rows.Count; columns = [int]$t.Columns.Count; cells = $cells }
+    $at = @()
+    foreach ($c in $t.Range.Cells) {
+      $cells += [string]$c.Range.Text
+      $at += ([string]$c.RowIndex + "," + [string]$c.ColumnIndex)
+    }
+    $tables += [ordered]@{ rows = [int]$t.Rows.Count; columns = [int]$t.Columns.Count; uniform = [bool]$t.Uniform; cells = $cells; at = $at }
   }
   $marks = @()
   foreach ($b in $doc.Bookmarks) { $marks += [ordered]@{ name = [string]$b.Name; text = [string]$b.Range.Text } }
-  return [ordered]@{ paragraphs = $paras; tables = $tables; bookmarks = $marks }
+  return [ordered]@{ paragraphs = $paras; inline = $inline; fields = $fields; tables = $tables; bookmarks = $marks }
 }
 
 function RunJob($app, $job) {

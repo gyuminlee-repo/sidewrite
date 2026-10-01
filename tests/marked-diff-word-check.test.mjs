@@ -44,8 +44,9 @@ const good = () => ({
   color: job(shape([]), { raw: { paragraphs: 4, tables: 1 } }),
 });
 
-test("the selection is fixed, 30 to 40 pairs, and covers every kind of change", () => {
-  assert.ok(PAIRS.length >= 30 && PAIRS.length <= 40, String(PAIRS.length));
+test("the selection is fixed, 30 to 45 pairs, and covers every kind of change", () => {
+  assert.ok(PAIRS.length >= 30 && PAIRS.length <= 45, String(PAIRS.length));
+  for (const k of ["cell-merge", "picture", "field"]) assert.ok(KINDS.includes(k), k);
   assert.equal(new Set(PAIRS.map((p) => p.name)).size, PAIRS.length);
   assert.deepEqual(uncovered(), []);
   for (const p of PAIRS) for (const k of p.covers) assert.ok(KINDS.includes(k), `${p.name}: ${k}`);
@@ -125,6 +126,58 @@ test("tables are compared by their number, rows, columns and cell texts", () => 
     compareStructure(t(1, 1, ["x"]), t(1, 1, ["a"])),
     'table 1 cell 1: expected "a", got "x"',
   );
+});
+
+test("tables are compared by where their cells stand, so a merge that is left behind shows", () => {
+  const t = (uniform, at) =>
+    shape(["p\r"], [{ rows: 2, columns: 2, uniform, cells: at.map(() => "a\r\u0007"), at }]);
+  const four = t(true, ["1,1", "1,2", "2,1", "2,2"]);
+  assert.equal(compareStructure(four, four), null);
+  // A cell merged down the first column: Word reports three cells.
+  assert.equal(
+    compareStructure(t(false, ["1,1", "1,2", "2,2"]), four),
+    "table 1 uniform (no merged cells): expected true, got false",
+  );
+  // Merged across in one, merged down in the other: neither is uniform.
+  assert.equal(
+    compareStructure(t(false, ["1,1", "2,1", "2,2"]), t(false, ["1,1", "1,2", "2,2"])),
+    'table 1 cell position 2: expected "1,2", got "2,1"',
+  );
+  // A report without these fields (an older script) compares as before.
+  const old = shape(["p\r"], [{ rows: 2, columns: 2, cells: ["a", "b", "c", "d"] }]);
+  assert.equal(compareStructure(old, old), null);
+});
+
+test("paragraphs are compared by their pictures and fields too", () => {
+  const p = (inline, fields) => ({ ...shape(["One.\r", "Two.\r"]), inline, fields });
+  assert.equal(compareStructure(p([0, 1], [0, 0]), p([0, 1], [0, 0])), null);
+  assert.equal(
+    compareStructure(p([0, 1], [0, 0]), p([0, 0], [0, 0])),
+    "paragraph 2 pictures: expected 0, got 1",
+  );
+  assert.equal(
+    compareStructure(p([0, 0], [0, 0]), p([0, 0], [1, 0])),
+    "paragraph 1 fields: expected 1, got 0",
+  );
+  // The texts are told first: a count that differs because a paragraph is missing is not a second finding.
+  assert.match(
+    compareStructure({ ...shape(["One.\r"]), inline: [0] }, p([0, 1], [0, 0])),
+    /^paragraph count: /,
+  );
+});
+
+test("a pair fails when rejecting leaves a picture or a merged cell", () => {
+  const a = good();
+  a.reject = job({ ...BASE, inline: [0, 1, 0] });
+  a.base = job({ ...BASE, inline: [0, 0, 0] });
+  assert.equal(
+    judgePair(a).first,
+    "reject-all is not the baseline: paragraph 2 pictures: expected 0, got 1",
+  );
+  const b = good();
+  b.reject = job({ ...BASE, tables: [{ ...CLEAN.tables[0], uniform: false }] });
+  b.base = job({ ...BASE, tables: [{ ...CLEAN.tables[0], uniform: true }] });
+  assert.match(judgePair(b).first, /^reject-all is not the baseline: table 1 uniform/);
 });
 
 test("a pair passes when Word opens everything and both sides match", () => {

@@ -121,7 +121,7 @@ no daemon, no port and no task pane.
 node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
 ```
 
-- For 40 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
+- For 45 fixed pairs of `tests/marked_diff_corpus.py` (the list and what each
   pair covers: `PAIRS` in `marked-diff-word-lib.mjs`) it writes the baseline and
   the clean document under `<base-dir>/mdw-<time>/pairs/<nn>/` and runs the tool
   in both modes.
@@ -130,8 +130,10 @@ node scripts/e2e/marked-diff-word-check.mjs --base-dir /mnt/d/some/folder
   path, and in that Word opens each file read-only, without a repair and
   without dialogs. The track-changes output is opened twice: once for
   `Revisions.AcceptAll()`, once for `Revisions.RejectAll()`. The structure is
-  read each time (the text of every paragraph, every table with its rows,
-  columns and cell texts, every bookmark with its text) and the document is
+  read each time (the text of every paragraph and how many pictures and
+  fields it holds, every table with its rows, columns, cell texts, whether
+  cells are merged (`Table.Uniform`) and where each cell stands, every
+  bookmark with its text) and the document is
   closed without saving. The clean and the baseline document are read the
   same way; the colour output is opened and its paragraphs and tables counted.
 - A pair passes when Word opens every file without an error and without
