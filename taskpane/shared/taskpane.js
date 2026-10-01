@@ -709,11 +709,16 @@ async function handleServerMessage(msg) {
     case "assistant_event":
       // turn_complete, error and auth_error end the turn (turn-state.js).
       turn.onAssistantEvent(msg);
+      if (msg.event === "error" || msg.event === "auth_error") {
+        reviewPane?.onTurnError?.(msg.error);
+      }
       if (msg.event === "tool_use_announce") {
         appendToolUse(msg.tool, msg.input);
         setAgentStatus("working", statusForTool(msg.tool));
       } else if (msg.event === "turn_complete") {
         setAgentStatus("idle", msg.interrupted ? "Stopped" : "Ready");
+        // A stopped turn ends a "Propose all" run too (review-pane.js).
+        if (msg.interrupted) reviewPane?.onTurnError?.("The turn was stopped.");
       } else if (msg.event === "info") {
         appendNotice(msg.message);
       } else if (msg.event === "error") {

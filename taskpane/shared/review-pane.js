@@ -30,7 +30,9 @@ import {
   ledgerImportFromJson,
   candidateRule,
   candidateLabel,
+  queueRefs,
 } from "./review-view.js";
+import { createProposeQueue } from "./propose-queue.js";
 
 const UNKNOWN_HINT =
   "Word did not answer; this exception may already be applied. Refresh status, then check the paragraph.";
@@ -41,6 +43,10 @@ const OVERRIDE_WAIT = 120_000;
 const CONNECTION_LOST =
   "The connection to the daemon was lost before the result came. Run it again.";
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
+// "Propose all": the longest wait for the end of one review turn.
+const TURN_WAIT_MS = 30 * 60_000;
+// How long a turn that reported an error may still send its turn_done.
+const TURN_ERROR_GRACE_MS = 5_000;
 
 export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFlight }) {
   const root = document.getElementById("review-root");
@@ -63,6 +69,8 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
     candidates: [], // P15: ledger rule candidates of the last suggestion, each with `picked`
+    turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
+    queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
   };
 
   function el(tag, props = {}, ...kids) {
@@ -325,32 +333,16 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         text: "Propose changes",
       });
       proposeButtons.push(propose);
-      propose.disabled = isTurnInFlight();
+      propose.disabled = isTurnInFlight() || queue.running;
       // The turn is taken on the click, before the selection and refresh()
       // waits: a second click meanwhile is ignored (Codex review 8) and the
       // daemon, which queues the agent message before it answers, may send
       // turn_complete and turn_done before the answer (Codex review 7).
       // onTurnStarted returns a release that ends only this turn. The check
       // runs before guard() so an ignored click keeps the message line.
-      const run = guard(async (release) => {
-        let r;
-        try {
-          const paragraphs = $("review-use-selection").checked
-            ? await word.selectionParagraphs()
-            : [];
-          // A fresh snapshot first: outside changes are caught before the turn
-          // (L4) and the new words of the turn are checked against it (L2).
-          await refresh();
-          const done = state.turnsDone;
-          r = await ask("review_propose", { ref: c.ref, paragraphs });
-          if (state.turnsDone === done && isTurnInFlight()) startProgress(c.ref, r.started_at);
-        } catch (e) {
-          release?.();
-          throw e;
-        }
-      });
+      const run = guard((release) => proposeRef(c.ref, release, $("review-use-selection").checked));
       propose.addEventListener("click", () => {
-        if (isTurnInFlight()) return;
+        if (isTurnInFlight() || queue.running) return;
         return run(
           onTurnStarted(`Review ${c.ref}: proposing changes (tracked, one comment per change)...`),
         );
@@ -541,13 +533,18 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     }
   }
 
-  // L9: elapsed time of the running turn and comments not done.
+  // L9: elapsed time of the running turn and comments not done. P15: the
+  // place in a "Propose all" run goes in front ("Propose all: 2/5 R1.2.").
   function showProgress() {
     const bar = $("review-progress");
-    bar.hidden = !state.turn;
-    if (state.turn) {
-      bar.textContent = progressText({ ...state.turn, comments: state.revision?.comments ?? [] });
-    }
+    bar.hidden = !state.turn && !state.queueNote;
+    if (bar.hidden) return;
+    bar.textContent = [
+      state.queueNote,
+      state.turn && progressText({ ...state.turn, comments: state.revision?.comments ?? [] }),
+    ]
+      .filter(Boolean)
+      .join(" ");
   }
   function startProgress(ref, startedAt) {
     state.turn = { ref, startedAt: startedAt ?? Date.now() };
@@ -574,6 +571,105 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
   }
 
   // ---- actions --------------------------------------------------------------
+  // Start the review turn of one comment. `release` (from onTurnStarted) ends
+  // the turn taken for it when the request fails.
+  async function proposeRef(ref, release, useSelection) {
+    try {
+      const paragraphs = useSelection ? await word.selectionParagraphs() : [];
+      // A fresh snapshot first: outside changes are caught before the turn
+      // (L4) and the new words of the turn are checked against it (L2).
+      await refresh();
+      const done = state.turnsDone;
+      const r = await ask("review_propose", { ref, paragraphs });
+      if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);
+    } catch (e) {
+      release?.();
+      throw e;
+    }
+  }
+
+  // ---- P15: Propose all -------------------------------------------------------
+  // A turn of the queue ends at its turn_done (after the reload and refresh
+  // that event starts), at an error or stop of the turn (onTurnError), at a
+  // new connection (reload), or after TURN_WAIT_MS without any of them.
+  function waitTurn(ref) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(
+        () => endWait(ref, { ok: false, error: "No turn end after 30 minutes." }),
+        TURN_WAIT_MS,
+      );
+      timer.unref?.();
+      state.turnWaiters.set(ref, { resolve, timer });
+    });
+  }
+  function endWait(ref, result) {
+    const w = state.turnWaiters.get(ref);
+    if (!w) return;
+    state.turnWaiters.delete(ref);
+    clearTimeout(w.timer);
+    clearTimeout(w.grace);
+    w.resolve(w.error ? { ok: false, error: w.error } : result);
+  }
+  function endAllWaits(error) {
+    for (const ref of [...state.turnWaiters.keys()]) endWait(ref, { ok: false, error });
+  }
+  // The error is kept and the wait ends at the turn_done that comes with it
+  // (before or after), so the summary of the run is written after the
+  // refresh of that turn_done; without one it ends after a short grace.
+  function failWaits(error) {
+    for (const [ref, w] of state.turnWaiters) {
+      if (w.error) continue;
+      w.error = error;
+      w.grace = setTimeout(() => endWait(ref), TURN_ERROR_GRACE_MS);
+      w.grace.unref?.();
+    }
+  }
+  const queue = createProposeQueue({
+    // The selection is not sent: it belongs to one comment, not to all.
+    async proposeOne(ref) {
+      if (isTurnInFlight()) return { ok: false, error: "Another turn is running." };
+      const release = onTurnStarted(`Review ${ref}: proposing changes (Propose all)...`);
+      const ended = waitTurn(ref); // before the request: turn_done may beat its answer
+      try {
+        await proposeRef(ref, release, false);
+      } catch (e) {
+        endWait(ref, { ok: false, error: e.message });
+      }
+      return ended;
+    },
+    onProgress({ index, total, ref }) {
+      state.queueNote = `Propose all: ${index + 1}/${total} ${ref}.`;
+      showProgress();
+    },
+  });
+  function showQueueButtons() {
+    $("review-propose-all").disabled = queue.running;
+    $("review-propose-stop").hidden = !queue.running;
+    for (const b of proposeButtons) b.disabled = isTurnInFlight() || queue.running;
+  }
+  // Not under guard(): the run outlasts many renders and keeps the message
+  // line of each refresh until its own summary.
+  $("review-propose-all").addEventListener("click", async () => {
+    if (queue.running || isTurnInFlight()) return;
+    const refs = queueRefs(state.revision);
+    if (!refs.length) return say("No open comment to propose changes for.", true);
+    const running = queue.run(refs);
+    showQueueButtons();
+    const r = await running;
+    state.queueNote = null;
+    const ok = r.done.filter((d) => d.ok).length;
+    const tail = `${ok} of ${refs.length} proposed.`;
+    if (r.failed) say(`Propose all stopped at ${r.failed}: ${r.error} ${tail}`, true);
+    else if (r.stopped) say(`Propose all stopped before ${r.next}. ${tail}`);
+    else say(`Propose all: ${tail}`);
+    render();
+    showQueueButtons();
+  });
+  $("review-propose-stop").addEventListener("click", () => {
+    queue.stop();
+    say("Propose all stops after the comment that is running.");
+  });
+
   async function load() {
     const r = await ask("review_load");
     state.path = r.path;
@@ -869,7 +965,10 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
         load()
           .then(refresh)
           .catch((e) => say(e.message, true))
-          .finally(render);
+          .finally(() => {
+            render();
+            endWait(msg.ref, { ok: true }); // Propose all: the next comment may start
+          });
       } else if (msg.event === "late_result_recorded") {
         // A tracked edit that timed out was applied after all and is now recorded.
         say(`${msg.ref}: an edit that timed out was applied; recorded as ${msg.change_id}.`);
@@ -884,12 +983,20 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     },
     // Any turn of the pane (chat or review) started or ended.
     setTurnBusy(busy) {
-      for (const b of proposeButtons) b.disabled = busy;
+      for (const b of proposeButtons) b.disabled = busy || queue.running;
+    },
+    // The running turn ended on an error or was stopped (taskpane.js): a
+    // "Propose all" run ends there instead of starting the next comment.
+    onTurnError(error) {
+      failWaits(error || "The turn ended with an error.");
     },
     // A new connection (welcome) means no turn of this pane is running any
     // more: a daemon restart never sends turn_done, so clear the progress line.
-    // Jobs of the old connection are ended with an error first.
+    // Jobs of the old connection are ended with an error first, and so is a
+    // "Propose all" run waiting for its turn.
     reload: () =>
-      (dropJobs(), stopProgress(), load()).catch((e) => say(e.message, true)).finally(render),
+      (dropJobs(), endAllWaits(CONNECTION_LOST), stopProgress(), load())
+        .catch((e) => say(e.message, true))
+        .finally(render),
   };
 }

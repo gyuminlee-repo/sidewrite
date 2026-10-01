@@ -433,6 +433,11 @@ export function progressText({ ref, startedAt, now = Date.now(), comments = [] }
   return `${ref} running ${clock}. ${open} of ${comments.length} comments not done.`;
 }
 
+// P15. The comments "Propose all" runs, in list order: every one not done.
+export function queueRefs(revision) {
+  return (revision?.comments ?? []).filter((c) => c.status !== "done").map((c) => c.ref);
+}
+
 // ---- P15: review text from a file --------------------------------------------
 
 export const REVIEW_FILE_MAX_BYTES = 2 * 1024 * 1024;

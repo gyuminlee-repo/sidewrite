@@ -964,3 +964,155 @@ test("ledger suggestions: a checklist from the review text; Add selected imports
   assert.equal(boxes().length, 0, "the list is cleared once added");
   assert.equal(t.$("ledger-candidates-actions").hidden, true);
 });
+
+// P15 "Propose all": one review turn per open comment, the next one only
+// after the turn_done of the one before.
+async function proposeAllSetup() {
+  const { createTurnState } = await import("../taskpane/shared/turn-state.js");
+  globalThis.document = fakeDocument();
+  const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+  const c = (ref, status) => ({
+    ref,
+    reviewer: 1,
+    text: "State the unit.",
+    requirements: [],
+    status,
+    changes: [],
+    blocked: [],
+  });
+  const revision = {
+    comments: [
+      c("R1.1", "pending"),
+      c("R1.2", "done"),
+      c("R1.3", "pending"),
+      c("R2.1", "in_progress"),
+    ],
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  let pane = null;
+  const turn = createTurnState({ getReviewPane: () => pane });
+  const proposals = [];
+  const sendRequest = async (type, payload) => {
+    if (type === "review_refresh") return { ok: true, rows: [], counts, external: [], revision };
+    if (type === "review_propose") {
+      proposals.push([payload.ref, payload.paragraphs.length]);
+      return { ok: true, started: true, ref: payload.ref, started_at: Date.now(), revision };
+    }
+    return { ok: true, revision, path: "/m/paper.revision.json" };
+  };
+  pane = initReviewPane({
+    sendRequest,
+    word: {
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }),
+      selectionParagraphs: async () => [{ index: 1, text: "selected" }],
+    },
+    onTurnStarted() {
+      const id = turn.begin();
+      return () => turn.endIf(id);
+    },
+    isTurnInFlight: () => turn.inFlight,
+  });
+  await pane.reload();
+  const $ = (id) => document.getElementById(id);
+  const wait = () => new Promise((r) => setTimeout(r, 5));
+  // What the daemon sends when the turn of `ref` ends.
+  const endTurn = (ref, error = null) => {
+    turn.onAssistantEvent({ event: error ? "error" : "turn_complete" });
+    if (error) pane.onTurnError(error);
+    pane.onEvent({ type: "review_event", event: "turn_done", ref });
+  };
+  return { pane, turn, proposals, $, wait, endTurn };
+}
+
+test("Propose all sends the next review_propose only after turn_done; an error stops the queue", async () => {
+  const t = await proposeAllSetup();
+  try {
+    t.$("review-use-selection").checked = true; // not used by Propose all
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    assert.deepEqual(t.proposals, [["R1.1", 0]]);
+    assert.equal(t.$("review-propose-stop").hidden, false);
+    assert.equal(t.$("review-propose-all").disabled, true);
+    assert.match(t.$("review-progress").textContent, /^Propose all: 1\/3 R1\.1\. R1\.1 running/);
+    const cards = () =>
+      findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes").map(
+        (b) => b.disabled,
+      );
+    assert.deepEqual(cards(), [true, true, true, true]);
+
+    await t.wait();
+    assert.equal(t.proposals.length, 1, "no second turn while the first one runs");
+    await t.$("review-propose-all").click(); // a second press while it runs
+    assert.equal(t.proposals.length, 1);
+
+    t.endTurn("R1.1");
+    await t.wait();
+    assert.deepEqual(
+      t.proposals.map((p) => p[0]),
+      ["R1.1", "R1.3"],
+      "the done comment R1.2 is skipped",
+    );
+    assert.equal(t.turn.inFlight, true);
+
+    t.endTurn("R1.3", "Claude usage limit reached.");
+    await all;
+    assert.equal(t.proposals.length, 2, "R2.1 is not started after the failure");
+    assert.match(
+      t.$("review-message").textContent,
+      /Propose all stopped at R1\.3: Claude usage limit reached\. 1 of 3 proposed\./,
+    );
+    assert.equal(t.$("review-propose-stop").hidden, true);
+    assert.equal(t.$("review-propose-all").disabled, false);
+    assert.equal(t.turn.inFlight, false);
+    assert.deepEqual(cards(), [false, false, false, false]);
+    assert.equal(t.$("review-progress").hidden, true);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+test("Propose all: Stop after this one lets the turn end and starts no other; a reconnect ends the wait", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    await t.$("review-propose-stop").click();
+    await t.wait();
+    assert.equal(t.proposals.length, 1);
+    t.endTurn("R1.1");
+    await all;
+    assert.equal(t.proposals.length, 1);
+    assert.match(t.$("review-message").textContent, /Propose all stopped before R1\.3\. 1 of 3/);
+
+    // A daemon restart never sends turn_done: welcome (reload) ends the wait.
+    const again = t.$("review-propose-all").click();
+    await t.wait();
+    assert.equal(t.proposals.length, 2);
+    t.turn.end(); // ws.onclose
+    await t.pane.reload();
+    await again;
+    assert.equal(t.proposals.length, 2);
+    assert.match(t.$("review-message").textContent, /stopped at R1\.1: The connection/);
+  } finally {
+    await t.pane.reload();
+  }
+});
+
+// The usage-limit path of the daemon: turn_complete, turn_done, then error.
+test("Propose all: an error that comes after turn_done still stops the queue and keeps the summary", async () => {
+  const t = await proposeAllSetup();
+  try {
+    const all = t.$("review-propose-all").click();
+    await t.wait();
+    t.turn.onAssistantEvent({ event: "turn_complete", subtype: "stream_ended" });
+    t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.1" });
+    t.pane.onTurnError("Claude usage limit reached.");
+    await all;
+    await t.wait();
+    assert.equal(t.proposals.length, 1);
+    assert.match(t.$("review-message").textContent, /^Propose all stopped at R1\.1: Claude usage/);
+  } finally {
+    await t.pane.reload();
+  }
+});
