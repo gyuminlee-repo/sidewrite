@@ -34,7 +34,7 @@ In Word, the Providers section of the Setup tab has one row for each kind of wor
 - **Writing**: response drafts, and translations and questions about a selection.
 - **Judgments**: splitting a review, extracting requests, checking the ledger and forbidden expressions, reading journal guidelines.
 
-Until you choose, Edits and Writing use the best Claude model your account lists (an Opus model; Sonnet when it lists none) and Judgments use Haiku. A choice you made earlier is kept. A better model uses more of your subscription's limit: Opus costs roughly 5× Sonnet, and Sonnet roughly 3 to 5× Haiku.
+Until you choose, Edits and Writing use the best Claude model your account lists (an Opus model; Sonnet when it lists none) and Judgments use Haiku. A model you picked in a menu is kept; a model that an earlier version stored as its default, without your picking it, is not. A better model uses more of your subscription's limit: Opus costs roughly 5× Sonnet, and Sonnet roughly 3 to 5× Haiku.
 
 A line under the tabs says what each kind of work last ran on, for example `Edits: Claude · Opus 5.5   Writing: Claude · Opus 5.5   Judgments: Claude · Haiku 4.5`. It shows the model the provider reported for the request (for Claude, the one the SDK names when the run starts), not the menu choice; when another model ran than the one asked for, it says `asked for ..., ran on ...`. A click on it opens Setup. Result lines name it too (`Drafted R1.2 with Claude · Opus 5.5.`). The connection indicator in the top bar shows the model of the running chat session in the same way. The Excel pane has the composer dropdown only.
 

@@ -2234,12 +2234,28 @@ test("a single Propose changes ends with a line: how many changes, for which com
     await t.wait();
     const c = t.revision.comments[0];
     c.changes.push(
-      { id: "R1.1-1", word_comment_id: "w1", state: "pending" },
-      { id: "R1.1-2", word_comment_id: "w2", state: "pending" },
+      {
+        id: "R1.1-1",
+        word_comment_id: "w1",
+        state: "pending",
+        kind: "replace",
+        before: "b",
+        after: "a",
+        rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+      },
+      {
+        id: "R1.1-2",
+        word_comment_id: "w2",
+        state: "pending",
+        kind: "replace",
+        before: "b",
+        after: "a",
+        rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+      },
     );
     t.doc.comments.push(
-      { id: "w1", text: "[R1.1] a / b / c" },
-      { id: "w2", text: "[R1.1] d / e / f" },
+      { id: "w1", content: "[R1.1] a / b / c" },
+      { id: "w2", content: "[R1.1] d / e / f" },
     );
     t.endTurn("R1.1");
     await t.wait();
@@ -2251,7 +2267,12 @@ test("a single Propose changes ends with a line: how many changes, for which com
     // An edit the forbid list blocked is said, also when nothing else came.
     await buttons()[0].click();
     await t.wait();
-    c.blocked.push({ id: "B1", blocked_by: ["L2"] });
+    c.blocked.push({
+      id: "R1.1-b1",
+      args: { find: "x", replace: "novel x" },
+      blocked_by: ["L2"],
+      created_at: "2026-01-01T00:00:00Z",
+    });
     t.endTurn("R1.1");
     await t.wait();
     await t.wait();

@@ -38,6 +38,17 @@ export function isStoredModelValid(v) {
   return typeof v === "string" && v !== "default" && /^[A-Za-z0-9][\w.:\-[\]]{0,80}$/.test(v);
 }
 
+// The model of edits a pane stored, or null when it stored no choice. Until
+// the default became the best model, every saved setting carried model:
+// "sonnet" (the default of the time), chosen or not. So a stored model counts
+// as a choice only with the mark the menus set when the user picks one
+// (modelChosen); without it the stored value is that old default.
+export function storedEditsModel(settings) {
+  return settings?.modelChosen === true && isStoredModelValid(settings.model)
+    ? settings.model
+    : null;
+}
+
 // The daemon answers set_model with the model it will use (it checks the
 // choice against the account's list). A line for the chat when that is not
 // the model the pane asked for, else null.
