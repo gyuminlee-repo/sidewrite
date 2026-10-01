@@ -205,6 +205,8 @@ function setAgentStatus(state, label) {
 $stopAgent?.addEventListener("click", () => {
   if (!wsReady) return;
   setAgentStatus("working", "Stopping…");
+  // A review turn that is not with the daemon yet is stopped in the pane.
+  reviewPane?.onStop?.();
   wsSend({ type: "stop_agent" });
 });
 

@@ -689,11 +689,18 @@ export function initReviewPane({
   // comment.
   async function proposeRef(ref, release, useSelection) {
     state.reviewTurnOpen = true;
+    // Until the request is sent the daemon has no turn to stop. A Stop in
+    // that stretch is kept here (onStop) and the request is not sent: no
+    // turn starts after the author's Stop.
+    const mine = { stopped: false };
+    state.starting = mine;
     try {
       const paragraphs = useSelection ? await promptParagraphs() : [];
       // A fresh snapshot first: outside changes are caught before the turn
       // (L4) and the new words of the turn are checked against it (L2).
       await refresh();
+      if (mine.stopped) throw new Error("The turn was stopped.");
+      state.starting = null; // from here the daemon stops it (stop_agent)
       const done = state.turnsDone;
       // wait_ms: how long this pane waits for the answer. The daemon starts
       // no turn for a request that waited longer at its gate.
@@ -708,6 +715,8 @@ export function initReviewPane({
       state.reviewTurnOpen = false;
       release?.();
       throw e;
+    } finally {
+      if (state.starting === mine) state.starting = null;
     }
   }
 
@@ -1153,8 +1162,12 @@ export function initReviewPane({
           msg.ok === false
             ? { ok: false, error: msg.error || "The turn ended with an error." }
             : null;
+        // notice: what the daemon says with a turn that worked (a request
+        // of the comment left without a change); shown after the counts.
+        const report = (text, bad) =>
+          say(!failed && msg.notice ? `${text} ${msg.notice}` : text, bad);
         load()
-          .then(refresh)
+          .then(() => refreshWith(report))
           .then(
             (inv) => {
               if (failed) return failed;
@@ -1229,6 +1242,13 @@ export function initReviewPane({
           .catch((e) => say(e.message, true))
           .finally(render);
       }
+    },
+    // The Stop button (taskpane.js). true when a review turn was on its
+    // way to the daemon and is now not sent.
+    onStop() {
+      if (!state.starting) return false;
+      state.starting.stopped = true;
+      return true;
     },
     // Any turn of the pane (chat or review) started or ended.
     setTurnBusy(busy) {
