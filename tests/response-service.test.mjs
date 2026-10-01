@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -1189,5 +1198,127 @@ test("response_translate: what it needs, and an answer changed while it ran", as
   r = await translating;
   assert.match(r.error, /changed while it was translated/);
   assert.equal((await t.rev()).comments[0].response.gloss, "");
+  await t.cleanup();
+});
+
+// ---- two exports of one manuscript at the same time -----------------------------
+
+// The Python tools as they are about files: the writer refuses a name that is
+// taken, the verifier needs the model and the manuscript list it is given.
+// peak(): how many tool calls ran at the same time at most.
+function strictPy() {
+  const py = fakePy();
+  let active = 0;
+  let peak = 0;
+  const run = async (script, args) => {
+    peak = Math.max(peak, ++active);
+    try {
+      await new Promise((res) => setTimeout(res, 5));
+      return await tool(script, args);
+    } finally {
+      active -= 1;
+    }
+  };
+  const tool = async (script, args) => {
+    if (basename(script) === "response_verify.py") {
+      const missing = ["--docx", "--model", "--manuscript"]
+        .map((flag) => args[args.indexOf(flag) + 1])
+        .filter((p) => !existsSync(p));
+      if (missing.length)
+        return {
+          ok: false,
+          code: 1,
+          json: { ok: false, error: `missing ${missing.map((p) => basename(p)).join(", ")}` },
+        };
+    }
+    return py.run(script, args);
+  };
+  return { run, calls: py.calls, peak: () => peak };
+}
+
+test("response_export: two panes export the same manuscript at once and both letters are whole", async () => {
+  // Both requests are held at the same point (the model of an LLM rule) and
+  // let go together, so both look for a free name before either writes.
+  let open;
+  const gate = new Promise((res) => (open = res));
+  let waiting = 0;
+  const t = await setup({
+    py: strictPy(),
+    revision: {
+      ledger: [
+        {
+          id: "L1",
+          kind: "instruction",
+          text: "Be kind.",
+          scope: "response",
+          check: { type: "llm" },
+        },
+      ],
+    },
+    service: {
+      oneshotJob: async () => {
+        waiting += 1;
+        await gate;
+        return { run: null, model: null };
+      },
+    },
+  });
+  await ready(t);
+  const ask = () => t.ask("response_export", { ...WITH_DOC, format: "docx", force: true });
+  const both = [ask(), ask()];
+  while (waiting < 2) await new Promise((res) => setTimeout(res, 2));
+  open();
+  const [a, b] = await Promise.all(both);
+  assert.deepEqual([a.ok, a.error, b.ok, b.error], [true, undefined, true, undefined]);
+  assert.deepEqual([basename(a.path), basename(b.path)].sort(), [
+    "paper.response-2.docx",
+    "paper.response.docx",
+  ]);
+  // Each letter has its own model and manuscript list, and nothing else is left.
+  assert.deepEqual(
+    (await t.files()).filter((f) => f.includes(".response")),
+    [
+      "paper.response-2.docx",
+      "paper.response-2.manuscript.json",
+      "paper.response-2.model.json",
+      "paper.response.docx",
+      "paper.response.manuscript.json",
+      "paper.response.model.json",
+    ],
+  );
+  for (const r of [a, b])
+    assert.equal(JSON.parse(await readFile(r.paths.model, "utf8")).paragraphs.length, 6);
+  // One after the other: the second began to write when the first was done.
+  assert.equal(t.py.peak(), 1);
+  // Plain text for the portal goes through the same queue.
+  const texts = await Promise.all([
+    t.ask("response_export", { ...WITH_DOC, format: "text", force: true }),
+    t.ask("response_export", { ...WITH_DOC, format: "text", force: true }),
+  ]);
+  assert.deepEqual(texts.map((x) => basename(x.paths[0])).sort(), [
+    "paper.response.R1-2.txt",
+    "paper.response.R1.txt",
+  ]);
+  await t.cleanup();
+});
+
+test("response_export removes only files it made: a file that takes the name after the look is kept", async () => {
+  // A link without a target: the look for a free name does not see it, the
+  // write does. It stands for a file another program puts there in between.
+  const t = await setup({ py: strictPy() });
+  await ready(t);
+  const foreign = join(t.dir, "paper.response.manuscript.json");
+  await symlink(join(t.dir, "nowhere.json"), foreign);
+  const r = await t.ask("response_export", { ...WITH_DOC, format: "docx" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(basename(r.path), "paper.response-2.docx");
+  // The foreign file is as it was; our model of the first name is not left behind.
+  assert.equal(await readlink(foreign), join(t.dir, "nowhere.json"));
+  assert.deepEqual((await readdir(t.dir)).filter((f) => f.includes(".response")).sort(), [
+    "paper.response-2.docx",
+    "paper.response-2.manuscript.json",
+    "paper.response-2.model.json",
+    "paper.response.manuscript.json",
+  ]);
   await t.cleanup();
 });

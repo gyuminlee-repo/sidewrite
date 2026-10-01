@@ -94,6 +94,17 @@ const letterGroup = (docx) => ({
   manuscript: docx.replace(/\.docx$/, ".manuscript.json"),
 });
 
+// The files of an export are written one request at a time per manuscript
+// (two panes may have the same document open): the second request looks for
+// a free name only after the first has its files. A chain of its own, not
+// withRevision's: an export saves the revision after its files are written.
+const exporting = new Map();
+function oneExport(doc, fn) {
+  const run = (exporting.get(doc) ?? Promise.resolve()).catch(() => {}).then(fn);
+  exporting.set(doc, run);
+  return run;
+}
+
 // The headings the pane lists, kept only where the snapshot agrees: the
 // paragraph is there and reads the same. The section name is then the
 // snapshot's own text.
@@ -295,10 +306,32 @@ export function createResponseService({
       if (!replace)
         n = await freeOutputIndex(wanted, { from: n, group: (p) => Object.values(letterGroup(p)) });
       const paths = letterGroup(outputName(wanted, n));
-      await writeJsonAtomic(paths.model, model);
-      await writeJsonAtomic(paths.manuscript, manuscript);
-      const dropSidecars = () =>
-        Promise.all([paths.model, paths.manuscript].map((p) => unlink(p).catch(() => {})));
+      // Without overwrite a sidecar is created, never replaced: a file that
+      // took the name since the look is someone else's and stays. `mine` are
+      // the files this request made; only they are ever removed.
+      const mine = [];
+      const dropMine = () => Promise.all(mine.map((p) => unlink(p).catch(() => {})));
+      if (replace) {
+        await writeJsonAtomic(paths.model, model);
+        await writeJsonAtomic(paths.manuscript, manuscript);
+      } else {
+        let taken = false;
+        for (const [path, data] of [
+          [paths.model, model],
+          [paths.manuscript, manuscript],
+        ]) {
+          try {
+            await writeFile(path, JSON.stringify(data, null, 2) + "\n", { flag: "wx" });
+            mine.push(path);
+          } catch (e) {
+            await dropMine();
+            if (e.code !== "EEXIST") throw e;
+            taken = true;
+            break;
+          }
+        }
+        if (taken) continue;
+      }
       let w;
       try {
         w = await py("response_docx.py", [
@@ -309,20 +342,21 @@ export function createResponseService({
           ...(replace ? ["--overwrite"] : []),
         ]);
       } catch (e) {
-        if (!replace) await dropSidecars();
+        await dropMine();
         throw e;
       }
       // Taken since we looked, or open in Word: the next free name. The file
       // that is there stays as it is.
       if (w.json.code === "exists" || w.json.code === "locked") {
-        if (!replace) await dropSidecars();
+        await dropMine();
         replace = false;
         continue;
       }
       if (!w.ok) {
-        if (!replace) await dropSidecars();
+        await dropMine();
         throw new Error(w.json.error ?? w.error ?? "the letter could not be written");
       }
+      if (!replace) mine.push(paths.docx);
       const v = await py("response_verify.py", [
         "--docx",
         paths.docx,
@@ -333,7 +367,7 @@ export function createResponseService({
       ]);
       if (!v.json.ok) {
         // A new file of ours that is not what the model says does not stay.
-        if (!replace) await Promise.all(Object.values(paths).map((p) => unlink(p).catch(() => {})));
+        await dropMine();
         const axes = [...new Set((v.json.failures ?? []).map((f) => f.axis))].join(", ");
         throw new Error(
           `The written letter failed verification (${axes || v.json.error || "unknown"}).` +
@@ -734,15 +768,12 @@ export function createResponseService({
       });
       const overwrite = msg.overwrite === true;
       if (format === "text") {
-        const { paths, wanted } = await writeText(d, model, overwrite);
+        const { paths, wanted } = await oneExport(d.doc, () => writeText(d, model, overwrite));
         log(`[response] export text files=${paths.length}`);
         return { exported: true, paths, wanted, checks, summary };
       }
-      const { paths, wanted, paragraphs, verify } = await writeLetter(
-        d,
-        model,
-        snapshot.paragraphs.map(viewText),
-        overwrite,
+      const { paths, wanted, paragraphs, verify } = await oneExport(d.doc, () =>
+        writeLetter(d, model, snapshot.paragraphs.map(viewText), overwrite),
       );
       const revision = await update(d, (rev) =>
         setExport(rev, {
