@@ -147,7 +147,7 @@ test("stage 4 keys pass through untouched", async () => {
       rules: [{ id: "r1" }],
       policy_packs: { facts_only: false },
       unit_packs: ["bio"],
-      italics: ["E. coli"],
+      italics: { genera: ["Escherichia"] },
       subscripts: ["CO2"],
       csl_style: "x",
     },
@@ -162,10 +162,53 @@ test("stage 4 keys pass through untouched", async () => {
       profile.subscripts,
       profile.csl_style,
     ],
-    [[{ id: "r1" }], { facts_only: false }, ["bio"], ["E. coli"], ["CO2"], "x"],
+    [[{ id: "r1" }], { facts_only: false }, ["bio"], { genera: ["Escherichia"] }, ["CO2"], "x"],
   );
   const eff = await effectiveProfile({ journal_profile: "j" }, { dirs: [d], env: {} });
   assert.deepEqual([eff.profile.rules, eff.profile.csl_style], [[{ id: "r1" }], "x"]);
+});
+
+test("format keys: italics.statistics is off unless set; first_line_indent takes consistent", async () => {
+  const p = withDefaults({});
+  assert.deepEqual([p.italics, p.first_line_indent], [{ statistics: false }, null]);
+  // What the profile set is kept, next to its other italics lists.
+  const set = withDefaults({
+    italics: { statistics: true, genera: ["Escherichia"] },
+    first_line_indent: "consistent",
+  });
+  assert.deepEqual(set.italics, { statistics: true, genera: ["Escherichia"] });
+  assert.equal(set.first_line_indent, "consistent");
+  // One level merge: an override of one italics key keeps the others.
+  const merged = withDefaults(
+    mergeProfile({ italics: { genera: ["Escherichia"] } }, { italics: { statistics: true } }),
+  );
+  assert.deepEqual(merged.italics, { statistics: true, genera: ["Escherichia"] });
+
+  const keys = (profile) => regexProblems(profile).map((s) => s.split(":")[0]);
+  for (const ok of [
+    null,
+    "indented",
+    "none",
+    "consistent",
+    { expect: "consistent", min_pt: 18 },
+    {},
+  ])
+    assert.deepEqual(keys({ first_line_indent: ok }), [], JSON.stringify(ok));
+  for (const bad of ["Consistent", "hanging", 12, true, ["none"], { expect: "hanging" }])
+    assert.deepEqual(keys({ first_line_indent: bad }), ["first_line_indent"], JSON.stringify(bad));
+  assert.deepEqual(keys({ italics: { statistics: "yes" } }), ["italics.statistics"]);
+  assert.deepEqual(keys({ italics: ["E. coli"] }), ["italics"]);
+  assert.deepEqual(keys({ italics: { statistics: true } }), []);
+  // A value of the wrong shape is reported, not replaced.
+  assert.deepEqual(withDefaults({ italics: ["E. coli"] }).italics, ["E. coli"]);
+
+  for (const name of ["generic", "example-elsevier"]) {
+    const { profile, problems } = await effectiveProfile({ journal_profile: name }, { env: {} });
+    assert.deepEqual(problems, [], name);
+    assert.equal(profile.italics.statistics, false, name);
+    assert.ok("first_line_indent" in (await loadProfile(name)).profile, name);
+    assert.ok("statistics" in (await loadProfile(name)).profile.italics, name);
+  }
 });
 
 test("language: manuscript override, profile, settings default, env, English", () => {

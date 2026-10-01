@@ -4,6 +4,10 @@
   "ref_item": "S?\\d+[A-Za-z]?(?![\\w])",
   "ref_sep": "(?:\\s*,\\s*(?:and\\s+)?|\\s*;\\s*|\\s+and\\s+)",
   "ref_item_cont": "[A-Za-z](?![\\w])",
+  "italics": {
+    "statistics": false
+  },
+  "first_line_indent": null,
   "colors": {
     "response_body": null,
     "response_revised": null,

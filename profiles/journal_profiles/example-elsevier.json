@@ -84,6 +84,10 @@
   "reviewer_head": "^Reviewer #(\\d+)",
   "comment_head": "^Comment \\d+ ",
   "highlight_targets": ["supp_refs"],
+  "italics": {
+    "statistics": false
+  },
+  "first_line_indent": "consistent",
   "colors": {
     "response_body": null,
     "response_revised": null,

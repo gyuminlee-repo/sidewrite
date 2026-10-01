@@ -53,6 +53,12 @@ export const LETTER_DEFAULTS = {
   gloss_prefix: "",
 };
 export const COLOR_DEFAULTS = { response_body: null, response_revised: null, response_kr: null };
+// italics.statistics: check that statistics symbols (p, n, t ...) are italic.
+// Off unless a profile turns it on. The other italics keys are name lists.
+export const ITALICS_DEFAULTS = { statistics: false };
+// first_line_indent: null (not checked), one of these, or { expect: one of
+// these, ... }. "consistent": every body paragraph like the most common one.
+export const FIRST_LINE_INDENT = ["indented", "none", "consistent"];
 
 // Dict values merge one level by key, everything else is replaced. A null
 // override removes nothing here: the caller deletes keys before it saves.
@@ -71,6 +77,10 @@ export function withDefaults(profile) {
     ...structuredClone(LETTER_DEFAULTS),
     ...(isObj(p.response_letter) ? p.response_letter : {}),
   };
+  // Format keys of the manuscript checks. A value of the wrong shape is left
+  // as it is; regexProblems names it.
+  if (p.italics == null || isObj(p.italics)) p.italics = { ...ITALICS_DEFAULTS, ...p.italics };
+  p.first_line_indent ??= null;
   return p;
 }
 
@@ -193,6 +203,15 @@ export function regexProblems(profile) {
   for (const [k, v] of Object.entries(isObj(p.colors) ? p.colors : {}))
     if (k.startsWith("response_") && v != null && !HEX.test(String(v)))
       out.push(`colors.${k}: not RRGGBB`);
+  if (p.italics != null && !isObj(p.italics)) out.push("italics: not an object");
+  else if (p.italics?.statistics != null && typeof p.italics.statistics !== "boolean")
+    out.push("italics.statistics: not true or false");
+  const indent = isObj(p.first_line_indent) ? p.first_line_indent.expect : p.first_line_indent;
+  if (
+    (indent != null && !FIRST_LINE_INDENT.includes(indent)) ||
+    (p.first_line_indent != null && !isObj(p.first_line_indent) && typeof indent !== "string")
+  )
+    out.push(`first_line_indent: not one of ${FIRST_LINE_INDENT.join(", ")}`);
   return out;
 }
 
