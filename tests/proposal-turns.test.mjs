@@ -1101,3 +1101,58 @@ test("a Stop after a proposal was taken up and before its Word call sends nothin
     await t.cleanup();
   }
 });
+
+// The daemon log holds ids, counts and codes of a proposal turn, no text of
+// the manuscript. A failure is said twice: to the author in words (which may
+// quote the manuscript: Word's own message, a CLI's stderr), and to the log
+// as a code. index.mjs hands the outcome of a turn to turnEnded, which logs it.
+test("the failure of a turn goes to the log as a code, not as the sentence the author reads", async () => {
+  const cases = [
+    {
+      over: {
+        word: () => ({ ok: false, code: "NotFound", message: '"30 degrees" not found' }),
+      },
+      error: /^The turn stopped at P1 \(NotFound\)\. "30 degrees" not found$/,
+      code: "P1:NotFound",
+    },
+    {
+      over: {
+        generate: async () => ({
+          ok: false,
+          error: "codex exited 1: Cells were grown at 30 degrees for two days.",
+        }),
+      },
+      error: /gave no proposals \(codex exited 1: Cells were grown at 30 degrees/,
+      code: "NoReply",
+    },
+    {
+      over: {
+        word: () => {
+          throw new Error('Paragraph "Cells were grown at 30 degrees" is locked');
+        },
+      },
+      error: /^The turn stopped at P1 \(ToolError\)\. Paragraph "Cells were grown/,
+      code: "P1:ToolError",
+    },
+  ];
+  for (const c of cases) {
+    const t = await setup(c.over);
+    try {
+      t.start();
+      await t.turnEnded();
+      const [, outcome] = t.ended[0];
+      assert.match(outcome.error, c.error);
+      assert.equal(outcome.code, c.code);
+      t.svc.turnEnded("k", { ref: "R1.1" }, outcome);
+      assert.ok(t.lines.includes(`[review] turn done R1.1 failed: ${c.code}`), c.code);
+      const log = t.lines.join("\n");
+      for (const text of ["30 degrees", "Cells were grown", "two days"]) {
+        assert.equal(log.includes(text), false, `${c.code}: ${text}`);
+      }
+      // The author still reads the sentence: turn_done carries it.
+      assert.match(t.service.at(-1)[1].error, c.error);
+    } finally {
+      await t.cleanup();
+    }
+  }
+});
