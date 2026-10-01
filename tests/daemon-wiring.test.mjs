@@ -117,7 +117,9 @@ test("set_model: the model the session runs on, read after the wait, decides whe
   assert.match(body, /const after = await modelCache\.get\(\);/);
   assert.match(
     body,
-    /running: staysOn\(key\)\s*\? model\s*: \(sessionFor\(key\)\?\.fellBackTo \?\? sessionFor\(key\)\?\.model \?\? null\)/,
+    // (A session left on another model because this very choice declines the
+    // manuscript counts as running on the choice; another choice restarts it.)
+    /const chosen = resolveModelChoice\(requested, after\);[\s\S]{0,400}running: staysOnFallback\(declinedByKey\.get\(key\), chosen\)\s*\? chosen\s*: \(sessionFor\(key\)\?\.fellBackTo \?\? sessionFor\(key\)\?\.model \?\? null\)/,
   );
   assert.ok(body.indexOf("await modelCache.get()") < body.indexOf("sessionFor(key)?.model"));
   assert.match(body, /if \(restart\)/);
@@ -131,8 +133,8 @@ test("set_model: the model the session runs on, read after the wait, decides whe
   // The session records the model it is started on, where query() gets it.
   assert.match(code, /session\.model = modelArgFor\(key\);/);
   assert.match(code, /model: session\.model,/);
-  // Its definition, the session start, getModel and one log line: query() reads it nowhere else.
-  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 4);
+  // Its definition, the session start, getModel, getRunModel, staysOn and one log line: query() reads it nowhere else.
+  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 6);
 });
 
 test("a restart that keeps waiting input does not drop it or end its turn", () => {
@@ -269,11 +271,14 @@ test("a model that declines the manuscript twice: the session stays on the other
   );
   // Another model chosen: the record of the old one goes.
   const set = code.slice(code.indexOf("set_model: async"));
-  assert.match(set.slice(0, 2600), /if \(prev !== undefined && prev !== model\) declinedByKey\.delete\(key\);/);
+  assert.match(
+    set.slice(0, 2600),
+    /if \(prev !== undefined && prev !== model\) declinedByKey\.delete\(key\);/,
+  );
   // A pane that connects again is told the state, without a chat notice.
   assert.match(
     set.slice(0, 2600),
-    /bridge\.sendAssistantEvent\(\s*\{ \.\.\.refusalFallback\(\{[\s\S]{0,260}\}\)\.event, stay: true, quiet: true \},\s*key,\s*\);/,
+    /bridge\.sendAssistantEvent\(\s*\{\s*\.\.\.refusalFallback\(\{[\s\S]{0,260}\}\)\.event,\s*stay: true,\s*quiet: true,\s*\},\s*key,\s*\);/,
   );
   assert.match(code, /declinedByKey\.delete\(key\);/);
   // Receipts of a review turn name the model the session runs on.
@@ -283,4 +288,3 @@ test("a model that declines the manuscript twice: the session stays on the other
   );
   assert.match(code, /if \(session\) session\.ranModel = msg\.model;/);
 });
-

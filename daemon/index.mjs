@@ -34,6 +34,8 @@ import {
   bestClaudeModel,
   createModelCache,
   refusalFallback,
+  declineStep,
+  staysOnFallback,
   modelChange,
   resolveModelChoice,
 } from "./model-list.mjs";
@@ -345,6 +347,11 @@ const modelCache = createModelCache();
 function modelArgFor(key) {
   return resolveModelChoice(modelByKey.get(key), modelCache.current());
 }
+// Refusals of the chosen model in this pane (model-list.mjs declineStep):
+// pane key -> record. After two in a row the session is left on the model
+// the CLI moved it to, for as long as that choice stands.
+const declinedByKey = new Map();
+const staysOn = (key) => staysOnFallback(declinedByKey.get(key), modelArgFor(key));
 
 function sessionFor(key) {
   return sessions.get(key) ?? null;
@@ -529,6 +536,7 @@ function onPaneClose(key) {
   loopRestartByKey.delete(key);
   modelByKey.delete(key);
   manuscriptByKey.delete(key);
+  declinedByKey.delete(key);
   selection.drop(key);
   startQueue.delete(key);
 }
@@ -546,7 +554,9 @@ async function ensureLoopForMessage(key, host, { idle = true } = {}) {
   const cwd = cwdForKey(key);
   const live = sessionFor(key);
   if (live && !live.settled) {
-    if (!live.fellBackTo || !idle) return; // the live loop will consume the message
+    // (staysOn: the chosen model declined twice in a row; the session is
+    // left where the CLI put it.)
+    if (!live.fellBackTo || !idle || staysOn(key)) return; // the live loop will consume the message
     // The CLI moved this session to another model after a refusal
     // (model_refusal_fallback) and keeps it there. The retry of that turn
     // stays; this turn starts on the model the user chose again. The old
@@ -607,7 +617,7 @@ const oneshotRouter = createOneshotRouter({
 // Will the next turn of this pane start (or restart) its session?
 const startsSession = (key) => {
   const s = sessionFor(key);
-  return !s || s.settled || !!s.fellBackTo;
+  return !s || s.settled || (!!s.fellBackTo && !staysOn(key));
 };
 
 const review = createReviewService({
@@ -640,6 +650,9 @@ const review = createReviewService({
   // A review turn starts only with a confirmed provider for review turns.
   turnGate: (key) => selection.ready(key, "turn"),
   getModel: (key) => modelArgFor(key),
+  // The model the session of the pane runs on, for receipts.
+  getRunModel: (key) =>
+    sessionFor(key)?.fellBackTo ?? sessionFor(key)?.ranModel ?? modelArgFor(key),
   manuscriptSeen: (key) => (startsSession(key) ? null : (manuscriptByKey.get(key)?.hashes ?? null)),
   manuscriptGiven: (key, hashes) => manuscriptByKey.set(key, { hashes, fresh: startsSession(key) }),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
@@ -902,13 +915,37 @@ const bridge = createBridge({
       const after = await modelCache.get();
       // Read after the wait: a session a first message started meanwhile
       // has recorded the model it runs on (session.model).
+      const chosen = resolveModelChoice(requested, after);
       const { model, restart } = modelChange({
         requested,
         after,
         // A session the CLI moved to another model runs on that one.
-        running: sessionFor(key)?.fellBackTo ?? sessionFor(key)?.model ?? null,
+        // One left on that model because this choice declines the
+        // manuscript counts as running on the choice: no restart.
+        running: staysOnFallback(declinedByKey.get(key), chosen)
+          ? chosen
+          : (sessionFor(key)?.fellBackTo ?? sessionFor(key)?.model ?? null),
       });
+      // Another model chosen: what the old one declined is no longer of use.
+      if (prev !== undefined && prev !== model) declinedByKey.delete(key);
       modelByKey.set(key, model);
+      // A pane that connects again has lost what it was told: the state goes
+      // again, without a chat notice.
+      const stays = staysOn(key);
+      if (stays) {
+        bridge.sendAssistantEvent(
+          {
+            ...refusalFallback({
+              original_model: stays.original,
+              fallback_model: stays.fallback,
+              api_refusal_category: stays.category,
+            }).event,
+            stay: true,
+            quiet: true,
+          },
+          key,
+        );
+      }
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
       // Relaunch when the model a session of this pane runs on is not the
       // one just decided: a later choice that differs, or, on the first
@@ -1509,6 +1546,8 @@ function handleAgentMessage(msg, session) {
         } catch (e) {
           diag("init tools introspection failed:", e?.message);
         }
+        // For the receipts of a review turn (getRunModel).
+        if (session) session.ranModel = msg.model;
         bridge.sendAssistantEvent(
           {
             event: "session_init",
@@ -1537,10 +1576,28 @@ function handleAgentMessage(msg, session) {
         // (session.fellBackTo) next to the model that was asked for
         // (session.model), and set_model compares the user's choice with
         // it, so choosing the model again restarts the session on it.
+        // A second refusal in a row of the same kind: the session is left
+        // on the other model from then on (ensureLoopForMessage).
         const f = refusalFallback(msg);
         console.log(f.log);
-        bridge.sendAssistantEvent(f.event, session?.key);
-        if (f.session && session) session.fellBackTo = msg.fallback_model;
+        let stay = false;
+        if (f.session && session) {
+          session.fellBackTo = msg.fallback_model;
+          const d = declineStep(declinedByKey.get(session.key), {
+            asked: session.model,
+            original: msg.original_model,
+            fallback: msg.fallback_model,
+            category: msg.api_refusal_category ?? null,
+          });
+          declinedByKey.set(session.key, d);
+          stay = d.stay;
+          if (d.stay) {
+            console.log(
+              `[agent] model stays on ${d.fallback}: ${d.original} declined ${d.count} turns in a row (category=${d.category ?? "-"})`,
+            );
+          }
+        }
+        bridge.sendAssistantEvent({ ...f.event, stay }, session?.key);
       } else {
         console.log(`[agent] system/${msg.subtype}`);
       }
@@ -1610,6 +1667,9 @@ function handleAgentMessage(msg, session) {
         session.turnProducedOutput = false;
       }
       for (const ev of events) bridge.sendAssistantEvent(ev, session?.key);
+      // The chosen model answered this turn (the CLI did not move the
+      // session): a refusal counted before is not one of two in a row.
+      if (session?.key && !session.fellBackTo) declinedByKey.delete(session.key);
       // text: the answer of the turn, for what a review turn reports in its
       // last line (review-service.mjs turnEnded).
       if (session?.key) {

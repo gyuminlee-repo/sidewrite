@@ -64,6 +64,13 @@ export function roleText(role, { used, choice }, models) {
   const next = modelLabel(choice, models);
   if (!used) return `${head}${next} (not used yet)`;
   const asked = modelLabel({ provider: used.provider, model: used.asked }, models);
+  // The chosen model declines this manuscript and the document stays on the
+  // other one: a state, said once here, not a warning on every turn.
+  if (used.declined?.stay) {
+    const d = used.declined;
+    const ran = modelLabel({ provider: used.provider, model: d.fallback }, models);
+    return `${head}${ran} (${modelDisplayName(d.original, models)} declines this manuscript${d.category ? `: ${d.category}` : ""})`;
+  }
   if (ranOther(used.asked, used.ran, models)) {
     const ran = modelLabel({ provider: used.provider, model: used.ran }, models);
     return `${head}asked for ${asked}, ran on ${ran}`;
@@ -79,11 +86,25 @@ export function modelLineText(state, models) {
 
 // The chat line for the daemon's model_fallback event: the CLI ran a refused
 // request again on another model ({ original, fallback, scope }).
-export function fallbackNotice({ original, fallback, scope }, models) {
+export function fallbackNotice(
+  { original, fallback, scope, category = null, stay = false },
+  models,
+) {
   const from = modelDisplayName(original, models);
   const to = modelDisplayName(fallback, models);
+  if (scope !== "local" && stay) {
+    return `${from} declined this manuscript again${category ? ` (${category})` : ""}. Edits of this document now stay on ${to}: asking ${from} before every turn would spend a refused request each time. To use another model, choose it in the chat box or in Setup.`;
+  }
   const head = `${from} declined a request of this turn, and Claude Code ran it again on ${to}.`;
   return scope === "local"
     ? `${head} Only that answer came from ${to}; the session keeps its model.`
-    : `${head} The session stays on ${to} from here on. To go back to the model you chose, pick it again in the chat box or in Setup.`;
+    : `${head} The next turn asks ${from} once more; if it declines again, this document stays on ${to}.`;
+}
+
+// The note under the Edits row of Setup while the chosen model declines the
+// manuscript; "" otherwise. used: what edits last ran on (taskpane.js).
+export function declinedNote(used, models) {
+  const d = used?.declined;
+  if (!d?.stay) return "";
+  return `${modelDisplayName(d.original, models)} declines this manuscript${d.category ? ` (${d.category})` : ""}, so edits run on ${modelDisplayName(d.fallback, models)}. You can choose another model here.`;
 }

@@ -139,6 +139,24 @@ export function refusalFallback(msg) {
   };
 }
 
+// A model that declines a manuscript declines it on every turn (a real
+// revision: 18 refusals of the same category in 18 turns), so taking the
+// session back to the chosen model before each turn spends a refused request
+// a turn. The record of a pane's refusals: the first one is followed by one
+// more try on the chosen model; a second in a row of the same category, for
+// the same model asked, and the document stays on the other model.
+// prev: the record so far (or none). f: { asked, original, fallback, category }.
+export function declineStep(prev, { asked, original, fallback, category = null }) {
+  const again = prev && prev.asked === asked && prev.category === category;
+  const count = again ? prev.count + 1 : 1;
+  return { asked, original, fallback, category, count, stay: count >= 2 };
+}
+
+// The record, when it says to stay and is about the model chosen now.
+export function staysOnFallback(record, chosen) {
+  return record?.stay && record.asked === chosen ? record : null;
+}
+
 // What set_model does with a choice: the model to use and whether the
 // session of that pane must be restarted to run on it. after: the account's
 // list, once it is known. running: the model the pane's session was started

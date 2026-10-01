@@ -242,6 +242,9 @@ export function createReviewService({
   afterRefresh = null,
   clock = Date.now,
   getModel = () => null,
+  // The model the session of the pane runs on, for the receipt of a change
+  // a review turn made (after a refusal fallback it is not the one asked for).
+  getRunModel = getModel,
   // The manuscript and the session of a pane (review-prompt.mjs
   // manuscriptBlock): manuscriptSeen(key) gives the paragraph hashes the
   // session was last given, or null; manuscriptGiven(key, hashes) is called
@@ -435,7 +438,7 @@ export function createReviewService({
           find: saved.find,
           text: saved.text,
         },
-        model: getModel(key),
+        model: getRunModel(key),
         output: {
           change_id: saved.id,
           comment_ref: ref,
@@ -868,7 +871,8 @@ export function createReviewService({
           return job.run({ ...req, timeoutMs: PARAGRAPH_CHECK_TIMEOUT_MS });
         },
       });
-      const model = job?.model ?? null;
+      // The model the last request ran on, when the router knows it.
+      const model = job?.used?.()?.ran ?? job?.model ?? null;
       log(
         `[review] paragraph check paragraphs=${r.paragraphs.length} findings=${r.findings.length}` +
           `${r.warnings.length ? ` warnings=${r.warnings.length}` : ""} model=${model ?? "-"}`,

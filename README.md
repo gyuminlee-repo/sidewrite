@@ -30,7 +30,7 @@ Short version: if you want zero-setup and don't need machine-local context, the 
 
 In Word, the Providers section of the Setup tab has one row for each kind of work, each with a provider and a model:
 
-- **Edits**: changes to the manuscript (Propose changes) and the chat. Claude only. Its model is the one of the dropdown in the composer: the two show and change the same value.
+- **Edits**: changes to the manuscript (Propose changes) and the chat. Claude only. Its model is the one of the dropdown in the composer: the two show and change the same value. When the chosen model declines a request, Claude Code runs it again on another model; the next turn asks the chosen model once more, and if it declines again the document stays on the other model (the line under the tabs and Setup say so) until you choose a model yourself.
 - **Writing**: response drafts, and translations and questions about a selection.
 - **Judgments**: splitting a review, extracting requests, checking the ledger and forbidden expressions, reading journal guidelines.
 
