@@ -257,8 +257,11 @@ test("toolEventOf: only an answer and a notice are items a judgment may have", a
   assert.equal(toolEventOf(item("command_execution", { command: "echo hi" })), "codex_shell");
   // A type this code has never seen is a tool until it is known not to be.
   assert.equal(toolEventOf(item("web_search", { query: "q" })), "web_search");
-  assert.equal(toolEventOf(item("reasoning", { text: "t" }, "item.completed")), "reasoning");
   assert.equal(toolEventOf(item("file_change", {}, "item.updated")), "file_change");
+  assert.equal(toolEventOf(item("collab_tool_call", {})), "collab_tool_call");
+  // Output of the model itself, not a tool: a reasoning summary and its to-do list.
+  assert.equal(toolEventOf(item("reasoning", { text: "t" }, "item.completed")), null);
+  assert.equal(toolEventOf(item("todo_list", { items: [] }, "item.updated")), null);
   assert.equal(toolEventOf('{"type":"item.started","item":{}}'), "unknown item");
 });
 
@@ -357,4 +360,44 @@ test("oneshot: the captured run with the tools off answers; its directory, envir
     },
   );
   assert.deepEqual(stopped, { ok: false, aborted: true, error: "stopped" });
+});
+
+// Codex review of cli-isolation (P1): a model that prints a reasoning summary
+// is not using a tool. The kinds of item `codex exec --json` has were read
+// from the installed binary (codex.mjs says where); the captured run is real
+// (made-up puzzle, reasoning effort high, summary detailed).
+test("oneshot: a reasoning summary before the answer is not a tool; a tool after it still is", async () => {
+  const lines = fixture("codex_exec_reasoning.jsonl");
+  assert.ok(lines.some((l) => JSON.parse(l).item?.type === "reasoning"));
+  const d = (run) => ({ runCli: run, runDir: (fn) => fn("/tmp/run"), log: () => {} });
+  const run = streaming(lines);
+  const r = await codexOneshot({ system: "S", prompt: "P" }, d(run));
+  assert.deepEqual([r.ok, r.json.pours], [true, 2]);
+  assert.equal(run.killed, false);
+
+  const reasoning =
+    '{"type":"item.completed","item":{"id":"i1","type":"reasoning","text":"**x**"}}';
+  const plan =
+    '{"type":"item.started","item":{"id":"i2","type":"todo_list","items":[{"text":"answer","completed":false}]}}';
+  const answer = '{"type":"item.completed","item":{"id":"i9","type":"agent_message","text":"{}"}}';
+  const quiet = await codexOneshot(
+    { system: "", prompt: "" },
+    d(streaming([reasoning, plan, answer, '{"type":"turn.completed"}'])),
+  );
+  assert.deepEqual([quiet.ok, quiet.json], [true, {}]);
+
+  for (const [tool, name] of [
+    [
+      '{"type":"item.started","item":{"id":"i3","type":"command_execution","command":"ls"}}',
+      "codex_shell",
+    ],
+    ['{"type":"item.started","item":{"id":"i3","type":"web_search","query":"q"}}', "web_search"],
+    ['{"type":"item.started","item":{"id":"i3","type":"file_change","changes":[]}}', "file_change"],
+    ['{"type":"item.started","item":{"id":"i3","type":"something_new"}}', "something_new"],
+  ]) {
+    const after = streaming([reasoning, tool, answer]);
+    const bad = await codexOneshot({ system: "", prompt: "" }, d(after));
+    assert.deepEqual([bad.ok, bad.tool_event, after.killed], [false, name, true], name);
+    assert.equal(after.handed.length, 2, "ended at the tool, before the answer");
+  }
 });
