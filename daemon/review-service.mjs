@@ -632,7 +632,9 @@ export function createReviewService({
     turnHolds.delete(key);
     const failed = outcome?.ok === false;
     const error = failed ? String(outcome.error ?? "The turn ended with an error.") : null;
-    log(`[review] turn done ${turn.ref}${failed ? ` failed: ${error}` : ""}`);
+    // outcome.code: what a proposal turn gives the log in place of its
+    // sentence, which may quote the manuscript (proposal-turns.mjs fail).
+    log(`[review] turn done ${turn.ref}${failed ? ` failed: ${outcome.code ?? error}` : ""}`);
     sendEvent(key, {
       type: "review_event",
       event: "turn_done",

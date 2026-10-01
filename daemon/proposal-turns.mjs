@@ -127,11 +127,12 @@ export function createProposalTurns({
   async function prepare({ key, ref, d, selected, choice }) {
     const label = labelOf(choice);
     const limit = budgetOf(choice);
-    if (!limit) return { ok: false, message: `${label} does not run proposal turns.` };
+    if (!limit)
+      return { ok: false, code: "NotOffered", message: `${label} does not run proposal turns.` };
     const deps = trackedEditDeps(key, d);
     const rev = await load(d);
     const comment = findComment(rev, ref);
-    if (!comment) return { ok: false, message: `No reviewer comment ${ref}.` };
+    if (!comment) return { ok: false, code: "NoComment", message: `No reviewer comment ${ref}.` };
     const ctx = await deps.getReviewContext(ref, d);
     const built = buildProposalPrompt({
       comment,
@@ -144,7 +145,7 @@ export function createProposalTurns({
       limit,
       label,
     });
-    if (!built.ok) return { ok: false, message: built.message };
+    if (!built.ok) return { ok: false, code: built.code, message: built.message };
     return { ok: true, built, comment, ctx, deps, snapshotAt: rev.snapshot?.taken_at ?? null };
   }
 
@@ -154,7 +155,7 @@ export function createProposalTurns({
     const { key, ref, d } = t;
     const label = labelOf(t.choice);
     const p = await prepare(t);
-    if (!p.ok) return void (t.failure = p.message);
+    if (!p.ok) return fail(t, p.code, p.message);
     const { built, comment, ctx, deps } = p;
     t.snapshotAt = p.snapshotAt;
     t.requirements = comment.requirements ?? [];
@@ -186,17 +187,25 @@ export function createProposalTurns({
       if (r?.tool_event) {
         // The run did more than answer: nothing of it is used.
         t.toolEvent = r.tool_event;
-        return void (t.failure = `${r.error} No change was made.`);
+        return fail(t, "ToolEvent", `${r.error} No change was made.`);
       }
       read = readProposalReply(r);
       if (!read) {
-        return void (t.failure = `${label} gave no proposals (${r?.error ?? "no reply"}). No change was made.`);
+        return fail(
+          t,
+          "NoReply",
+          `${label} gave no proposals (${r?.error ?? "no reply"}). No change was made.`,
+        );
       }
       if (read.ok) break;
       log(`[proposal] unusable reply ref=${ref} try=${n + 1}`);
     }
     if (!read.ok) {
-      return void (t.failure = `${label} answered twice in a form that cannot be used (${read.problem}). No change was made.`);
+      return fail(
+        t,
+        "BadReply",
+        `${label} answered twice in a form that cannot be used (${read.problem}). No change was made.`,
+      );
     }
 
     // The checks of proposal.mjs, on the paragraphs the model was shown.
@@ -280,7 +289,7 @@ export function createProposalTurns({
     }
     if (t.stopped) return;
     const applied = t.rows.filter((x) => x.outcome === "applied").length;
-    if (t.rows.length && !applied) t.failure = "No proposal could be placed.";
+    if (t.rows.length && !applied) fail(t, "NothingPlaced", "No proposal could be placed.");
   }
 
   // The requests of the comment (ids) that no change on record answers,
@@ -300,8 +309,16 @@ export function createProposalTurns({
     row.code = code;
     t.stoppedAt = row.id;
     const hint = HINTS[code]?.(r) ?? r.message ?? r.error ?? "The change was not applied.";
-    t.failure = `The turn stopped at ${row.id} (${code}). ${hint}`;
+    fail(t, `${row.id}:${code}`, `The turn stopped at ${row.id} (${code}). ${hint}`);
     log(`[proposal] stopped ref=${t.ref} id=${row.id} code=${code}`);
+  }
+
+  // A failure is said twice. message: the sentence the author reads; it may
+  // quote the manuscript (Word's own message, the stderr of a CLI). code:
+  // what the daemon log gets in its place (review-service.mjs turnEnded).
+  function fail(t, code, message) {
+    t.failure = message;
+    t.failureCode = code;
   }
 
   async function run(t) {
@@ -309,7 +326,7 @@ export function createProposalTurns({
     await Promise.resolve()
       .then(() => work(t))
       .then(undefined, (e) => {
-        t.failure ??= String(e?.message ?? e);
+        if (!t.failure) fail(t, "Error", String(e?.message ?? e));
       });
     // What was not started.
     const left = t.rows.filter((x) => x.outcome === "pending");
@@ -386,7 +403,7 @@ export function createProposalTurns({
     } else if (t.failure) {
       sendEvent({ event: "error", error: t.failure }, key);
       sendEvent({ event: "turn_complete", subtype: "error" }, key);
-      endTurn(key, { ok: false, error: t.failure });
+      endTurn(key, { ok: false, error: t.failure, code: t.failureCode });
     } else {
       sendEvent({ event: "turn_complete", subtype: "success" }, key);
       endTurn(key, { ok: true, ...(notice ? { notice } : {}) });
@@ -420,6 +437,7 @@ export function createProposalTurns({
         abort: new AbortController(),
         stopped: false,
         failure: null,
+        failureCode: null,
         rows: [],
         input: { system: null, prompt: null },
         model: null,

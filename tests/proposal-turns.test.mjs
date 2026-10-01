@@ -486,6 +486,7 @@ test("a generation that used a tool, or failed, applies nothing", async () => {
       ok: false,
       error:
         "Codex CLI used a tool (codex_shell) in a run that must not use any. Its reply was discarded. No change was made.",
+      code: "ToolEvent",
     });
     assert.deepEqual((await tool.batch())[0].output.tool_event, "codex_shell");
   } finally {
@@ -502,6 +503,7 @@ test("a generation that used a tool, or failed, applies nothing", async () => {
       ok: false,
       error:
         "Codex CLI (ChatGPT sign-in) gave no proposals (codex exited 1: boom). No change was made.",
+      code: "NoReply",
     });
   } finally {
     await failed.cleanup();
@@ -720,7 +722,9 @@ test("no proposals with a note is a turn that worked; proposals that all fail th
   try {
     all.start();
     await all.turnEnded();
-    assert.deepEqual(all.ended, [["k", { ok: false, error: "No proposal could be placed." }]]);
+    assert.deepEqual(all.ended, [
+      ["k", { ok: false, error: "No proposal could be placed.", code: "NothingPlaced" }],
+    ]);
     assert.equal(all.wordCalls.length, 0);
   } finally {
     await all.cleanup();
@@ -792,6 +796,7 @@ test("a turn that cannot be built is refused before the provider is asked", asyn
     assert.deepEqual(t.ended[0][1], {
       ok: false,
       error: "Ollama (local) does not run proposal turns.",
+      code: "NotOffered",
     });
     // A selection the snapshot does not have.
     t.start("k", { selected: [{ index: 40 }] });
@@ -901,7 +906,9 @@ test("a request no change answers is named at the end of a turn that worked", as
   try {
     failed.start();
     await failed.turnEnded();
-    assert.deepEqual(failed.ended, [["k", { ok: false, error: "No proposal could be placed." }]]);
+    assert.deepEqual(failed.ended, [
+      ["k", { ok: false, error: "No proposal could be placed.", code: "NothingPlaced" }],
+    ]);
   } finally {
     await failed.cleanup();
   }
@@ -932,9 +939,13 @@ test("preview gives the request of the turn and asks nobody", async () => {
       { ref: "R1.1" },
       { at, selected: [], choice: { id: "ollama", model: "qwen3.5:9b" } },
     );
-    assert.deepEqual(no, { ok: false, message: "Ollama (local) does not run proposal turns." });
+    assert.deepEqual(no, {
+      ok: false,
+      code: "NotOffered",
+      message: "Ollama (local) does not run proposal turns.",
+    });
     const gone = await t.turns.preview("k", { ref: "R7.7" }, { at, selected: [], choice: CODEX });
-    assert.deepEqual(gone, { ok: false, message: "No reviewer comment R7.7." });
+    assert.deepEqual(gone, { ok: false, code: "NoComment", message: "No reviewer comment R7.7." });
   } finally {
     await t.cleanup();
   }
