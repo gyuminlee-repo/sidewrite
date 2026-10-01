@@ -1054,6 +1054,58 @@ test("response_draft: a mark the Review tab's refresh set while the model wrote 
   await t.cleanup();
 });
 
+test("response_draft: an answer already marked when the draft was asked for, and the sentence edited once more meanwhile", async () => {
+  const reviewRefresh = (t, snap) =>
+    withRevision(t.revPath, t.doc, (rev) =>
+      markStale(applyStates(rev, classifyRevision(rev, snap)), snap),
+    );
+  const KEPT = snapshotOf({ text: AFTER.replace("was held at", "was kept at") });
+  const AGAIN = snapshotOf({ text: AFTER.replace("was held at", "was always kept at") });
+  const start = async () => {
+    const m = heldModel();
+    const t = await setup({ job: m.job });
+    await ready(t);
+    // The sentence was edited: the answer is marked, and a redraft is asked for.
+    const seen = await t.ask("response_state", { snapshot: KEPT, headings: HEADINGS });
+    assert.deepEqual(seen.revision.comments[0].response.stale, ["quote_changed", "lines_old"]);
+    const drafting = t.ask("response_draft", { ref: "R1.1", snapshot: KEPT, headings: HEADINGS });
+    await m.asked();
+    return { m, t, drafting };
+  };
+
+  // Edited again while the model writes; the Review refresh sees it. The mark
+  // was there before and is there after, and the citation is not replaced.
+  const a = await start();
+  const marked = await reviewRefresh(a.t, AGAIN);
+  assert.deepEqual(marked.comments[0].response.stale, ["quote_changed", "lines_old"]);
+  assert.match(marked.comments[0].response.citations[0].quote, /was kept at 30/);
+  a.m.release();
+  let r = await a.drafting;
+  assert.deepEqual(r.revision.comments[0].response.stale, ["quote_changed", "lines_old"]);
+  assert.match(r.warnings.join(" "), /manuscript changed while/);
+  await a.t.cleanup();
+
+  // The same refresh with the document the draft was asked for: the draft
+  // answers the mark, as it does with no refresh at all.
+  const b = await start();
+  await reviewRefresh(b.t, KEPT);
+  b.m.release();
+  r = await b.drafting;
+  assert.deepEqual([r.revision.comments[0].response.stale, r.warnings], [["lines_old"], []]);
+  await b.t.cleanup();
+
+  // Another paragraph changed meanwhile: not this answer's business.
+  const c = await start();
+  await reviewRefresh(c.t, {
+    ...KEPT,
+    paragraphs: [...KEPT.paragraphs, { index: 2, id: "P2", text: "A new last paragraph." }],
+  });
+  c.m.release();
+  r = await c.drafting;
+  assert.deepEqual([r.revision.comments[0].response.stale, r.warnings], [["lines_old"], []]);
+  await c.t.cleanup();
+});
+
 // The marks quote_changed and change_state on every way an answer is saved.
 // What must hold: reading the line numbers again never makes an answer pass
 // that was written for another sentence.

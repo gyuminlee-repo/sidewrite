@@ -132,11 +132,21 @@ export function usableHeadings(headings, snapshot) {
 // the letter quotes for the comment, and its changes with their states (the
 // prompt lists each change as in the manuscript, revised by hand, or not in
 // it). Compared when the draft is saved (response_draft).
+//
+// The Review tab's refresh does not replace the citations, so an edit it saw
+// leaves both of these as they were. For that each value also carries the
+// manuscript text in which the citations were last found not to fit
+// (stale_at, set by markStale): it changes with every further edit of a
+// cited sentence, whether a mark was there before or not.
 const draftInput = (c) => ({
-  quote_changed: JSON.stringify(
+  quote_changed: JSON.stringify([
     (c.response?.citations ?? []).map((x) => [x.kind, x.quote, x.problem]),
-  ),
-  change_state: JSON.stringify((c.changes ?? []).map((ch) => [ch.id, ch.state])),
+    c.response?.stale_at?.quote_changed ?? null,
+  ]),
+  change_state: JSON.stringify([
+    (c.changes ?? []).map((ch) => [ch.id, ch.state]),
+    c.response?.stale_at?.change_state ?? null,
+  ]),
 });
 
 // States, then citations, then stale marks, from one snapshot. Pure.
@@ -629,7 +639,6 @@ export function createResponseService({
       if (!comment) throw new Error(`No reviewer comment ${ref}`);
       const L = profile.response_letter;
       const written = draftInput(comment);
-      const marksThen = comment.response?.stale ?? [];
       const built = buildResponsePrompt({
         comment,
         profile,
@@ -653,13 +662,7 @@ export function createResponseService({
         const now = findComment(rev, ref);
         if (!now) throw new Error(`No reviewer comment ${ref}`);
         const input = draftInput(now);
-        // The Review tab's refresh marks and leaves the citations as they
-        // are: a mark that was not there when the draft was asked for tells
-        // the same as a changed quote.
-        const marks = now.response?.stale ?? [];
-        moved = Object.keys(written).filter(
-          (k) => input[k] !== written[k] || (marks.includes(k) && !marksThen.includes(k)),
-        );
+        moved = Object.keys(written).filter((k) => input[k] !== written[k]);
         const next = setResponse(rev, ref, { text: drafted.text, gloss, source: "model" });
         const r = findComment(next, ref).response;
         const stale = moved.length

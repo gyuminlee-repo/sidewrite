@@ -565,3 +565,26 @@ test("stale: the quote is looked for in the paragraph of its change, not in the 
   const none = { ...c, changes: [ch({ paragraph_index: null })] };
   assert.deepEqual(staleReasons(none, twice, null), ["quote_changed"]);
 });
+
+test("markStale keeps the text in which the citations were found not to fit, per reason", () => {
+  const first = edited(1, "was held", "was kept");
+  const second = edited(1, "was held", "was always kept");
+  const at = (rev) => rev.comments[0].response.stale_at;
+  // Nothing found: nothing kept.
+  assert.equal(at(markStale(staleRev(), snap)), undefined);
+  const one = markStale(staleRev(), first);
+  assert.deepEqual(at(one), { quote_changed: snapshotHash(first) });
+  // The mark stays the same over a second edit; the text does not.
+  const two = markStale(one, second);
+  assert.deepEqual(two.comments[0].response.stale, one.comments[0].response.stale);
+  assert.deepEqual(at(two), { quote_changed: snapshotHash(second) });
+  // An edit elsewhere, with citations that fit: as it was.
+  assert.equal(at(markStale(staleRev(), edited(3, "day four", "day five"))), undefined);
+  // Also without an answer (no mark is set then), and next to another reason.
+  const noText = markStale(staleRev({ text: "" }, "rejected"), first);
+  assert.deepEqual(noText.comments[0].response.stale, ["lines_old"]);
+  assert.deepEqual(at(noText), {
+    quote_changed: snapshotHash(first),
+    change_state: snapshotHash(first),
+  });
+});

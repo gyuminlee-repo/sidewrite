@@ -290,8 +290,9 @@ export function staleReasons(comment, snapshot, render) {
 //                          quoted sentences, the changes and their states) is
 //                          still what is stored when it is saved; if another
 //                          request read a changed document in between (the
-//                          citations changed, or the Review refresh set a
-//                          mark that was not there), what moved is marked
+//                          citations changed, or the Review refresh found
+//                          them not to fit another text: stale_at below),
+//                          what moved is marked
 //   response_save, text    with the document of the pane: cleared when the
 //                          citations the card showed still fit that document;
 //                          a shown sentence edited or a cited change taken
@@ -309,6 +310,7 @@ export function staleReasons(comment, snapshot, render) {
 export const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
 export function markStale(rev, snapshot) {
   const next = structuredClone(rev);
+  let text = null; // snapshotHash, when a reason is found
   for (const c of next.comments ?? []) {
     if (!c.response) continue;
     const now = staleReasons(c, snapshot, next.response_render);
@@ -317,6 +319,16 @@ export function markStale(rev, snapshot) {
     c.response.stale = STALE_ORDER.filter((s) =>
       s === "lines_old" ? now.includes(s) : hasText && (kept.includes(s) || now.includes(s)),
     );
+    // A mark that stays says nothing about a second edit: the text in which
+    // the saved citations were found not to fit is kept with each reason.
+    const found = now.filter((s) => s !== "lines_old");
+    if (found.length) {
+      text ??= snapshotHash(snapshot);
+      c.response.stale_at = {
+        ...c.response.stale_at,
+        ...Object.fromEntries(found.map((s) => [s, text])),
+      };
+    }
   }
   return next;
 }

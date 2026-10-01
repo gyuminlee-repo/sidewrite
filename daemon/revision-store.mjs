@@ -166,6 +166,11 @@ const Response = z.object({
   previous: z.string().nullable().default(null),
   citations: z.array(Citation).default([]),
   stale: z.array(z.enum(["quote_changed", "change_state", "lines_old"])).default([]),
+  // For quote_changed and change_state: the manuscript text (snapshotHash)
+  // in which the saved citations were last found not to fit, answer or no
+  // answer. A draft compares it between its request and its save
+  // (response-quotes.mjs markStale).
+  stale_at: z.record(z.string(), z.string()).default({}),
   declined_requirements: z
     .array(z.object({ id: z.string(), reason: z.string().min(1) }))
     .default([]),
