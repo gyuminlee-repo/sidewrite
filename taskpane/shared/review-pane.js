@@ -86,6 +86,7 @@ export function initReviewPane({
     jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
     candidates: [], // P15: ledger rule candidates of the last suggestion, each with `picked`
+    turnStart: new Map(), // ref -> { changes, blocked } on record when its turn was asked for
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
     reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
@@ -101,7 +102,10 @@ export function initReviewPane({
     for (const k of kids) if (k) n.append(k);
     return n;
   }
+  // The message line as it was last written, for a line put in front of it.
+  let said = { text: "", bad: false };
   function say(text, bad = false) {
+    said = { text, bad };
     const m = $("review-message");
     m.textContent = text;
     m.classList.toggle("form-error", bad);
@@ -694,6 +698,29 @@ export function initReviewPane({
   // useSelection: send the paragraphs Preview prompt would show
   // (promptParagraphs); Propose all sends none, a selection belongs to one
   // comment.
+  // What is on record for a comment: its changes and its blocked edits.
+  function onRecord(ref) {
+    const c = (state.revision?.comments ?? []).find((x) => x.ref === ref);
+    return { changes: (c?.changes ?? []).length, blocked: (c?.blocked ?? []).length };
+  }
+  // What came of the turn of `ref`, for the message line: how many changes
+  // it put on record and what it ran on. null for a turn this pane did not
+  // start (another connection).
+  function proposedLine(ref) {
+    const before = state.turnStart.get(ref);
+    state.turnStart.delete(ref);
+    if (!before) return null;
+    const now = onRecord(ref);
+    const n = now.changes - before.changes;
+    const blocked = now.blocked - before.blocked;
+    const ran = usedLabel("turn");
+    const withModel = ran ? ` with ${ran}` : "";
+    const blockedText = `${blocked} edit${blocked === 1 ? " was" : "s were"} blocked (see the blocked list of the comment)`;
+    if (n > 0) {
+      return `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`;
+    }
+    return `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
+  }
   async function proposeRef(ref, release, useSelection) {
     state.reviewTurnOpen = true;
     try {
@@ -701,6 +728,7 @@ export function initReviewPane({
       // A fresh snapshot first: outside changes are caught before the turn
       // (L4) and the new words of the turn are checked against it (L2).
       await refresh();
+      state.turnStart.set(ref, onRecord(ref));
       const done = state.turnsDone;
       // wait_ms: how long this pane waits for the answer. The daemon starts
       // no turn for a request that waited longer at its gate.
@@ -1168,7 +1196,13 @@ export function initReviewPane({
           .then(refresh)
           .then(
             (inv) => {
-              if (failed) return failed;
+              if (failed) {
+                state.turnStart.delete(msg.ref);
+                return failed;
+              }
+              // What came of the turn, in front of the status the refresh wrote.
+              const line = proposedLine(msg.ref);
+              if (line) say(`${line} ${said.text}`, said.bad);
               if (inv.ok) return { ok: true };
               // Only changes Word applied without their rationale comment:
               // said as that, not as a mismatch.

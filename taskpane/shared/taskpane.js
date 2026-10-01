@@ -79,6 +79,7 @@ import { isInOrUnder, docDirFromActiveUrl } from "./paths.js";
 import {
   ALIAS_MODELS,
   editsModelValue,
+  storedEditsModel,
   modelMenuOptions,
   isStoredModelValid,
   effectiveModelNote,
@@ -554,6 +555,7 @@ function defaultSettings() {
     // alias or a model id the account lists (models_list); null until the
     // user chooses one, and the daemon then uses the best the account lists.
     model: null,
+    modelChosen: false, // true once the user picked the model in a menu
   };
 }
 
@@ -562,10 +564,11 @@ function loadSettings() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return defaultSettings();
     const s = { ...defaultSettings(), ...JSON.parse(raw) };
-    // The retired "default" model choice (and any malformed value) is no
-    // choice. Whether the account can use a stored model is the daemon's
-    // check (set_model), against its model list.
-    if (!isStoredModelValid(s.model)) s.model = null;
+    // Only a model the user picked in a menu is a choice (modelChosen): a
+    // value saved by an earlier build without that mark is its old default,
+    // and a malformed or retired one is none. Whether the account can use a
+    // stored model is the daemon's check (set_model), against its model list.
+    s.model = storedEditsModel(s);
     return s;
   } catch {
     return defaultSettings();
@@ -671,6 +674,7 @@ function refreshModelViews() {
 // The one way the model of edits is chosen, from the chat box or from Setup.
 function chooseEditsModel(value) {
   settings.model = value;
+  settings.modelChosen = true; // the user's own choice: kept from now on
   saveSettings(settings);
   applySettings();
   sendModel();
