@@ -170,3 +170,35 @@ test("oneshot: text mode, not JSON, no answer, timeout, not installed", async ()
   );
   assert.match(missing.error, /Codex CLI is not installed/);
 });
+
+// The one real run in which a tool was called (model gpt-5.5, read-only
+// sandbox, no approval flag): Codex itself refused the call.
+const APPROVAL_LINES = fixture("codex_exec_turn_approval.jsonl");
+
+test("parse: the captured tool call and Codex's refusal of it", () => {
+  const ev = APPROVAL_LINES.map(parseCodexLine).filter(Boolean);
+  const started = ev.find((e) => e.kind === "tool");
+  assert.equal(started.name, "mcp__office__office_tracked_edit");
+  assert.deepEqual(started.input.comment_ref, "R1.1");
+  const failed = ev.find((e) => e.kind === "tool_error");
+  assert.deepEqual(failed, {
+    kind: "tool_error",
+    name: "mcp__office__office_tracked_edit",
+    message: "MCP tool call requires approval, but approval policy is never",
+    approval: true,
+  });
+  assert.equal(ev.at(-1).kind, "done");
+});
+
+test("parse: a finished tool call, and a tool error that is not about approval", () => {
+  assert.deepEqual(
+    parseCodexLine(
+      '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"office","tool":"office_find","arguments":{},"result":{"content":[]},"error":null,"status":"completed"}}',
+    ),
+    { kind: "tool_done", name: "mcp__office__office_find" },
+  );
+  const blocked = parseCodexLine(
+    '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"office","tool":"office_tracked_edit","arguments":{},"result":null,"error":{"message":"Blocked by L1"},"status":"failed"}}',
+  );
+  assert.deepEqual([blocked.kind, blocked.approval], ["tool_error", false]);
+});

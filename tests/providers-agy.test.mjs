@@ -74,13 +74,12 @@ test("stream lines: the captured run", () => {
 });
 
 test("stream lines: another step type, a failed result, junk", () => {
-  // A tool step was not in the capture: its step_type and state are passed on
-  // as they are, for the turn runner to show.
+  // A step type not seen in a capture is passed on as it is.
   assert.deepEqual(
     parseAgyLine(
-      '{"event":"step_update","step_update":{"step_index":2,"state":"RUNNING","step_type":"call_mcp_tool"}}',
+      '{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"planning"}}',
     ),
-    [{ kind: "step", step_type: "call_mcp_tool", state: "RUNNING" }],
+    [{ kind: "step", step_type: "planning", state: "ACTIVE" }],
   );
   assert.deepEqual(
     parseAgyLine('{"event":"result","result":{"status":"ERROR","error":"rate limit reached"}}'),
@@ -138,4 +137,36 @@ test("oneshot failures: exit code, not installed, a limit, not JSON, a prompt to
   );
   assert.match(long.error, /too long/);
   assert.equal(ran, false);
+});
+
+// The real run in which agy tried an office tool (print mode, --sandbox, no
+// permission flag): the call was denied and never reached the daemon.
+test("stream lines: the captured tool step and its denial", () => {
+  const lines = read("agy_turn_denied.jsonl").split("\n").filter(Boolean);
+  const ev = lines.flatMap(parseAgyLine);
+  const tools = ev.filter((e) => e.kind === "tool");
+  assert.deepEqual(tools, [
+    { kind: "tool", name: "mcp__office__office_read_paragraphs", input: {} },
+  ]);
+  assert.equal(ev.filter((e) => e.kind === "tool_done").length, 1);
+  const denied = ev.find((e) => e.kind === "denied");
+  assert.deepEqual(denied, { kind: "denied", actions: ["CallMcpTool"] });
+  assert.equal(ev.at(-1).kind, "done");
+  assert.ok(
+    ev
+      .filter((e) => e.kind === "text")
+      .map((e) => e.text)
+      .join("")
+      .includes("office_tracked_edit"),
+    "the text deltas join to the answer",
+  );
+});
+
+test("stream lines: a tool of agy's own keeps its name", () => {
+  assert.deepEqual(
+    parseAgyLine(
+      '{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"view_file","tool_info":{"name":"view_file","parameters":{"Path":"/x"}}}}',
+    ),
+    [{ kind: "tool", name: "agy_view_file", input: { Path: "/x" } }],
+  );
 });

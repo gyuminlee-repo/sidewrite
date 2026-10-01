@@ -6,8 +6,10 @@
 // reason: why not, or a note for an available one; null when there is
 // nothing to say. models: [{ value, displayName }].
 //
-// A probe only reads: `codex login status`, `agy models`, `agy mcp list`,
-// GET requests, the Codex model cache, and whether a key is stored. It never
+// turn_note: why review turns are off for an available provider, or null.
+//
+// A probe only reads: `codex login status`, `agy models`, GET requests, the
+// Codex model cache, and whether a key is stored. It never
 // writes a CLI's configuration and never asks a model anything. Every command
 // and request has a timeout and every provider a deadline, so a row always
 // comes back; a failure is a reason in the row, never a throw. A key is used
@@ -26,6 +28,32 @@ const OLLAMA_TIMEOUT_MS = 2_000;
 const HTTP_TIMEOUT_MS = 5_000;
 const DEADLINE_MS = 35_000;
 const MAX_MODELS = 200;
+
+// Why a CLI provider is not offered for review turns. Checked with the real
+// CLIs on 2026-10-01 against the daemon's MCP endpoint, with the read-only
+// sandbox and no approval flag (tests/fixtures/codex_exec_turn_approval.jsonl,
+// agy_turn_denied.jsonl): each refused the office tool call itself. This
+// add-in never passes a flag that skips an approval, so both stay providers
+// for judgments. The texts quote what the CLI said.
+export const TURN_BLOCKED = Object.freeze({
+  codex:
+    'Judgments only. Codex CLI will not call the office tools without an approval: "MCP tool call requires approval, but approval policy is never".',
+  antigravity:
+    "Judgments only. agy print mode denies the office tools (permission mode request-review, denied_actions: CallMcpTool) unless permission prompts are skipped, which this add-in never does.",
+});
+const NO_TOOL_LOOP = "Judgments only: no tool loop for this provider in this stage.";
+
+// CC_OFFICE_CLI_TURNS: a comma list of CLI providers to offer for review
+// turns all the same, for a test after a CLI changed its approval rules. It
+// adds no flag to any command; the CLI still decides on each tool call.
+function cliTurnsTried(env) {
+  return new Set(
+    String(env.CC_OFFICE_CLI_TURNS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s in TURN_BLOCKED),
+  );
+}
 
 // { code, stdout, stderr, timedOut }. Rejects only when the command cannot
 // be started (ENOENT: not installed).
@@ -151,14 +179,7 @@ async function probeAgy({ execFileFn, env }) {
   const models = parseAgyModels(r.stdout);
   if (r.code !== 0 || !models.length)
     return { reason: "Not signed in, or no model listed (run: agy)" };
-  const mcp = await run(execFileFn, bin, ["mcp", "list"], CMD_TIMEOUT_MS);
-  const registered = mcp.code === 0 && /^\s*office\b/m.test(String(mcp.stdout ?? ""));
-  return {
-    available: true,
-    turn_ready: registered,
-    reason: registered ? null : "Connect office tools to run review turns",
-    models,
-  };
+  return { available: true, turn_ready: true, models };
 }
 
 async function probeOllama({ fetchFn }, preset) {
@@ -228,6 +249,7 @@ export async function probeAll({
   deadlineMs = DEADLINE_MS,
 } = {}) {
   const deps = { claudeModels, execFileFn, readFileFn, fetchFn, env };
+  const tried = cliTurnsTried(env);
   return Promise.all(
     PRESETS.map(async (preset) => {
       let stored = { key: null, base_url: null, source: null };
@@ -250,6 +272,14 @@ export async function probeAll({
       clearTimeout(timer);
       const available = found.available === true;
       const base_url = preset.baseUrl ?? stored.base_url ?? null;
+      const blocked = preset.id in TURN_BLOCKED && !tried.has(preset.id);
+      const turn_note = !canRun(preset, "turn")
+        ? NO_TOOL_LOOP
+        : blocked
+          ? TURN_BLOCKED[preset.id]
+          : tried.has(preset.id)
+            ? "Offered for review turns because CC_OFFICE_CLI_TURNS lists it."
+            : null;
       return {
         id: preset.id,
         tier: preset.tier,
@@ -258,7 +288,8 @@ export async function probeAll({
         policy: preset.policy,
         default_enabled: preset.defaultEnabled,
         available,
-        turn_ready: available && canRun(preset, "turn") && found.turn_ready === true,
+        turn_ready: available && canRun(preset, "turn") && !blocked && found.turn_ready === true,
+        turn_note,
         reason: found.reason ?? null,
         models: found.models ?? [],
         has_key: !!stored.key,

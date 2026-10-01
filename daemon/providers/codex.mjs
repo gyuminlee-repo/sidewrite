@@ -11,8 +11,14 @@
 //   {"type":"error","message":"..."}  then  {"type":"turn.failed","error":{"message":"..."}}
 // An item of type "error" is a notice (a config warning came that way in a
 // run that answered); only turn.failed and a top-level error end the turn.
-// The mcp_tool_call and command_execution items were not seen in the capture
-// (no tool ran); their fields here follow the plan and wait for Task 12.
+// A tool call (tests/fixtures/codex_exec_turn_approval.jsonl) is an
+// item.started and an item.completed of type "mcp_tool_call":
+//   {"id":"item_3","type":"mcp_tool_call","server":"office","tool":"...",
+//    "arguments":{...},"result":null,"error":null,"status":"in_progress"}
+//   ... "error":{"message":"..."},"status":"failed"
+// In that run Codex refused the call itself: "MCP tool call requires
+// approval, but approval policy is never". The command_execution item was
+// not seen in a capture.
 //
 // Every run is `-s read-only`, `--ephemeral` and never carries a flag that
 // turns approvals or the sandbox off. The user's ~/.codex/config.toml is
@@ -55,8 +61,9 @@ export function codexTurnArgs({ model, cwd, mcpUrl }) {
 
 export const codexOneshotArgs = ({ model, cwd }) => [...baseArgs({ model, cwd }), "-"];
 
-// One stdout line as { kind: "session" | "text" | "tool" | "notice" | "done"
-// | "error", ... }, or null for a line that says nothing we use.
+// One stdout line as { kind: "session" | "text" | "tool" | "tool_done" |
+// "tool_error" | "notice" | "done" | "error", ... }, or null for a line that
+// says nothing we use.
 export function parseCodexLine(line) {
   let o;
   try {
@@ -83,6 +90,13 @@ export function parseCodexLine(line) {
       return null;
     case "item.completed":
       if (it.type === "agent_message") return { kind: "text", text: String(it.text ?? "") };
+      if (it.type === "mcp_tool_call") {
+        const name = `mcp__${it.server}__${it.tool}`;
+        if (it.status !== "failed" && !it.error) return { kind: "tool_done", name };
+        const message = String(it.error?.message ?? "tool call failed");
+        // approval: Codex would not run the tool without the user's approval.
+        return { kind: "tool_error", name, message, approval: /requires approval/i.test(message) };
+      }
       if (it.type === "error") return { kind: "notice", message: String(it.message ?? "") };
       return null;
     case "turn.completed":

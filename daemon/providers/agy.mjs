@@ -10,14 +10,19 @@
 //     {"event":"step_update","step_update":{"step_index":1,"state":"DONE",
 //        "step_type":"agent_response","text_delta":"..."}}
 //     {"event":"result","result":{"status":"SUCCESS","response":"..."}}
-// The capture ran no tool, so the form of a tool step is not known yet; any
-// step that is not the user's input or the answer is passed on with its
-// step_type and state. A failed run was not captured either: any status
-// other than SUCCESS is taken as a failure.
+// A tool step (tests/fixtures/agy_turn_denied.jsonl):
+//     {"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool",
+//        "tool_name":"call_mcp_tool","tool_info":{"name":"call_mcp_tool",
+//        "parameters":{"Arguments":{},"ServerName":"office","ToolName":"..."}}}}
+//   and the same with "state":"DONE". In that run agy denied the call: the
+//   result carried "denied_actions":[{"action":"mcp","display_name":
+//   "CallMcpTool"}] (init said "permission_mode":"request-review") and
+//   nothing reached the daemon. A failed run was not captured: any status
+//   other than SUCCESS is taken as a failure.
 //
-// No run carries --dangerously-skip-permissions or --mode accept-edits. If
-// agy cannot call the office tools without one of them, it stays a provider
-// for judgments only and the task pane says why.
+// No run carries --dangerously-skip-permissions or --mode accept-edits. agy
+// denies the office tools without one of them, so it is a provider for
+// judgments only and the task pane says why (probe.mjs TURN_BLOCKED).
 //
 // agy has no setting for a run that leaves no trace: every judgment is kept
 // as a conversation in the user's Antigravity history.
@@ -87,9 +92,12 @@ export function parseAgyResult(stdout) {
 }
 
 // One line of --output-format stream-json as a list of events:
-// { kind: "session", id } | { kind: "text", text } | { kind: "step",
-// step_type, state } | { kind: "done", text } | { kind: "error", message,
-// limited }. An unknown line is [].
+// { kind: "session", id } | { kind: "text", text } | { kind: "tool", name,
+// input } | { kind: "tool_done", name } | { kind: "step", step_type, state }
+// | { kind: "denied", actions } | { kind: "done", text } | { kind: "error",
+// message, limited }. An unknown line is []. An MCP tool is named
+// mcp__<server>__<tool>, as in a Claude or Codex turn; a tool of agy's own
+// is agy_<name>.
 export function parseAgyLine(line) {
   let o;
   try {
@@ -107,13 +115,35 @@ export function parseAgyLine(line) {
         ? [{ kind: "text", text: s.text_delta }]
         : [];
     }
+    if (s.step_type === "tool") {
+      const p = s.tool_info?.parameters ?? {};
+      const name =
+        s.tool_name === "call_mcp_tool"
+          ? `mcp__${p.ServerName}__${p.ToolName}`
+          : `agy_${s.tool_name ?? s.tool_info?.name ?? "tool"}`;
+      if (s.state === "DONE") return [{ kind: "tool_done", name }];
+      return [
+        {
+          kind: "tool",
+          name,
+          input: s.tool_name === "call_mcp_tool" ? (p.Arguments ?? {}) : p,
+        },
+      ];
+    }
     return [{ kind: "step", step_type: String(s.step_type ?? ""), state: s.state ?? null }];
   }
   if (o.event === "result") {
-    const r = resultOf(o.result ?? {});
-    return r.ok
-      ? [{ kind: "done", text: r.text }]
-      : [{ kind: "error", message: r.error, limited: LIMIT_RE.test(r.error) }];
+    const res = o.result ?? {};
+    const r = resultOf(res);
+    const denied = (Array.isArray(res.denied_actions) ? res.denied_actions : []).map((d) =>
+      String(d?.display_name ?? d?.action ?? "action"),
+    );
+    return [
+      ...(denied.length ? [{ kind: "denied", actions: denied }] : []),
+      r.ok
+        ? { kind: "done", text: r.text }
+        : { kind: "error", message: r.error, limited: LIMIT_RE.test(r.error) },
+    ];
   }
   return [];
 }
