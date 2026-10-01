@@ -2499,3 +2499,105 @@ test("review_split still works when the document has no local path", async () =>
     [true, ["R1.1"]],
   );
 });
+
+// ---- stage 3: a refresh marks saved responses stale (afterRefresh) --------------
+import { markStale, snapshotHash } from "../daemon/response-quotes.mjs";
+import { emptyRevision } from "../daemon/revision-store.mjs";
+
+const QUOTED = "The incubation temperature was held at 30 °C.";
+const STALE_SNAP = (
+  p1 = `Flasks were shaken. ${QUOTED} Samples were drawn daily.`,
+  p2 = "Growth was slow.",
+) => ({
+  paragraphs: [
+    { index: 0, id: "P0", text: p1, w_ins: 0, w_del: 0 },
+    { index: 1, id: "P1", text: p2, w_ins: 0, w_del: 0 },
+  ],
+  comments: [],
+});
+async function staleSetup(more = {}) {
+  const t = await setup({ afterRefresh: (rev, snap) => markStale(rev, snap), ...more });
+  await saveRevision(join(t.dir, "paper.revision.json"), {
+    ...emptyRevision(t.doc),
+    response_render: {
+      pdf_sha: "0".repeat(64),
+      snapshot_hash: snapshotHash(STALE_SNAP()),
+      at: "2026-01-01T00:00:00.000Z",
+      lines_indexed: 10,
+    },
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "State the unit.",
+        changes: [],
+        response: {
+          text: "We now state the unit.",
+          citations: [
+            { kind: "revised", quote: QUOTED, paragraph_index: 0, section: null, change_ids: [] },
+          ],
+        },
+      },
+    ],
+  });
+  return t;
+}
+const staleOf = async (t) =>
+  (await loadRevision(join(t.dir, "paper.revision.json"), t.doc)).comments[0].response.stale;
+
+test("review_refresh: a changed word in a quoted sentence marks the response stale and logs it", async () => {
+  const t = await staleSetup();
+  try {
+    const same = await t.ask("review_refresh", { snapshot: STALE_SNAP() });
+    assert.equal(same.ok, true, same.error);
+    assert.deepEqual(await staleOf(t), []);
+    assert.equal(
+      t.lines.some((l) => l.startsWith("[response] stale")),
+      false,
+    );
+
+    const r = await t.ask("review_refresh", {
+      snapshot: STALE_SNAP(
+        `Flasks were shaken. ${QUOTED.replace("held", "kept")} Samples were drawn daily.`,
+      ),
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.revision.comments[0].response.stale, ["quote_changed", "lines_old"]);
+    assert.deepEqual(await staleOf(t), ["quote_changed", "lines_old"]);
+    assert.ok(
+      t.lines.includes("[response] stale R1.1 quote_changed,lines_old"),
+      t.lines.join("\n"),
+    );
+    // The same state again is not logged again.
+    const n = t.lines.filter((l) => l.startsWith("[response] stale")).length;
+    await t.ask("review_refresh", {
+      snapshot: STALE_SNAP(
+        `Flasks were shaken. ${QUOTED.replace("held", "kept")} Samples were drawn daily.`,
+      ),
+    });
+    assert.equal(t.lines.filter((l) => l.startsWith("[response] stale")).length, n);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_refresh: a change in another paragraph makes only the line numbers old", async () => {
+  const t = await staleSetup();
+  try {
+    await t.ask("review_refresh", { snapshot: STALE_SNAP(undefined, "Growth was fast.") });
+    assert.deepEqual(await staleOf(t), ["lines_old"]);
+    assert.ok(t.lines.includes("[response] stale R1.1 lines_old"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_refresh without the hook leaves the responses alone", async () => {
+  const t = await staleSetup({ afterRefresh: null });
+  try {
+    await t.ask("review_refresh", { snapshot: STALE_SNAP(undefined, "Growth was fast.") });
+    assert.deepEqual(await staleOf(t), []);
+  } finally {
+    await t.cleanup();
+  }
+});

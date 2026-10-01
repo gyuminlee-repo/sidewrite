@@ -51,13 +51,7 @@ import {
   profileDirs,
   regexProblems,
 } from "./journal-profile.mjs";
-import {
-  citationsFor,
-  keepLines,
-  staleReasons,
-  snapshotHash,
-  viewText,
-} from "./response-quotes.mjs";
+import { citationsFor, keepLines, markStale, snapshotHash, viewText } from "./response-quotes.mjs";
 import { applyLineResults, lineRequests, locate, savePdf } from "./response-lines.mjs";
 import { buildLetterModel, letterPlainText } from "./response-model.mjs";
 import { checkResponses, summarize, wordCount } from "./response-check.mjs";
@@ -80,7 +74,6 @@ export const DRAFT_CLAUDE_MODEL = "sonnet";
 
 // A PDF arrives as base64 in one WebSocket frame of at most 100 MiB.
 const MAX_BASE64 = 100 * 1024 * 1024;
-const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
 
 const TOOLS = join(dirname(fileURLToPath(import.meta.url)), "..", "tools");
 const tool = (name) => join(TOOLS, name);
@@ -120,19 +113,14 @@ export function usableHeadings(headings, snapshot) {
 export function refreshed(rev, snapshot, headings, profile) {
   let next = applyStates(rev, classifyRevision(rev, snapshot));
   const level = profile.response_letter.section_level;
+  next = markStale(next, snapshot);
   for (const c of next.comments) {
     const fresh = keepLines(
       citationsFor(c, snapshot, headings, { level }),
       c.response?.citations ?? [],
     );
     if (!c.response && !fresh.length) continue;
-    const now = staleReasons(c, snapshot, next.response_render);
-    const kept = c.response?.stale ?? [];
-    const hasText = !!c.response?.text?.trim();
-    const stale = STALE_ORDER.filter((s) =>
-      s === "lines_old" ? now.includes(s) : hasText && (kept.includes(s) || now.includes(s)),
-    );
-    next = setCitations(next, c.ref, fresh, stale);
+    next = setCitations(next, c.ref, fresh);
   }
   return next;
 }

@@ -256,3 +256,27 @@ export function staleReasons(comment, snapshot, render) {
     out.add("lines_old");
   return ["quote_changed", "change_state", "lines_old"].filter((x) => out.has(x));
 }
+
+// The stale marks of every saved response, judged against the citations as
+// saved. Returns a new revision; the input is not changed.
+//   - quote_changed and change_state stay until the answer is written again
+//     (the text was written for the old sentence or the old set of changes),
+//     and are set only when there is an answer
+//   - lines_old follows the PDF: set while the manuscript differs from the
+//     one the line numbers were read from
+// Run it after applyStates on the same snapshot. Both the Review refresh and
+// the Response tab mark with this function.
+const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
+export function markStale(rev, snapshot) {
+  const next = structuredClone(rev);
+  for (const c of next.comments ?? []) {
+    if (!c.response) continue;
+    const now = staleReasons(c, snapshot, next.response_render);
+    const kept = c.response.stale ?? [];
+    const hasText = !!c.response.text?.trim();
+    c.response.stale = STALE_ORDER.filter((s) =>
+      s === "lines_old" ? now.includes(s) : hasText && (kept.includes(s) || now.includes(s)),
+    );
+  }
+  return next;
+}

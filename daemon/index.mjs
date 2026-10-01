@@ -27,6 +27,7 @@ import {
 } from "./limit-detect.mjs";
 import { createReviewService } from "./review-service.mjs";
 import { createResponseService } from "./response-service.mjs";
+import { markStale } from "./response-quotes.mjs";
 import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
 import { createModelCache, resolveModelChoice } from "./model-list.mjs";
 import { createKeyStore } from "./providers/keys.mjs";
@@ -614,6 +615,9 @@ const review = createReviewService({
     return t.id === "claude" ? modelArgFor(key) : `${t.id}:${t.model ?? "default"}`;
   },
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
+  // The answers of the response letter that a change of the manuscript made
+  // out of date (same rule as the Response tab).
+  afterRefresh: (rev, snap) => markStale(rev, snap),
 });
 
 // Response tab (C2): the response letter. Drafts and LLM checks go through

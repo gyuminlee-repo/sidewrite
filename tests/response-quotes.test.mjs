@@ -456,3 +456,67 @@ test("snapshotHash follows the accepted text and ignores spacing", () => {
   const moved = { paragraphs: [...snap.paragraphs].reverse() };
   assert.notEqual(snapshotHash(moved), snapshotHash(snap));
 });
+
+// ---- markStale: one rule for the Review refresh and the Response tab -----------
+import { markStale } from "../daemon/response-quotes.mjs";
+
+const staleRev = (
+  response,
+  state = "accepted",
+  render = { snapshot_hash: snapshotHash(snap) },
+) => ({
+  response_render: render,
+  comments: [
+    {
+      ref: "R1.1",
+      changes: [{ id: "R1.1-1", state }],
+      response: {
+        text: "We now state the unit.",
+        stale: [],
+        citations: [
+          {
+            kind: "revised",
+            quote: "The incubation temperature was held at 30 °C.",
+            paragraph_index: 1,
+            change_ids: ["R1.1-1"],
+          },
+        ],
+        ...response,
+      },
+    },
+    { ref: "R1.2", changes: [] },
+  ],
+});
+const edited = (index, from, to) => ({
+  paragraphs: snap.paragraphs.map((p) =>
+    p.index === index ? { ...p, text: p.text.replace(from, to) } : p,
+  ),
+});
+
+test("markStale: nothing changed, nothing marked; the input is not touched", () => {
+  const rev = staleRev();
+  const out = markStale(rev, snap);
+  assert.deepEqual(out.comments[0].response.stale, []);
+  assert.equal(out.comments[1].response, undefined);
+  assert.deepEqual(rev, staleRev());
+});
+
+test("markStale: a word of the quoted sentence changed, or only another paragraph", () => {
+  const quoted = markStale(staleRev(), edited(1, "was held", "was kept"));
+  assert.deepEqual(quoted.comments[0].response.stale, ["quote_changed", "lines_old"]);
+  const other = markStale(staleRev(), edited(3, "day four", "day five"));
+  assert.deepEqual(other.comments[0].response.stale, ["lines_old"]);
+});
+
+test("markStale: quote_changed and change_state stay until the answer is written again; lines_old follows the PDF", () => {
+  const kept = markStale(staleRev({ stale: ["quote_changed", "change_state", "lines_old"] }), snap);
+  assert.deepEqual(kept.comments[0].response.stale, ["quote_changed", "change_state"]);
+  const rejected = markStale(staleRev({}, "rejected"), snap);
+  assert.deepEqual(rejected.comments[0].response.stale, ["change_state"]);
+  // No answer written yet: nothing of it can be out of date, but the lines can.
+  const noText = markStale(staleRev({ text: "" }, "rejected"), edited(3, "day four", "day five"));
+  assert.deepEqual(noText.comments[0].response.stale, ["lines_old"]);
+  // No PDF read yet: no line numbers to be old.
+  const noPdf = markStale(staleRev({}, "accepted", null), edited(3, "day four", "day five"));
+  assert.deepEqual(noPdf.comments[0].response.stale, []);
+});

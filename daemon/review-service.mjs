@@ -160,6 +160,14 @@ const JOB_TYPES = new Set(["review_split", "ledger_check", "ledger_suggest"]);
 
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
 
+// The comments whose stale marks are not what they were, and not empty.
+function staleChanges(before, after) {
+  const was = new Map(before.comments.map((c) => [c.ref, (c.response?.stale ?? []).join(",")]));
+  return after.comments
+    .map((c) => ({ ref: c.ref, stale: c.response?.stale ?? [] }))
+    .filter((x) => x.stale.length && x.stale.join(",") !== was.get(x.ref));
+}
+
 export function createReviewService({
   getContext,
   callTool,
@@ -184,6 +192,9 @@ export function createReviewService({
   // Default language of the settings file, between the profile and the
   // environment (journal-profile.mjs rationaleLang): () => string | null.
   langDefault = null,
+  // (revision, snapshot) => revision, run in a refresh once the states of
+  // the changes are set (index.mjs: the stale marks of saved responses).
+  afterRefresh = null,
   getModel = () => null,
   sendEvent = () => {},
   log = console.log,
@@ -668,6 +679,7 @@ export function createReviewService({
       let external = [];
       let resolved = [];
       let dropped = [];
+      let stale = [];
       const revision = await update(d, (old) => {
         const r0 = resolveUnknownOverrides(clearStale(d, old) ?? old, snapshot);
         const rev = r0.revision;
@@ -688,8 +700,11 @@ export function createReviewService({
           next = r.revision;
           external = r.added;
         }
+        next = afterRefresh?.(next, snapshot) ?? next;
+        stale = staleChanges(old, next);
         return setSnapshot(next, texts, new Date(), snapshotIds(snapshot));
       });
+      for (const x of stale) log(`[response] stale ${x.ref} ${x.stale.join(",")}`);
       for (const x of resolved) {
         forgetLate(x.tool_call_id);
         log(

@@ -85,3 +85,10 @@ test("the response service is wired to the same one-shot router and its handlers
   assert.equal(/makeOneshot|runOneshot|ONESHOT_MODEL/.test(block), false);
   assert.match(code, /\.\.\.review\.handlers,\s*\.\.\.response\.handlers,/);
 });
+
+test("a Review refresh marks saved responses stale with the rule of the Response tab", () => {
+  const at = code.indexOf("const review = createReviewService({");
+  const block = code.slice(at, code.indexOf("\n});", at));
+  assert.match(block, /afterRefresh: \(rev, snap\) => markStale\(rev, snap\)/);
+  assert.match(code, /import \{ markStale \} from "\.\/response-quotes\.mjs";/);
+});
