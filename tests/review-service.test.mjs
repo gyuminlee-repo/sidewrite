@@ -645,10 +645,13 @@ test("a late applied result of a timed-out tracked edit is recorded once; not ap
     assert.equal(rev.comments[0].changes[0].word_comment_id, "44");
     assert.ok(t.lines.includes("[review] late result recorded x1"));
     assert.ok(t.lines.some((l) => l.startsWith("[review] late result not applied x2")));
+    // Each unanswered edit is first written to the file (edit_blocked makes
+    // the pane reload); both are settled by their late answers.
     assert.deepEqual(
       t.events.map((e) => e.event),
-      ["change_recorded", "late_result_recorded"],
+      ["edit_blocked", "edit_blocked", "change_recorded", "late_result_recorded"],
     );
+    assert.equal(rev.comments[0].blocked.length, 0);
   } finally {
     await t.cleanup();
   }
@@ -1617,6 +1620,223 @@ test("tracked-edit context: changes recorded after the last refresh are given wi
       { ref: "R1.3" },
     );
     assert.deepEqual([r.ok, r.blocked_by, r.blocked_id], [false, ["L1"], "R1.3-b1"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+// Codex review 14: a normal tracked edit Word applied while the connection
+// dropped left nothing in the file: the attempt was only in memory, no late
+// result came, and the refresh recovery read blocked exceptions only. The
+// change and its rationale comment were in Word with no change record.
+const P_BEFORE = "Cells grew on the substrate at 30 C.";
+const P_AFTER = "Cells grew on the medium at 30 C.";
+const UNANSWERED_COMMENT = "[R1.3] w / y / a";
+// reviewed: the paragraph with pending changes accepted (Word reviewed text).
+const snap = (text, { comments = [], marks = 0, reviewed = null } = {}) => ({
+  paragraphs: [
+    { index: 0, id: "p0", text: "Title", w_ins: 0, w_del: 0 },
+    { index: 1, id: "p1", text, reviewed_text: reviewed, w_ins: marks, w_del: marks },
+  ],
+  comments,
+});
+// A normal edit ("the substrate" -> "the medium") that Word never answered.
+async function unansweredEdit(t, { id = "x1" } = {}) {
+  await t.ask("review_save_comments", { comments: COMMENTS });
+  await t.ask("review_refresh", { snapshot: snap(P_BEFORE) });
+  const deps = {
+    ...t.svc.trackedEditDeps("k"),
+    call: async () => {
+      throw noAnswer(id);
+    },
+  };
+  return applyTrackedEdit(
+    deps,
+    {
+      comment_ref: "R1.3",
+      find: "the substrate",
+      replace: "the medium",
+      rationale: { what: "w", why: "y", addresses: "a" },
+    },
+    { ref: "R1.3" },
+  );
+}
+const r13 = async (t) => (await t.ask("review_load")).revision.comments[1];
+
+test("an unanswered normal edit is written to the file as outcome_unknown, with what it would record", async () => {
+  for (const id of ["x1", null]) {
+    const t = await setup();
+    try {
+      const r = await unansweredEdit(t, { id });
+      assert.equal(r.code, "OutcomeUnknown");
+      const c = await r13(t);
+      assert.equal(c.changes.length, 0);
+      assert.equal(c.blocked.length, 1);
+      const b = c.blocked[0];
+      assert.deepEqual([b.id, b.state, b.blocked_by], ["R1.3-b1", "outcome_unknown", []]);
+      assert.deepEqual([b.args.find, b.args.replace], ["the substrate", "the medium"]);
+      assert.equal(b.attempt.tool_call_id, id);
+      assert.equal(b.attempt.comment_text, UNANSWERED_COMMENT);
+      assert.deepEqual(
+        [b.attempt.change.paragraph_index, b.attempt.change.before, b.attempt.change.after],
+        [1, P_BEFORE, P_AFTER],
+      );
+      assert.equal(c.blocked_seq, 1);
+      assert.ok(t.lines.some((l) => /outcome unknown R1\.3-b1 kept for refresh/.test(l)));
+    } finally {
+      await t.cleanup();
+    }
+  }
+});
+
+test("refresh reconciles an unanswered normal edit: applied, not applied, or still unknown", async () => {
+  const comment = { id: "12", paragraph_index: 1, content: UNANSWERED_COMMENT };
+  const cases = [
+    // [name, snapshot, changes, blocked left, state of the change]
+    ["accepted text and the comment", snap(P_AFTER, { comments: [comment] }), 1, 0, "accepted"],
+    [
+      "pending tracked replace and the comment",
+      snap("Cells grew on the mediumthe substrate at 30 C.", {
+        comments: [comment],
+        marks: 1,
+        reviewed: P_AFTER,
+      }),
+      1,
+      0,
+      "pending",
+    ],
+    ["before text intact, no comment", snap(P_BEFORE), 0, 0, null],
+    ["paragraph rewritten by hand, no comment", snap("Cells grew well at 30 C."), 0, 1, null],
+    ["paragraph gone", snap("Something else entirely."), 0, 1, null],
+  ];
+  for (const [name, snapshot, changes, blocked, state] of cases) {
+    const t = await setup();
+    try {
+      await unansweredEdit(t);
+      const r = await t.ask("review_refresh", { snapshot });
+      const c = r.revision.comments[1];
+      assert.deepEqual([c.changes.length, c.blocked.length], [changes, blocked], name);
+      if (changes) {
+        assert.deepEqual(
+          [c.changes[0].state, c.changes[0].word_comment_id, c.changes[0].text],
+          [state, "12", "the medium"],
+          name,
+        );
+        assert.deepEqual(r.external, [], name);
+      }
+      if (blocked) assert.equal(c.blocked[0].state, "outcome_unknown", name);
+      if (name.startsWith("before text")) {
+        assert.ok(
+          t.lines.some((l) => /R1\.3-b1 not applied.*dropped/.test(l)),
+          name,
+        );
+      }
+    } finally {
+      await t.cleanup();
+    }
+  }
+});
+
+test("a daemon that restarted reconciles the unanswered edit it finds in the file", async () => {
+  for (const [text, comments, changes] of [
+    [P_AFTER, [{ id: "12", paragraph_index: 1, content: UNANSWERED_COMMENT }], 1],
+    [P_BEFORE, [], 0],
+  ]) {
+    const t = await setup();
+    try {
+      await unansweredEdit(t);
+      // A second service on the same folder: nothing of the first in memory.
+      const svc2 = createReviewService({
+        getContext: () => ({ activeDoc: t.doc }),
+        callTool: async () => ({ ok: true }),
+        pushTurn: () => {},
+        sendEvent: () => {},
+        log: () => {},
+        env: ENV,
+      });
+      const ask2 = (type, payload = {}) =>
+        new Promise((resolve) =>
+          svc2.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+        );
+      const before = (await ask2("review_load")).revision.comments[1];
+      assert.equal(before.blocked[0].state, "outcome_unknown");
+      const r = await ask2("review_refresh", { snapshot: snap(text, { comments }) });
+      const c = r.revision.comments[1];
+      assert.deepEqual([c.changes.length, c.blocked.length], [changes, 0]);
+      // The late answer of the old call means nothing to this daemon.
+      await svc2.lateToolResult("k", {
+        id: "x1",
+        ok: true,
+        result: { ok: true, word_comment_id: 12, paragraph_index: 1, before: "b", after: "a" },
+      });
+      assert.equal((await ask2("review_load")).revision.comments[1].changes.length, changes);
+    } finally {
+      await t.cleanup();
+    }
+  }
+});
+
+test("a late answer settles the unanswered normal edit: recorded, or dropped when Word says not applied", async () => {
+  let t = await setup();
+  try {
+    await unansweredEdit(t);
+    await t.svc.lateToolResult("k", {
+      id: "x1",
+      ok: true,
+      result: {
+        ok: true,
+        word_comment_id: 12,
+        paragraph_index: 1,
+        before: P_BEFORE,
+        after: P_AFTER,
+      },
+    });
+    const c = await r13(t);
+    assert.deepEqual([c.changes.length, c.blocked.length], [1, 0]);
+    assert.equal(c.changes[0].word_comment_id, "12");
+  } finally {
+    await t.cleanup();
+  }
+  for (const entry of [
+    { id: "x1", ok: false, error: "GeneralException" },
+    { id: "x1", ok: true, result: { ok: false, code: "NotFound", message: "not found" } },
+  ]) {
+    t = await setup();
+    try {
+      await unansweredEdit(t);
+      await t.svc.lateToolResult("k", entry);
+      const c = await r13(t);
+      assert.deepEqual([c.changes.length, c.blocked.length], [0, 0]);
+    } finally {
+      await t.cleanup();
+    }
+  }
+});
+
+test("an unanswered normal edit can be applied again from the Review tab (force), like an exception", async () => {
+  const t = await setup({
+    callResult: {
+      ok: true,
+      word_comment_id: 9,
+      paragraph_index: 1,
+      before: P_BEFORE,
+      after: P_AFTER,
+    },
+  });
+  try {
+    await unansweredEdit(t);
+    const plain = await t.ask("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
+    assert.equal(plain.ok, false);
+    const forced = await t.ask("review_override", {
+      ref: "R1.3",
+      blocked_id: "R1.3-b1",
+      force: true,
+    });
+    assert.deepEqual([forced.ok, forced.applied], [true, true]);
+    const c = forced.revision.comments[1];
+    assert.deepEqual([c.changes.length, c.blocked.length], [1, 0]);
+    assert.deepEqual(c.changes[0].override_of, []);
+    assert.equal(t.calls[0][1].comment_text, UNANSWERED_COMMENT); // no exception note
   } finally {
     await t.cleanup();
   }

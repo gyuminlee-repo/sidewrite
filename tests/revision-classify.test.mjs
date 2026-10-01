@@ -633,3 +633,62 @@ test("replace containing its find: accepted then edited reads user_edited, not r
     "pending",
   );
 });
+
+// Codex review 14, class audit: a changed paragraph that had an identical
+// twin when it was changed. With no paragraph id (a Word without
+// uniqueLocalId) and its rationale comment gone, the only paragraph that
+// still reads the old text may be the twin the tool never touched; it was
+// taken for the changed one and the change read "rejected".
+test("an untouched twin of the changed paragraph is not taken for it", () => {
+  const before = "Cells grew on the substrate at 30 degrees.";
+  const after = "Cells grew on the substrate at 30 °C.";
+  const change = {
+    id: "R1.1-1",
+    kind: "replace",
+    find: "30 degrees",
+    text: "30 °C",
+    word_comment_id: "77", // cleaned up: no longer in the document
+    paragraph_index: 2,
+    paragraph_id: null,
+    before,
+    after,
+    context: { left: "substrate at ", right: "." },
+    duplicate_before: true,
+  };
+  const doc = (third) => ({
+    paragraphs: [before, "Middle.", third].map((text, index) => ({
+      index,
+      id: null,
+      text,
+      w_ins: 0,
+      w_del: 0,
+    })),
+    comments: [],
+  });
+  // Accepted, then rewritten by hand: only the twin reads the old text.
+  assert.deepEqual(locateParagraph(change, doc("Cells grew well at 30 °C.")), {
+    index: null,
+    method: "not_found",
+  });
+  assert.equal(classifyChange(change, doc("Cells grew well at 30 °C.")).state, "unlocated");
+  // Accepted (the twin reads the old text, the changed one the new) and
+  // rejected (both read the old text): two candidates, ambiguous as before,
+  // never a guess.
+  assert.equal(locateParagraph(change, doc(after)).method, "ambiguous");
+  assert.equal(locateParagraph(change, doc(before)).method, "ambiguous");
+  // The old text at the recorded place still counts (the twin is gone).
+  const moved = {
+    paragraphs: [
+      { index: 0, id: null, text: "Title.", w_ins: 0, w_del: 0 },
+      { index: 2, id: null, text: before, w_ins: 0, w_del: 0 },
+    ],
+    comments: [],
+  };
+  assert.deepEqual(locateParagraph(change, moved), { index: 2, method: "text" });
+  // A change with no twin at edit time keeps the unique-text rule anywhere.
+  const single = { ...change, duplicate_before: false };
+  assert.deepEqual(locateParagraph(single, doc("Cells grew well at 30 °C.")), {
+    index: 0,
+    method: "text",
+  });
+});

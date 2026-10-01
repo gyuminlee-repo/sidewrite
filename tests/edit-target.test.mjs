@@ -19,13 +19,16 @@ function fakeDoc(texts, mode) {
     for (let i = text.indexOf(q); i !== -1; i = text.indexOf(q, i + q.length)) out.push(i);
     return out;
   };
+  // A range knows its paragraph; two ranges compare as Equal inside the
+  // same paragraph (enough for "which paragraph is this").
   const range = (p) => ({
+    owner: p,
     load() {},
     paragraphs: { getFirst: () => p },
     search: () => coll([]),
     insertText: () => range(p),
     insertComment: () => ({ id: "C1", load() {} }),
-    compareLocationWith: () => ({ value: "Before" }),
+    compareLocationWith: (other) => ({ value: other.owner === p ? "Equal" : "Before" }),
   });
   const paras = texts.map((text, k) => {
     const p = {
@@ -33,6 +36,7 @@ function fakeDoc(texts, mode) {
       style: "Normal",
       ...(mode === "uniqueLocalId" ? { uniqueLocalId: `U${k}` } : {}),
       load() {},
+      getRange: () => range(p),
       search: (q) => coll(hits(text, q).map(() => range(p))),
     };
     return p;
@@ -54,14 +58,14 @@ function fakeDoc(texts, mode) {
 
 const { toolTrackedEdit } = await import("../taskpane/shared/tools-word.js");
 
-const TEXTS = [
+const TEXTS_A = [
   "This is a novel material.",
   "This is a conventional material.",
   "Plain text only.",
   "One material and another material.",
 ];
 // [find, hint as a paragraph position or a literal string, expected]
-const CASES = [
+const CASES_A = [
   ["conventional", null, 1],
   ["conventional", 0, 1], // one hit in the document: the hint is not read
   ["conventional", "nowhere", 1],
@@ -81,36 +85,93 @@ const CASES = [
   ["This is a", null, "Ambiguous"],
 ];
 
-for (const mode of ["uniqueLocalId", "index"]) {
-  test(`editTarget picks the paragraph toolTrackedEdit edits (${mode} ids)`, async () => {
-    const ids = TEXTS.map((_, k) => (mode === "uniqueLocalId" ? `U${k}` : null));
-    for (const [find, h, want] of CASES) {
-      const hint = typeof h === "number" ? (mode === "uniqueLocalId" ? `U${h}` : `p${h}`) : h;
-      const expected = want !== null && typeof want === "object" ? want[mode] : want;
-      fakeDoc(TEXTS, mode);
-      const r = await toolTrackedEdit({
-        find,
-        replace: "x",
-        ...(hint ? { paragraph_hint: hint } : {}),
-        comment_text: "[R1.1] w / y / a",
-      });
-      const word = r.ok ? r.paragraph_index : r.code;
-      const t = editTarget(TEXTS, ids, find, hint);
-      const daemon = t.code ?? t.index;
-      const name = `${find} / ${hint}`;
-      assert.equal(word, expected, `Word: ${name}`);
-      assert.equal(daemon, word, `daemon vs Word: ${name}`);
-    }
-    console.log(`edit target corpus (${mode}): ${CASES.length} cases, same answer on both sides`);
-  });
-}
+// Codex review 14: two paragraphs with the same text. Without uniqueLocalId
+// the task pane looked the edited paragraph up by its text and reported the
+// first twin (hint p2 gave index 0).
+const TWINS = [
+  "The same line with material.",
+  "Another paragraph.",
+  "The same line with material.",
+  "Another paragraph.",
+  "A single line.",
+];
+const TWIN_CASES = [
+  ["material", 2, 2],
+  ["material", 0, 0],
+  ["The same line", 2, 2],
+  ["Another", 3, 3],
+  ["Another", 1, 1],
+  ["material", null, "Ambiguous"],
+  ["single", 0, 4],
+  ["single", null, 4],
+];
+
+for (const [label, TEXTS, CASES] of [
+  ["", TEXTS_A, CASES_A],
+  [", identical paragraphs", TWINS, TWIN_CASES],
+])
+  for (const mode of ["uniqueLocalId", "index"]) {
+    test(`editTarget picks the paragraph toolTrackedEdit edits (${mode} ids${label})`, async () => {
+      const ids = TEXTS.map((_, k) => (mode === "uniqueLocalId" ? `U${k}` : null));
+      for (const [find, h, want] of CASES) {
+        const hint = typeof h === "number" ? (mode === "uniqueLocalId" ? `U${h}` : `p${h}`) : h;
+        const expected = want !== null && typeof want === "object" ? want[mode] : want;
+        fakeDoc(TEXTS, mode);
+        const r = await toolTrackedEdit({
+          find,
+          replace: "x",
+          ...(hint ? { paragraph_hint: hint } : {}),
+          comment_text: "[R1.1] w / y / a",
+        });
+        const word = r.ok ? r.paragraph_index : r.code;
+        const t = editTarget(TEXTS, ids, find, hint);
+        const daemon = t.code ?? t.index;
+        const name = `${find} / ${hint}`;
+        assert.equal(word, expected, `Word: ${name}`);
+        assert.equal(daemon, word, `daemon vs Word: ${name}`);
+      }
+      console.log(
+        `edit target corpus (${mode}${label}): ${CASES.length} cases, same answer on both sides`,
+      );
+    });
+  }
 
 test("editTarget without known ids reads a p<N> hint only; other hints are not found", () => {
-  assert.deepEqual(editTarget(TEXTS, null, "material", "p1"), { index: 1, code: null });
-  assert.deepEqual(editTarget(TEXTS, null, "material", "U1"), {
+  assert.deepEqual(editTarget(TEXTS_A, null, "material", "p1"), { index: 1, code: null });
+  assert.deepEqual(editTarget(TEXTS_A, null, "material", "U1"), {
     index: null,
     code: "HintNotFound",
   });
   assert.deepEqual(editTarget([], null, "material", null), { index: null, code: "NotFound" });
-  assert.deepEqual(editTarget(TEXTS, null, "  ", null), { index: null, code: "NotFound" });
+  assert.deepEqual(editTarget(TEXTS_A, null, "  ", null), { index: null, code: "NotFound" });
+});
+
+// The same lookup for the other callers in tools-word.js (comment anchors in
+// collectReviewSnapshot and office_clear_comments, the selection).
+test("paragraphIndexes: a paragraph with a twin is found by its place, not by its text", async () => {
+  const { paragraphIndexes } = await import("../taskpane/shared/tools-word.js");
+  for (const mode of ["uniqueLocalId", "index"]) {
+    fakeDoc(TWINS, mode);
+    await globalThis.Word.run(async (context) => {
+      const paragraphs = context.document.body.paragraphs;
+      const firsts = [2, 0, 3, 4, null].map((k) => (k === null ? null : paragraphs.items[k]));
+      assert.deepEqual(
+        await paragraphIndexes(context, paragraphs, mode, firsts),
+        [2, 0, 3, 4, -1],
+        mode,
+      );
+      // A paragraph that is not in the document.
+      const stray = { text: "Not here.", uniqueLocalId: "U99", getRange: () => ({ owner: null }) };
+      assert.deepEqual(await paragraphIndexes(context, paragraphs, mode, [stray]), [-1], mode);
+    });
+  }
+});
+
+test("tools-word.js maps no paragraph back by text equality outside paragraphIndexes", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../taskpane/shared/tools-word.js", import.meta.url), "utf8");
+  const helper = /export async function paragraphIndexes[\s\S]*?\n}\n/.exec(src)[0];
+  const rest = src.replace(helper, "");
+  assert.deepEqual(rest.match(/findIndex\(\((\w+)\) => \1\.text === /g) ?? [], []);
+  assert.equal((src.match(/await paragraphIndexes\(/g) ?? []).length, 4);
 });

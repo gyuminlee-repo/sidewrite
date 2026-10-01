@@ -39,6 +39,7 @@ import {
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
 import { createTurnState } from "./turn-state.js";
+import { createResultQueue } from "./result-queue.js";
 import {
   toolExcelGetSelectedRange,
   toolExcelListSheets,
@@ -578,6 +579,7 @@ function wsConnect() {
   ws.onopen = () => {
     wsReady = true;
     sendHello();
+    for (const r of unsentResults.drain()) ws.send(JSON.stringify(r));
     // Record the sticky model for this pane key right after the hello
     // binds it, so the lazy first-message session start uses it.
     sendModel();
@@ -615,8 +617,14 @@ function wsConnect() {
   };
 }
 
+// A tool result made while the socket is down waits for the next
+// connection (result-queue.js); anything else is dropped as before.
+const unsentResults = createResultQueue();
 function wsSend(obj) {
-  if (!wsReady) return;
+  if (!wsReady) {
+    if (obj?.type === "tool_result") unsentResults.push(obj);
+    return;
+  }
   ws.send(JSON.stringify(obj));
 }
 
