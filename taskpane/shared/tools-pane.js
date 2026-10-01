@@ -5,7 +5,7 @@
 // own, made by the daemon from the saved file.
 // Text from the daemon or the document is inserted with textContent only.
 
-import { docLine } from "./tools-view.js";
+import { docLine, selectionHead } from "./tools-view.js";
 
 const CONNECTION_LOST =
   "The connection to the daemon was lost before the result came. Run it again.";
@@ -13,6 +13,9 @@ const CONNECTION_LOST =
 export function initToolsPane({
   sendRequest,
   word,
+  // The pane's stored settings (taskpane.js): toolsLang is kept there.
+  settings = {},
+  saveSettings = () => {},
   // () => the request that confirms the stored providers while it is under
   // way (providers-pane.js whenRestored), else null.
   providersReady = () => null,
@@ -117,6 +120,36 @@ export function initToolsPane({
   }
 
   // ---- sections -------------------------------------------------------------
+
+  // Selection: the selected text goes to the model, the answer is shown here.
+  // No call writes to Word.
+  async function selection(kind) {
+    const text = String(await word.selectionText()).trim();
+    if (!text) throw new Error("Select some text in the document first.");
+    let r;
+    if (kind === "translate") {
+      const lang = $("tools-lang").value.trim();
+      if (!lang) throw new Error("Name the language to translate into.");
+      settings.toolsLang = lang;
+      saveSettings(settings);
+      say("Translating the selection...");
+      r = await askJob("selection_translate", { text, lang });
+    } else {
+      const question = $("tools-question").value.trim();
+      if (!question) throw new Error("Type a question about the selected text.");
+      say("Asking about the selection...");
+      r = await askJob("selection_ask", { text, question });
+    }
+    if (!r.ok) throw new Error(r.error || "The request failed.");
+    say("");
+    $("tools-selection").replaceChildren(
+      el("div", { class: "review-reqs-line", text: selectionHead(kind, text, r) }),
+      el("div", { class: "review-preview", text: r.text }),
+    );
+  }
+  $("tools-lang").value = settings.toolsLang ?? "";
+  onClick("tools-translate", () => selection("translate"));
+  onClick("tools-ask", () => selection("ask"));
 
   renderDoc(); // loaded on "welcome" (taskpane.js calls reload once connected)
 

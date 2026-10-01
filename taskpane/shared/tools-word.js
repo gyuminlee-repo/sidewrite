@@ -2049,6 +2049,16 @@ export async function selectCommentById(commentId) {
   });
 }
 
+// The selected text, as Word gives it. Read only.
+export async function selectionText() {
+  return await Word.run(async (context) => {
+    const sel = context.document.getSelection();
+    sel.load("text");
+    await context.sync();
+    return sel.text;
+  });
+}
+
 export async function selectParagraphByIndex(index) {
   return await Word.run(async (context) => {
     const paragraphs = context.document.body.paragraphs;

@@ -34,6 +34,7 @@ import {
   selectionParagraphs,
   selectCommentById,
   selectParagraphByIndex,
+  selectionText,
   readAllComments,
   deleteBackedUpComments,
   deleteToolComments,
@@ -1258,7 +1259,9 @@ Office.onReady((info) => {
     toolsPane = initToolsPane({
       sendRequest,
       providersReady: () => providersPane?.whenRestored() ?? null,
-      word: {},
+      settings,
+      saveSettings,
+      word: { selectionText },
     });
   }
 

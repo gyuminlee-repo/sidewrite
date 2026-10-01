@@ -633,6 +633,7 @@ const response = createResponseService({
 // Tools tab: selection, journal rules, checks and copies of the manuscript.
 const aux = createAuxService({
   getContext: (key) => bridge.getContext(key),
+  oneshotFor: (key, options) => oneshotRouter.pin(key, options),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
 });
 

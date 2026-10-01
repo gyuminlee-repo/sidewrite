@@ -135,6 +135,93 @@ test("a document that is not saved: the tab says so and shows the daemon's reaso
   assert.equal(t.message(), "Save the document to a local folder first.");
 });
 
+// ---- selection: translate and ask --------------------------------------------
+
+test("translate: the selection and the language are sent, the answer is shown, Word is only read", async () => {
+  const wordCalls = [];
+  const t = await setup({
+    settings: { toolsLang: "Korean" },
+    word: { selectionText: async () => (wordCalls.push("selectionText"), " Grown at 30 °C. ") },
+    respond: {
+      selection_translate: (p) => ({
+        ok: true,
+        text: "30 °C 에서 배양했다.",
+        lang: p.lang,
+        model: "sonnet",
+      }),
+    },
+  });
+  assert.equal(t.$("tools-lang").value, "Korean");
+  await t.$("tools-translate").click();
+  await tick();
+  assert.deepEqual(t.of("selection_translate")[0].payload, {
+    text: "Grown at 30 °C.",
+    lang: "Korean",
+  });
+  assert.deepEqual(texts(t.$("tools-selection")), [
+    'Translation into Korean (sonnet) for: "Grown at 30 °C."',
+    "30 °C 에서 배양했다.",
+  ]);
+  assert.deepEqual(wordCalls, ["selectionText"]);
+  assert.equal(t.saved.at(-1).toolsLang, "Korean");
+  assert.equal(t.message(), "");
+});
+
+test("ask: the question goes with the selection and the answer is shown", async () => {
+  const t = await setup({
+    respond: { selection_ask: () => ({ ok: true, text: "At 30 °C.", model: "haiku" }) },
+  });
+  t.$("tools-question").value = "At what temperature?";
+  await t.$("tools-ask").click();
+  await tick();
+  assert.deepEqual(t.of("selection_ask")[0].payload, {
+    text: "The cells were grown at 30 °C.",
+    question: "At what temperature?",
+  });
+  assert.deepEqual(texts(t.$("tools-selection")), [
+    'Answer (haiku) for: "The cells were grown at 30 °C."',
+    "At 30 °C.",
+  ]);
+});
+
+test("nothing selected, no language or no question: said in the tab, nothing is sent", async () => {
+  let t = await setup({ word: { selectionText: async () => "  " } });
+  t.$("tools-lang").value = "Korean";
+  await t.$("tools-translate").click();
+  assert.equal(t.message(), "Select some text in the document first.");
+  t = await setup();
+  await t.$("tools-translate").click();
+  assert.equal(t.message(), "Name the language to translate into.");
+  await t.$("tools-ask").click();
+  assert.equal(t.message(), "Type a question about the selected text.");
+  assert.equal(t.of("selection_translate").length + t.of("selection_ask").length, 0);
+});
+
+test("a failed job shows the daemon's reason and leaves the buttons usable", async () => {
+  const t = await setup({
+    respond: { selection_ask: () => ({ ok: false, error: "the answer failed: usage limit" }) },
+  });
+  t.$("tools-question").value = "Why?";
+  await t.$("tools-ask").click();
+  await tick();
+  assert.equal(t.message(), "the answer failed: usage limit");
+  assert.equal(t.$("tools-ask").disabled, false);
+});
+
+test("a new connection ends a job that was waiting, with an error, and the buttons come back", async () => {
+  const t = await setup({ hold: ["selection_ask"] });
+  t.$("tools-question").value = "Why?";
+  const pressed = t.$("tools-ask").click();
+  await tick();
+  assert.equal(t.$("tools-ask").disabled, true);
+  await t.pane.reload(); // welcome of the new connection
+  await pressed;
+  await tick();
+  assert.match(t.message(), /connection to the daemon was lost/);
+  assert.equal(t.$("tools-ask").disabled, false);
+  assert.equal(t.$("tools-translate").disabled, false);
+});
+
 test("a page without the Tools tab (Excel) gets a pane that does nothing", async () => {
   const t = await setup({ missing: ["tools-root"] });
   assert.equal(t.requests.length, 0);

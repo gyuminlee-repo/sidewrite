@@ -295,6 +295,22 @@
       <div class="setup-content" id="tools-root">
         <p class="setup-help" id="tools-doc"></p>
         <div id="tools-message" hidden></div>
+
+        <div class="setup-section">
+          <h3>Selection</h3>
+          <p class="setup-help">
+            Translate the selected text or ask about it. The document is not changed.
+          </p>
+          <label>Translate into <input type="text" id="tools-lang" placeholder="Language" /></label>
+          <button type="button" class="btn-secondary btn-small" id="tools-translate">
+            Translate selection
+          </button>
+          <input type="text" id="tools-question" placeholder="Question about the selected text" />
+          <button type="button" class="btn-secondary btn-small" id="tools-ask">
+            Ask about selection
+          </button>
+          <div id="tools-selection"></div>
+        </div>
       </div>
     </section>
 
