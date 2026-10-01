@@ -14,6 +14,8 @@
 // States of the changes, citations, section names, line ranges, stale marks
 // and every check come from code and from what the pane read in Word
 // (snapshot, headings, the rendered PDF); a request cannot send them in.
+// (response_save `shown` names the citations a card showed; it is compared
+// with the document to decide the stale marks and is never saved.)
 //
 // Handler rules (as in review-service.mjs): the document of a pane is read
 // once per request (at(key)) and never again after an await; a failure is an
@@ -149,6 +151,20 @@ const draftInput = (c) => ({
   ]),
 });
 
+// The citations a pane says its card showed (response_save), reduced to what
+// staleReasons reads. null: the request holds none (a pane that does not send
+// them). They are compared with the document and never saved.
+function shownCitations(list) {
+  if (list === undefined) return null;
+  if (!Array.isArray(list)) throw new Error("shown must be a list of citations.");
+  return list.map((x) => ({
+    kind: x?.kind === "removed" ? "removed" : "revised",
+    quote: String(x?.quote ?? ""),
+    paragraph_index: Number.isInteger(x?.paragraph_index) ? x.paragraph_index : null,
+    change_ids: (Array.isArray(x?.change_ids) ? x.change_ids : []).map(String),
+  }));
+}
+
 // States, then citations, then stale marks, from one snapshot. Pure.
 //   - a change is cited only while it is in the manuscript (accepted or
 //     revised by the author); applyStates runs first so citationsFor reads
@@ -234,16 +250,11 @@ export function createResponseService({
   }
 
   // The revision brought up to date with the document, saved, and its profile.
-  // peek(rev, snapshot): called with the stored revision right before it is
-  // brought up to date.
-  async function current(d, msg, peek = null) {
+  async function current(d, msg) {
     const { snapshot, headings, dropped } = docOf(msg);
     if (dropped) log(`[response] headings dropped=${dropped}`);
     const { profile } = await profileOf(d, await load(d));
-    const revision = await update(d, (rev) => {
-      peek?.(rev, snapshot);
-      return refreshed(rev, snapshot, headings, profile);
-    });
+    const revision = await update(d, (rev) => refreshed(rev, snapshot, headings, profile));
     return { snapshot, headings, dropped, profile, revision };
   }
   // What the pane found as headings, for a run that cites no section: how
@@ -558,22 +569,38 @@ export function createResponseService({
     // snapshot, headings (optional): the document as it is now. With them the
     // citations are brought up to date first, so the text is saved against
     // the changes it answers and a later change shows as stale.
+    // shown (with text): the citations the card of this pane showed while the
+    // text was typed, [{ kind, quote, paragraph_index, change_ids }]. They are
+    // compared with the document and never saved.
     async response_save(msg, key) {
       const d = at(key);
       const ref = msg.ref;
-      // The text was typed against the citations the card showed, and those
-      // are the stored ones. Where the document of this request no longer
-      // agrees with them (a shown sentence edited, a cited change taken
-      // back), the text is saved with that mark: the author reads it against
-      // the citations as they are now and saves again. A card that showed no
-      // citation gives nothing to compare.
-      let moved = [];
-      if (msg.snapshot !== undefined)
-        await current(d, msg, (rev, snapshot) => {
-          const shown = findComment(applyStates(rev, classifyRevision(rev, snapshot)), ref);
-          if (shown?.response?.citations?.length) moved = staleReasons(shown, snapshot, null);
-        });
-      const marked = "text" in msg && moved.length > 0;
+      const shown = "text" in msg ? shownCitations(msg.shown) : null;
+      const state = msg.snapshot !== undefined ? await current(d, msg) : null;
+      // The text was typed against the citations its card showed. Another
+      // pane, or the refresh of this request, may have replaced the stored
+      // ones since, so it is the pane that says what it showed, and the
+      // marks quote_changed and change_state are decided by that alone:
+      //   - what it showed still fits the document of this request (the
+      //     sentences stand in their paragraphs, the cited changes are the
+      //     ones in the manuscript): the marks are taken off
+      //   - it does not: the text is saved with what does not fit as marks;
+      //     the author reads it against the citations as they are now and
+      //     saves again
+      //   - the card showed no citation: nothing to compare, marks taken off
+      //   - no `shown`, or no document in the request: nothing is judged and
+      //     the stored marks stay as they are
+      const judged = !!shown && !!state;
+      const comment0 = judged ? findComment(state.revision, ref) : null;
+      const moved =
+        comment0 && shown.length
+          ? staleReasons(
+              { changes: comment0.changes, response: { citations: shown } },
+              state.snapshot,
+              null,
+            )
+          : [];
+      const marked = moved.length > 0;
       const revision = await update(d, (rev) => {
         const comment = findComment(rev, ref);
         if (!comment) throw new Error(`No reviewer comment ${ref}`);
@@ -584,14 +611,13 @@ export function createResponseService({
           // text it is dropped (the check then asks for a new one), never kept.
           const gloss = text === (comment.response?.text ?? "") ? {} : { gloss: "" };
           next = setResponse(next, ref, { text, source: "author", ...gloss });
-          // Written again: what was stale about the old text is not any more.
           const r = findComment(next, ref).response;
           next = setCitations(
             next,
             ref,
             r.citations,
             STALE_ORDER.filter((s) =>
-              s === "lines_old" ? r.stale.includes(s) : moved.includes(s),
+              s === "lines_old" || !judged ? r.stale.includes(s) : moved.includes(s),
             ),
           );
         }
@@ -614,7 +640,7 @@ export function createResponseService({
         }
         return next;
       });
-      if (marked) log(`[response] save ${ref} input changed: ${moved.join(",")}`);
+      if (marked) log(`[response] save ${ref} shown citations do not fit: ${moved.join(",")}`);
       return {
         revision,
         warnings: marked

@@ -29,6 +29,18 @@ export const STALE_LABELS = {
 };
 export const staleText = (stale) => (stale ?? []).map((s) => STALE_LABELS[s] ?? s).join("; ");
 
+// What a card shows as the citations of its comment, as the pane tells the
+// daemon with a saved text (response_save `shown`). The daemon judges the
+// text by these: they are what the author read while typing, and another
+// pane may have replaced the stored ones since.
+export const shownCitations = (comment) =>
+  (comment?.response?.citations ?? []).map((c) => ({
+    kind: c.kind,
+    quote: c.quote,
+    paragraph_index: c.paragraph_index,
+    change_ids: c.change_ids,
+  }));
+
 // The line of a card whose saved answer has no second-language paragraph
 // although the letter writes one (the `translation` row of
 // daemon/response-check.mjs), or "". letter: profile.response_letter.

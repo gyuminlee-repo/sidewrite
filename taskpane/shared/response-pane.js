@@ -10,6 +10,7 @@ import {
   pdfTooLarge,
   staleText,
   translationMissing,
+  shownCitations,
   citationText,
   checkLine,
   checksSummary,
@@ -283,6 +284,8 @@ export function initResponsePane({
           const r = await ask("response_save", {
             ref: c.ref,
             text: text.value,
+            // The citations this card shows: the text is judged by them.
+            shown: shownCitations(c),
             ...(await docNow()),
           });
           state.texts.delete(c.ref);

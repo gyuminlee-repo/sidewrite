@@ -293,14 +293,14 @@ export function staleReasons(comment, snapshot, render) {
 //                          citations changed, or the Review refresh found
 //                          them not to fit another text: stale_at below),
 //                          what moved is marked
-//   response_save, text    with the document of the pane: cleared when the
-//                          citations the card showed still fit that document;
-//                          a shown sentence edited or a cited change taken
-//                          back since is marked instead (a card that showed
-//                          no citation has nothing to compare).
-//                          without the document: cleared, and the citations
-//                          are left as they were, so the next read of the
-//                          document judges the new text against them
+//   response_save, text    judged by the citations the pane says its card
+//                          showed (`shown`), against the document of the
+//                          request, whatever is stored by then: cleared when
+//                          they still fit; a shown sentence edited or a cited
+//                          change taken back is marked instead (a card that
+//                          showed no citation has nothing to compare: cleared).
+//                          without `shown` or without the document: not
+//                          judged, the marks stay as they are stored
 //   response_save, other   (declined, declined_requirements) not touched
 //   response_locate        not touched; it takes off lines_old only
 //   response_translate     not touched

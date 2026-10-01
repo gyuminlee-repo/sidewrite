@@ -284,10 +284,29 @@ test("Save sends the text with the document as it is now", async () => {
   assert.deepEqual(t.sent("response_save")[0].payload, {
     ref: "R1.2",
     text: "The strain is named in Section 2.",
+    shown: [], // this card shows no citation
     snapshot: SNAPSHOT,
     headings: HEADINGS,
   });
   assert.equal(t.message(), "Saved R1.2.");
+
+  // A card with a citation says which one it shows; the daemon judges the
+  // text by that, not by what another pane stored meanwhile.
+  const cited = await setup({
+    revision: revisionOf([
+      C1({ response: { text: "We now state the unit.", stale: [], citations: [CITATION] } }),
+      C2(),
+    ]),
+  });
+  await button(cited.card("R1.1"), "Save").click();
+  assert.deepEqual(cited.sent("response_save")[0].payload.shown, [
+    {
+      kind: "revised",
+      quote: "The temperature was held at 30 °C.",
+      paragraph_index: 1,
+      change_ids: ["R1.1-1"],
+    },
+  ]);
 
   // The daemon saved it with a mark: the manuscript changed under the answer.
   const stale = revisionOf([

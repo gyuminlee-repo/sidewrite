@@ -25,6 +25,7 @@ import {
 import { classifyRevision } from "../daemon/revision-classify.mjs";
 import { markStale, snapshotHash, viewText } from "../daemon/response-quotes.mjs";
 import { runPy as realRunPy } from "../daemon/py-tool.mjs";
+import { shownCitations } from "../taskpane/shared/response-view.js";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0", CC_OFFICE_CONFIG_DIR: "/nonexistent-config" };
 const SECTION = "2. Materials and Methods";
@@ -192,6 +193,11 @@ const model = (answer) => {
   };
 };
 const draftOk = { ok: true, json: { response: " We now state the unit. " } };
+
+// What a pane sends with a text it saves: the citations the card of the
+// comment showed (the pane's own function), here of a reply it got.
+const shownOf = (r, ref = "R1.1") => shownCitations(r.revision.comments.find((c) => c.ref === ref));
+const cardOf = async (t, ref) => shownOf({ revision: await t.rev() }, ref);
 
 // A comment answered, located and passing every check.
 async function ready(t) {
@@ -506,7 +512,13 @@ test("an answer goes stale when the changes it was written against are no longer
   // The mark stays over the next refresh, until the answer is written again.
   r = await t.ask("response_state", WITH_DOC);
   assert.deepEqual(r.revision.comments[0].response.stale, ["change_state"]);
-  r = await t.ask("response_save", { ref: "R1.1", text: "We now state the unit.", ...WITH_DOC });
+  // (The pane sends what its card showed: the citation of the accepted change.)
+  r = await t.ask("response_save", {
+    ref: "R1.1",
+    text: "We now state the unit.",
+    shown: shownOf(r),
+    ...WITH_DOC,
+  });
   assert.deepEqual(r.revision.comments[0].response.stale, []);
   // A quoted sentence edited in Word afterwards.
   const edited = snapshotOf({ text: AFTER.replace("was held at", "was kept at") });
@@ -1125,24 +1137,43 @@ async function stillHeld(t, doc = EDITED_DOC) {
 
 test("response_save: the sentence the card showed was edited before the save, so the answer is saved as out of date", async () => {
   const t = await setup();
-  await ready(t); // the card shows the sentence with 30 °C
+  await ready(t);
+  const card30 = await cardOf(t); // the card shows the sentence with 30 °C
+  assert.deepEqual(card30, [
+    { kind: "revised", quote: QUOTE, paragraph_index: 1, change_ids: ["R1.1-1"] },
+  ]);
   // The author edits the sentence in Word, then saves an answer typed before that.
   let r = await t.ask("response_save", {
     ref: "R1.1",
     text: "The temperature is now given as 30 °C.",
+    shown: card30,
     ...EDITED_DOC,
   });
   assert.match(r.revision.comments[0].response.citations[0].quote, /held at 32 °C/);
   assert.deepEqual(staleOf(r), ["quote_changed", "lines_old"]);
   assert.match(r.warnings.join(" "), /manuscript changed under this answer/);
+  assert.ok(t.lines.includes("[response] save R1.1 shown citations do not fit: quote_changed"));
   await stillHeld(t);
-  // Read against the sentence as it is now and saved again: the mark goes.
+  // A save that does not say what its card showed (a pane of an older build)
+  // is not judged: the mark stays.
   r = await t.ask("response_save", {
     ref: "R1.1",
     text: "The temperature is now given as 32 °C.",
     ...EDITED_DOC,
   });
+  assert.deepEqual([staleOf(r), r.warnings], [["quote_changed"], []]);
+  // Read against the sentence as it is now and saved again: the mark goes.
+  r = await t.ask("response_save", {
+    ref: "R1.1",
+    text: "The temperature is now given as 32 °C.",
+    shown: shownOf(r),
+    ...EDITED_DOC,
+  });
   assert.deepEqual([staleOf(r), r.warnings], [[], []]);
+  // What is sent as shown is compared, not saved, and must be a list.
+  assert.match(r.revision.comments[0].response.citations[0].quote, /held at 32 °C/);
+  const bad = await t.ask("response_save", { ref: "R1.1", text: "x", shown: "all", ...EDITED_DOC });
+  assert.deepEqual([bad.ok, bad.error], [false, "shown must be a list of citations."]);
   r = await t.ask("response_check", EDITED_DOC);
   // (One warning is left: the number 30 of the earlier text is not in the new one.)
   assert.deepEqual(
@@ -1155,27 +1186,91 @@ test("response_save: the sentence the card showed was edited before the save, so
   const u = await setup();
   await ready(u);
   const REJECTED = { snapshot: snapshotOf({ text: BEFORE }), headings: HEADINGS };
-  r = await u.ask("response_save", { ref: "R1.1", text: "We now state the unit.", ...REJECTED });
+  r = await u.ask("response_save", {
+    ref: "R1.1",
+    text: "We now state the unit.",
+    shown: await cardOf(u),
+    ...REJECTED,
+  });
   assert.deepEqual(r.revision.comments[0].response.citations, []);
   assert.ok(staleOf(r).includes("change_state"), JSON.stringify(staleOf(r)));
   await u.cleanup();
 
-  // The first answer to a comment, with no citation shown yet: nothing moved under it.
+  // The first answer to a comment, with no citation on its card: nothing to
+  // compare, and a mark of an earlier text (none here) would be taken off.
   const v = await setup();
-  r = await v.ask("response_save", { ref: "R1.1", text: "We now state the unit.", ...WITH_DOC });
+  r = await v.ask("response_save", {
+    ref: "R1.1",
+    text: "We now state the unit.",
+    shown: [],
+    ...WITH_DOC,
+  });
   assert.deepEqual([staleOf(r), r.warnings], [[], []]);
   await v.cleanup();
 });
 
+test("response_save from two panes: each save is judged by what its own card showed", async () => {
+  const t = await setup();
+  await ready(t);
+  const card30 = await cardOf(t); // both cards show the sentence with 30 °C
+  const first = await t.ask("response_save", {
+    ref: "R1.1",
+    text: "The temperature is now given as 30 °C.",
+    shown: card30,
+    ...EDITED_DOC,
+  });
+  assert.deepEqual(staleOf(first), ["quote_changed", "lines_old"]);
+  // The other pane never showed the new sentence either. The stored citation
+  // is the new one by now (the first save replaced it); that is not what
+  // this pane's text was written against.
+  const second = await t.ask("response_save", {
+    ref: "R1.1",
+    text: "The temperature was 30 °C throughout.",
+    shown: card30,
+    ...EDITED_DOC,
+  });
+  assert.deepEqual(staleOf(second), ["quote_changed", "lines_old"]);
+  await stillHeld(t);
+
+  // The other order: the pane that read the document again and saw 32 °C
+  // saves and clears; then the pane that still shows 30 °C saves. The store
+  // held no mark, and the text is still marked.
+  const u = await setup();
+  await ready(u);
+  const old = await cardOf(u);
+  const seen = await u.ask("response_state", EDITED_DOC);
+  const fresh = await u.ask("response_save", {
+    ref: "R1.1",
+    text: "The temperature is now given as 32 °C.",
+    shown: shownOf(seen),
+    ...EDITED_DOC,
+  });
+  assert.deepEqual(staleOf(fresh), ["lines_old"]);
+  const late = await u.ask("response_save", {
+    ref: "R1.1",
+    text: "The temperature was 30 °C throughout.",
+    shown: old,
+    ...EDITED_DOC,
+  });
+  assert.deepEqual(staleOf(late), ["quote_changed", "lines_old"]);
+  assert.match(late.warnings.join(" "), /manuscript changed under this answer/);
+  await stillHeld(u);
+  await u.cleanup();
+  await t.cleanup();
+});
+
 test("response_save without the document, and a redraft in another language: neither lets a stale answer pass", async () => {
-  // Saved without a snapshot: the citations are not touched, so the next
-  // read of the document marks the answer.
+  // Saved without a snapshot: nothing is judged. The citations and the marks
+  // stay as they are, so the next read of the document marks the answer, and
+  // a mark that is there is not taken off, whatever the request says it showed.
   const t = await setup();
   await ready(t);
   let r = await t.ask("response_save", { ref: "R1.1", text: "The temperature is 30 °C." });
   assert.deepEqual(staleOf(r), []);
   assert.equal(r.revision.comments[0].response.citations[0].quote, QUOTE);
   r = await t.ask("response_state", EDITED_DOC);
+  assert.deepEqual(staleOf(r), ["quote_changed", "lines_old"]);
+  r = await t.ask("response_save", { ref: "R1.1", text: "Still 30 °C.", shown: shownOf(r) });
   assert.deepEqual(staleOf(r), ["quote_changed", "lines_old"]);
   await stillHeld(t);
 

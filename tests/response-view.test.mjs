@@ -7,6 +7,7 @@ import {
   STALE_LABELS,
   staleText,
   translationMissing,
+  shownCitations,
   citationText,
   checkLine,
   checksSummary,
@@ -61,6 +62,29 @@ test("staleText", () => {
   assert.equal(STALE_LABELS.lines_old, "Line numbers are older than the manuscript");
   // A reason this pane does not know is shown as it is, not dropped.
   assert.equal(staleText(["other"]), "other");
+});
+
+test("shownCitations: what a card shows of its citations, and nothing else of them", () => {
+  const cit = {
+    change_ids: ["R1.1-1"],
+    kind: "revised",
+    section: "2. Methods",
+    paragraph_index: 4,
+    quote: "Cells were kept at 30 °C.",
+    lines: { start: 9, end: 9 },
+    lines_pdf: "sha",
+    problem: null,
+  };
+  assert.deepEqual(shownCitations({ response: { citations: [cit] } }), [
+    {
+      kind: "revised",
+      quote: "Cells were kept at 30 °C.",
+      paragraph_index: 4,
+      change_ids: ["R1.1-1"],
+    },
+  ]);
+  for (const none of [{ response: null }, { response: { citations: [] } }, {}, undefined])
+    assert.deepEqual(shownCitations(none), []);
 });
 
 test("translationMissing: only with the second language on, an answer and no translation of it", () => {
