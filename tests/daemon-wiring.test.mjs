@@ -126,8 +126,8 @@ test("set_model: the model the session runs on, read after the wait, decides whe
   // The session records the model it is started on, where query() gets it.
   assert.match(code, /session\.model = modelArgFor\(key\);/);
   assert.match(code, /model: session\.model,/);
-  // Its definition, the session start and getModel: query() reads it nowhere else.
-  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 3);
+  // Its definition, the session start, getModel and one log line: query() reads it nowhere else.
+  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 4);
 });
 
 test("a restart that keeps waiting input does not drop it or end its turn", () => {

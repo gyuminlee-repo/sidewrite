@@ -894,8 +894,13 @@ async function handleServerMessage(msg) {
         contextCache = null;
         if (document.body.dataset.activeTab === "setup") loadContext(true);
       } else if (msg.event === "config_reloaded") {
-        const what = msg.reason === "context_changed" ? "context files" : "config";
-        appendEvent(`Session reloaded — ${what} updated.`);
+        if (msg.reason === "model_restored") {
+          // After a refusal fallback the next turn goes back to the chosen model.
+          appendEvent("Session restarted on the model you chose (it had moved to another one).");
+        } else {
+          const what = msg.reason === "context_changed" ? "context files" : "config";
+          appendEvent(`Session reloaded \u2014 ${what} updated.`);
+        }
       }
       break;
 

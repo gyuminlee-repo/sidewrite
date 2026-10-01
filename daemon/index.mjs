@@ -532,12 +532,26 @@ function onPaneClose(key) {
 // conversation. Deferred via setImmediate so it lands after the message
 // is queued and after any in-flight finally; the new loop then drains
 // this pane's queue. No other pane's loop is ever touched.
-async function ensureLoopForMessage(key, host) {
+// idle: no turn of this pane was running when the message came.
+async function ensureLoopForMessage(key, host, { idle = true } = {}) {
   if (!key) return;
   const cwd = cwdForKey(key);
   const live = sessionFor(key);
   if (live && !live.settled) {
-    return; // this pane's loop is live and will consume the message
+    if (!live.fellBackTo || !idle) return; // the live loop will consume the message
+    // The CLI moved this session to another model after a refusal
+    // (model_refusal_fallback) and keeps it there. The retry of that turn
+    // stays; this turn starts on the model the user chose again. The old
+    // session's wait for a message ends here, before the caller queues the
+    // new one, so the restarted session is the one that reads it.
+    console.log(
+      `[agent] model restored to ${modelArgFor(key)} after the fallback to ${live.fellBackTo}`,
+    );
+    bridge.clearUserMessages(key, { keepQueued: true });
+    restartSession(key, host, { reason: "model_restored", keepQueued: true }).catch((err) =>
+      console.warn("[daemon] restart after a model fallback failed:", err.message),
+    );
+    return;
   }
   let resumeId = null;
   try {
@@ -654,8 +668,9 @@ const bridge = createBridge({
   allowedOrigins: [HTTP_ORIGIN],
   onHello: (key, host, doc) => onPaneConnect(key, host, doc),
   onUserMessage: (key, host) => {
+    const idle = !turnBusy.has(key);
     turnBusy.add(key);
-    return ensureLoopForMessage(key, host);
+    return ensureLoopForMessage(key, host, { idle });
   },
   onClose: (key) => onPaneClose(key),
   // A tracked edit answered after its timeout or disconnect: record it.
