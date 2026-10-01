@@ -1201,5 +1201,5 @@ test("the pane steps wait for the message their own action ends with", async () 
   for (const w of waits) assert.doesNotMatch(HOLD, new RegExp(w));
   assert.ok(pane.includes("say(`Split by ${r.method}"));
   assert.ok(pane.includes("candidate rule(s) by ${r.method}."));
-  assert.ok(pane.includes(`say("${HOLD}")`));
+  assert.ok(pane.includes(`const PROVIDER_WAIT = "${HOLD}";`));
 });

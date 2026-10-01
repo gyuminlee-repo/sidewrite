@@ -1664,7 +1664,9 @@ test("Preview prompt and Propose changes send the same paragraphs under the sele
     },
   });
   const button = (label) => findAll(t.$("review-comments"), (n) => n.textContent === label)[0];
-  const sent = (type) => t.requests.filter((r) => r.type === type).map((r) => r.payload);
+  // wait_ms belongs to review_propose alone (how long the pane waits for it).
+  const sent = (type) =>
+    t.requests.filter((r) => r.type === type).map(({ payload: { wait_ms: _, ...rest } }) => rest);
 
   // Option on: both carry the selection.
   t.$("review-use-selection").checked = true;

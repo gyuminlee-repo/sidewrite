@@ -46,6 +46,10 @@ const CONNECTION_LOST =
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 // "Propose all": the longest wait for the end of one review turn.
 const TURN_WAIT_MS = 30 * 60_000;
+// How long the pane waits for the answer of review_propose (taskpane.js
+// sendRequest waits as long by default); the request says so (wait_ms).
+const PROPOSE_WAIT_MS = 10_000;
+const PROVIDER_WAIT = "Waiting for the daemon to confirm the stored provider choice...";
 
 export function initReviewPane({
   sendRequest,
@@ -135,7 +139,7 @@ export function initReviewPane({
         // daemon that would have to guess.
         const confirming = providersReady();
         if (confirming) {
-          say("Waiting for the daemon to confirm the stored provider choice...");
+          say(PROVIDER_WAIT);
           await confirming;
         }
         say("");
@@ -632,7 +636,13 @@ export function initReviewPane({
       // (L4) and the new words of the turn are checked against it (L2).
       await refresh();
       const done = state.turnsDone;
-      const r = await ask("review_propose", { ref, paragraphs });
+      // wait_ms: how long this pane waits for the answer. The daemon starts
+      // no turn for a request that waited longer at its gate.
+      const r = await ask(
+        "review_propose",
+        { ref, paragraphs, wait_ms: PROPOSE_WAIT_MS },
+        PROPOSE_WAIT_MS,
+      );
       if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);
       else if (state.turnsDone !== done) state.reviewTurnOpen = false; // its turn_done came first
     } catch (e) {
@@ -696,6 +706,15 @@ export function initReviewPane({
   // line of each refresh until its own summary.
   $("review-propose-all").addEventListener("click", async () => {
     if (queue.running || isTurnInFlight()) return;
+    // As guard() does for every other action: nothing is sent before the
+    // daemon has confirmed the stored provider.
+    const confirming = providersReady();
+    if (confirming) {
+      say(PROVIDER_WAIT);
+      await confirming;
+      if (queue.running || isTurnInFlight()) return; // a second press, meanwhile
+      say("");
+    }
     const refs = queueRefs(state.revision);
     if (!refs.length) return say("No open comment to propose changes for.", true);
     const running = queue.run(refs);
