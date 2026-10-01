@@ -1610,7 +1610,14 @@ function handleAgentMessage(msg, session) {
         session.turnProducedOutput = false;
       }
       for (const ev of events) bridge.sendAssistantEvent(ev, session?.key);
-      if (session?.key) endTurnState(session.key, turnOutcome(events, msg));
+      // text: the answer of the turn, for what a review turn reports in its
+      // last line (review-service.mjs turnEnded).
+      if (session?.key) {
+        endTurnState(session.key, {
+          ...turnOutcome(events, msg),
+          text: typeof msg.result === "string" ? msg.result : null,
+        });
+      }
       break;
     }
     case "user": {

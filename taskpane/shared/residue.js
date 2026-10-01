@@ -12,8 +12,17 @@
 // than 3, never more than `maxPlaces`) is taken to be vocabulary of the
 // paper and not the claim, and is left out: "growth" in a paper on growth.
 // At most `maxTerms` terms are reported, those in the fewest places first.
-// Places: paragraphs of the last status refresh (as they read with every
-// tracked change applied) that hold the term as a whole word, any case.
+//
+// Which removed words are the claim: any rewording drops words ("suggests",
+// "primary", "likely"), and a real revision of 20 comments gave 88 lines of
+// those. The term of a claim is one the reviewer named and the model names
+// again as its reason, so a removed word counts only when the comment text
+// and the why or addresses of its change both hold it, in any form. (What a
+// change says it did quotes the replaced text, so it names every word.)
+// A comment that names no term ("the claim in line 203"), and a rationale
+// in another language that does not quote the term, give no line here. In
+// front of these lines goes what the turn itself said is left
+// (comment.same_term_at, from its last line "Same term still at: ...").
 
 const STOP = new Set(
   (
@@ -44,18 +53,31 @@ export function removedTerms(change) {
   return out;
 }
 
+// The removed words of a change that the reason of the change and the
+// reviewer comment both name.
+export function claimTerms(change, commentText) {
+  const r = change?.rationale;
+  const names = (text) => {
+    const said = words(text);
+    return (w) => said.some((x) => x.startsWith(stem(w)));
+  };
+  const reason = names([r?.why, r?.addresses].filter(Boolean).join(" "));
+  const reviewer = names(commentText);
+  return removedTerms(change).filter((w) => reason(w) && reviewer(w));
+}
+
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // [{ term, change_ids, places }]: places are paragraph indexes. Rejected
 // changes took nothing out.
-export function stillPresent(comment, paragraphs, { maxPlaces = 15, maxTerms = 8 } = {}) {
+export function stillPresent(comment, paragraphs, { maxPlaces = 15, maxTerms = 3 } = {}) {
   const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
   const filled = texts.filter((t) => t.trim()).length;
   const most = Math.min(maxPlaces, Math.max(3, Math.ceil(filled / 5)));
   const by = new Map();
   for (const ch of comment?.changes ?? []) {
     if (ch.state === "rejected") continue;
-    for (const term of removedTerms(ch)) by.set(term, [...(by.get(term) ?? []), ch.id]);
+    for (const term of claimTerms(ch, comment.text)) by.set(term, [...(by.get(term) ?? []), ch.id]);
   }
   const rows = [];
   for (const [term, change_ids] of by) {
@@ -68,6 +90,14 @@ export function stillPresent(comment, paragraphs, { maxPlaces = 15, maxTerms = 8
 
 // The lines of the card. snapshot: revision.snapshot ({ paragraphs, ids }).
 export function stillPresentLines(comment, snapshot) {
+  const named = comment?.same_term_at ?? [];
+  const head = named.length
+    ? [`The turn says the same term is still at: ${named.join(", ")}.`]
+    : [];
+  return [...head, ...computedLines(comment, snapshot)];
+}
+
+function computedLines(comment, snapshot) {
   return stillPresent(comment, snapshot?.paragraphs).map((r) => {
     const n = r.places.length;
     const at = r.places.map((i) => snapshot.ids?.[i] ?? `p${i}`).join(", ");

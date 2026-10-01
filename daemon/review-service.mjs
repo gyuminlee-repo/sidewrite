@@ -61,6 +61,7 @@ import {
   answerQuestion,
   authorAnswers,
   setRequirementOutside,
+  setSameTerm,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -69,7 +70,7 @@ import {
   normalizeParaText,
 } from "./revision-classify.mjs";
 import { extractRequirements, splitReview } from "./review-split.mjs";
-import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
+import { buildReviewPrompt, formatPromptLog, sameTermReport } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
 import { checkParagraphs } from "./paragraph-check.mjs";
@@ -671,13 +672,28 @@ export function createReviewService({
     const failed = outcome?.ok === false;
     const error = failed ? String(outcome.error ?? "The turn ended with an error.") : null;
     log(`[review] turn done ${turn.ref}${failed ? ` failed: ${error}` : ""}`);
-    sendEvent(key, {
-      type: "review_event",
-      event: "turn_done",
-      ref: turn.ref,
-      ok: !failed,
-      ...(failed ? { error } : {}),
-    });
+    const done = () =>
+      sendEvent(key, {
+        type: "review_event",
+        event: "turn_done",
+        ref: turn.ref,
+        ok: !failed,
+        ...(failed ? { error } : {}),
+      });
+    // outcome.text: the answer of the turn (index.mjs gives it for a turn
+    // that ended with a result). The paragraphs its last line names as
+    // still holding the term are saved first, so the pane that loads on
+    // turn_done has them; a save that fails only loses that list.
+    if (typeof outcome?.text !== "string") return done();
+    Promise.resolve()
+      .then(() => {
+        const d = at(key);
+        return update(d, (rev) =>
+          setSameTerm(rev, turn.ref, sameTermReport(outcome.text, rev.snapshot)),
+        );
+      })
+      .catch((e) => log(`[review] same-term list not saved ${turn.ref}: ${e?.message ?? e}`))
+      .finally(done);
   }
 
   const includeForbid = () => env.CC_OFFICE_REVIEW_PROMPT_FORBID !== "0";

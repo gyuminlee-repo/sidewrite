@@ -2424,7 +2424,7 @@ test("a comment card names the places where a term its changes took out is still
       {
         ref: "R1.1",
         reviewer: 1,
-        text: "The claim is not supported.",
+        text: "Gene A is not essential: the claim is not supported.",
         requirements: [],
         status: "in_progress",
         changes: [
@@ -2438,7 +2438,12 @@ test("a comment card names the places where a term its changes took out is still
             narrowed_from: null,
             before: "Gene A is essential for growth.",
             after: "Gene A was associated with growth.",
-            rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+            rationale: {
+              what: "w",
+              why: "Essentiality is not shown.",
+              addresses: "a",
+              requirement_ids: [],
+            },
           },
         ],
         blocked: [],

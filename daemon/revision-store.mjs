@@ -219,6 +219,9 @@ const Comment = z.object({
   requirement_seq: z.number().int().nonnegative().nullable().default(null),
   blocked_seq: z.number().int().nonnegative().nullable().default(null),
   questions: z.array(Question).default([]),
+  // Paragraph ids the last turn of this comment named as still holding the
+  // term it changed (review-prompt.mjs sameTermReport).
+  same_term_at: z.array(z.string()).default([]),
   // Requests the model said cannot be handled in this file (review-tools.mjs
   // requirementOutside): one note per request id.
   requirements_outside: z
@@ -518,6 +521,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       declined: old ? clone(old.declined ?? null) : null,
       questions: old ? clone(old.questions ?? []) : [],
       requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
+      same_term_at: old ? clone(old.same_term_at ?? []) : [],
     });
     const row = list[list.length - 1];
     row.requirement_seq = requirementSeq({ ...row, requirement_seq: requirementSeq(old) });
@@ -697,6 +701,16 @@ export function setRequirementOutside(rev, ref, { id, why = "" }, now = new Date
     ...(c.requirements_outside ?? []).filter((n) => n.id !== id),
     { id, why: String(why ?? "").trim(), at: now.toISOString() },
   ];
+  return next;
+}
+
+// The paragraphs the last turn of a comment named as still holding its term.
+// null when the comment is gone or the list is the one on file.
+export function setSameTerm(rev, ref, ids) {
+  const old = findComment(rev, ref);
+  if (!old || JSON.stringify(old.same_term_at ?? []) === JSON.stringify(ids)) return null;
+  const next = clone(rev);
+  findComment(next, ref).same_term_at = ids;
   return next;
 }
 

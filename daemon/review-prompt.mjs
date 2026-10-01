@@ -335,6 +335,21 @@ export function buildReviewPrompt({
   };
 }
 
+// The paragraphs a turn named in the last line the rules ask for ("Same
+// term still at: p4, p7" or "none"): the ids of that line that the
+// manuscript of the last status refresh has, each once. snapshot:
+// { paragraphs, ids }. No such line, or none named: [].
+export function sameTermReport(text, snapshot) {
+  const lines = [...String(text ?? "").matchAll(/^[*_\s]*Same term still at:[*_\s]*(.*)$/gim)];
+  if (!lines.length) return [];
+  const n = snapshot?.paragraphs?.length ?? 0;
+  const known = new Set(
+    Array.from({ length: n }, (_, i) => snapshot?.ids?.[i] ?? `p${i}`).filter(Boolean),
+  );
+  const tokens = lines.at(-1)[1].match(/[\p{L}\p{N}_-]+/gu) ?? [];
+  return [...new Set(tokens.filter((t) => known.has(t)))];
+}
+
 export function formatPromptLog(ref, built, { paragraphs = 0, preview = false } = {}) {
   const ids = (a) => (a.length ? a.join(",") : "-");
   return (
