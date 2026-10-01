@@ -98,6 +98,7 @@ async function view(page) {
         blocked: q(".review-blocked", c).map(t),
       })),
       decisions: q("#review-decisions > div").map(t),
+      consistency: q("#review-consistency .review-violation").map(t),
       external: q("#review-external .review-external-item .review-violation").map(t),
       ledger: q("#review-ledger .review-ledger-item").map(t),
       violations: q("#review-violations .review-violation").map(t),
@@ -469,6 +470,19 @@ const steps = {
     await clearMessage(page);
     await page.click("#review-refresh");
     await waitMessage(page, 120_000);
+    return view(page);
+  },
+
+  // "Check revised paragraphs": a status refresh, then the check of the
+  // paragraphs that hold two or more changes (one model request or more).
+  async "check-paragraphs"(page) {
+    await clearMessage(page);
+    await page.click("#review-check-paragraphs");
+    await waitMessage(
+      page,
+      20 * 60_000,
+      "^(Checked \\d+ revised paragraph|No paragraph holds two or more changes)",
+    );
     return view(page);
   },
 

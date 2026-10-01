@@ -159,10 +159,11 @@ test("formatPromptLog names the section when the comment has one", () => {
 
 // ---- policy packs: rules 2 to 4 are a pack a journal profile can switch off
 
-test("without a profile every rule is in the prompt, numbered 1 to 7", () => {
+test("without a profile every rule is in the prompt, numbered from 1", () => {
   const { text } = buildReviewPrompt({ comment, ledger });
   assert.equal(rulesFor({}).length, REVIEW_RULES.length);
   assert.match(text, /\n7\. Follow every author instruction below/);
+  assert.equal(text.match(/^\d+\. /gm).length, REVIEW_RULES.length);
 });
 
 test("a profile that switches the review_scope pack off drops rules 2 to 4 and renumbers", () => {
@@ -174,9 +175,13 @@ test("a profile that switches the review_scope pack off drops rules 2 to 4 and r
   assert.doesNotMatch(text, /Base every change/);
   assert.match(text, /\n1\. Change the manuscript only with office_tracked_edit/);
   assert.match(text, /\n4\. Follow every author instruction below/);
-  assert.doesNotMatch(text, /\n5\. /);
+  // The rules after the pack (how the tool works) all stay.
+  assert.equal(text.match(/^\d+\. /gm).length, REVIEW_RULES.length - 3);
   // Any other value keeps the pack; an unknown pack name changes nothing.
-  assert.equal(rulesFor({ policy_packs: { review_scope: true, other: false } }).length, 7);
+  assert.equal(
+    rulesFor({ policy_packs: { review_scope: true, other: false } }).length,
+    REVIEW_RULES.length,
+  );
 });
 
 test("the rationale language is the one given; the default names no particular reader", () => {
@@ -338,6 +343,157 @@ test("formatPromptLog counts the comments of the overview", () => {
   assert.match(formatPromptLog("R1.3", built), / overview=1$/);
   assert.equal(
     /overview=/.test(formatPromptLog("R1.3", buildReviewPrompt({ comment, ledger }))),
+    false,
+  );
+});
+
+// A person told "revise the paper for this review" reads the whole paper
+// first. The turn of a comment is given it too: every paragraph of the last
+// status refresh with its id, in front of the turn (the part that does not
+// change from turn to turn comes first).
+test("the turn is given the whole manuscript, paragraph by paragraph with ids, in front of the turn", async () => {
+  const { manuscriptBlock } = await import("../daemon/review-prompt.mjs");
+  const paragraphs = [
+    "Growth of strain X on methanol",
+    "",
+    "1. Introduction",
+    "Methanol is a cheap carbon source.",
+    "Figure 1. Growth curves of strain X at 30 °C.",
+  ];
+  const ids = ["a1", "a2", "a3", "a4", "a5"];
+  const full = manuscriptBlock({ paragraphs, ids });
+  assert.equal(full.mode, "full");
+  assert.deepEqual(full.lines, [
+    "Manuscript, as it reads with every tracked change applied: one paragraph per line as [id] text, headings and captions included. An id is what paragraph_hint takes.",
+    "[a1] Growth of strain X on methanol",
+    "[a3] 1. Introduction",
+    "[a4] Methanol is a cheap carbon source.",
+    "[a5] Figure 1. Growth curves of strain X at 30 °C.",
+  ]);
+  assert.equal(full.shown, 4);
+  assert.equal(full.hashes.length, 5);
+  // A document without task pane ids: p<index>, the form paragraph_hint reads.
+  assert.equal(manuscriptBlock({ paragraphs, ids: null }).lines[2], "[p2] 1. Introduction");
+  assert.deepEqual(manuscriptBlock({ paragraphs: [], ids: null }), {
+    mode: "none",
+    lines: [],
+    hashes: [],
+    shown: 0,
+    references_omitted: 0,
+    cut: 0,
+  });
+
+  // In the prompt: before the turn, and the line about finding the text says so.
+  const { text, manuscript } = buildReviewPrompt({
+    comment,
+    ledger,
+    fence: "F1",
+    manuscript: { paragraphs, ids },
+  });
+  const lines = text.split("\n");
+  assert.deepEqual(lines.slice(0, full.lines.length), full.lines);
+  assert.equal(lines[full.lines.length], "");
+  assert.equal(lines[full.lines.length + 1], "[Review turn R1.3]");
+  assert.ok(
+    lines.includes(
+      "No paragraphs were selected: the manuscript above is where to look. Read a paragraph again with office_read_paragraphs only when an edit is refused because the paragraph changed.",
+    ),
+  );
+  assert.equal(text.includes("Locate the text with office_find"), false);
+  assert.deepEqual([manuscript.mode, manuscript.shown], ["full", 4]);
+  // Without one (no status refresh yet) the prompt is as it was.
+  const bare = buildReviewPrompt({ comment, ledger, fence: "F1" });
+  assert.ok(bare.text.startsWith("[Review turn R1.3]"));
+  assert.ok(
+    bare.text.includes("Locate the text with office_find or office_read_paragraphs first."),
+  );
+  assert.equal(bare.manuscript.mode, "none");
+});
+
+// The session keeps what it was sent: a second copy of the paper in every
+// turn would fill its context (20 turns of a 16k-token paper). A turn of a
+// session that was given the paper gets only the paragraphs that read
+// differently now.
+test("a session that has the manuscript gets only the paragraphs that changed since", async () => {
+  const { manuscriptBlock } = await import("../daemon/review-prompt.mjs");
+  const paragraphs = ["Title", "One.", "Two.", "Three."];
+  const ids = ["a1", "a2", "a3", "a4"];
+  const seen = manuscriptBlock({ paragraphs, ids }).hashes;
+  const same = manuscriptBlock({ paragraphs, ids, seen });
+  assert.deepEqual(
+    [same.mode, same.lines],
+    [
+      "same",
+      [
+        "The manuscript was given earlier in this conversation with its paragraph ids; it reads the same now.",
+      ],
+    ],
+  );
+  const edited = ["Title", "One.", "Two, changed.", "Three."];
+  const changed = manuscriptBlock({ paragraphs: edited, ids, seen });
+  assert.equal(changed.mode, "changed");
+  assert.deepEqual(changed.lines, [
+    "The manuscript was given earlier in this conversation with its paragraph ids. These paragraphs read differently now (the others are as given):",
+    "[a3] Two, changed.",
+  ]);
+  assert.notDeepEqual(changed.hashes, seen);
+  // Another number of paragraphs: the ids may have moved, so all of it again.
+  assert.equal(manuscriptBlock({ paragraphs: [...edited, "Four."], ids: null, seen }).mode, "full");
+});
+
+test("a manuscript over the budget loses its reference list first, then its end, and says so", async () => {
+  const { manuscriptBlock } = await import("../daemon/review-prompt.mjs");
+  const body = Array.from({ length: 10 }, (_, i) => `Body sentence number ${i + 1} of the paper.`);
+  const refs = Array.from(
+    { length: 30 },
+    (_, i) => `${i + 1}. Author A, Author B. A long title of a cited work. Journal ${i}.`,
+  );
+  const paragraphs = [
+    ...body,
+    "References",
+    ...refs,
+    "Figure legends",
+    "Figure 1. Growth curves.",
+    "Table 1. Strains used.",
+  ];
+  const all = manuscriptBlock({ paragraphs, ids: null });
+  assert.equal(all.references_omitted, 0);
+  const limit = all.lines.join("\n").length - 10;
+  const b = manuscriptBlock({ paragraphs, ids: null, limit });
+  assert.equal(b.references_omitted, 30);
+  assert.equal(b.cut, 0);
+  assert.ok(b.lines.includes("[p10] References"));
+  assert.ok(
+    b.lines.includes(
+      "(reference list not shown: 30 paragraphs; read it with office_read_paragraphs when a comment is about a reference)",
+    ),
+  );
+  assert.ok(b.lines.includes("[p42] Figure 1. Growth curves."), "captions after the list stay");
+  assert.equal(
+    b.lines.some((l) => l.includes("A long title of a cited work")),
+    false,
+  );
+  assert.ok(b.lines.join("\n").length <= limit);
+  // Still over: the end is cut, and the line says how much is missing.
+  const tight = manuscriptBlock({ paragraphs, ids: null, limit: 500 });
+  assert.equal(tight.references_omitted, 30);
+  assert.ok(tight.cut > 0);
+  assert.match(
+    tight.lines.at(-1),
+    /^\(the manuscript is cut here: \d+ more paragraphs are not shown; read them with office_read_paragraphs\)$/,
+  );
+  assert.ok(tight.lines.join("\n").length <= 500);
+});
+
+test("formatPromptLog says how the manuscript went into the prompt", () => {
+  const built = buildReviewPrompt({
+    comment,
+    ledger,
+    manuscript: { paragraphs: ["One.", "Two."], ids: null },
+  });
+  assert.match(formatPromptLog("R1.3", built), / manuscript=full:2$/);
+  assert.equal(
+    /manuscript=/.test(formatPromptLog("R1.3", buildReviewPrompt({ comment, ledger }))),
     false,
   );
 });

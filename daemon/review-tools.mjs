@@ -12,6 +12,7 @@ import { forbidHits, forbidHitsAfterEdit, brokenForbidRules } from "./ledger-che
 import { lostFacts, unsourcedTerms, narrowEdit, startsSentence } from "./edit-facts.mjs";
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
+import { newNumbers } from "./number-guard.mjs";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
 // The capability a task pane must name in its hello to be sent a tracked
@@ -56,8 +57,12 @@ export const REVIEW_BLOCKED_TOOLS = new Set([
   "office_header_footer",
 ]);
 
+// Tools of a review turn that write the review file and nothing in Word:
+// a question for the author, and a request that belongs to another file.
+export const REVIEW_NOTE_TOOLS = new Set(["office_ask_author", "office_requirement_outside"]);
+
 export function reviewTurnToolAllowed(name) {
-  return REVIEW_READ_TOOLS.has(name) || name === REVIEW_WRITE_TOOL;
+  return REVIEW_READ_TOOLS.has(name) || REVIEW_NOTE_TOOLS.has(name) || name === REVIEW_WRITE_TOOL;
 }
 
 // Wrap the bridge call used by every office/excel tool handler.
@@ -127,6 +132,110 @@ export const trackedEditShape = {
     ),
 };
 
+const commentRef = (what) =>
+  z
+    .string()
+    .regex(/^(?:R\d+|E)\.\d+$/)
+    .describe(`${what} Must be the comment of this turn.`);
+
+export const ASK_AUTHOR_DESCRIPTION =
+  "Review turns only. Ask the author ONE question instead of changing the manuscript, when what the comment needs cannot be told from the manuscript or the review: " +
+  "which of two numbers that differ is right, how something was measured, a statistic that would have to be computed again, a count or a direction that is only in the author's records. " +
+  "The question is kept on the card of the comment; the author's answer comes with the next turn. Do not edit the text the question is about in this turn.";
+
+export const askAuthorShape = {
+  comment_ref: commentRef('Reviewer comment the question belongs to, e.g. "R1.3".'),
+  requirement_id: z
+    .string()
+    .optional()
+    .describe("Id of the listed request the question holds up (q2), when there is one."),
+  question: z
+    .string()
+    .min(1)
+    .describe(
+      "The question, in the language of the rationale. Name the places and the values it is about, so the author can answer without searching.",
+    ),
+  why: z.string().min(1).describe("Why the manuscript and the review cannot answer it."),
+};
+
+// The turn and the request id of a note tool, checked as office_tracked_edit
+// checks them. Returns { error } or { at, ctx }.
+async function noteTurn(deps, tool, args, turn) {
+  if (!turn)
+    return { error: fail(`${tool} works only in a review turn started from the Review tab.`) };
+  if (args.comment_ref !== turn.ref) {
+    return {
+      error: fail(
+        `comment_ref ${args.comment_ref} does not match the comment of this turn ${turn.ref}.`,
+      ),
+    };
+  }
+  const at = deps.begin?.();
+  const ctx = (await deps.getReviewContext?.(turn.ref, at)) ?? {};
+  const known = (ctx.requirements ?? []).map((r) => r.id);
+  if (args.requirement_id != null && !known.includes(args.requirement_id)) {
+    return {
+      error: fail(
+        `Unknown requirement id ${args.requirement_id} for ${turn.ref}. Valid ids: ${known.join(", ") || "(none listed)"}.`,
+      ),
+    };
+  }
+  return { at, ctx };
+}
+
+// office_ask_author. deps: { begin(), getReviewContext(ref),
+// onQuestion({ref, question: {requirement_id, question, why}, at}) -> {id}, log }.
+// The log names the question by id; its text stays in the review file.
+export async function askAuthor(deps, args, turn) {
+  const t = await noteTurn(deps, "office_ask_author", args, turn);
+  if (t.error) return t.error;
+  const saved = await deps.onQuestion({
+    ref: turn.ref,
+    question: {
+      requirement_id: args.requirement_id ?? null,
+      question: args.question,
+      why: args.why,
+    },
+    at: t.at,
+  });
+  deps.log?.(`[review] question ${turn.ref} ${saved.id} requirement=${args.requirement_id ?? "-"}`);
+  return {
+    ok: true,
+    question_id: saved.id,
+    message: `Recorded as ${saved.id} on the card of ${turn.ref}. Leave the text it is about as it is in this turn; the author's answer comes with the next turn.`,
+  };
+}
+
+export const REQUIREMENT_OUTSIDE_DESCRIPTION =
+  "Review turns only. Say that ONE listed request of the comment cannot be handled in this file because what it asks for is in another file (a supplementary file, a figure file, the response letter). " +
+  "The author then sees the request as outside this file instead of open. Not for a request that needs something only the author knows (office_ask_author), and not for a request you chose not to handle.";
+
+export const requirementOutsideShape = {
+  comment_ref: commentRef('Reviewer comment the request belongs to, e.g. "R1.3".'),
+  requirement_id: z.string().describe("Id of the listed request (q2)."),
+  why: z
+    .string()
+    .min(1)
+    .describe("Which file or place it belongs to, and what has to be done there."),
+};
+
+// office_requirement_outside. deps: { begin(), getReviewContext(ref),
+// onRequirementOutside({ref, note: {id, why}, at}), log }.
+export async function requirementOutside(deps, args, turn) {
+  const t = await noteTurn(deps, "office_requirement_outside", args, turn);
+  if (t.error) return t.error;
+  await deps.onRequirementOutside({
+    ref: turn.ref,
+    note: { id: args.requirement_id, why: args.why },
+    at: t.at,
+  });
+  deps.log?.(`[review] requirement outside ${turn.ref} ${args.requirement_id}`);
+  return {
+    ok: true,
+    message: `${args.requirement_id} is shown to the author as outside this file.`,
+  };
+}
+
 export const TOOL_COMMENT_PREFIX = /^\s*\[(?:R\d+|E)\.\d+\]/;
 
 // L1: facts the change deletes go on a last line, so the author sees them in
@@ -171,11 +280,12 @@ function fail(message, extra = {}) {
 // same way as an answer in time (review-service.mjs lateToolResult);
 // `attempt` is the change as it would read in the document (unknownAttempt).
 // getReviewContext returns { requirements, comment_text, paragraphs,
-// paragraph_ids, recent_changes } for the L2 sources (manuscript snapshot
+// paragraph_ids, recent_changes, author_texts } for the L2 sources (manuscript snapshot
 // texts and the comment), the L5 ids, and what is judged in the paragraph of
 // the edit before Word is called (paragraph_ids: the task pane ids of the
 // snapshot paragraphs, for paragraph_hint; recent_changes: changes recorded
-// since that snapshot, oldest first).
+// since that snapshot, oldest first; author_texts: what the author answered
+// to questions of this review, a source of numbers like the comment).
 // turn: { ref } of the current review turn, or null.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
@@ -227,6 +337,30 @@ export async function applyTrackedEdit(deps, args, turn, { override = null } = {
     return fail(
       `Not applied: forbidden rule(s) ${ids.join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}). No edit is applied until the author fixes or removes the rule in the Review tab. Do not retry; tell the author.`,
       { code: "ForbidRuleBroken", broken_rules: ids },
+    );
+  }
+  // A number the change adds (number-guard.mjs) must be given: by the text
+  // it replaces, the paragraph it lands in, the reviewer comment, an author
+  // instruction or an author answer. Any other number is a fact only the
+  // author can confirm, so the edit is refused and the model asks. Unit
+  // notation changes no number; a deletion adds none. An approved forbid
+  // exception does not lift this. The log holds the count, not the number.
+  const numbers = newNumbers({
+    kind,
+    find: args.find,
+    text: newText,
+    sources: [
+      ctx.comment_text ?? "",
+      ...(ctx.author_texts ?? []),
+      ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
+      ...(target === null ? [] : [current[target]]),
+    ],
+  });
+  if (numbers.length) {
+    deps.log?.(`[review] number needs author ${turn.ref} count=${numbers.length}`);
+    return fail(
+      `Not applied: the change puts a number into the manuscript (${numbers.join(", ")}) that is not in the text it replaces, its paragraph, the reviewer comment, an author instruction or an author answer. Which value is right is a fact only the author can confirm. Leave the text as it is and ask with office_ask_author: say which values disagree and where. Do not try another number.`,
+      { code: "NumberNeedsAuthor", numbers },
     );
   }
   const around = forbidHitsAfterEdit(ledger, target === null ? current : [current[target]], {

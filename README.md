@@ -332,7 +332,9 @@ CC_OFFICE_SETTING_SOURCES=all CC_OFFICE_LOAD_USER_MCP=1 npm start
 
 `CC_OFFICE_DEBUG=1` turns on the opt-in `[diag]` logger (`daemon/diag.mjs`).
 
-The Review tab appends one JSON line per model decision (comment split, requirement sentence labels, LLM ledger check verdict, requirement link) to `<manuscript>.decisions.jsonl` next to the document. Each line holds a SHA-256 fingerprint of the input instead of its text, the model, a short output, and an empty `expected` field for a person to fill in later; delete the file whenever you like.
+**What a review turn is given and held to.** The turn of a comment gets the whole manuscript (every paragraph of the last status refresh with its id; a turn in a session that already has it gets only the paragraphs that changed), the comment, its requests and an overview of the other comments. A change that would write a number nothing gives (not the replaced text, its paragraph, the comment, an author instruction or an author answer) is refused: the model asks instead (`office_ask_author`), the question shows on the card under "Questions for the author", and your answer goes into the next turn. Each request of a comment ends as changed, waiting for the author, outside this file (`office_requirement_outside`) or open; open ones are named on the card and in the line after the turn. The card also names words the changes took out that other paragraphs still hold. "Check revised paragraphs" refreshes the status and has the model of the edits read every paragraph that holds two or more changes for a contradiction, changes of different comments that work against each other, and a sentence that takes the review as its source; it reports and changes nothing.
+
+The Review tab appends one JSON line per model decision (comment split, requirement sentence labels, LLM ledger check verdict, requirement link, paragraph check) to `<manuscript>.decisions.jsonl` next to the document. Each line holds a SHA-256 fingerprint of the input instead of its text, the model, a short output, and an empty `expected` field for a person to fill in later; delete the file whenever you like.
 
 ### Response letter (Response tab, Word)
 

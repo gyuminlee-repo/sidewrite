@@ -47,7 +47,7 @@ import { initReviewPane } from "./review-pane.js";
 import { initResponsePane } from "./response-pane.js";
 import { initToolsPane } from "./tools-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
-import { modelLabel, modelLineText } from "./model-line.js";
+import { fallbackNotice, modelLabel, modelLineText } from "./model-line.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
 import {
@@ -331,6 +331,8 @@ const TOOL_STATUS_LABELS = {
   office_resolve_comment: "Resolving a comment…",
   office_header_footer: "Editing header/footer…",
   office_tracked_edit: "Applying a tracked change with its rationale…",
+  office_ask_author: "Noting a question for the author…",
+  office_requirement_outside: "Noting a request that belongs to another file…",
   // Excel
   excel_get_selected_range: "Reading your selection…",
   excel_list_sheets: "Listing sheets…",
@@ -851,6 +853,20 @@ async function handleServerMessage(msg) {
         setAgentStatus("working", statusForTool(msg.tool));
       } else if (msg.event === "turn_complete") {
         setAgentStatus("idle", msg.interrupted ? "Stopped" : "Ready");
+      } else if (msg.event === "model_fallback") {
+        // The CLI moved a refused request, and unless the scope is local the
+        // session, to another model: said in the chat and shown at once.
+        if (msg.scope !== "local") {
+          liveModel = msg.fallback || liveModel;
+          modelUsed.turn = {
+            provider: "claude",
+            asked: modelUsed.turn?.asked ?? editsModel(),
+            ran: msg.fallback ?? null,
+          };
+          renderConnection();
+          renderModelLine();
+        }
+        appendNotice(fallbackNotice(msg, accountModels));
       } else if (msg.event === "info") {
         appendNotice(msg.message);
       } else if (msg.event === "error") {
@@ -880,8 +896,13 @@ async function handleServerMessage(msg) {
         contextCache = null;
         if (document.body.dataset.activeTab === "setup") loadContext(true);
       } else if (msg.event === "config_reloaded") {
-        const what = msg.reason === "context_changed" ? "context files" : "config";
-        appendEvent(`Session reloaded — ${what} updated.`);
+        if (msg.reason === "model_restored") {
+          // After a refusal fallback the next turn goes back to the chosen model.
+          appendEvent("Session restarted on the model you chose (it had moved to another one).");
+        } else {
+          const what = msg.reason === "context_changed" ? "context files" : "config";
+          appendEvent(`Session reloaded \u2014 ${what} updated.`);
+        }
       }
       break;
 

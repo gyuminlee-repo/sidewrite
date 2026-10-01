@@ -216,3 +216,38 @@ test("modelChange: a session restarts only when the model it runs on is not the 
     false,
   );
 });
+
+// The CLI itself changes the model of a session: when a request ends with a
+// refusal it runs it again on another model and, unless the notice says the
+// scope is local, keeps the session on that one (seen in a real run: asked
+// opus, claude-opus-5-5 until the notice, claude-opus-5 for every turn after).
+// The daemon says so in its log and to the pane, with ids only.
+test("refusalFallback: the log line and the pane event of a model_refusal_fallback notice", async () => {
+  const { refusalFallback } = await import("../daemon/model-list.mjs");
+  const msg = {
+    type: "system",
+    subtype: "model_refusal_fallback",
+    trigger: "refusal",
+    direction: "retry",
+    original_model: "claude-opus-5-5",
+    fallback_model: "claude-opus-5",
+    api_refusal_category: "bio",
+    api_refusal_explanation: "prose that is not for a log",
+    content: "prose",
+  };
+  assert.deepEqual(refusalFallback(msg), {
+    session: true,
+    log: "[agent] model refusal fallback original=claude-opus-5-5 fallback=claude-opus-5 scope=session category=bio",
+    event: {
+      event: "model_fallback",
+      original: "claude-opus-5-5",
+      fallback: "claude-opus-5",
+      scope: "session",
+      category: "bio",
+    },
+  });
+  const local = refusalFallback({ ...msg, scope: "local", api_refusal_category: null });
+  assert.equal(local.session, false);
+  assert.match(local.log, / scope=local category=-$/);
+  assert.equal(JSON.stringify(refusalFallback(msg)).includes("prose"), false);
+});

@@ -1127,6 +1127,15 @@ export const JUDGES = {
       got: `${r.message} | started ${e.started.join(",")} overlaps=${e.overlaps}`,
     };
   },
+  "check-paragraphs": (r) => ({
+    pass:
+      !r.message_error &&
+      /^(Checked \d+ revised paragraphs?( with .+?)?: (\d+ problems?|no problem found)\.|No paragraph holds two or more changes: nothing to check\.)/.test(
+        r.message,
+      ),
+    expect: "Checked N revised paragraph(s)...: K problem(s) | no problem found.",
+    got: `${r.message} | ${(r.consistency ?? []).length} line(s)`,
+  }),
   "focus-refresh": (r) => ({
     pass: r.changed === true && /^Auto-refreshed /.test(r.after ?? ""),
     expect: "Auto-refreshed <time>: ... (no Refresh click)",

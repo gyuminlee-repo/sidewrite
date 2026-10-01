@@ -1233,11 +1233,15 @@ body {
   border-color: #c62828;
   color: #c62828;
 }
-.review-reqs {
+.review-reqs,
+.review-answer {
   flex: 1 1 100%;
   min-width: 0;
 }
 .review-reqs-line,
+.review-question,
+.review-questions-head,
+.review-residue,
 .review-progress,
 .review-decision {
   font-size: 11px;

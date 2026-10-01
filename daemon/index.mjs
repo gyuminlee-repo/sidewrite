@@ -33,6 +33,7 @@ import { makeOneshot, ONESHOT_MODEL } from "./oneshot.mjs";
 import {
   bestClaudeModel,
   createModelCache,
+  refusalFallback,
   modelChange,
   resolveModelChoice,
 } from "./model-list.mjs";
@@ -325,6 +326,13 @@ const reviewTurnByKey = new Map();
 // model is fixed per agent loop, so a change while a loop is live triggers
 // a resuming restart (see the set_model handler).
 const modelByKey = new Map();
+// What the session of a pane was given of the manuscript in a review turn
+// (review-prompt.mjs manuscriptBlock): pane key -> { hashes, fresh }. fresh:
+// given in a turn that starts the session itself (a first turn, or the
+// restart after a model fallback); that start keeps it. Any other start of
+// a session, and a compaction of its history, forgets it: the next review
+// turn then carries the whole manuscript again.
+const manuscriptByKey = new Map();
 // The models the signed-in account can use (model-list.mjs), fetched once at
 // start and kept for ten minutes. Until it is known, and when the fetch
 // fails, the three aliases and well-formed claude-* ids are accepted.
@@ -520,6 +528,7 @@ function onPaneClose(key) {
   explicitWorkspaceKeys.delete(key);
   loopRestartByKey.delete(key);
   modelByKey.delete(key);
+  manuscriptByKey.delete(key);
   selection.drop(key);
   startQueue.delete(key);
 }
@@ -531,12 +540,26 @@ function onPaneClose(key) {
 // conversation. Deferred via setImmediate so it lands after the message
 // is queued and after any in-flight finally; the new loop then drains
 // this pane's queue. No other pane's loop is ever touched.
-async function ensureLoopForMessage(key, host) {
+// idle: no turn of this pane was running when the message came.
+async function ensureLoopForMessage(key, host, { idle = true } = {}) {
   if (!key) return;
   const cwd = cwdForKey(key);
   const live = sessionFor(key);
   if (live && !live.settled) {
-    return; // this pane's loop is live and will consume the message
+    if (!live.fellBackTo || !idle) return; // the live loop will consume the message
+    // The CLI moved this session to another model after a refusal
+    // (model_refusal_fallback) and keeps it there. The retry of that turn
+    // stays; this turn starts on the model the user chose again. The old
+    // session's wait for a message ends here, before the caller queues the
+    // new one, so the restarted session is the one that reads it.
+    console.log(
+      `[agent] model restored to ${modelArgFor(key)} after the fallback to ${live.fellBackTo}`,
+    );
+    bridge.clearUserMessages(key, { keepQueued: true });
+    restartSession(key, host, { reason: "model_restored", keepQueued: true }).catch((err) =>
+      console.warn("[daemon] restart after a model fallback failed:", err.message),
+    );
+    return;
   }
   let resumeId = null;
   try {
@@ -581,6 +604,12 @@ const oneshotRouter = createOneshotRouter({
   log: console.log,
 });
 
+// Will the next turn of this pane start (or restart) its session?
+const startsSession = (key) => {
+  const s = sessionFor(key);
+  return !s || s.settled || !!s.fellBackTo;
+};
+
 const review = createReviewService({
   getContext: (key) => bridge.getContext(key),
   callTool: (name, args, key) => bridge.callTaskpaneTool(name, args, key),
@@ -606,10 +635,13 @@ const review = createReviewService({
   oneshotModel: ONESHOT_MODEL,
   // Judgments go to the provider the pane chose (default: Claude, haiku),
   // fixed for each job when it starts.
-  oneshotJob: (key) => oneshotRouter.pin(key),
+  // (options: the paragraph check asks for the role and model of the edits.)
+  oneshotJob: (key, options) => oneshotRouter.pin(key, options),
   // A review turn starts only with a confirmed provider for review turns.
   turnGate: (key) => selection.ready(key, "turn"),
   getModel: (key) => modelArgFor(key),
+  manuscriptSeen: (key) => (startsSession(key) ? null : (manuscriptByKey.get(key)?.hashes ?? null)),
+  manuscriptGiven: (key, hashes) => manuscriptByKey.set(key, { hashes, fresh: startsSession(key) }),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
   // The answers of the response letter that a change of the manuscript made
   // out of date (same rule as the Response tab).
@@ -653,8 +685,9 @@ const bridge = createBridge({
   allowedOrigins: [HTTP_ORIGIN],
   onHello: (key, host, doc) => onPaneConnect(key, host, doc),
   onUserMessage: (key, host) => {
+    const idle = !turnBusy.has(key);
     turnBusy.add(key);
-    return ensureLoopForMessage(key, host);
+    return ensureLoopForMessage(key, host, { idle });
   },
   onClose: (key) => onPaneClose(key),
   // A tracked edit answered after its timeout or disconnect: record it.
@@ -872,7 +905,8 @@ const bridge = createBridge({
       const { model, restart } = modelChange({
         requested,
         after,
-        running: sessionFor(key)?.model ?? null,
+        // A session the CLI moved to another model runs on that one.
+        running: sessionFor(key)?.fellBackTo ?? sessionFor(key)?.model ?? null,
       });
       modelByKey.set(key, model);
       reply({ type: "set_model_result", ok: true, model, request_id: msg.request_id });
@@ -1234,6 +1268,11 @@ async function startSessionForFolder(
   // triggered the lazy start) — clearing here would drop it, leaving
   // userMessageStream awaiting forever and the SDK with no first input
   // (no init, taskpane stuck on "Working…").
+  // The manuscript a review turn gave: this start keeps it only when that
+  // turn is what starts the session.
+  const given = manuscriptByKey.get(key);
+  if (given?.fresh) given.fresh = false;
+  else manuscriptByKey.delete(key);
   const prior = sessionFor(key);
   if (prior) {
     prior.abortController.abort();
@@ -1487,6 +1526,21 @@ function handleAgentMessage(msg, session) {
             console.warn("[daemon] Could not save session id:", err.message),
           );
         }
+      } else if (msg.subtype === "compact_boundary") {
+        // The history was summarized: the manuscript an earlier turn gave
+        // may be gone from it, so the next review turn gives it again.
+        console.log(`[agent] system/${msg.subtype}`);
+        if (session?.key) manuscriptByKey.delete(session.key);
+      } else if (msg.subtype === "model_refusal_fallback") {
+        // The CLI ran a refused request again on another model. The pane is
+        // told at once. For the session the swap lasts: it is recorded
+        // (session.fellBackTo) next to the model that was asked for
+        // (session.model), and set_model compares the user's choice with
+        // it, so choosing the model again restarts the session on it.
+        const f = refusalFallback(msg);
+        console.log(f.log);
+        bridge.sendAssistantEvent(f.event, session?.key);
+        if (f.session && session) session.fellBackTo = msg.fallback_model;
       } else {
         console.log(`[agent] system/${msg.subtype}`);
       }

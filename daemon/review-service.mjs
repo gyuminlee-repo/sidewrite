@@ -4,7 +4,7 @@
 // Messages (task pane -> daemon, reply type is `<type>_result` with the same
 // request_id, the existing sendRequest pattern in taskpane.js):
 //   review_load, review_split, review_save_comments, review_set_status,
-//   review_set_requirements, review_preview, review_propose, review_refresh,
+//   review_set_requirements, review_question_answer, review_check_paragraphs, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
 //   review_comment_text, review_comment_set,
 //   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
@@ -57,6 +57,10 @@ import {
   dismissExternal,
   markCommentsCleaned,
   setChangeComment,
+  addQuestion,
+  answerQuestion,
+  authorAnswers,
+  setRequirementOutside,
 } from "./revision-store.mjs";
 import {
   classifyRevision,
@@ -68,9 +72,11 @@ import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
+import { checkParagraphs } from "./paragraph-check.mjs";
 import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
+  currentTexts,
   narrowedAttempt,
   formatRationaleComment,
   TOOL_COMMENT_PREFIX,
@@ -186,7 +192,15 @@ export const keptWarning = (refs) =>
 // Requests that may run model calls one after another (a split and its
 // requirement extraction; a ledger check of up to 20 batches per rule). The
 // regex-only path takes the same route: one reply shape per request type.
-const JOB_TYPES = new Set(["review_split", "ledger_check", "ledger_suggest"]);
+// One request of the paragraph check may hold several paragraphs and goes
+// to the model of the edits, which thinks before it answers.
+const PARAGRAPH_CHECK_TIMEOUT_MS = 300_000;
+const JOB_TYPES = new Set([
+  "review_split",
+  "ledger_check",
+  "ledger_suggest",
+  "review_check_paragraphs",
+]);
 
 const ruleFingerprint = (item) => JSON.stringify([item.kind, item.text, item.scope, item.check]);
 
@@ -227,6 +241,12 @@ export function createReviewService({
   afterRefresh = null,
   clock = Date.now,
   getModel = () => null,
+  // The manuscript and the session of a pane (review-prompt.mjs
+  // manuscriptBlock): manuscriptSeen(key) gives the paragraph hashes the
+  // session was last given, or null; manuscriptGiven(key, hashes) is called
+  // when a turn that carries the manuscript is queued.
+  manuscriptSeen = () => null,
+  manuscriptGiven = () => {},
   sendEvent = () => {},
   log = console.log,
   env = process.env,
@@ -445,6 +465,9 @@ export function createReviewService({
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
           comment_ids: recordedCommentIds(rev),
+          // What the author answered to questions of this review: a source
+          // of numbers for an edit, like the comment.
+          author_texts: authorAnswers(rev),
           recent_changes: since
             ? rev.comments
                 .flatMap((x) => x.changes)
@@ -499,6 +522,23 @@ export function createReviewService({
         await linkReceipt(d, key, ref, comment, saved);
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
         return saved;
+      },
+      // office_ask_author: the question goes under the comment and the pane
+      // loads the file again.
+      onQuestion: async ({ ref, question, at: d = at(key) }) => {
+        let saved = null;
+        await update(d, (rev) => {
+          const r = addQuestion(withComment(d, rev, ref), ref, question);
+          saved = r.question;
+          return r.revision;
+        });
+        sendEvent(key, { type: "review_event", event: "comment_noted", ref });
+        return saved;
+      },
+      // office_requirement_outside: the note goes under the comment.
+      onRequirementOutside: async ({ ref, note, at: d = at(key) }) => {
+        await update(d, (rev) => setRequirementOutside(withComment(d, rev, ref), ref, note));
+        sendEvent(key, { type: "review_event", event: "comment_noted", ref });
       },
       // blocked_id: the approved exception the edit came from (its item is
       // marked by review_override). attempt_id: the item a normal edit wrote
@@ -660,7 +700,7 @@ export function createReviewService({
     }
   }
 
-  async function buildFor(d, ref, paragraphs) {
+  async function buildFor(d, ref, paragraphs, key) {
     const rev = await load(d);
     const comment = findComment(rev, ref);
     if (!comment) throw new Error(`No reviewer comment ${ref}. Save the comment list first.`);
@@ -669,6 +709,21 @@ export function createReviewService({
       comment,
       // What the other comments of the review ask and what is on record for them.
       others: rev.comments,
+      // The manuscript of the last status refresh, with the changes
+      // recorded since put in.
+      manuscript: rev.snapshot
+        ? {
+            paragraphs: currentTexts(
+              rev.snapshot.paragraphs,
+              rev.comments
+                .flatMap((c) => c.changes)
+                .filter((ch) => ch.created_at > rev.snapshot.taken_at)
+                .sort((a, b) => (a.created_at < b.created_at ? -1 : 1)),
+            ),
+            ids: rev.snapshot.ids,
+            seen: manuscriptSeen(key),
+          }
+        : null,
       paragraphs: Array.isArray(paragraphs) ? paragraphs : [],
       ledger: rev.ledger,
       lang: profile.rationale_lang,
@@ -774,9 +829,70 @@ export function createReviewService({
       const texts = Array.isArray(msg.requirements) ? msg.requirements : [];
       return { revision: await update(d, (rev) => setRequirements(rev, msg.ref, texts)) };
     },
+    // The author's answer to a question of the model (the card of the comment).
+    async review_question_answer(msg, key) {
+      const d = at(key);
+      return {
+        revision: await update(d, (rev) => answerQuestion(rev, msg.ref, msg.id, msg.answer)),
+      };
+    },
+    // "Check revised paragraphs" (paragraph-check.mjs): the paragraphs that
+    // hold two or more changes, read by the model that writes the edits
+    // (the router's role "turn" with the model of the pane). The pane
+    // refreshes the status first. The result replaces the last one in the
+    // review file; the log and the receipt hold counts and ids, no text.
+    async review_check_paragraphs(msg, key) {
+      const d = at(key);
+      const rev = await load(d);
+      let job = null;
+      const r = await checkParagraphs(rev, {
+        oneshot: async (req) => {
+          job ??= await oneshotJob(key, { role: "turn", claudeModel: getModel(key) ?? undefined });
+          if (!job.run) return { ok: false, error: "no model is available" };
+          return job.run({ ...req, timeoutMs: PARAGRAPH_CHECK_TIMEOUT_MS });
+        },
+      });
+      const model = job?.model ?? null;
+      log(
+        `[review] paragraph check paragraphs=${r.paragraphs.length} findings=${r.findings.length}` +
+          `${r.warnings.length ? ` warnings=${r.warnings.length}` : ""} model=${model ?? "-"}`,
+      );
+      if (r.asked) {
+        await receipt(d, [
+          decisionRecord({
+            kind: "paragraph_check",
+            input: r.input,
+            model,
+            output: {
+              paragraphs: r.paragraphs.map((p) => p.index),
+              findings: r.findings.map((f) => ({
+                p: f.paragraph_index,
+                kind: f.kind,
+                change_ids: f.change_ids,
+              })),
+              warnings: r.warnings.length,
+            },
+          }),
+        ]);
+      }
+      const consistency = {
+        checked_at: new Date().toISOString(),
+        model,
+        paragraphs: r.paragraphs.map((p) => ({
+          index: p.index,
+          id: p.id,
+          change_ids: p.changes.map((ch) => ch.id),
+          many: p.many,
+        })),
+        findings: r.findings,
+        warnings: r.warnings,
+      };
+      const revision = await update(d, (cur) => ({ ...cur, consistency }));
+      return { revision, consistency };
+    },
     async review_preview(msg, key) {
       const d = at(key);
-      const { built } = await buildFor(d, msg.ref, msg.paragraphs);
+      const { built } = await buildFor(d, msg.ref, msg.paragraphs, key);
       log(
         formatPromptLog(msg.ref, built, { paragraphs: msg.paragraphs?.length ?? 0, preview: true }),
       );
@@ -795,7 +911,7 @@ export function createReviewService({
         );
       }
       const d = at(key);
-      const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs);
+      const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs, key);
       // A turn in which no edit can be applied is not started: every
       // office_tracked_edit of it would be refused (review-tools.mjs
       // applyTrackedEdit: TaskPaneOutdated, ForbidRuleBroken), the turn
@@ -814,6 +930,8 @@ export function createReviewService({
         );
       }
       pushTurn(key, host, built.text, { ref: msg.ref });
+      // The session of the pane has the manuscript as of this turn.
+      if (built.manuscript.mode !== "none") manuscriptGiven(key, built.manuscript.hashes);
       turnHolds.get(key)?.();
       turnHolds.set(
         key,

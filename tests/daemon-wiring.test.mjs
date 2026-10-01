@@ -17,7 +17,12 @@ test("the HTTP server listens on loopback only", () => {
 
 test("judgments go through the router", () => {
   // One handle per job: provider and model are fixed when the job starts.
-  assert.match(code, /oneshotJob: \(key\) => oneshotRouter\.pin\(key\)/);
+  // (options: a job may name its role and Claude model; the paragraph check
+  // of the Review tab asks for those of the edits.)
+  assert.equal(
+    code.match(/oneshotJob: \(key, options\) => oneshotRouter\.pin\(key, options\)/g).length,
+    2,
+  );
   assert.match(code, /process\.on\("SIGTERM", shutdown\)/);
 });
 
@@ -110,7 +115,10 @@ test("set_model: the model the session runs on, read after the wait, decides whe
   const body = code.slice(at, at + 1400);
   // The session's own model, read once the list is known.
   assert.match(body, /const after = await modelCache\.get\(\);/);
-  assert.match(body, /running: sessionFor\(key\)\?\.model \?\? null/);
+  assert.match(
+    body,
+    /running: sessionFor\(key\)\?\.fellBackTo \?\? sessionFor\(key\)\?\.model \?\? null/,
+  );
   assert.ok(body.indexOf("await modelCache.get()") < body.indexOf("sessionFor(key)?.model"));
   assert.match(body, /if \(restart\)/);
   assert.equal(/modelCache\.current\(\)/.test(body), false, "no guess from the list as it was");
@@ -123,8 +131,8 @@ test("set_model: the model the session runs on, read after the wait, decides whe
   // The session records the model it is started on, where query() gets it.
   assert.match(code, /session\.model = modelArgFor\(key\);/);
   assert.match(code, /model: session\.model,/);
-  // Its definition, the session start and getModel: query() reads it nowhere else.
-  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 3);
+  // Its definition, the session start, getModel and one log line: query() reads it nowhere else.
+  assert.equal((code.match(/modelArgFor\(key\)/g) ?? []).length, 4);
 });
 
 test("a restart that keeps waiting input does not drop it or end its turn", () => {
@@ -155,4 +163,79 @@ test("the pane is told what each request ran on: one-shots by the router, the se
   assert.match(ev, /asked: session\?\.model \?\? null,/);
   // No option of the session or of a one-shot lowers thinking or effort.
   assert.equal(/\b(thinking|effort|maxThinkingTokens)\s*:/.test(code), false);
+});
+
+test("a refusal fallback of the CLI is logged, told to the pane, and recorded as the model the session runs on", () => {
+  const at = code.indexOf('msg.subtype === "model_refusal_fallback"');
+  assert.ok(at > 0);
+  const body = code.slice(at, at + 500);
+  assert.match(body, /const f = refusalFallback\(msg\);/);
+  assert.match(body, /console\.log\(f\.log\);/);
+  assert.match(body, /bridge\.sendAssistantEvent\(f\.event, session\?\.key\);/);
+  // set_model compares the model the session runs on with the one the user
+  // chose: with the fallback recorded, choosing the model again restarts the
+  // session on it. session.model stays what was asked for.
+  assert.match(body, /if \(f\.session && session\) session\.fellBackTo = msg\.fallback_model;/);
+  // The daemon itself names no fallback model.
+  assert.equal(/fallbackModel/.test(code), false);
+});
+
+// After a refusal fallback the CLI keeps the session on the other model. The
+// retry inside that turn stays (and is shown); the next turn starts on the
+// model the user chose again: the session is restarted, resuming, before the
+// new message is queued, and the old session is given no further message.
+test("the turn after a refusal fallback goes back to the chosen model, and its message is not lost", () => {
+  const at = code.indexOf("async function ensureLoopForMessage(key, host, { idle = true } = {})");
+  assert.ok(at > 0);
+  const body = code.slice(at, at + 900);
+  assert.match(
+    body,
+    /if \(live && !live\.settled\) \{\s*if \(!live\.fellBackTo \|\| !idle\) return;/,
+  );
+  // First the old session's wait for a message ends (no await before it: the
+  // caller queues the message right after this function returns its promise).
+  const restore = body.slice(body.indexOf("live.fellBackTo"));
+  assert.ok(
+    restore.indexOf("bridge.clearUserMessages(key, { keepQueued: true })") <
+      restore.indexOf('restartSession(key, host, { reason: "model_restored", keepQueued: true })'),
+  );
+  assert.equal(/await/.test(restore.slice(0, restore.indexOf("restartSession("))), false);
+  assert.match(
+    body,
+    /\[agent\] model restored to \$\{modelArgFor\(key\)\} after the fallback to \$\{live\.fellBackTo\}/,
+  );
+  // A chat message sent while a turn runs does not restart under that turn.
+  assert.match(
+    code,
+    /onUserMessage: \(key, host\) => \{\s*const idle = !turnBusy\.has\(key\);\s*turnBusy\.add\(key\);\s*return ensureLoopForMessage\(key, host, \{ idle \}\);/,
+  );
+});
+
+// What a session was given of the manuscript is remembered per pane, and
+// forgotten when the session is one that did not get it: a start this turn
+// did not cause, or a compaction of its history.
+test("the manuscript a session has: kept for the session a turn starts, forgotten on any other start and on compaction", () => {
+  assert.match(code, /const manuscriptByKey = new Map\(\);/);
+  // A turn that starts or restarts the session takes nothing as seen.
+  assert.match(
+    code,
+    /const startsSession = \(key\) => \{\s*const s = sessionFor\(key\);\s*return !s \|\| s\.settled \|\| !!s\.fellBackTo;\s*\};/,
+  );
+  assert.match(
+    code,
+    /manuscriptSeen: \(key\) => \(startsSession\(key\) \? null : \(manuscriptByKey\.get\(key\)\?\.hashes \?\? null\)\),/,
+  );
+  assert.match(
+    code,
+    /manuscriptGiven: \(key, hashes\) =>\s*manuscriptByKey\.set\(key, \{ hashes, fresh: startsSession\(key\) \}\),/,
+  );
+  const start = code.slice(code.indexOf("async function startSessionForFolder"));
+  assert.match(
+    start.slice(0, 600),
+    /const given = manuscriptByKey\.get\(key\);\s*if \(given\?\.fresh\) given\.fresh = false;\s*else manuscriptByKey\.delete\(key\);/,
+  );
+  assert.match(
+    code,
+    /msg\.subtype === "compact_boundary"[\s\S]{0,200}manuscriptByKey\.delete\(session\.key\)/,
+  );
 });

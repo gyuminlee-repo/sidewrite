@@ -116,6 +116,29 @@ export function resolveModelChoice(requested, state) {
   return "sonnet";
 }
 
+// The CLI's notice that a request ended with a refusal and was run again on
+// another model (SDK message system/model_refusal_fallback). Unless its
+// scope is "local" (a subagent or a side question), the session stays on
+// that model from then on: the daemon did not ask for it and names no
+// fallback model itself. Seen in a real run of 20 review turns: asked opus,
+// claude-opus-5-5 until the notice in the third turn, claude-opus-5 after.
+// { session, log, event }: ids and the category only, none of its prose.
+export function refusalFallback(msg) {
+  const scope = msg.scope ?? "session";
+  const category = msg.api_refusal_category ?? null;
+  return {
+    session: scope !== "local",
+    log: `[agent] model refusal fallback original=${msg.original_model} fallback=${msg.fallback_model} scope=${scope} category=${category ?? "-"}`,
+    event: {
+      event: "model_fallback",
+      original: msg.original_model,
+      fallback: msg.fallback_model,
+      scope,
+      category,
+    },
+  };
+}
+
 // What set_model does with a choice: the model to use and whether the
 // session of that pane must be restarted to run on it. after: the account's
 // list, once it is known. running: the model the pane's session was started

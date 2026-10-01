@@ -17,7 +17,10 @@ import {
   commentsToResolve,
   changeFlags,
   requirementsFromText,
-  unaddressedRequirements,
+  requirementsLine,
+  consistencyMessage,
+  consistencyLines,
+  openRequestsText,
   doneBlockers,
   ledgerDraftFromChange,
   ledgerFormFromItem,
@@ -36,6 +39,7 @@ import {
   queueRefs,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
+import { stillPresentLines } from "./residue.js";
 import { createAutoRefresh } from "./auto-refresh.js";
 
 const UNKNOWN_HINT =
@@ -76,6 +80,7 @@ export function initReviewPane({
     backupShown: null,
     editingLedger: null, // L6: id of the ledger item loaded into the form
     confirmDone: null, // L5: ref whose "Done" was asked once with something left open
+    answerDrafts: new Map(), // ref/question id -> answer typed and not saved yet
     reqDrafts: new Map(), // ref -> requirement text typed and not saved yet (Codex review 9)
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
@@ -426,7 +431,6 @@ export function initReviewPane({
         if (v === c.status) o.selected = true;
         status.append(o);
       }
-      const open = unaddressedRequirements(c);
       status.addEventListener(
         "change",
         guard(async () => {
@@ -507,10 +511,7 @@ export function initReviewPane({
           state.reqDrafts.delete(c.ref);
         }),
       );
-      const reqLine = (c.requirements ?? []).length
-        ? `Requirements: ${c.requirements.map((r) => `${r.id} ${r.text}`).join("; ")}.` +
-          (open.length ? ` No change yet: ${open.map((r) => r.id).join(", ")}.` : "")
-        : "";
+      const reqLine = requirementsLine(c);
       const card = el(
         "div",
         { class: "review-comment" },
@@ -526,9 +527,53 @@ export function initReviewPane({
         el("div", { class: "review-comment-text", text: c.text }),
         reqs,
         saveReqs,
-        reqLine ? el("div", { class: "review-reqs-line", text: reqLine }) : null,
+        el("div", { class: "review-reqs-line", text: reqLine }),
       );
+      // What the model asked instead of guessing (office_ask_author). An
+      // answer goes into the prompt of the next turn.
+      if ((c.questions ?? []).length) {
+        card.append(
+          el("div", { class: "review-questions-head", text: "Questions for the author" }),
+        );
+        for (const q of c.questions) {
+          const draftKey = `${c.ref}/${q.id}`;
+          const answer = el("textarea", {
+            rows: "2",
+            class: "review-answer",
+            placeholder: "Your answer (it goes into the next turn)",
+          });
+          answer.value = state.answerDrafts.has(draftKey)
+            ? state.answerDrafts.get(draftKey)
+            : (q.answer ?? "");
+          answer.addEventListener("input", () => state.answerDrafts.set(draftKey, answer.value));
+          const saveAnswer = el("button", {
+            type: "button",
+            class: "btn-secondary btn-small",
+            text: "Save answer",
+          });
+          saveAnswer.addEventListener(
+            "click",
+            guard(async () => {
+              await ask("review_question_answer", { ref: c.ref, id: q.id, answer: answer.value });
+              state.answerDrafts.delete(draftKey);
+            }),
+          );
+          card.append(
+            el("div", {
+              class: "review-question",
+              text: `${q.id}${q.requirement_id ? ` (${q.requirement_id})` : ""}: ${q.question}`,
+            }),
+            el("div", { class: "review-reqs-line", text: `Why it is asked: ${q.why}` }),
+            answer,
+            saveAnswer,
+          );
+        }
+      }
       for (const ch of c.changes) card.append(changeRow(ch));
+      // Terms the changes took out that other paragraphs still hold (residue.js).
+      for (const line of stillPresentLines(c, state.revision?.snapshot)) {
+        card.append(el("div", { class: "review-residue", text: line }));
+      }
       for (const b of c.blocked) if (!inFlightEdit(b)) card.append(blockedRow(c.ref, b));
       box.append(card);
     }
@@ -681,9 +726,25 @@ export function initReviewPane({
     showProgress();
   }
 
+  // The findings of the last "Check revised paragraphs"; a click selects
+  // the paragraph in Word.
+  function renderConsistency() {
+    const box = $("review-consistency");
+    box.replaceChildren();
+    for (const line of consistencyLines(state.revision?.consistency)) {
+      const b = el("button", { type: "button", class: "review-violation", text: line.text });
+      b.addEventListener(
+        "click",
+        guard(() => word.selectParagraphByIndex(line.paragraph_index)),
+      );
+      box.append(b);
+    }
+  }
+
   function render() {
     renderDraft();
     renderComments();
+    renderConsistency();
     renderLedger();
     renderCandidates();
     renderDecisions();
@@ -716,10 +777,13 @@ export function initReviewPane({
     const ran = usedLabel("turn");
     const withModel = ran ? ` with ${ran}` : "";
     const blockedText = `${blocked} edit${blocked === 1 ? " was" : "s were"} blocked (see the blocked list of the comment)`;
-    if (n > 0) {
-      return `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`;
-    }
-    return `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
+    // Requests the turn left without a change, a question or a note.
+    const open = openRequestsText((state.revision?.comments ?? []).find((x) => x.ref === ref));
+    const line =
+      n > 0
+        ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
+        : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
+    return open ? `${line} ${open}` : line;
   }
   async function proposeRef(ref, release, useSelection) {
     state.reviewTurnOpen = true;
@@ -958,6 +1022,20 @@ export function initReviewPane({
   $("review-refresh").addEventListener(
     "click",
     once("refresh", guard(refresh), () => $("review-refresh")),
+  );
+  // The check reads the document as it is: a status refresh first.
+  $("review-check-paragraphs").addEventListener(
+    "click",
+    once(
+      "check-paragraphs",
+      guard(async () => {
+        await refresh();
+        say("Checking the revised paragraphs...");
+        const r = await askJob("review_check_paragraphs", {});
+        say(consistencyMessage(r.consistency, usedLabel("turn")));
+      }),
+      () => $("review-check-paragraphs"),
+    ),
   );
   $("review-check-all").addEventListener(
     "click",
@@ -1274,7 +1352,11 @@ export function initReviewPane({
           .then(refresh)
           .catch((e) => say(e.message, true))
           .finally(render);
-      } else if (msg.event === "change_recorded" || msg.event === "edit_blocked") {
+      } else if (
+        msg.event === "change_recorded" ||
+        msg.event === "edit_blocked" ||
+        msg.event === "comment_noted"
+      ) {
         load()
           .catch((e) => say(e.message, true))
           .finally(render);
