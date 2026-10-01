@@ -140,3 +140,33 @@ test("runOneshot: a refusal, an empty reply and cut-off JSON are errors", async 
     assert.deepEqual([r.ok, r.error], [false, "reply was not JSON"], JSON.stringify(text));
   }
 });
+
+// Codex review 15: one-shot requests ignored CC_OFFICE_CLAUDE_PATH, so they
+// ran the SDK's bundled CLI while the drafting session ran the chosen one.
+test("one-shot requests run the executable CC_OFFICE_CLAUDE_PATH names, and stay isolated", async () => {
+  const isolated = (o) => [o.tools, o.mcpServers, o.settingSources, o.persistSession, o.maxTurns];
+  const want = [[], {}, [], false, 1];
+  // Without the variable: no key, the SDK uses its bundled CLI.
+  const plain = buildOneshotOptions({ system: "s", env: {} });
+  assert.equal("pathToClaudeCodeExecutable" in plain, false);
+  assert.deepEqual(isolated(plain), want);
+  for (const blank of ["", "   "]) {
+    const o = buildOneshotOptions({ system: "s", env: { CC_OFFICE_CLAUDE_PATH: blank } });
+    assert.equal("pathToClaudeCodeExecutable" in o, false);
+  }
+  // With it: the same executable as the drafting session (query-options.mjs).
+  const env = { CC_OFFICE_CLAUDE_PATH: " /opt/claude/bin/claude " };
+  const { buildQueryOptions } = await import("../daemon/query-options.mjs");
+  const session = buildQueryOptions({ cwd: "/tmp", officeMcp: {} }, env);
+  const chosen = buildOneshotOptions({ system: "s", env });
+  assert.equal(chosen.pathToClaudeCodeExecutable, "/opt/claude/bin/claude");
+  assert.equal(chosen.pathToClaudeCodeExecutable, session.pathToClaudeCodeExecutable);
+  assert.deepEqual(isolated(chosen), want);
+  // runOneshot hands the options to the query as built.
+  const seen = {};
+  await runOneshot({ system: "s", prompt: "p" }, { queryFn: fakeQuery([ok("{}")], seen), env });
+  assert.equal(seen.options.pathToClaudeCodeExecutable, "/opt/claude/bin/claude");
+  const none = {};
+  await runOneshot({ system: "s", prompt: "p" }, { queryFn: fakeQuery([ok("{}")], none), env: {} });
+  assert.equal("pathToClaudeCodeExecutable" in none.options, false);
+});

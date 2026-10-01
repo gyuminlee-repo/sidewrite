@@ -8,15 +8,21 @@
 import { query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { tmpdir } from "node:os";
 import { detectUsageLimit } from "./limit-detect.mjs";
+import { claudeExecutablePath } from "./query-options.mjs";
 
 export const ONESHOT_MODEL = "haiku";
 
+// The executable is the one the drafting session runs (CC_OFFICE_CLAUDE_PATH,
+// query-options.mjs claudeExecutablePath; unset: the SDK's bundled CLI). The
+// isolation stays: no tools, no MCP, no settings, nothing persisted.
 export function buildOneshotOptions({
   system,
   model = ONESHOT_MODEL,
   cwd = tmpdir(),
   abortController,
+  env = process.env,
 }) {
+  const executable = claudeExecutablePath(env);
   return {
     cwd,
     model,
@@ -27,6 +33,7 @@ export function buildOneshotOptions({
     strictMcpConfig: true,
     persistSession: false,
     maxTurns: 1,
+    ...(executable ? { pathToClaudeCodeExecutable: executable } : {}),
     ...(abortController ? { abortController } : {}),
   };
 }
@@ -55,7 +62,7 @@ export function parseJsonReply(text) {
 
 export async function runOneshot(
   { system, prompt, model = ONESHOT_MODEL, expectJson = true, timeoutMs = 120_000 },
-  { queryFn = sdkQuery } = {},
+  { queryFn = sdkQuery, env = process.env } = {},
 ) {
   const abortController = new AbortController();
   const timer = setTimeout(() => abortController.abort(), timeoutMs);
@@ -64,7 +71,7 @@ export async function runOneshot(
   try {
     for await (const msg of queryFn({
       prompt,
-      options: buildOneshotOptions({ system, model, abortController }),
+      options: buildOneshotOptions({ system, model, abortController, env }),
     })) {
       const lim = detectUsageLimit(msg);
       if (lim.limited && !limited) limited = lim;

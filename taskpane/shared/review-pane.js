@@ -297,6 +297,14 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
     );
   }
 
+  // The paragraphs that go into the prompt of a comment: the selection in
+  // Word when "send selected paragraphs" is on, else none. Preview prompt
+  // and Propose changes both use this, so the preview shows the prompt the
+  // turn will get.
+  async function promptParagraphs() {
+    return $("review-use-selection").checked ? await word.selectionParagraphs() : [];
+  }
+
   function renderComments() {
     const box = $("review-comments");
     box.replaceChildren();
@@ -339,9 +347,7 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       const run = guard(async (release) => {
         let r;
         try {
-          const paragraphs = $("review-use-selection").checked
-            ? await word.selectionParagraphs()
-            : [];
+          const paragraphs = await promptParagraphs();
           // A fresh snapshot first: outside changes are caught before the turn
           // (L4) and the new words of the turn are checked against it (L2).
           await refresh();
@@ -367,7 +373,11 @@ export function initReviewPane({ sendRequest, word, onTurnStarted, isTurnInFligh
       preview.addEventListener(
         "click",
         guard(async () => {
-          const r = await ask("review_preview", { ref: c.ref });
+          // The same paragraphs as Propose changes would send now.
+          const r = await ask("review_preview", {
+            ref: c.ref,
+            paragraphs: await promptParagraphs(),
+          });
           $("review-preview").textContent = r.prompt;
           $("review-preview").hidden = false;
         }),
