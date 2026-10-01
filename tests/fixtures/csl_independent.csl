@@ -22,4 +22,9 @@
       <text variable="title"/>
     </layout>
   </citation>
+  <bibliography>
+    <layout>
+      <text variable="title"/>
+    </layout>
+  </bibliography>
 </style>
