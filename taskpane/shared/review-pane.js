@@ -17,7 +17,6 @@ import {
   commentsToResolve,
   changeFlags,
   requirementsFromText,
-  requirementsLine,
   consistencyMessage,
   consistencyLines,
   openRequestsText,
@@ -31,6 +30,15 @@ import {
   inFlightEdit,
   reviewerOfRef,
   progressText,
+  countsSentence,
+  ledgerHowText,
+  requestStateText,
+  requirementStates,
+  clockText,
+  commentState,
+  firstLine,
+  summaryText,
+  reviewLine,
   reviewTextFromFile,
   REVIEW_FILE_MAX_BYTES,
   ledgerImportFromJson,
@@ -39,7 +47,8 @@ import {
   queueRefs,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
-import { stillPresentLines } from "./residue.js";
+import { stillPresentItems } from "./residue.js";
+import { firstWords, paragraphLabel } from "./paragraph-label.js";
 import { createAutoRefresh } from "./auto-refresh.js";
 
 const UNKNOWN_HINT =
@@ -69,6 +78,11 @@ export function initReviewPane({
   // (role) => what the last request of that kind of work really ran on
   // ("Claude · Opus 5.5"), or null when the pane does not know (taskpane.js).
   usedLabel = () => null,
+  // () => stops the running turn (the Stop button of the chat).
+  stopTurn = () => {},
+  // () => the text of the last answer of the model in the chat, or null. It is
+  // the reason a turn gives when it proposes no change.
+  lastReply = () => null,
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -82,6 +96,8 @@ export function initReviewPane({
     confirmDone: null, // L5: ref whose "Done" was asked once with something left open
     answerDrafts: new Map(), // ref/question id -> answer typed and not saved yet
     reqDrafts: new Map(), // ref -> requirement text typed and not saved yet (Codex review 9)
+    reqEdit: new Set(), // refs whose list of requests is open for editing
+    previewRef: null, // the comment whose prompt is shown under its Advanced
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
     applyingBlocked: new Set(), // ids of blocked edits whose override request is in flight
@@ -95,6 +111,10 @@ export function initReviewPane({
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
     reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
+    openRef: null, // the comment whose card is open (one at a time)
+    pasteOpen: false, // the paste box is shown although a review is split
+    results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
+    cards: new Map(), // ref -> the elements of its card, as of the last render
   };
 
   function el(tag, props = {}, ...kids) {
@@ -109,12 +129,30 @@ export function initReviewPane({
   }
   // The message line as it was last written, for a line put in front of it.
   let said = { text: "", bad: false };
-  function say(text, bad = false) {
+  // details: the exact numbers behind the sentence, under "Details".
+  function say(text, bad = false, details = "") {
     said = { text, bad };
     const m = $("review-message");
     m.textContent = text;
     m.classList.toggle("form-error", bad);
     m.hidden = !text;
+    $("review-message-details").textContent = text ? details : "";
+    $("review-message-more").hidden = !text || !details;
+  }
+  // A paragraph, named by its section and its first words. Pressing it selects
+  // the paragraph in Word. The internal id of a paragraph is never shown.
+  function paragraphLink(index) {
+    const b = el("button", {
+      type: "button",
+      class: "btn-link review-paragraph-link",
+      text: paragraphLabel(state.revision?.snapshot, index).label,
+    });
+    b.title = "Select this paragraph in Word";
+    b.addEventListener(
+      "click",
+      guard(() => word.selectParagraphByIndex(index)),
+    );
+    return b;
   }
   async function ask(type, payload = {}, timeoutMs) {
     const r = await sendRequest(type, payload, timeoutMs ? { timeoutMs } : undefined);
@@ -241,13 +279,12 @@ export function initReviewPane({
   }
 
   function changeRow(ch) {
-    const ids = ch.rationale.requirement_ids ?? [];
     const row = el(
       "button",
       { type: "button", class: `review-change state-${ch.state}` },
       el("span", { class: "review-badge", text: STATE_LABELS[ch.state] ?? ch.state }),
       el("span", {
-        text: ` ${ch.kind}: ${ch.rationale.what}${ids.length ? ` [${ids.join(",")}]` : ""}`,
+        text: ` ${ch.kind}: ${ch.rationale.what}`,
       }),
     );
     row.title = `${ch.rationale.why} / ${ch.rationale.addresses}\nBefore: ${ch.before}\nAfter: ${ch.after}`;
@@ -420,10 +457,67 @@ export function initReviewPane({
     return $("review-use-selection").checked ? await word.selectionParagraphs() : [];
   }
 
+  // ---- the list: a row for each comment, its card when it is open ----------------
+  const stateOf = (c, now = Date.now()) =>
+    commentState(c, {
+      working: state.turn?.ref === c.ref ? state.turn : null,
+      now,
+      noChange: state.results.get(c.ref)?.noChange === true,
+    });
+  // Open or close the card of a row; one card is open at a time. A card opened
+  // by the author is scrolled to the top of the list area, under the bar that
+  // stays at the top of the tab.
+  function paintOpen(ref, els) {
+    const open = state.openRef === ref;
+    els.body.hidden = !open;
+    els.head.setAttribute("aria-expanded", open ? "true" : "false");
+    els.card.classList.toggle("open", open);
+  }
+  function openCard(ref, { toggle = true, scroll = true } = {}) {
+    state.openRef = toggle && state.openRef === ref ? null : ref;
+    for (const [r, els] of state.cards) paintOpen(r, els);
+    const els = state.cards.get(state.openRef);
+    if (scroll && els) {
+      const top = $("review-top");
+      els.card.style?.setProperty?.("scroll-margin-top", `${(top?.offsetHeight ?? 0) + 4}px`);
+      els.card.scrollIntoView?.({ block: "start" });
+    }
+  }
+  // The words of a row, and the work indicator inside its card.
+  function paintCard(c, els, now = Date.now()) {
+    const st = stateOf(c, now);
+    els.stateEl.textContent = st.label;
+    els.stateEl.setAttribute("class", `review-comment-state review-state-${st.kind}`);
+    const working = state.turn?.ref === c.ref ? state.turn : null;
+    els.progressEl.hidden = !working;
+    if (working) {
+      els.clockEl.textContent = `Working on this comment: ${clockText(working.startedAt, now)}`;
+    }
+    return st;
+  }
+  function paintCards() {
+    const now = Date.now();
+    for (const c of state.revision?.comments ?? []) {
+      const els = state.cards.get(c.ref);
+      if (els) paintCard(c, els, now);
+    }
+  }
+  function renderSummary() {
+    const comments = state.revision?.comments ?? [];
+    const box = $("review-summary");
+    box.textContent = summaryText(
+      comments,
+      comments.map((c) => stateOf(c)),
+    );
+    box.hidden = comments.length === 0;
+  }
+
   function renderComments() {
     const box = $("review-comments");
+    $("review-preview-holder").append($("review-preview")); // out of the cards that go
     box.replaceChildren();
     proposeButtons = [];
+    state.cards.clear();
     for (const c of state.revision?.comments ?? []) {
       const status = el("select", { class: "setting-select" });
       for (const [v, label] of Object.entries(STATUS_LABELS)) {
@@ -483,6 +577,7 @@ export function initReviewPane({
           });
           $("review-preview").textContent = r.prompt;
           $("review-preview").hidden = false;
+          state.previewRef = c.ref;
         }),
       );
       const reqs = el("textarea", {
@@ -509,30 +604,114 @@ export function initReviewPane({
             requirements: requirementsFromText(reqs.value),
           });
           state.reqDrafts.delete(c.ref);
+          state.reqEdit.delete(c.ref);
         }),
       );
-      const reqLine = requirementsLine(c);
-      const card = el(
+      // What the reviewer asks: one line per request with where it stands. The
+      // box to change the list opens from Edit.
+      const rows = requirementStates(c);
+      const editing = state.reqEdit.has(c.ref);
+      const edit = el("button", {
+        type: "button",
+        class: "btn-link",
+        text: editing ? "Close the editor" : "Edit",
+      });
+      edit.addEventListener("click", () => {
+        if (state.reqEdit.has(c.ref)) state.reqEdit.delete(c.ref);
+        else state.reqEdit.add(c.ref);
+        render();
+      });
+      reqs.hidden = !editing;
+      saveReqs.hidden = !editing;
+      const requestList = el(
         "div",
-        { class: "review-comment" },
-        el(
-          "div",
-          { class: "review-comment-head" },
-          el("strong", { text: c.ref }),
-          status,
-          propose,
-          preview,
-        ),
+        { class: "review-req-list" },
+        el("div", { class: "review-questions-head" }, "What the reviewer asks ", edit),
+        ...(rows.length
+          ? rows.map((r) =>
+              el(
+                "div",
+                {
+                  class: "review-req",
+                  "data-req-id": r.id,
+                  "data-req-text": r.text,
+                  "data-state": r.state,
+                },
+                el("span", { class: "review-req-text", text: r.text }),
+                el("span", {
+                  class: `review-req-state review-req-${r.state}`,
+                  text: requestStateText(r),
+                }),
+              ),
+            )
+          : [
+              el("div", {
+                class: "review-req-none",
+                text: "No requests listed yet. Use Edit to add them, one per line; until then a turn lists them itself.",
+              }),
+            ]),
+      );
+      const stateEl = el("span", { class: "review-comment-state" });
+      const head = el(
+        "button",
+        { type: "button", class: "review-comment-head", "aria-expanded": "false" },
+        el("strong", { text: c.ref }),
+        el("span", { class: "review-comment-snippet", text: firstLine(c.text) }),
+        stateEl,
+      );
+      head.addEventListener("click", () => openCard(c.ref));
+      // The work of this comment, inside its card: the clock and a way to stop.
+      const clockEl = el("span", { class: "review-card-clock" });
+      const stop = el("button", {
+        type: "button",
+        class: "btn-secondary btn-small",
+        text: "Stop",
+      });
+      stop.addEventListener("click", () => stopTurn());
+      const progressEl = el("div", { class: "review-card-progress", role: "timer" }, clockEl, stop);
+      progressEl.hidden = true;
+      // What the last turn of this comment came to.
+      const res = state.results.get(c.ref);
+      const result = res
+        ? el(
+            "div",
+            { class: `review-card-result${res.bad ? " form-error" : ""}` },
+            el("div", { text: res.text }),
+            res.reason
+              ? el(
+                  "details",
+                  { class: "review-card-reason" },
+                  el("summary", { text: "Why no change" }),
+                  el("div", { text: res.reason }),
+                )
+              : null,
+          )
+        : null;
+      const body = el(
+        "div",
+        { class: "review-comment-body" },
+        progressEl,
+        result,
+        el("div", { class: "review-card-actions" }, status, propose),
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
+        requestList,
         reqs,
         saveReqs,
-        el("div", { class: "review-reqs-line", text: reqLine }),
       );
+      const card = el("div", { class: "review-comment", "data-ref": c.ref }, head, body);
+      const advanced = el(
+        "details",
+        { class: "review-card-advanced" },
+        el("summary", { text: "Advanced" }),
+        preview,
+      );
+      advanced.open = state.previewRef === c.ref;
+      state.cards.set(c.ref, { card, head, body, stateEl, progressEl, clockEl, advanced });
       // What the model asked instead of guessing (office_ask_author). An
       // answer goes into the prompt of the next turn.
       if ((c.questions ?? []).length) {
-        card.append(
+        body.append(
           el("div", { class: "review-questions-head", text: "Questions for the author" }),
         );
         for (const q of c.questions) {
@@ -558,7 +737,7 @@ export function initReviewPane({
               state.answerDrafts.delete(draftKey);
             }),
           );
-          card.append(
+          body.append(
             el("div", {
               class: "review-question",
               text: `${q.id}${q.requirement_id ? ` (${q.requirement_id})` : ""}: ${q.question}`,
@@ -569,14 +748,29 @@ export function initReviewPane({
           );
         }
       }
-      for (const ch of c.changes) card.append(changeRow(ch));
+      for (const ch of c.changes) body.append(changeRow(ch));
       // Terms the changes took out that other paragraphs still hold (residue.js).
-      for (const line of stillPresentLines(c, state.revision?.snapshot)) {
-        card.append(el("div", { class: "review-residue", text: line }));
+      for (const it of stillPresentItems(c, state.revision?.snapshot)) {
+        const line = el("div", { class: "review-residue", text: it.text });
+        for (const i of it.indexes) line.append(" ", paragraphLink(i));
+        if (it.more) line.append(el("span", { text: ` and ${it.more} more` }));
+        body.append(line);
       }
-      for (const b of c.blocked) if (!inFlightEdit(b)) card.append(blockedRow(c.ref, b));
+      for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));
+      body.append(advanced);
       box.append(card);
     }
+    // The prompt shown by Preview prompt sits under Advanced in its card.
+    const pre = $("review-preview");
+    const shown = state.cards.get(state.previewRef);
+    if (shown) shown.advanced.append(pre);
+    else {
+      state.previewRef = null;
+      $("review-preview-holder").append(pre);
+    }
+    if (state.openRef && !state.cards.has(state.openRef)) state.openRef = null;
+    for (const [ref, els] of state.cards) paintOpen(ref, els);
+    paintCards();
   }
 
   function renderLedger() {
@@ -615,18 +809,21 @@ export function initReviewPane({
         }),
       );
       const statusText = ledgerStatusText(item);
+      const how = ledgerHowText(item);
       box.append(
         el(
           "div",
-          { class: "review-ledger-item" },
-          el("strong", { text: `${item.id} ${item.kind}` }),
-          el("span", { text: ` ${item.text} [${item.check.type}] ${statusText} ` }),
+          { class: "review-ledger-item", "data-id": item.id, "data-kind": item.kind },
+          el("strong", { text: item.kind === "forbid" ? "Forbidden wording" : "Instruction" }),
+          el("span", { text: ` ${item.text}${how ? ` (${how})` : ""}. ${statusText}. ` }),
           check,
           edit,
           remove,
         ),
       );
     }
+    const rules = state.revision?.ledger ?? [];
+    $("review-ledger-count").textContent = rules.length ? `(${rules.length})` : "";
     $("review-ledger-add").textContent = state.editingLedger
       ? `Save ${state.editingLedger}`
       : "Add";
@@ -656,23 +853,80 @@ export function initReviewPane({
   function renderDecisions() {
     const d = pendingDecisions(state.revision);
     const box = $("review-decisions");
-    box.replaceChildren(
-      el("div", { text: d.total ? `Waiting for you: ${d.total}` : "Nothing waits for you." }),
-    );
-    for (const x of [...d.blocked, ...d.ledger, ...d.requirements]) {
-      box.append(el("div", { class: "review-decision", text: x.text }));
+    // A request waits for the author only once a turn has run for its comment;
+    // before that it waits for the tool. Those items stay in the list (hidden)
+    // and are not counted.
+    const turnRan = (ref) => {
+      const c = (state.revision?.comments ?? []).find((x) => x.ref === ref);
+      return (
+        !!c &&
+        (c.changes.length > 0 ||
+          (c.questions ?? []).length > 0 ||
+          (c.blocked ?? []).length > 0 ||
+          (c.requirements_outside ?? []).length > 0 ||
+          state.results.has(ref))
+      );
+    };
+    const items = [
+      ...d.blocked.map((x) => ({ x, shown: true })),
+      ...d.ledger.map((x) => ({ x, shown: true })),
+      ...d.requirements.map((x) => ({ x, shown: turnRan(x.ref) })),
+    ];
+    const total = items.filter((i) => i.shown).length;
+    const count = el("div", { text: `Waiting for you: ${total}` });
+    count.hidden = true; // the summary of the box says it
+    box.replaceChildren(count);
+    for (const { x, shown } of items) {
+      const row = el("div", {
+        class: "review-decision",
+        text: x.text,
+        role: "button",
+        tabindex: "0",
+        "data-kind": x.kind,
+        "data-ref": x.ref ?? "",
+        "data-req": x.kind.startsWith("request") ? x.id : "",
+      });
+      row.hidden = !shown;
+      // Opens what it is about: the comment, or the rules.
+      const go = () => {
+        if (x.ref) openCard(x.ref, { toggle: false });
+        else {
+          $("review-ledger-box").open = true;
+          $("review-ledger-box").scrollIntoView?.({ block: "start" });
+        }
+      };
+      row.addEventListener("click", go);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault?.();
+          go();
+        }
+      });
+      box.append(row);
     }
+    $("review-waiting-count").textContent = total ? `(${total})` : "";
+    $("review-waiting-box").hidden = total === 0;
   }
 
   // L4: changes made outside the tool since the last refresh.
   function renderExternal() {
     const box = $("review-external");
     box.replaceChildren();
-    for (const x of state.revision?.external ?? []) {
-      const where = x.paragraph_index ?? x.old_index;
+    const outside = state.revision?.external ?? [];
+    $("review-external-count").textContent = outside.length ? `(${outside.length})` : "";
+    $("review-external-box").hidden = outside.length === 0;
+    for (const x of outside) {
+      // A deleted paragraph is not in the snapshot: its old first words name it.
+      const what =
+        x.paragraph_index == null
+          ? `\u201c${firstWords(x.before)}\u201d`
+          : paragraphLabel(state.revision?.snapshot, x.paragraph_index).label;
+      const verb = { inserted: "added", deleted: "deleted" }[x.kind] ?? "changed";
       const label =
-        `${x.id} ${x.kind} paragraph ${where}` +
-        (x.lost_facts.length ? `. Lost: ${x.lost_facts.join("; ")}` : "");
+        `A paragraph was ${verb} outside the tool: ${what}.` +
+        (x.lost_facts.length
+          ? ` The old text had ${x.lost_facts.join("; ")}, and the new text does not. Check that this is meant.`
+          : "");
       const go = el("button", { type: "button", class: "review-violation", text: label });
       if (x.paragraph_index != null)
         go.addEventListener(
@@ -704,6 +958,7 @@ export function initReviewPane({
   // place in a "Propose all" run goes in front ("Propose all: 2/5 R1.2.").
   function showProgress() {
     const bar = $("review-progress");
+    paintCards();
     bar.hidden = !state.turn && !state.queueNote;
     if (bar.hidden) return;
     bar.textContent = [
@@ -732,7 +987,11 @@ export function initReviewPane({
     const box = $("review-consistency");
     box.replaceChildren();
     for (const line of consistencyLines(state.revision?.consistency)) {
-      const b = el("button", { type: "button", class: "review-violation", text: line.text });
+      const b = el("button", {
+        type: "button",
+        class: "review-violation",
+        text: `${paragraphLabel(state.revision?.snapshot, line.paragraph_index).label}: ${line.text}`,
+      });
       b.addEventListener(
         "click",
         guard(() => word.selectParagraphByIndex(line.paragraph_index)),
@@ -755,7 +1014,7 @@ export function initReviewPane({
           if (isTurnInFlight() || queue.running) return;
           return run(
             onTurnStarted(
-              `Review ${line.rewrite_ref}: rewriting paragraph ${line.paragraph_index} (tracked)...`,
+              `Review ${line.rewrite_ref}: rewriting ${paragraphLabel(state.revision?.snapshot, line.paragraph_index).label} (tracked)...`,
             ),
           );
         });
@@ -764,9 +1023,39 @@ export function initReviewPane({
     }
   }
 
+  // What has nothing to show is hidden; the paste box shrinks to one line once
+  // the review is split.
+  function renderSections() {
+    const comments = state.revision?.comments ?? [];
+    const hasReview = comments.length > 0 || state.draft.length > 0;
+    $("review-start").hidden = hasReview;
+    const collapsed = hasReview && !state.pasteOpen;
+    $("review-paste-box").hidden = collapsed;
+    $("review-paste-summary").hidden = !hasReview;
+    $("review-paste-summary-text").textContent = comments.length
+      ? reviewLine(comments)
+      : `Review split into ${state.draft.length} comment${state.draft.length === 1 ? "" : "s"}, not saved yet`;
+    $("review-paste-toggle").textContent = state.pasteOpen
+      ? "Hide review text"
+      : "Show review text";
+    $("review-paste-toggle").setAttribute("aria-expanded", state.pasteOpen ? "true" : "false");
+    // Refresh status stays reachable while nothing is loaded (no daemon), so a
+    // press says why; once a review is loaded and empty there is nothing to list.
+    $("review-comments-section").hidden = comments.length === 0 && !!state.revision;
+    $("review-propose-all").hidden = comments.length === 0;
+    $("review-more").hidden = comments.length === 0;
+    $("review-submit-box").hidden = comments.length === 0;
+    const notDone = comments.filter((c) => c.status !== "done").length;
+    $("review-submit-count").textContent = notDone ? `(${notDone} not done)` : "";
+  }
+
   function render() {
+    // The cards are built anew: the author stays where they were.
+    const keep = root.scrollTop;
+    renderSections();
     renderDraft();
     renderComments();
+    renderSummary();
     renderConsistency();
     renderLedger();
     renderCandidates();
@@ -774,6 +1063,7 @@ export function initReviewPane({
     renderExternal();
     showProgress();
     $("review-file").textContent = state.path ? `Review file: ${state.path}` : "";
+    if (root.scrollTop !== keep) root.scrollTop = keep;
   }
 
   // ---- actions --------------------------------------------------------------
@@ -787,9 +1077,9 @@ export function initReviewPane({
     const c = (state.revision?.comments ?? []).find((x) => x.ref === ref);
     return { changes: (c?.changes ?? []).length, blocked: (c?.blocked ?? []).length };
   }
-  // What came of the turn of `ref`, for the message line: how many changes
-  // it put on record and what it ran on. null for a turn this pane did not
-  // start (another connection).
+  // What came of the turn of `ref`, for its card: how many changes it put on
+  // record and what it ran on. null for a turn this pane did not start
+  // (another connection).
   function proposedLine(ref) {
     const before = state.turnStart.get(ref);
     state.turnStart.delete(ref);
@@ -805,12 +1095,15 @@ export function initReviewPane({
     const line =
       n > 0
         ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
-        : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
-    return open ? `${line} ${open}` : line;
+        : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is below"}.`;
+    return { text: open ? `${line} ${open}` : line, noChange: n <= 0 };
   }
   // extra: more fields of the request (rewrite_paragraph for a rewrite turn).
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
+    state.results.delete(ref);
+    // The card shows the work from the click on, not from the answer of the daemon.
+    startProgress(ref);
     try {
       const paragraphs = useSelection ? await promptParagraphs() : [];
       // A fresh snapshot first: outside changes are caught before the turn
@@ -825,10 +1118,15 @@ export function initReviewPane({
         { ref, paragraphs, wait_ms: PROPOSE_WAIT_MS, ...extra },
         PROPOSE_WAIT_MS,
       );
-      if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);
-      else if (state.turnsDone !== done) state.reviewTurnOpen = false; // its turn_done came first
+      if (state.turnsDone === done && isTurnInFlight()) {
+        if (r.started_at && state.turn?.ref === ref) state.turn.startedAt = r.started_at;
+      } else if (state.turnsDone !== done)
+        state.reviewTurnOpen = false; // its turn_done came first
+      else if (state.turn?.ref === ref) stopProgress(); // no turn came of it
     } catch (e) {
       state.reviewTurnOpen = false;
+      if (state.turn?.ref === ref) stopProgress();
+      state.results.set(ref, { text: e.message, bad: true });
       release?.();
       throw e;
     }
@@ -947,9 +1245,12 @@ export function initReviewPane({
     const inv = invariantReport(state.revision, snapshot.comments);
     const c = r.counts;
     const outside = r.external?.length
-      ? ` Outside changes: ${r.external.length} (list under Comments and changes).`
+      ? ` Outside changes: ${r.external.length} (list under Changes made outside the tool).`
       : "";
+    // One sentence on what to do next; the full counts are under Details.
     report(
+      countsSentence(c, inv, { outside: r.external?.length ?? 0, unresolved: unresolved.length }),
+      !inv.ok,
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
         invariantText(inv) +
@@ -957,7 +1258,6 @@ export function initReviewPane({
         (unresolved.length
           ? ` ${unresolved.length} rationale comment(s) not marked resolved (Word: ${unresolved[0]}; one cause is a document in compatibility mode).`
           : ""),
-      !inv.ok,
     );
     return inv; // turn_done: a mismatch ends a Propose all run
   }
@@ -968,13 +1268,29 @@ export function initReviewPane({
     const r = await askJob("ledger_check", { ids, snapshot, full });
     const box = $("review-violations");
     box.replaceChildren();
+    const rules = state.revision?.ledger ?? [];
     for (const res of r.outcomes) {
+      const text = rules.find((i) => i.id === res.id)?.text ?? res.id;
+      const found = res.violations.length;
+      if (found) {
+        box.append(
+          el("div", {
+            class: "review-found",
+            text: `${text}: found in ${found} place${found === 1 ? "" : "s"}`,
+          }),
+        );
+      }
       for (const v of res.violations) {
-        const label =
+        const where =
           v.paragraph_index == null
-            ? `${res.id}: required text is gone`
-            : `${res.id}: paragraph ${v.paragraph_index}${v.match ? ` "${v.match}"` : " (pending deletion)"}`;
-        const b = el("button", { type: "button", class: "review-violation", text: label });
+            ? "Required text is gone"
+            : `${paragraphLabel(state.revision?.snapshot, v.paragraph_index).label}${v.match ? ` has \u201c${v.match}\u201d` : " is waiting to be deleted"}`;
+        const b = el("button", {
+          type: "button",
+          class: "review-violation",
+          "data-rule": res.id,
+          text: where,
+        });
         if (v.paragraph_index != null)
           b.addEventListener(
             "click",
@@ -983,12 +1299,18 @@ export function initReviewPane({
         box.append(b);
       }
       if (res.status === "error")
-        box.append(el("div", { class: "form-error", text: `${res.id}: ${res.error}` }));
+        box.append(
+          el("div", { class: "form-error", text: `The check of ${text} failed: ${res.error}` }),
+        );
     }
   }
 
   // P15: the review text from a .txt or .md file instead of a paste. The
   // file is read in the pane (File.text()); the daemon is not involved.
+  $("review-paste-toggle").addEventListener("click", () => {
+    state.pasteOpen = !state.pasteOpen;
+    render();
+  });
   $("review-load-file").addEventListener("click", () => $("review-file-input").click());
   $("review-file-input").addEventListener(
     "change",
@@ -1015,8 +1337,15 @@ export function initReviewPane({
         ...c,
         requirementsText: (c.requirements ?? []).map((q) => q.text).join("\n"),
       }));
-      if (r.warnings?.length) say(`Split by ${r.method}. ${r.warnings.join(" ")}`);
-      else say(`Split by ${r.method}: ${r.comments.length} comment(s). Edit, then Save.`);
+      // regex: found by the numbering and layout of the text; llm: read by the model.
+      const how = r.method === "llm" ? "read by Claude" : "found by the numbering in the text";
+      if (r.warnings?.length) say(`Split into comments (${how}). ${r.warnings.join(" ")}`);
+      else {
+        const n = r.comments.length;
+        say(
+          `Split into ${n} comment${n === 1 ? "" : "s"} (${how}). Check the list, then press Save comment list.`,
+        );
+      }
     }),
   );
   $("review-save").addEventListener(
@@ -1083,13 +1412,21 @@ export function initReviewPane({
   $("review-ledger-add").addEventListener(
     "click",
     guard(async () => {
+      // Only the words typed: the check is drafted from them, as "Draft check
+      // from text" does (a phrase in quotation marks is looked for as written,
+      // anything else is read by Claude).
+      let checkType = $("ledger-check-type").value;
+      let pattern = $("ledger-pattern").value;
+      let flags = $("ledger-flags").value;
+      const drafted = checkType === "regex" && !pattern && !state.editingLedger;
+      if (drafted) ({ checkType, pattern, flags } = ledgerCheckFromText($("ledger-text").value));
       const r = ledgerItemFromForm({
         kind: $("ledger-kind").value,
         text: $("ledger-text").value,
         scope: $("ledger-scope").value,
-        checkType: $("ledger-check-type").value,
-        pattern: $("ledger-pattern").value,
-        flags: $("ledger-flags").value,
+        checkType,
+        pattern,
+        flags,
         expect: $("ledger-expect").value,
       });
       if (r.error) throw new Error(r.error);
@@ -1101,6 +1438,13 @@ export function initReviewPane({
       }
       $("ledger-text").value = "";
       $("ledger-pattern").value = "";
+      if (drafted) {
+        say(
+          checkType === "regex"
+            ? `Rule added. It looks for \u201c${pattern.replace(/\\(.)/g, "$1")}\u201d as written.`
+            : "Rule added. Claude reads each paragraph to check it.",
+        );
+      }
     }),
   );
   // P15: the ledger as a JSON file. Export writes <stem>.ledger.json next to
@@ -1290,6 +1634,7 @@ export function initReviewPane({
         const unchecked = (what) => {
           const error = `The turn for ${msg.ref} ran and its record is saved, but ${what}`;
           say(error, true);
+          state.results.set(msg.ref, { text: error, bad: true });
           return { ok: false, unchecked: true, error };
         };
         const failed =
@@ -1302,11 +1647,18 @@ export function initReviewPane({
             (inv) => {
               if (failed) {
                 state.turnStart.delete(msg.ref);
+                state.results.set(msg.ref, { text: failed.error, bad: true });
                 return failed;
               }
-              // What came of the turn, in front of the status the refresh wrote.
+              // What came of the turn goes into its card.
               const line = proposedLine(msg.ref);
-              if (line) say(`${line} ${said.text}`, said.bad);
+              if (line) {
+                state.results.set(msg.ref, {
+                  text: line.text,
+                  noChange: line.noChange,
+                  ...(line.noChange ? { reason: lastReply() } : {}),
+                });
+              }
               if (inv.ok) return { ok: true };
               // Only changes Word applied without their rationale comment:
               // said as that, not as a mismatch.
@@ -1326,6 +1678,7 @@ export function initReviewPane({
             (e) => {
               if (failed) {
                 say(e.message, true);
+                state.results.set(msg.ref, { text: failed.error, bad: true });
                 return failed;
               }
               return unchecked(
