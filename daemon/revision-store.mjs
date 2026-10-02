@@ -482,6 +482,13 @@ export const RevisionSchema = z.object({
       exported_at: z.string(),
       fail: z.number().int(),
       warn: z.number().int(),
+      // What the letter said and the bytes of the file that was written
+      // (response-model.mjs letterModelSha, sha256 of the docx). Not there:
+      // an export from before they were recorded, or a file an earlier daemon
+      // saved; the submission checklist then asks for a new export. They are
+      // optional and get no default, so such a file saves as it was loaded.
+      model_sha: z.string().nullish(),
+      docx_sha: z.string().nullish(),
     })
     .nullable()
     .default(null),

@@ -49,7 +49,7 @@
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import {
   localDocPath,
   revisionPathFor,
@@ -72,7 +72,8 @@ import { findFormatIssues, formatRulesOn } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
 import { refreshed, usableHeadings, writingJob } from "./response-service.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
-import { submissionRows } from "./submission-check.mjs";
+import { submissionPaths, submissionRows } from "./submission-check.mjs";
+import { sha256File } from "./figure-service.mjs";
 
 // The Tools tab names the format rules that are on (format-check.mjs).
 export { formatRulesOn };
@@ -386,10 +387,19 @@ export function createAuxService({
       const stored = await load(d);
       const { profile } = await profileOf(d, stored);
       const revision = refreshed(stored, snapshot, headings, profile);
+      // The files the record names, as they are on the disk now: a path of
+      // the record is absolute, or relative to the manuscript folder with
+      // "/" (as the figure files are stored). null: not there or not readable.
+      const files = {};
+      for (const path of submissionPaths(revision)) {
+        const abs = isAbsolute(path) ? path : join(dirname(d.doc), ...path.split("/"));
+        files[path] = await sha256File(abs).catch(() => null);
+      }
       const rows = submissionRows({
         revision,
         profile,
         live: { snapshot, headings, format: isObj(msg.format) ? msg.format : null },
+        files,
         file: basename(d.doc),
       });
       const count = (state) => rows.filter((r) => r.state === state).length;

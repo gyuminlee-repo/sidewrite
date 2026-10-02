@@ -16,6 +16,10 @@
 //             snapshot of collectReviewSnapshot (paragraphs with w_ins and
 //             w_del, comments), the usable headings, the format read of
 //             readFormatSnapshot (null when it could not be read)
+//   files     { <path as the record holds it>: sha256 | null } for the paths
+//             of submissionPaths(revision): the file as it is on the disk
+//             now, null when it is not there. A path that was not handed in
+//             counts as not there.
 //   file      the name of the open manuscript; every row is about that file
 //
 //   go        where the row is fixed, or null:
@@ -30,8 +34,16 @@
 //   file_clean       no tracked change and no comment is left (the state the
 //                    two rows above lead to, plus the comments of people)
 //   format_counts    no format finding and no failing count rule
+//   letter           the exported letter (.docx) still says what the record
+//                    says now. Compared by hash, not by time: the export
+//                    recorded the hash of the letter model and of the file
+//                    (response_export.model_sha, docx_sha), and the model
+//                    built now must hash the same. A later accept or reject,
+//                    an edited answer, a profile change or new line numbers
+//                    all change the model.
 
 import { checkResponses } from "./response-check.mjs";
+import { buildLetterModel, letterModelSha } from "./response-model.mjs";
 import { inScope } from "./ledger-check.mjs";
 import { findFormatIssues, formatRulesOn } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
@@ -57,6 +69,19 @@ const TO_COMMENTS = { tab: "review", target: "review-comments" };
 const TO_CLEAN_TOOL = { tab: "review", target: "review-clean-tool" };
 const TO_DELETE_ALL = { tab: "review", target: "review-delete-all" };
 const TO_TOOLS_CHECK = { tab: "tools", target: "tools-check" };
+const TO_EXPORT = { tab: "response", target: "response-export" };
+
+// The last part of a path, whichever separator it was written with.
+const nameOf = (path) =>
+  String(path ?? "")
+    .split(/[\\/]/)
+    .pop();
+
+// The files whose hashes the rows compare, as the record names them. The
+// service hashes each one and hands the result in as `files`.
+export function submissionPaths(revision) {
+  return uniq([revision?.response_export?.path].filter(Boolean));
+}
 
 // Rows 1 and 2: the pure checks of the response letter. The `requirements`
 // rows are the open requests; every other failing row is an answer that does
@@ -224,10 +249,46 @@ function formatRow({ revision, profile, live }) {
     : { id, state: READY, text: "The format and count checks have no failing rule.", go: null };
 }
 
-export function submissionRows({ revision, profile, live, file = null }) {
-  const input = { revision, profile, live };
-  return [...answerRows(input), ...documentRows(input), formatRow(input)].map((row) => ({
-    ...row,
-    file,
-  }));
+// Row 7: the response letter that was exported, against the record as it is
+// now. Not ready is the answer whenever one of the compared values is missing.
+function letterRow({ revision, profile, files }) {
+  const id = "letter";
+  const notReady = (text) => ({ id, state: NOT_READY, text, go: TO_EXPORT });
+  const x = revision.response_export;
+  if (!x) return notReady("The response letter (.docx) has not been exported yet.");
+  const name = nameOf(x.path);
+  if (!x.model_sha || !x.docx_sha)
+    return notReady(
+      `Export the letter again: ${name} was written before the tool recorded what it said, so it cannot be compared with the answers as they are now.`,
+    );
+  if (x.fail > 0)
+    return notReady(
+      `${name} was exported while ${n(x.fail, "check")} failed. Fix ${x.fail === 1 ? "it" : "them"} in the Response tab, then export the letter again.`,
+    );
+  const onDisk = files[x.path] ?? null;
+  if (onDisk === null) return notReady(`The exported letter is gone: ${name}. Export it again.`);
+  if (onDisk !== x.docx_sha)
+    return notReady(
+      `${name} was changed after it was exported, so it is no longer the letter the tool wrote. Export it again.`,
+    );
+  const now = letterModelSha(
+    buildLetterModel(revision, profile, { gloss: !!profile.response_letter.gloss_enabled }),
+  );
+  if (now !== x.model_sha)
+    return notReady(
+      `The answers, the accepted changes or the line numbers changed after ${name} was exported. Export the letter again.`,
+    );
+  return {
+    id,
+    state: READY,
+    text: `The exported letter says what the answers and the accepted changes say now: ${name}.`,
+    go: null,
+  };
+}
+
+export function submissionRows({ revision, profile, live, files = {}, file = null }) {
+  const input = { revision, profile, live, files };
+  return [...answerRows(input), ...documentRows(input), formatRow(input), letterRow(input)].map(
+    (row) => ({ ...row, file }),
+  );
 }
