@@ -8,6 +8,7 @@
 // The daemon now sends the hash of the paragraph it judged; the task pane
 // hashes the paragraph it is about to edit, in the same Word.run, and
 // changes nothing when they differ (StaleTarget).
+import { plainPane } from "./helpers/plain-pane.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -320,7 +321,7 @@ async function world() {
   });
   const ask = (type, payload = {}) =>
     new Promise((resolve) =>
-      svc.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+      svc.handlers[type]({ type, request_id: "q", ...plainPane(payload) }, resolve, "k", "word"),
     );
   const edit = (args = ARGS) =>
     applyTrackedEdit({ ...svc.trackedEditDeps("k"), call: callTool }, args, { ref: "R1.1" });
@@ -334,6 +335,29 @@ async function world() {
   });
   return { ask, edit, events, calls, cleanup: () => rm(dir, { recursive: true, force: true }) };
 }
+
+test("service: an undo that took more than the edit asks the pane of that document for a refresh, on the comment of the turn", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "undo-more-"));
+  const events = [];
+  const lines = [];
+  try {
+    const svc = createReviewService({
+      getContext: () => ({ activeDoc: join(dir, "paper.docx"), caps: ["target_hash"] }),
+      callTool: async () => ({}),
+      pushTurn: () => {},
+      sendEvent: (key, obj) => events.push([key, obj]),
+      log: (l) => lines.push(l),
+      env: { CC_OFFICE_WSL_PATHS: "0" },
+    });
+    await svc.trackedEditDeps("k").onUndoTookMore({ ref: "R1.1", paragraph_index: 4 });
+    assert.deepEqual(events, [
+      ["k", { type: "review_event", event: "undo_took_more", ref: "R1.1", paragraph_index: 4 }],
+    ]);
+    assert.deepEqual(lines, ["[review] undo took more R1.1 paragraph=4: refresh asked"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("together: the author changes a word next to the edit after the snapshot; the edit is refused before Word is touched", async () => {
   const w = await world();

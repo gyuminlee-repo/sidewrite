@@ -27,6 +27,22 @@ export function snapshotTexts(snapshot) {
     .map((p) => normalizeParaText(p.reviewed_text ?? p.text));
 }
 
+// What the task pane could read of the fields (revision-store.mjs snapshot):
+// unreviewed: the positions, in the order of snapshotTexts, of the paragraphs
+// it gave no reviewed text for; fields: does the document hold a field
+// anywhere. true when a reviewed text shows one or the pane found one in the
+// XML (has_fields), false only when the pane read the XML of every paragraph
+// and found none, null otherwise (a pane that does not say).
+export function snapshotRead(snapshot) {
+  const sorted = [...(snapshot?.paragraphs ?? [])].sort((a, b) => a.index - b.index);
+  const shown = sorted.some((p) => /[\u0013\u0014\u0015]/.test(String(p.reviewed_text ?? "")));
+  return {
+    unreviewed: sorted.flatMap((p, k) => (typeof p.reviewed_text === "string" ? [] : [k])),
+    fields:
+      shown || snapshot?.has_fields === true ? true : snapshot?.has_fields === false ? false : null,
+  };
+}
+
 // Their task pane ids in the same order (null where the pane sent none).
 export function snapshotIds(snapshot) {
   return [...(snapshot?.paragraphs ?? [])]

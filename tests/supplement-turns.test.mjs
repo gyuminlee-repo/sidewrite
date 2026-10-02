@@ -3,6 +3,7 @@
 // other file, the state of the document a refresh writes, the comment a
 // running turn of a supplement holds, the author's answers in both files,
 // and the figures page. Invented files only.
+import { plainPane } from "./helpers/plain-pane.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -377,7 +378,12 @@ async function world() {
   });
   const ask = (key, type, payload = {}) =>
     new Promise((resolve) =>
-      service.handlers[type]({ type, request_id: "q", ...payload }, resolve, key, "word"),
+      service.handlers[type](
+        { type, request_id: "q", ...plainPane(payload) },
+        resolve,
+        key,
+        "word",
+      ),
     );
   const pathOf = (name) => join(dir, name.replace(/\.docx$/, ".revision.json"));
   const file = async (name) => JSON.parse(await readFile(pathOf(name), "utf8"));

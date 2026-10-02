@@ -8,6 +8,7 @@
 // Saves are watched and failed at the rename of the atomic write
 // (revision-store.mjs writeJsonAtomic): node:module syncBuiltinESMExports
 // makes the patched fs.promises.rename the one the daemon imports.
+import { plainPane } from "./helpers/plain-pane.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fsp from "node:fs/promises";
@@ -78,7 +79,7 @@ function service(dir, call = async () => APPLIED) {
   });
   const ask = (type, payload = {}) =>
     new Promise((resolve) =>
-      svc.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+      svc.handlers[type]({ type, request_id: "q", ...plainPane(payload) }, resolve, "k", "word"),
     );
   const edit = (args = EDIT) =>
     applyTrackedEdit({ ...svc.trackedEditDeps("k"), call: (name, a) => callTool(name, a) }, args, {

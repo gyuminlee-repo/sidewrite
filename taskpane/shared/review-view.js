@@ -1098,6 +1098,12 @@ export function candidateLabel(c) {
   return `${kind}, ${check}: ${c.text}`;
 }
 
+// What the card of a comment says after an edit of its turn was taken back
+// and Word took an earlier pending change of the paragraph back with it
+// (review_event undo_took_more).
+export const UNDO_TOOK_MORE_TEXT =
+  "While taking back an edit that would have damaged a citation, Word also took back an earlier pending change in the same paragraph. Check the paragraph and ask for that change again if you still want it.";
+
 // ---- "Before submission": the checklist (daemon/submission-check.mjs) -------
 
 export const SUBMISSION_STATE_LABELS = {

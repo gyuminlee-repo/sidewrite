@@ -1,3 +1,4 @@
+import { plainPane } from "./helpers/plain-pane.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -46,7 +47,7 @@ async function setup({ env = ENV, oneshot = null, callResult, callImpl = null, .
         if (!r.accepted) return resolve(r);
         jobWaiters.set(r.job_id, (e) => resolve({ request_id: r.request_id, ...e.result }));
       };
-      svc.handlers[type]({ type, request_id: "q1", ...payload }, reply, "k", "word");
+      svc.handlers[type]({ type, request_id: "q1", ...plainPane(payload) }, reply, "k", "word");
     });
   return {
     dir,
@@ -976,7 +977,12 @@ test("an applying item left by a stopped daemon becomes outcome_unknown on load 
     });
     const ask2 = (type, payload = {}) =>
       new Promise((resolve) =>
-        next.handlers[type]({ type, request_id: "q2", ...payload }, resolve, "k", "word"),
+        next.handlers[type](
+          { type, request_id: "q2", ...plainPane(payload) },
+          resolve,
+          "k",
+          "word",
+        ),
       );
     // An override sent before any load gets the Refresh hint, not "applying".
     const early = await ask2("review_override", { ref: "R1.3", blocked_id: "R1.3-b1" });
@@ -2064,7 +2070,12 @@ test("a daemon that restarted reconciles the unanswered edit it finds in the fil
       });
       const ask2 = (type, payload = {}) =>
         new Promise((resolve) =>
-          svc2.handlers[type]({ type, request_id: "q", ...payload }, resolve, "k", "word"),
+          svc2.handlers[type](
+            { type, request_id: "q", ...plainPane(payload) },
+            resolve,
+            "k",
+            "word",
+          ),
         );
       const before = (await ask2("review_load")).revision.comments[1];
       assert.equal(before.blocked[0].state, "outcome_unknown");

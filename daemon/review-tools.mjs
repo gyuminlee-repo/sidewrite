@@ -22,7 +22,9 @@ import { paragraphHash } from "./doc-diff.mjs";
 import { newNumbers } from "./number-guard.mjs";
 import { rewriteSegments } from "./word-diff.mjs";
 import {
+  FIELDS_UNREAD,
   fieldRefusal,
+  fieldsUnread,
   fieldVerdict,
   fieldView,
   fieldViews,
@@ -297,6 +299,7 @@ function fail(message, extra = {}) {
 //         onNotApplied({ref, attempt_id}), onBlocked({ref, args, blocked_by}),
 //         onOutcomeUnknown({id, ref, record, attempt, attempt_id}),
 //         onRecordFailed({ref, attempt_id, change}), onStaleTarget({ref}),
+//         onUndoTookMore({ref, paragraph_index}),
 //         paneChecksTarget() -> boolean, paneCan(cap) -> boolean,
 //         holdRef(ref) -> release, log }
 // onAttempt: called before Word, with the edit and the form it would have in
@@ -379,6 +382,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
   // its citation) goes on, to a task pane that checks the paragraph after
   // the edit. The parts of a rewrite are not judged here: the task pane
   // refuses the paragraph as a whole (ParagraphNotPlain).
+  // The fields of the paragraph could not be read at the last refresh (its
+  // reviewed text is missing, or that of a paragraph before it, where a
+  // field over several paragraphs would begin): nothing here can tell
+  // whether the edit cuts through one, so it is refused, a part of a rewrite
+  // too. Not when the document is known to hold no field.
+  if (target !== null && fieldsUnread(ctx.fields_read, target)) {
+    deps.log?.(`[review] fields unread ${turn.ref} paragraph=${target} by=daemon`);
+    return fail(FIELDS_UNREAD, { code: "FieldsUnread", reason: "unread", paragraph_index: target });
+  }
   if (!part && target !== null) {
     const v = fieldVerdict(
       views[target],
@@ -578,8 +590,24 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
       if (r.code === "FieldNotEditable") {
         deps.log?.(
           `[review] field edit refused ${turn.ref} why=${r.reason ?? "?"} by=pane paragraph=${r.paragraph_index ?? "?"}` +
-            `${r.detail ? ` found=${String(r.detail).replace(/\s+/g, "_")}` : ""}${r.undone ? " undone=1" : ""}`,
+            `${r.detail ? ` found=${String(r.detail).replace(/\s+/g, "_")}` : ""}${r.undone ? " undone=1" : ""}` +
+            `${r.took_more ? " took_more=1" : ""}`,
         );
+        // The undo took a pending change next to the edit with it (the task
+        // pane read the paragraph before the edit, after it and after the
+        // undo). The edit is not in the document and nothing is recorded;
+        // the change that vanished is on record as pending, so the task
+        // pane is asked for a status refresh, which reads it from the
+        // document again, and the author is told on the card of the comment.
+        if (r.took_more) {
+          await Promise.resolve(
+            deps.onUndoTookMore?.({
+              ref: turn.ref,
+              paragraph_index: r.paragraph_index ?? null,
+              at,
+            }),
+          ).catch(() => {});
+        }
       }
       if (r.code !== "StaleTarget") return r;
       // The task pane found the paragraph not as it was judged here and
@@ -764,6 +792,23 @@ export async function applyTrackedRewrite(deps, args, turn) {
       code: "ParagraphNotFound",
     });
   }
+  // Fields, before anything is cut: a paragraph whose fields could not be
+  // read (as in applyTrackedEdit), and a paragraph of a field that runs over
+  // several paragraphs (a reference list). The task pane refuses a paragraph
+  // that holds a field of its own (ParagraphNotPlain); the middle paragraph
+  // of such a list holds no marker at all, so only the carry from the
+  // paragraphs before it tells, and that is known here.
+  const refusedForFields = (code, message) => {
+    deps.log?.(`[review] rewrite ${turn.ref} paragraph=${index} parts=0 applied=0 stopped=${code}`);
+    return fail(message, { code, applied_parts: 0, parts: 0, paragraph_index: index });
+  };
+  if (fieldsUnread(ctx.fields_read, index)) return refusedForFields("FieldsUnread", FIELDS_UNREAD);
+  const views = fieldViews(current);
+  if ((index > 0 && views[index - 1].carry > 0) || views[index].carry > 0)
+    return refusedForFields(
+      "ParagraphNotPlain",
+      "Not applied: the paragraph is part of a field that runs over several paragraphs (a reference list written by the reference manager), so it is not rewritten as a whole. Nothing was changed. Do not edit it with office_tracked_edit either: a field is written by the reference manager.",
+    );
   const before = current[index];
   const after = normalizeParaText(args.text);
   const cut = rewriteSegments(before, after);

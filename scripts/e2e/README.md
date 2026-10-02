@@ -373,27 +373,56 @@ found=<what> undone=1`). When Word cannot take the edit back the tool
 answers `FieldEditNotUndone`, the change stays on record without a comment
 and the model is told to leave it to the author.
 
+What the undo came to is read from the document (`undoOutcome` in
+`field-text.js`): the fields of the paragraph, and its reviewed text before
+the edit, after the edit and after the undo. Fields as before and the text
+as before the edit: a clean undo, refused as above. A field still not as it
+was, or the text still as after the edit: the edit is in the document
+(`FieldEditNotUndone`). Fields as before and a text that is neither: the
+edit is gone and so is something else, because Word had merged the edit with
+a pending change of the same author next to it and rejected both. Then the
+edit is refused and not recorded (`... undone=1 took_more=1`, then
+`[review] undo took more <ref> paragraph=<n>: refresh asked`), the pane
+refreshes the status, which reads the change that vanished from the
+document, and the card of the comment tells the author to check the
+paragraph. A text that could not be read counts as "the edit is in the
+document".
+
+A paragraph whose fields nobody has seen is not edited. The status refresh
+records which paragraphs came without reviewed text and whether the document
+holds a field anywhere (the pane looks for one in the XML of every
+paragraph, `has_fields`). An edit or a rewrite in a paragraph without
+reviewed text, or after one (a field over several paragraphs would begin
+there), is refused as `FieldsUnread` (`[review] fields unread <ref>
+paragraph=<n> by=daemon`) unless the document is known to hold no field; a
+snapshot written before this was recorded is refused the same way until the
+next refresh (every Propose refreshes first). A rewrite of a paragraph that
+lies in a field over several paragraphs is refused by the daemon
+(`stopped=ParagraphNotPlain`), which knows the carry from the paragraphs
+before it; the task pane sees no marker in a middle paragraph.
+
 What that assumes of Word, and what a row shows when it does not hold. None
 of the Word side could be run when the tool was written; the first two lines
 were seen in the run of 2026-10-02.
 
-| Assumed                                                                                                                                                              | The row when it is wrong                                                                                                                                                                                                                          |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Range.getReviewedText` shows a field as U+0013 instruction U+0014 result U+0015 (seen)                                                                              | the cases expected `refused` are not refused beforehand: their rows read `why=after-edit by=pane` (taken back) and not `why=inside by=daemon`, or `applied` with `hollowed 1`                                                                     |
-| a search finds a sentence across a field (seen: the pane answered with its paragraph), and the range it finds runs from before the begin marker to after the end one | `delete-sentence`: `refused NotFound`, or `refused FieldNotEditable [why=after-edit by=pane ... found=split undone=1]` with `NOT MET`, the fields unchanged                                                                                       |
-| `Range.delete()` with change tracking on puts the whole range, field markers included, into a tracked deletion                                                       | the same row: `why=after-edit` with `found=split`, `hollowed` or `count_a->b`, `NOT MET`                                                                                                                                                          |
-| `Paragraph.getOoxml()` shows the tracked deletions and the field markers of the paragraph as the saved file does                                                     | a good deletion is taken back (`found=count_a->b`, `NOT MET`), or a hollowed field is not seen: `applied`, and the checker fails the row with `hollowed`                                                                                          |
-| `Range.getTrackedChanges().rejectAll()` on the range of the edit takes back that edit and nothing else (WordApi 1.6)                                                 | `applied (delete, no comment: FieldEditNotUndone)`, the daemon log has `[review] field edit not undone`, and the checker names the field                                                                                                          |
-| `Office.context.requirements.isSetSupported("WordApi", "1.6")` is true in this Word (the paragraph ids of the run are the 1.6 ones)                                  | `delete-sentence`: `refused FieldNotEditable [why=no-undo by=pane ...]`, `NOT MET`, nothing changed                                                                                                                                               |
-| after such a deletion the reviewed text of the paragraph no longer shows the field                                                                                   | the next edit in that paragraph is refused once as `StaleTarget` and the pane refreshes: the turn of R1.1 (the paragraph of `delete-sentence-zotero`) reads `stale 1` or more, and the refresh may list the paragraph as changed outside the tool |
-| the tracked-deleted sentence can still be found for the rationale comment                                                                                            | `applied (delete, no comment: CommentAnchorMissing)`: the change is recorded, its comment is missing                                                                                                                                              |
+| Assumed                                                                                                                                                              | The row when it is wrong                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Range.getReviewedText` shows a field as U+0013 instruction U+0014 result U+0015 (seen)                                                                              | the cases expected `refused` are not refused beforehand: their rows read `why=after-edit by=pane` (taken back) and not `why=inside by=daemon`, or `applied` with `hollowed 1`                                                                                                                                                                                                          |
+| a search finds a sentence across a field (seen: the pane answered with its paragraph), and the range it finds runs from before the begin marker to after the end one | `delete-sentence`: `refused NotFound`, or `refused FieldNotEditable [why=after-edit by=pane ... found=split undone=1]` with `NOT MET`, the fields unchanged                                                                                                                                                                                                                            |
+| `Range.delete()` with change tracking on puts the whole range, field markers included, into a tracked deletion                                                       | the same row: `why=after-edit` with `found=split`, `hollowed` or `count_a->b`, `NOT MET`                                                                                                                                                                                                                                                                                               |
+| `Paragraph.getOoxml()` shows the tracked deletions and the field markers of the paragraph as the saved file does                                                     | a good deletion is taken back (`found=count_a->b`, `NOT MET`), or a hollowed field is not seen: `applied`, and the checker fails the row with `hollowed`                                                                                                                                                                                                                               |
+| `Range.getTrackedChanges().rejectAll()` on the range of the edit takes back that edit and nothing else (WordApi 1.6)                                                 | took back less: `applied (delete, no comment: FieldEditNotUndone)`, the daemon log has `[review] field edit not undone`, and the checker names the field. Took back more (a pending change next to it): `refused FieldNotEditable [why=after-edit by=pane ... undone=1 took_more=1]`, the log has `[review] undo took more`, and Word lists fewer tracked changes than before the edit |
+| `Office.context.requirements.isSetSupported("WordApi", "1.6")` is true in this Word (the paragraph ids of the run are the 1.6 ones)                                  | `delete-sentence`: `refused FieldNotEditable [why=no-undo by=pane ...]`, `NOT MET`, nothing changed                                                                                                                                                                                                                                                                                    |
+| after such a deletion the reviewed text of the paragraph no longer shows the field                                                                                   | the next edit in that paragraph is refused once as `StaleTarget` and the pane refreshes: the turn of R1.1 (the paragraph of `delete-sentence-zotero`) reads `stale 1` or more, and the refresh may list the paragraph as changed outside the tool                                                                                                                                      |
+| the tracked-deleted sentence can still be found for the rationale comment                                                                                            | `applied (delete, no comment: CommentAnchorMissing)`: the change is recorded, its comment is missing                                                                                                                                                                                                                                                                                   |
 
 Not covered: a paragraph inside a field that runs over several paragraphs (a
 bibliography) is refused by the daemon, which sees the whole document; the
 task pane alone sees it only in the first and the last paragraph of the
 field. `w:fldSimple` and `w:hyperlink` are guarded through the reviewed text
-and are not read by the check after the edit. A Word without WordApi 1.4
-gives no reviewed text and no field list; there the edit goes in as before.
+and are not read by the check after the edit. A Word that gives no reviewed
+text: an edit goes in as before only when the pane found no field in the XML
+of any paragraph; otherwise it is refused (`FieldsUnread`).
 
 The Word side of the stage (`word-com.ps1 save` and `addins`, `save_as` of
 `marked-diff-word.ps1`, the pane steps `apply-seeded` and
@@ -488,11 +517,12 @@ line printed when the row was judged and `result.json` have it whole.
 | e   | an edit that writes "novel" is put on file for R1.1 of `SI.docx` under a rule the ledger does not have (L9) and sent with "Allow exception", as `forbidGuard()` of stage 2 does | `forbidBlockEvidence` with the review file and the Word state of `SI.docx`: the pane shows the refusal by L1, the daemon logged `[review] blocked R1.1 by=L1`, recorded the blocked edit, Word has no new tracked change                                                                                                                      |
 | f   | nothing is pressed in the pane of `paper.docx`: the step waits for its row of R1.1 (`wait-state`)                                                                               | `partsCrossState`: the row says "n change(s) to review in SI.docx" and the request the change names shows "Waiting for your decision in SI.docx"                                                                                                                                                                                              |
 | g   | Propose changes for R1.2 in both panes, started together (two driver processes)                                                                                                 | `partsBoth`: both steps ended; both `[review] prompt R1.2` lines come before the first `[review] turn done R1.2`; a new change in each review file; in each document more tracked changes and between one and that many new `[R1.2]` comments; no log line with `outcome unknown`, `from another pane`, `unknown id` or `late result dropped` |
+| g2  | nothing is done: the log of the whole run is read                                                                                                                               | `partsSessions`: each document has at least one `[agent] turn doc=<file> session=<id> asked=<id or -> (started, resumed or continued)` line, and no session id of one document (run on or asked for) is one of the other                                                                                                                      |
 | h   | in the pane of `paper.docx` the review is split again and saved without R1.1 (`save-without`)                                                                                   | `partsKeep`: the message line shows "Comment R1.1 has recorded change(s) in SI.docx; keep it" as an error; the comment list in `paper.revision.json` is as it was                                                                                                                                                                             |
 | i   | `SI.docx` is saved through Word (`word-com.ps1 save`), then its pane refreshes                                                                                                  | not judged, see below                                                                                                                                                                                                                                                                                                                         |
 | j   | "Leave this revision" in the pane of `SI.docx`                                                                                                                                  | `partsLeft`: the join box is shown again with the manuscript as a candidate, `part_of` and `parts` are gone, every change `SI.revision.json` held is still in it                                                                                                                                                                              |
 
-Two rows are told and not judged (`NOTE`):
+One row is told and not judged (`NOTE`):
 
 - **Document.saved and the file on disk** (row i). The pane step `doc-saved`
   reads `Word.Document.saved` in the pane of `SI.docx` at four points: right
@@ -505,13 +535,15 @@ Two rows are told and not judged (`NOTE`):
   gave none. This is the experiment for the confirmed-state guard of the
   next step (does the property turn false on an edit and true on a save; do
   the time and the size change with a save and only then).
-- **The session each pane's turns started on.** From the daemon's
-  `[diag] message → ensure loop key=... resume=...` lines. The resume hint is
-  kept per host and folder (`daemon/sessions.mjs`), and both files are in one
-  folder, so the pane that starts second is expected to print "resumed" with
-  a session id: its turns then continue the transcript of the other pane's
-  session.
-  The row says so when it happens. Nothing in step A2 changes this.
+
+Row g2, the session each pane's turns ran on. The daemon prints one line per
+turn without a debug flag (`daemon/sessions.mjs` `turnSessionLine`). The
+resume hint of a document is kept per host and folder; a file of a revision
+with parts (the manuscript and each supplementary file) has a hint of its
+own, by its path, and never reads the one of its folder. So with both files
+in one folder each pane starts its own session, and the row fails when one
+pane ran on, or was asked to resume, a session of the other. `asked` is read
+as well: should the SDK give a resumed session a new id, the row still fails.
 
 What the stage assumes about Word and Office.js, and what the log shows when
 an assumption does not hold:
@@ -528,6 +560,7 @@ an assumption does not hold:
 | the two turns of row g overlap (each takes far longer than the second click)                                                                                     | row g: "the two turns ran at the same time" fails with the positions of the log lines; the other checks of the row still say whether each change landed in its own files                 |
 | the turn of the manuscript notes the request of R1.1 as another file's (a model decides it)                                                                      | row c fails with what the turn did instead: `outside [...], questions n, changes n`                                                                                                      |
 | the turn of the supplementary file names the request in `rationale.requirement_ids` (a model does)                                                               | row f: "a pending change of R1.1 names a request" fails with the ids of each change                                                                                                      |
+| the CLI sends a `system/init` message at the start of every turn, as it did in the runs so far (the line of a turn is printed from it)                           | row g2: "a turn ran on a session" fails for a document with `no turn`, although its rows c, d or g passed                                                                                |
 | `Word.Document.saved` (WordApi 1.1) can be read in the pane                                                                                                      | the NOTE of row i shows `Document.saved=null` with Office's error; the pane then sends `null` and `doc_state.saved` is `null`                                                            |
 | a file Word holds open can be read for its time and size from WSL                                                                                                | the NOTE of row i shows `file not read`, and `doc_state.file` is `null`                                                                                                                  |
 

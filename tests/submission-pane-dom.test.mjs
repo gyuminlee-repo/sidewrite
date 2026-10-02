@@ -167,7 +167,14 @@ test("Check now sends the document as read and renders one row per answer, with 
   await t.$("review-submit-check").click();
   assert.equal(t.jobs.length, 1);
   assert.equal(t.jobs[0].type, "submission_check");
-  assert.deepEqual(Object.keys(t.jobs[0].payload).sort(), ["format", "headings", "snapshot"]);
+  assert.deepEqual(Object.keys(t.jobs[0].payload).sort(), [
+    "format",
+    "headings",
+    "saved",
+    "snapshot",
+  ]);
+  // A Word stub without documentSaved: not known.
+  assert.equal(t.jobs[0].payload.saved, null);
   assert.equal(t.jobs[0].payload.headings.length, 1);
   const rows = t.rows();
   assert.deepEqual(
@@ -200,6 +207,32 @@ test("after a check the header counts the rows that are not ready, and keeps doi
   await t.pane.reload();
   assert.equal(t.$("review-submit-count").textContent, "(1 not done)");
   assert.deepEqual(t.rows(), []);
+});
+
+const asof = (t) =>
+  findAll(t.$("review-submit-rows"), (n) => /review-submit-asof/.test(n.attributes.class ?? ""))[0]
+    .textContent;
+
+test("Check now sends whether Word has unsaved changes, and the line under the rows says so", async () => {
+  let saved = false;
+  const t = await setup({
+    result: () => ({ ok: true, rows: ROWS, doc_name: "paper.docx", saved }),
+    word: { documentSaved: async () => saved },
+  });
+  await t.$("review-submit-check").click();
+  assert.equal(t.jobs[0].payload.saved, false);
+  assert.match(
+    asof(t),
+    /^paper\.docx, checked at .+\. This document has changes that are not saved: save it, then press Check now again\.$/,
+  );
+  saved = true;
+  await t.$("review-submit-check").click();
+  assert.equal(t.jobs[1].payload.saved, true);
+  assert.match(asof(t), /^paper\.docx, checked at .+\. Press Check now again after a change\.$/);
+  // A daemon from before the flag answers without it: the line is as it was.
+  const old = await setup({ word: { documentSaved: async () => false } });
+  await old.$("review-submit-check").click();
+  assert.match(asof(old), /Press Check now again after a change\.$/);
 });
 
 test("the button of a row goes to where it is fixed: a tab and an element, or a paragraph in Word", async () => {

@@ -3,6 +3,7 @@
 // the task panes (as tests/review-bridge-integration.test.mjs): a change of
 // the link reaches the other pane as a review_event, and a tracked edit of
 // one document is neither sent to nor taken from the pane of the other.
+import { plainPane } from "./helpers/plain-pane.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -92,7 +93,7 @@ async function pane(port, doc) {
       const request_id = `r${++n}`;
       return new Promise((resolve) => {
         waiters.set(request_id, resolve);
-        ws.send(JSON.stringify({ type, request_id, ...payload }));
+        ws.send(JSON.stringify({ type, request_id, ...plainPane(payload) }));
       });
     },
     send: (obj) => ws.send(JSON.stringify(obj)),

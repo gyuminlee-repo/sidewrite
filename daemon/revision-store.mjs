@@ -464,6 +464,14 @@ export const RevisionSchema = z.object({
       // A paragraph_hint of a tracked edit is one of them (review-tools.mjs
       // editTarget).
       ids: z.array(z.string().nullable()).nullable().default(null),
+      // What the task pane could read of the fields at that refresh
+      // (field-text.js fieldsUnread). unreviewed: the indexes of the
+      // paragraphs whose reviewed text it could not read (their text here is
+      // the raw one, which shows no field). fields: whether the document
+      // holds a field anywhere (null: not known). Optional and without a
+      // default: a file from before them saves as it was loaded.
+      unreviewed: z.array(z.number().int().nonnegative()).optional(),
+      fields: z.boolean().nullable().optional(),
     })
     .nullable()
     .default(null),
@@ -1293,12 +1301,14 @@ export function importLedgerItems(rev, items, { mode = "append" } = {}) {
 
 export const EXTERNAL_KEEP = 100;
 
-export function setSnapshot(rev, paragraphs, now = new Date(), ids = null) {
+// read: { unreviewed, fields } of that refresh (doc-diff.mjs snapshotRead).
+export function setSnapshot(rev, paragraphs, now = new Date(), ids = null, read = null) {
   const next = clone(rev);
   next.snapshot = {
     taken_at: now.toISOString(),
     paragraphs: [...paragraphs],
     ids: ids ? [...ids] : null,
+    ...(read ? { unreviewed: [...read.unreviewed], fields: read.fields } : {}),
   };
   return next;
 }

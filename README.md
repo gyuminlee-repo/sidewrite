@@ -390,6 +390,8 @@ Each pane shows where a request stands in the other file: "Changed in SI.docx" o
 
 The figures page takes no new record under a supplementary document: it answers "Record this under paper.docx", because the requests and the letter are those of the manuscript.
 
+The chat and the review turns of a manuscript and of each supplementary document run on Agent SDK sessions of their own: the stored session a pane resumes is kept per document for the files of such a revision, and per folder for every other document, as before. The first turn after a document joined, or after this version was installed, starts a new session.
+
 Known limit of this step: the response letter does not count or cite changes of the supplementary document yet. A file that was renamed after the join is not found again; leave and join once more.
 
 ### Tools tab (Word)
@@ -418,6 +420,8 @@ The Tools tab never writes to the open document. A copy is a new file next to th
 | The marked copy matches the saved manuscript           | The hashes recorded when the copy was made against the copy and the saved manuscript on the disk                                     |
 | The anonymized copy, when the journal asks for one     | The same, when the profile has `submission.anonymized_copy: true`. Not needed for `false` or no value                                |
 | Adopted figures and files are in the submission folder | The hash recorded at the adoption against the copy on the disk. A change that is still proposed makes the row not ready              |
+
+The rows about the marked copy and the anonymized copy compare the file on the disk, so the pane also sends whether Word holds unsaved changes: while it does, both rows read "This document has changes that are not saved. Save it, then press Check now again." and the line under the rows says so. When Word does not say, the rows are computed as before and add that unsaved changes could not be checked.
 
 Removing the tool's comments and saving changes the manuscript file, so a marked copy made before that reads as stale. Do the cleanup first, save, then make the copy. A copy or a letter made before these hashes were recorded reads "make it again" once. The checklist makes no package and writes no cover letter.
 

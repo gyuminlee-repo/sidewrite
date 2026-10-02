@@ -12,7 +12,7 @@
 //   review_link_candidates, review_link_join, review_link_leave
 // Push (daemon -> task pane, no request_id):
 //   { type: "review_event", event: "change_recorded" | "edit_blocked" | "turn_done"
-//     | "late_result_recorded" | "stale_target" | "record_failed" | "job_done"
+//     | "late_result_recorded" | "stale_target" | "undo_took_more" | "record_failed" | "job_done"
 //     | "linked_changed", ... }
 //   linked_changed: { doc }. The link between a manuscript and a supplement, or
 //   what the manuscript owns, is not as it was; it goes to the OTHER open panes
@@ -103,7 +103,7 @@ import { buildReviewPrompt, formatPromptLog, sameTermReport } from "./review-pro
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
 import { checkParagraphs, rewriteNote } from "./paragraph-check.mjs";
-import { snapshotTexts, snapshotIds, outsideChanges } from "./doc-diff.mjs";
+import { snapshotTexts, snapshotIds, snapshotRead, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
   currentTexts,
@@ -625,6 +625,14 @@ export function createReviewService({
           comment_text: [c?.section, c?.text ?? ""].filter((x) => x !== undefined).join("\n"),
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
+          // What that refresh could read of the fields (field-text.js
+          // fieldsUnread). A snapshot from before this was recorded says
+          // nothing about it: unknown.
+          fields_read: {
+            unreviewed: rev.snapshot?.unreviewed ?? null,
+            fields: rev.snapshot?.fields ?? null,
+            unknown: !!rev.snapshot && !Array.isArray(rev.snapshot.unreviewed),
+          },
           comment_ids: recordedCommentIds(rev),
           // What the author answered to questions of this review, in this
           // file and in the other files of its revision: a source of numbers
@@ -765,6 +773,15 @@ export function createReviewService({
       // (review_refresh), so it is asked to refresh.
       onStaleTarget: async ({ ref }) => {
         sendEvent(key, { type: "review_event", event: "stale_target", ref });
+      },
+      // The task pane took an edit back that would have damaged a field,
+      // and Word took a pending change next to it back as well. That change
+      // is still on record as pending: the pane refreshes (as for a stale
+      // target), which reads its state from the document, and shows the
+      // author one sentence on the card of the comment that was proposed.
+      onUndoTookMore: async ({ ref, paragraph_index = null }) => {
+        log(`[review] undo took more ${ref} paragraph=${paragraph_index ?? "?"}: refresh asked`);
+        sendEvent(key, { type: "review_event", event: "undo_took_more", ref, paragraph_index });
       },
       onBlocked: async ({ ref, args, blocked_by, at: d = at(key) }) => {
         let saved = null;
@@ -1348,7 +1365,7 @@ export function createReviewService({
         moved = changeStates(file) !== changeStates(next);
         const now = new Date();
         return setDocState(
-          setSnapshot(next, texts, now, snapshotIds(snapshot)),
+          setSnapshot(next, texts, now, snapshotIds(snapshot), snapshotRead(snapshot)),
           docState(snapshot, { saved: msg.saved, file: onDisk, now }),
         );
       });

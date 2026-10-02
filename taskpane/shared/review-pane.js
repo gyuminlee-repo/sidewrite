@@ -50,6 +50,7 @@ import {
   SUBMISSION_STATE_LABELS,
   submissionCount,
   submissionGoLabel,
+  UNDO_TOOK_MORE_TEXT,
   joinLabel,
   linkedFilesText,
   partOfText,
@@ -154,8 +155,9 @@ export function initReviewPane({
     openRef: null, // the comment whose card is open (one at a time)
     pasteOpen: false, // the paste box is shown although a review is split
     results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
+    notices: new Map(), // ref -> a sentence for the author that outlives the result of the turn
     cards: new Map(), // ref -> the elements of its card, as of the last render
-    submission: null, // { rows, doc, at } of the last "Check now" of this connection
+    submission: null, // { rows, doc, unsaved, at } of the last "Check now" of this connection
     linked: null, // { part_of, parts, note } of the last load (null: a daemon from before links)
     linkCandidates: [], // manuscripts in the folder this file could join
   };
@@ -769,11 +771,20 @@ export function initReviewPane({
               : null,
           )
         : null;
+      // What the author has to look at by hand (an undo that took more
+      // than the edit). It stays until the next turn of this comment.
+      const notice = state.notices.has(c.ref)
+        ? el("div", {
+            class: "review-card-result review-card-notice form-error",
+            text: state.notices.get(c.ref),
+          })
+        : null;
       const body = el(
         "div",
         { class: "review-comment-body" },
         progressEl,
         result,
+        notice,
         el("div", { class: "review-card-actions" }, status, propose),
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
@@ -1270,7 +1281,11 @@ export function initReviewPane({
       ...rows,
       el("div", {
         class: "review-submit-asof",
-        text: `${check.doc ? `${check.doc}, c` : "C"}hecked at ${check.at}. Press Check now again after a change.`,
+        text: `${check.doc ? `${check.doc}, c` : "C"}hecked at ${check.at}. ${
+          check.unsaved
+            ? "This document has changes that are not saved: save it, then press Check now again."
+            : "Press Check now again after a change."
+        }`,
       }),
     );
   }
@@ -1335,6 +1350,7 @@ export function initReviewPane({
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
     state.results.delete(ref);
+    state.notices.delete(ref);
     // The card shows the work from the click on, not from the answer of the daemon.
     startProgress(ref);
     try {
@@ -1474,6 +1490,9 @@ export function initReviewPane({
     $("review-link-box").open = state.linkCandidates.length > 0;
   }
 
+  // Word.Document.saved as the pane sends it: true, false, or null when
+  // Word did not say (tools-word.js documentSaved).
+  const documentSaved = async () => (word.documentSaved ? await word.documentSaved() : null);
   const refresh = () => refreshWith(say);
   // report(text, bad): where the counts go. The message line for a refresh
   // the author or a turn asked for, the small line for an automatic one.
@@ -1481,7 +1500,7 @@ export function initReviewPane({
   async function refreshWith(report) {
     // Has Word unsaved changes of the document (null: it did not say). The
     // daemon keeps it with the state of the document at this refresh.
-    const saved = word.documentSaved ? await word.documentSaved() : null;
+    const saved = await documentSaved();
     const snapshot = await word.collectReviewSnapshot();
     const r = await ask("review_refresh", { snapshot, saved });
     // Word refuses Comment.resolved in a document in compatibility mode
@@ -1782,12 +1801,17 @@ export function initReviewPane({
         const snapshot = await word.collectReviewSnapshot();
         const headings = (await word.collectHeadings?.()) ?? [];
         const format = (await word.readFormatSnapshot?.().catch(() => null)) ?? null;
+        // Has Word unsaved changes of the document (null: it did not say).
+        // The rows about copies made from the saved file depend on it.
+        const saved = await documentSaved();
         say("Checking...");
-        const r = await toolsJob("submission_check", { snapshot, headings, format });
+        const r = await toolsJob("submission_check", { snapshot, headings, format, saved });
         if (!r?.ok) throw new Error(r?.error || "The check failed.");
         state.submission = {
           rows: r.rows ?? [],
           doc: r.doc_name ?? null,
+          // As the daemon took it (a daemon from before the flag: not said).
+          unsaved: r.saved === false,
           at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         };
         say("");
@@ -2008,6 +2032,16 @@ export function initReviewPane({
               );
             }
           });
+      } else if (msg.event === "undo_took_more") {
+        // An edit of this comment was taken back, and Word took an earlier
+        // pending change of the same paragraph with it. The refresh reads
+        // that change from the document again (it is no longer pending
+        // there); the card of the comment says what to look at.
+        state.notices.set(msg.ref, UNDO_TOOK_MORE_TEXT);
+        load()
+          .then(refresh)
+          .catch((e) => say(e.message, true))
+          .finally(render);
       } else if (msg.event === "stale_target") {
         // A tracked edit was refused: its paragraph is no longer as the
         // daemon has it. A refresh gives the daemon the document as it is.
