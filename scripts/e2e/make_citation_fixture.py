@@ -97,36 +97,81 @@ LINK = "https://example.invalid/invented-protocol"
 
 # What the stage does without a model, one tracked edit each (run-acceptance
 # mainCite). Every find is in the document exactly once.
+# expect: what the tool has to answer (judge.mjs citeCaseRow).
+#   "applied"  the edit goes in and no field is touched
+#   "refused"  refused as FieldNotEditable, Word unchanged: the range lies in
+#              the text of a field, cuts through one, or would replace one
+#   "removed"  the edit goes in and exactly `fields` field(s) lie whole in
+#              the tracked deletion (begin through end)
+# The cases that must be refused share a paragraph with a later edit of the
+# run (the two in the baffles paragraph with the turn of R1.3, the EndNote
+# one with the turn of R1.2); when one of them is applied against the
+# expectation, its own row fails first and names the field.
 CASES = [
     {
         "name": "next-to",
         "what": "a phrase next to a Zotero citation, in its sentence",
         "find": "are cheap to run",
         "replace": "are inexpensive to run",
+        "expect": "applied",
     },
     {
         "name": "spans",
-        "what": "a phrase whose find holds the visible text of a Zotero citation",
+        "what": "a replacement whose find holds the whole visible text of a Zotero citation",
         "find": "slow growth (Belloc, 2020) in narrow flasks",
         "replace": "reduced growth (Belloc, 2020) in slim flasks",
+        "expect": "refused",
     },
     {
         "name": "straddles",
         "what": "a phrase that starts before a Zotero citation and ends inside its text",
         "find": "that reading (Corvane,",
         "replace": "this view (Corvane;",
+        "expect": "refused",
+    },
+    {
+        "name": "cite-text-zotero",
+        "what": "the visible text of a Zotero citation alone, deleted",
+        "find": "(Arden, 2019; Eskridge, 2022)",
+        "replace": "",
+        "expect": "refused",
+    },
+    {
+        "name": "cite-text-endnote",
+        "what": "the visible text of an EndNote citation alone, deleted",
+        "find": "(Hallivane, 2016)",
+        "replace": "",
+        "expect": "refused",
+    },
+    {
+        "name": "cite-text-replace",
+        "what": "the visible text of a Zotero citation replaced by other text",
+        "find": "(Dellmar, 2018)",
+        "replace": "(Dellmar and others, 2018)",
+        "expect": "refused",
     },
     {
         "name": "delete-sentence",
-        "what": "a deleted sentence that holds an EndNote citation",
+        "what": "a whole sentence with an EndNote citation, deleted as one edit",
         "find": "The plugs were autoclaved twice before use (Garrowby, 2017).",
         "replace": "",
+        "expect": "removed",
+        "fields": 1,
+    },
+    {
+        "name": "delete-sentence-zotero",
+        "what": "a whole sentence with a Zotero citation, deleted as one edit",
+        "find": "The invented strain grows fastest when a tenth of the flask is filled (Arden, 2019).",
+        "replace": "",
+        "expect": "removed",
+        "fields": 1,
     },
     {
         "name": "formatted",
         "what": "a phrase next to a field in the paragraph with italic and superscript runs",
         "find": "as counted under the microscope",
         "replace": "as counted by microscopy",
+        "expect": "applied",
     },
 ]
 # The paragraph the whole-paragraph rewrite is tried on, and the words changed.

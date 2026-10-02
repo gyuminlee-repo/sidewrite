@@ -1366,11 +1366,13 @@ async function mainS4() {
 
 // ---- stage cite ------------------------------------------------------------
 // Do tracked edits leave the fields of Zotero and EndNote whole? The document
-// is the fake manuscript of make_citation_fixture.py. What a tool answers
-// (applied, refused and why) is recorded; what is judged is what
+// is the fake manuscript of make_citation_fixture.py. What is judged is what
 // tools/citation_fields_check.py finds in the files Word saved: after every
 // edit of the run, after every model turn, and at the end with the changes
-// tracked, all accepted and all rejected.
+// tracked, all accepted and all rejected. For the edits of the run itself
+// the answer of the tool is judged too (CASES expect): an edit in the text
+// of a field must be refused, a whole sentence with a citation must go into
+// one tracked deletion with its field.
 
 const firstLine = (e) => String(e?.message ?? e).split("\n")[0];
 // A row of the stage that is no pane step: in the table of the run and,
@@ -1385,15 +1387,18 @@ const citeRow = (row) => {
 // The checker on two files. Its lines (the paragraph, the kind of the field
 // and its markers before and after) go to the screen, its result into
 // result.json under cite.checks[name].
+// w:fldData is compared only when Word's own save of the fixture kept it
+// (mainCite sets record.cite.fld_data to "note" when it did not).
 function fieldsCheck(name, before, after, extra = []) {
   let exit = 0;
   let out = "";
+  const data = record.cite.fld_data === "note" ? ["--fld-data", "note"] : [];
   try {
     out = execFileSync(
       "python3",
       [
         path.join(REPO, "tools/citation_fields_check.py"),
-        ...["--before", before, "--after", after, "--detail", ...extra],
+        ...["--before", before, "--after", after, "--detail", ...data, ...extra],
       ],
       { encoding: "utf8", maxBuffer: 64 << 20 },
     );
@@ -1444,7 +1449,13 @@ function citeSave(name) {
 // turn does. prev: the last saved copy; returns the copy saved after it.
 async function citeCase(c, prev) {
   const ref = CITE_SEED_REF;
-  const entry = { name: c.name, what: c.what, find: c.find, replace: c.replace };
+  const entry = {
+    name: c.name,
+    what: c.what,
+    find: c.find,
+    replace: c.replace,
+    expect: c.expect ?? null,
+  };
   let outcome;
   try {
     // A refresh first: what is left to write is written before the run
@@ -1492,7 +1503,11 @@ async function citeCase(c, prev) {
   const copy = citeSave(`case-${c.name}`);
   const check = copy ? fieldsCheck(`case-${c.name}`, prev, copy) : null;
   record.cite.cases.push({ ...entry, outcome, check_ok: check?.ok ?? null });
-  citeRow(citeCaseRow({ name: c.name, what: c.what, outcome, check }));
+  citeRow(
+    citeCaseRow({ name: c.name, what: c.what, expect: c.expect, fields: c.fields, outcome, check }),
+  );
+  // The message of a refusal, whole: the row has its code only.
+  if (outcome.answer === "refused") console.log(`      ${c.name}: ${outcome.message}`);
   return copy ?? prev;
 }
 
@@ -1565,10 +1580,17 @@ async function mainCite() {
   const baseline = citeSave("baseline");
   if (!baseline) throw new Error("the document could not be saved before the edits");
   const own = fieldsCheck("word-save", opt.fixture, baseline);
+  // Word rewrote the w:fldData of the untouched fixture: what differs there
+  // in a later file is Word's own doing, so it is told and not judged.
+  record.cite.fld_data = own.fld_data?.differs ? "note" : "judge";
   citeRow({
     step: "cite: Word's own save keeps the fields of the fixture (not judged)",
     result: own.ok ? "PASS" : "NOTE",
-    got: fieldsLine(own),
+    got:
+      fieldsLine(own) +
+      (record.cite.fld_data === "note"
+        ? " | Word rewrote w:fldData on its own save: fldData is not judged in this run"
+        : ""),
   });
 
   note("split", pane("split", { review_file: winPath(opt.review) }), { judge: "cite-split" });

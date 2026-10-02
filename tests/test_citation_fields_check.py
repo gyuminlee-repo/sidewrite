@@ -164,6 +164,135 @@ class Check(unittest.TestCase):
         self.assertEqual(out["after"]["by_state"]["deleted"], 1)
         self.assertEqual(out["after"]["list"][0]["state"], "deleted")
         self.assertEqual(out["flattened"], [])
+        self.assertEqual((out["hollowed"], out["result_changed"]), ([], []))
+
+    # ---- a field that is still there with its result gone (hollowed) ----
+    # The layout of the first real run (2026-10-02): the EndNote citation
+    # with the record in w:fldData and the nested EN.CITE.DATA field,
+    #   'study ' [begin]{EN.CITE}[begin]{EN.CITE.DATA}[end][separate]
+    #   '(Hallivane, 2016)'[end]'. Samples were kept on ice.'
+    # after three tracked deletions: the words before the citation, its
+    # visible text alone, and the full stop after it.
+    SHOWN = (
+        '<w:r><w:rPr><w:noProof/></w:rPr><w:t xml:space="preserve">'
+        "(Hallivane, 2016)</w:t></w:r>"
+    )
+    WORDS = (
+        " The reader had been calibrated against dry weight in an earlier invented study"
+    )
+    STOP = '<w:r><w:t xml:space="preserve">. Samples were kept on ice.</w:t></w:r>'
+
+    def run_of(self, text):
+        return f'<w:r><w:t xml:space="preserve">{text}</w:t></w:r>'
+
+    def three_deletions(self, x):
+        self.assertEqual((x.count(self.SHOWN), x.count(self.STOP)), (1, 1))
+        lead = self.run_of("Optical density was read every hour." + self.WORDS + " ")
+        self.assertEqual(x.count(lead), 1)
+        x = x.replace(
+            lead,
+            self.run_of("Optical density was read every hour.")
+            + deleted(self.run_of(self.WORDS))
+            + self.run_of(" "),
+        )
+        x = x.replace(self.SHOWN, deleted(self.SHOWN))
+        return x.replace(
+            self.STOP, deleted(self.run_of(". ")) + self.run_of("Samples were kept on ice.")
+        )
+
+    def accepted_form(self, x):
+        lead = self.run_of("Optical density was read every hour." + self.WORDS + " ")
+        x = x.replace(lead, self.run_of("Optical density was read every hour. "))
+        x = x.replace(self.SHOWN, "")
+        return x.replace(self.STOP, self.run_of("Samples were kept on ice."))
+
+    def test_a_result_in_a_deletion_with_live_markers_is_hollowed_and_fails(self):
+        code, out, lines = self.run_tool(self.copy("hollow.docx", self.three_deletions))
+        self.assertEqual((code, out["failures"]), (1, ["hollowed"]))
+        self.assertEqual(
+            [(f["kind"], f["state"], f["was"]) for f in out["hollowed"]],
+            [("EN.CITE", "live", "(Hallivane, 2016)")],
+        )
+        # Whole by every older rule: the counts and the states say nothing.
+        self.assertEqual(out["before"]["fields"], out["after"]["fields"])
+        self.assertEqual(out["after"]["by_state"], {"live": out["after"]["fields"]})
+        self.assertEqual((out["split"], out["flattened"], out["text_changed"]), ([], [], []))
+        self.assertEqual(
+            lines,
+            [
+                'FAIL hollowed | word/document.xml p12 "Optical density was read every hour. The" '
+                "| kind=EN.CITE | before: begin@- instr@- separate@- result@- end@- "
+                "| after: begin@- instr@- separate@- result@del end@- "
+                '| result: "(Hallivane, 2016)" -> ""'
+            ],
+        )
+
+    def test_the_accepted_form_with_an_empty_result_is_hollowed_and_fails(self):
+        code, out, lines = self.run_tool(self.copy("hollow-acc.docx", self.accepted_form))
+        self.assertEqual((code, out["failures"]), (1, ["hollowed"]))
+        self.assertEqual(out["hollowed"][0]["was"], "(Hallivane, 2016)")
+        self.assertEqual(out["after"]["by_state"], {"live": out["after"]["fields"]})
+        self.assertIn('p12 "Optical density was read every hour. Sam"', lines[0])
+        self.assertIn("after: begin@- instr@- separate@- end@-", lines[0])
+        # Against itself the empty field is what the file had: it does not
+        # fail a later comparison a second time (no text, and none before).
+        hollow = self.dir / "hollow-acc.docx"
+        code, out, _ = self.run_tool(hollow, before=hollow)
+        self.assertEqual((code, out["hollowed"]), (0, []))
+
+    def test_the_tracked_form_fails_against_itself_too(self):
+        # The deleted text is still in the file: a later copy of the document
+        # shows the hollowed field as long as the deletion is pending.
+        hollow = self.copy("hollow-self.docx", self.three_deletions)
+        code, out, _ = self.run_tool(hollow, before=hollow)
+        self.assertEqual((code, out["failures"]), (1, ["hollowed"]))
+
+    def test_a_field_without_a_result_is_not_hollowed(self):
+        # The nested EN.CITE.DATA field has no separate and no result, before
+        # and after: nothing was taken from it.
+        code, out, _ = self.run_tool(self.copy("same2.docx"))
+        self.assertEqual((code, out["hollowed"]), (0, []))
+        data = [f for f in out["after"]["list"] if f["kind"] == "EN.CITE.DATA"]
+        self.assertEqual(len(data), 1)
+
+    def test_a_result_partly_in_a_deletion_fails_as_result_changed(self):
+        part = (
+            self.run_of("(Arden, ")
+            + deleted(self.run_of("2019"))
+            + self.run_of(")")
+        )
+
+        def edit(x):
+            return x.replace(self.run_of("(Arden, 2019)"), part, 1)
+
+        code, out, lines = self.run_tool(self.copy("part.docx", edit))
+        self.assertEqual((code, out["failures"]), (1, ["result-changed"]))
+        self.assertEqual(
+            [(f["kind"], f["was"], f["accepted"]) for f in out["result_changed"]],
+            [("ZOTERO_ITEM", "(Arden, 2019)", "(Arden, )")],
+        )
+        self.assertEqual(out["hollowed"], [])
+        # Still listed against what the instruction records.
+        self.assertEqual(out["text_changed"][0]["accepted"], "(Arden, )")
+        self.assertIn('| result: "(Arden, 2019)" -> "(Arden, )"', lines[0])
+
+    def test_field_data_that_differs_is_a_note_with_fld_data_note(self):
+        def edit(x):
+            a = x.index("<w:fldData")
+            b = x.index(">", a) + 1
+            return x[:b] + "QUJD" + x[b:]
+
+        data = self.copy("data-note.docx", edit)
+        code, out, lines = self.run_tool(data, "--fld-data", "note")
+        self.assertEqual((code, out["ok"], out["failures"]), (0, True, []))
+        self.assertEqual((out["fld_data"]["differs"], out["fld_data"]["judged"]), (True, False))
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("NOTE fldData | missing 1, not in the original 1"))
+        # The flag lifts nothing else.
+        code, out, _ = self.run_tool(
+            self.copy("hollow-note.docx", self.three_deletions), "--fld-data", "note"
+        )
+        self.assertEqual((code, out["failures"]), (1, ["hollowed"]))
 
     def test_a_deleted_field_whose_text_was_typed_again_is_listed_as_flattened(self):
         typed = (
@@ -225,12 +354,18 @@ class Check(unittest.TestCase):
         code, out, _ = self.run_tool(self.copy("data.docx", edit))
         self.assertEqual((code, out["failures"]), (1, ["fldData"]))
 
-    def test_changed_citation_text_is_listed_and_does_not_fail(self):
-        code, out, _ = self.run_tool(
-            self.copy("text.docx", lambda x: x.replace("(Arden, 2019)</w:t>", "(Arden 2019)</w:t>", 1))
+    def test_citation_text_the_author_had_changed_is_listed_and_does_not_fail(self):
+        # In the before file already: not the work of the edits compared.
+        hand = self.copy(
+            "text.docx", lambda x: x.replace("(Arden, 2019)</w:t>", "(Arden 2019)</w:t>", 1)
         )
+        code, out, _ = self.run_tool(hand, before=hand)
         self.assertEqual((code, out["ok"]), (0, True))
         self.assertEqual(len(out["text_changed"]), 1)
+        # Changed between the two files: the same list, and it fails.
+        code, changed, _ = self.run_tool(hand)
+        self.assertEqual((code, changed["failures"]), (1, ["result-changed"]))
+        self.assertEqual(changed["text_changed"], out["text_changed"])
         self.assertEqual(out["text_changed"][0]["recorded"], "(Arden, 2019)")
         self.assertEqual(out["text_changed"][0]["accepted"], "(Arden 2019)")
 

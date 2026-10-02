@@ -172,7 +172,41 @@ class CitationFixture(unittest.TestCase):
         self.assertEqual(len(target), 1)
         for old, _new in fx.REWRITE["changes"]:
             self.assertEqual(target[0].count(old), 1, old)
-        self.assertEqual([c["name"] for c in fx.CASES if c["replace"] == ""], ["delete-sentence"])
+        self.assertEqual(
+            [c["name"] for c in fx.CASES if c["replace"] == ""],
+            ["cite-text-zotero", "cite-text-endnote", "delete-sentence", "delete-sentence-zotero"],
+        )
+
+    def test_what_each_case_of_the_stage_expects(self):
+        shown = {f["text"] for f in self.shown_citations()}
+        by = {c["name"]: c for c in fx.CASES}
+        self.assertEqual({c["expect"] for c in fx.CASES}, {"applied", "refused", "removed"})
+        # Refused: the find is the visible text of a citation, or cuts into one,
+        # or is replaced over one.
+        for name in ("cite-text-zotero", "cite-text-endnote", "cite-text-replace"):
+            self.assertIn(by[name]["find"], shown, name)
+            self.assertEqual(by[name]["expect"], "refused")
+        self.assertEqual((by["spans"]["expect"], by["straddles"]["expect"]), ("refused",) * 2)
+        # Removed: a whole sentence, with words before the citation and a
+        # character after it, so the range holds the field from begin to end.
+        for name in ("delete-sentence", "delete-sentence-zotero"):
+            c = by[name]
+            self.assertEqual((c["expect"], c["fields"], c["replace"]), ("removed", 1, ""))
+            inside = [t for t in shown if t in c["find"]]
+            self.assertEqual(len(inside), 1, name)
+            at = c["find"].index(inside[0])
+            self.assertTrue(at > 0 and at + len(inside[0]) < len(c["find"]), name)
+        # Applied: no citation text in the find.
+        for name in ("next-to", "formatted"):
+            self.assertEqual(by[name]["expect"], "applied")
+            self.assertFalse(any(t in by[name]["find"] for t in shown))
+
+    def shown_citations(self):
+        return [
+            {"text": "".join(t for t, _ in f["result"])}
+            for f in self.doc["fields"]
+            if f["kind"] in ("ZOTERO_ITEM", "EN.CITE")
+        ]
 
     def test_the_committed_fixture_is_what_the_script_builds(self):
         _lines, result = check.compare(check.read(fx.FIXTURE), self.doc)

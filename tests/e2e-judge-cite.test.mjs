@@ -63,7 +63,7 @@ test("the committed fixture holds the fields of both plugins, whole", () => {
   );
   assert.equal(
     J.fieldsLine(result),
-    "fields 18 -> 18 (live 18, in deletions 0, in insertions 0, split 0)",
+    "fields 18 -> 18 (live 18, in deletions 0, in insertions 0, split 0, hollowed 0, result changed 0)",
   );
 });
 
@@ -83,7 +83,31 @@ test("every text the run edits is in the document once, and the citation texts a
   for (const c of SPEC.cases) assert.equal(whole.split(c.find).length, 2, c.name);
   assert.deepEqual(
     SPEC.cases.map((c) => c.name),
-    ["next-to", "spans", "straddles", "delete-sentence", "formatted"],
+    [
+      "next-to",
+      "spans",
+      "straddles",
+      "cite-text-zotero",
+      "cite-text-endnote",
+      "cite-text-replace",
+      "delete-sentence",
+      "delete-sentence-zotero",
+      "formatted",
+    ],
+  );
+  assert.deepEqual(
+    SPEC.cases.map((c) => c.expect),
+    [
+      "applied",
+      "refused",
+      "refused",
+      "refused",
+      "refused",
+      "refused",
+      "removed",
+      "removed",
+      "applied",
+    ],
   );
   const by = Object.fromEntries(SPEC.cases.map((c) => [c.name, c]));
   // next-to: the citation is in the sentence, not in the find.
@@ -97,6 +121,13 @@ test("every text the run edits is in the document once, and the citation texts a
   // delete-sentence: a whole sentence with an EndNote citation.
   assert.equal(by["delete-sentence"].replace, "");
   assert.ok(by["delete-sentence"].find.includes("(Garrowby, 2017)."));
+  // The visible text of a citation alone: deleted (Zotero, EndNote: the
+  // field of the first real run), replaced.
+  assert.deepEqual(
+    ["cite-text-zotero", "cite-text-endnote", "cite-text-replace"].map((n) => by[n].find),
+    ["(Arden, 2019; Eskridge, 2022)", "(Hallivane, 2016)", "(Dellmar, 2018)"],
+  );
+  assert.equal(by["cite-text-replace"].replace, "(Dellmar and others, 2018)");
 });
 
 test("the review of the stage splits into its four comments without a model", () => {
@@ -175,6 +206,7 @@ test("each edit of the run passes the guards of the daemon and reaches Word with
     narrowed: !!args.narrow,
     target_checked: true,
   }));
+  const now = [...TEXTS];
   try {
     for (const c of SPEC.cases) {
       const seeded = addBlocked(await loadRevision(t.file, t.doc), J.CITE_SEED_REF, {
@@ -197,8 +229,10 @@ test("each edit of the run passes the guards of the daemon and reaches Word with
       const [name, args] = t.calls[sent];
       assert.equal(name, "office_tracked_edit");
       assert.equal(args.find, c.find);
-      const target = TEXTS.find((x) => x.includes(c.find));
-      assert.equal(args.expected_before_hash, paragraphHash(target), c.name);
+      // The paragraph as the edits of the run before this one left it.
+      const k = now.findIndex((x) => x.includes(c.find));
+      assert.equal(args.expected_before_hash, paragraphHash(now[k]), c.name);
+      now[k] = now[k].replace(c.find, c.replace);
       assert.match(args.comment_text, /^\[R1\.4\] Acceptance run: /);
       // The pane shows nothing after an edit that went in (step: the view).
       const outcome = J.citeOutcome({
@@ -345,6 +379,16 @@ const CHECKS = await (async () => {
     half: copy("half.docx", "b = x.rindex('<w:r>', a, s); y = x[:a] + gone(x[a:b]) + x[b:]"),
     // After accept-all of that: a separate and an end without a begin.
     halfAccepted: copy("half-accepted.docx", "b = x.rindex('<w:r>', a, s); y = x[:a] + x[b:]"),
+    // The visible text of the first citation alone in a deletion, its markers live.
+    hollow: copy(
+      "hollow.docx",
+      "r = x.index('<w:r>', s); e = x.index('</w:r>', r) + 6; y = x[:r] + gone(x[r:e]) + x[e:]",
+    ),
+    // Changed w:fldData, as Word's own save of the fixture changes it.
+    data: copy(
+      "data.docx",
+      "d = x.index('>', x.index('<w:fldData')) + 1; y = x[:d] + 'QUJD' + x[d:]",
+    ),
   };
   const out = {
     same: check(FIXTURE, FIXTURE),
@@ -353,6 +397,9 @@ const CHECKS = await (async () => {
     acceptedNoneExpected: check(FIXTURE, files.accepted, ["--expect-removed", "0"]),
     half: check(FIXTURE, files.half),
     halfAccepted: check(FIXTURE, files.halfAccepted, ["--expect-removed", "0"]),
+    hollow: check(FIXTURE, files.hollow),
+    data: check(FIXTURE, files.data),
+    dataNoted: check(FIXTURE, files.data, ["--fld-data", "note"]),
   };
   await rm(dir, { recursive: true });
   return out;
@@ -386,7 +433,7 @@ test("the row of an edit: the answer of the tool is told, the fields decide", ()
   assert.equal(ok.result, "PASS");
   assert.equal(
     ok.got,
-    "tool: applied (replace, narrowed) | fields 18 -> 18 (live 17, in deletions 1, in insertions 0, split 0)",
+    "tool: applied (replace, narrowed) | fields 18 -> 18 (live 17, in deletions 1, in insertions 0, split 0, hollowed 0, result changed 0)",
   );
   // A refusal is as good as an applied edit when the fields hold.
   assert.equal(row(refused, CHECKS.same).result, "PASS");
@@ -414,6 +461,90 @@ test("the row of an edit: the answer of the tool is told, the fields decide", ()
   };
   assert.equal(row(applied, flat).result, "PASS");
   assert.match(row(applied, flat).got, /; replaced by plain text: ZOTERO_ITEM \(Belloc, 2020\)$/);
+});
+
+test("a hollowed field fails the row and is named first; fldData that Word rewrote is told and not judged", () => {
+  assert.deepEqual([CHECKS.hollow.exit, CHECKS.hollow.result.failures], [1, ["hollowed"]]);
+  const row = J.citeCaseRow({
+    name: "cite-text-zotero",
+    what: "the text of a citation",
+    outcome: { ...applied, changes: [{ kind: "delete", narrowed: false }] },
+    check: CHECKS.hollow.result,
+  });
+  assert.equal(row.result, "FAIL");
+  assert.equal(
+    row.got,
+    "tool: applied (delete) | fields 18 -> 18 (live 18, in deletions 0, in insertions 0, split 0, hollowed 1, result changed 0); " +
+      'FAILED hollowed; first: ZOTERO_ITEM in "Shaken flasks remain the usual first ves" begin@- instr@- separate@- result@del end@- result "(Arden, 2019)" -> ""',
+  );
+  // w:fldData: judged by default, a note with --fld-data note.
+  assert.deepEqual([CHECKS.data.exit, CHECKS.data.result.failures], [1, ["fldData"]]);
+  assert.deepEqual([CHECKS.dataNoted.exit, CHECKS.dataNoted.result.ok], [0, true]);
+  assert.match(CHECKS.dataNoted.lines[0], /^NOTE fldData \| missing 1, not in the original 1/);
+  assert.match(J.fieldsLine(CHECKS.dataNoted.result), /; fldData differs \(not judged\)$/);
+  assert.doesNotMatch(J.fieldsLine(CHECKS.same.result), /fldData/);
+});
+
+test("the row of an edit with an expectation: the answer of the tool is judged with the fields", () => {
+  const fieldRefused = {
+    answer: "refused",
+    code: "FieldNotEditable",
+    word_unchanged: true,
+    changes: [],
+    log: ["[review] field edit refused R1.4 why=inside by=daemon paragraph=12"],
+  };
+  const row = (expect, outcome, c, fields) =>
+    J.citeCaseRow({ name: "x", what: "y", expect, fields, outcome, check: c.result });
+  // refused: only as FieldNotEditable, with Word unchanged.
+  const r = row("refused", fieldRefused, CHECKS.same);
+  assert.equal(r.result, "PASS");
+  assert.equal(r.expect, "refused FieldNotEditable");
+  assert.equal(
+    r.got,
+    "tool: refused FieldNotEditable [why=inside by=daemon paragraph=12] | expected refused FieldNotEditable: met (fields newly in deletions: 0) | " +
+      "fields 18 -> 18 (live 18, in deletions 0, in insertions 0, split 0, hollowed 0, result changed 0)",
+  );
+  const stale = row("refused", { ...refused, code: "StaleTarget" }, CHECKS.same);
+  assert.equal(stale.result, "FAIL");
+  assert.match(stale.got, /refused StaleTarget \| expected refused FieldNotEditable: NOT MET/);
+  assert.equal(row("refused", applied, CHECKS.same).result, "FAIL");
+  assert.equal(
+    row("refused", { ...fieldRefused, word_unchanged: false }, CHECKS.same).result,
+    "FAIL",
+  );
+  // removed: applied, and exactly that many fields newly whole in a deletion.
+  const gone = row("removed", applied, CHECKS.tracked, 1);
+  assert.equal(gone.result, "PASS");
+  assert.match(
+    gone.got,
+    /expected applied, 1 field\(s\) whole in the deletion: met \(fields newly in deletions: 1\)/,
+  );
+  assert.equal(row("removed", applied, CHECKS.same, 1).result, "FAIL");
+  // The tool refused the deletion (it could not do it safely): the fields
+  // hold, the expectation is not met, and the row says both.
+  const kept = row("removed", fieldRefused, CHECKS.same, 1);
+  assert.equal(kept.result, "FAIL");
+  assert.match(kept.got, /NOT MET \(fields newly in deletions: 0\) \| fields 18 -> 18 \(live 18/);
+  // applied: no field may go into a deletion.
+  assert.equal(row("applied", applied, CHECKS.same).result, "PASS");
+  assert.equal(row("applied", applied, CHECKS.tracked).result, "FAIL");
+  assert.equal(row("applied", fieldRefused, CHECKS.same).result, "FAIL");
+  // An expectation that is met does not lift a failed check.
+  assert.equal(row("applied", applied, CHECKS.hollow).result, "FAIL");
+  // Every case of the run names an expectation the row knows.
+  for (const c of SPEC.cases) {
+    const x = J.citeCaseRow({ ...c, outcome: applied, check: CHECKS.same.result });
+    assert.match(x.got, / \| expected (applied|refused)/, c.name);
+  }
+});
+
+test("refusalCode: the refusal for a field", () => {
+  assert.equal(
+    J.refusalCode(
+      "This edit would change the text of a citation or another field. Fields are written by the reference manager.",
+    ),
+    "FieldNotEditable",
+  );
 });
 
 // The pane's snapshot of the fixture, as the driver step returns it.

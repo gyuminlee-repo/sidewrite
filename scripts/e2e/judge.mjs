@@ -1097,9 +1097,12 @@ const written = (r, rows) => ({
 // ---- the cite stage: tracked edits next to reference-manager fields ----
 // The document is tests/fixtures/citation_manuscript.docx
 // (make_citation_fixture.py); what is judged is what
-// tools/citation_fields_check.py finds in the files Word saved. Whether a
-// tool applied an edit or refused it is recorded and never expected, with
-// one exception: a paragraph with fields must not be rewritten as a whole.
+// tools/citation_fields_check.py finds in the files Word saved, and for the
+// edits of the run itself also what the tool answered: each case of
+// make_citation_fixture.py CASES names the answer it expects (applied with
+// no field touched; refused as FieldNotEditable; applied with a field whole
+// in the deletion). A paragraph with fields must not be rewritten as a
+// whole. What a model turn does is recorded; its fields are judged.
 
 // The comments of tests/fixtures/cite_review.txt. R1.1 to R1.3 get a model
 // turn each; the edits of the run itself are put on file under R1.4.
@@ -1125,6 +1128,7 @@ export const citeEdit = (c, ref = CITE_SEED_REF) => ({
 // of review-tools.mjs applyTrackedEdit and tools-word.js toolTrackedEdit.
 const REFUSAL_TEXTS = [
   [/is not rewritten as a whole/, "ParagraphNotPlain"],
+  [/would change the text of a citation or another field/, "FieldNotEditable"],
   [/" not found$/, "NotFound"],
   [/^Paragraph not found: /, "HintNotFound"],
   [/" occurs \d+ times; /, "Ambiguous"],
@@ -1203,38 +1207,85 @@ export function fieldsLine(check) {
   // A field deleted whole whose text was typed again as plain words passes,
   // and is told: after accept-all that citation is text.
   const flat = (check.flattened ?? []).map((f) => `${f.kind} ${f.shown}`);
+  // The invariants of an edit, each with its count: no field split by a
+  // tracked change, none left with its result gone (hollowed), no result
+  // other than before.
+  const hollow = check.hollowed ?? [];
+  const other = check.result_changed ?? [];
+  // w:fldData that differs and is not judged (Word rewrote it on its own
+  // save of the fixture: run-acceptance mainCite).
+  const data = check.fld_data?.differs && check.fld_data.judged === false;
   const counts =
     `fields ${check.before.fields} -> ${check.after.fields}` +
-    ` (live ${s.live ?? 0}, in deletions ${s.deleted ?? 0}, in insertions ${s.inserted ?? 0}, split ${s.split ?? 0})` +
-    (flat.length ? `; replaced by plain text: ${flat.join("; ")}` : "");
+    ` (live ${s.live ?? 0}, in deletions ${s.deleted ?? 0}, in insertions ${s.inserted ?? 0}, split ${s.split ?? 0},` +
+    ` hollowed ${hollow.length}, result changed ${other.length})` +
+    (flat.length ? `; replaced by plain text: ${flat.join("; ")}` : "") +
+    (data ? "; fldData differs (not judged)" : "");
   if (check.ok) return counts;
-  const f = check.split?.[0] ?? check.missing?.[0] ?? check.added?.[0] ?? null;
+  const f =
+    hollow[0] ?? other[0] ?? check.split?.[0] ?? check.missing?.[0] ?? check.added?.[0] ?? null;
   const u = check.unbalanced?.[0];
+  const result = f && "was" in f ? ` result "${f.was}" -> "${f.accepted ?? ""}"` : "";
   const first = f
-    ? ` first: ${f.kind} in "${f.text}" ${f.layout}`
+    ? ` first: ${f.kind} in "${f.text}" ${f.layout}${result}`
     : u
       ? ` first: ${u.what} in ${u.story} p${u.paragraph}`
       : "";
   return `${counts}; FAILED ${check.failures.join(", ")};${first}`;
 }
 
-// The row of one edit of the run: the answer of the tool is recorded, the
-// fields are judged. A refusal that changed the document fails too.
-export function citeCaseRow({ name, what, outcome, check }) {
+// What the daemon logged about an edit refused for a field
+// (review-tools.mjs): "why=<reason> by=<daemon|pane> ...".
+const FIELD_REFUSED = /^\[review\] field edit refused \S+ (.*)$/;
+
+// What a case of the run expects of the tool (make_citation_fixture.py
+// CASES expect), in words.
+const CITE_EXPECT = {
+  applied: () => "applied, no field touched",
+  refused: () => "refused FieldNotEditable",
+  removed: (n) => `applied, ${n} field(s) whole in the deletion`,
+};
+
+// The row of one edit of the run. The fields are judged (the checker on the
+// copy before the edit against the copy after it); a refusal that changed
+// the document fails; and with `expect` the answer of the tool is judged
+// too: "applied" (no field newly in a deletion), "refused" (as
+// FieldNotEditable) or "removed" (applied, exactly `fields` fields newly
+// whole in a deletion). The row says what the tool answered and why (the
+// reason the daemon logged), whether the expectation was met, and the count
+// of each invariant.
+export function citeCaseRow({ name, what, expect = null, fields = 0, outcome, check }) {
+  const why = (outcome.log ?? []).map((l) => FIELD_REFUSED.exec(l)?.[1]).find(Boolean);
   const tool =
     outcome.answer === "applied"
       ? `applied (${outcome.changes.map((c) => `${c.kind}${c.narrowed ? ", narrowed" : ""}`).join("; ") || "exception approved"})`
       : outcome.answer === "refused"
-        ? `refused ${outcome.code}${outcome.word_unchanged ? "" : ", but the tracked changes of the document differ"}`
+        ? `refused ${outcome.code}${why ? ` [${why}]` : ""}${outcome.word_unchanged ? "" : ", but the tracked changes of the document differ"}`
         : `no readable answer (${outcome.message ?? "-"})`;
+  const gone = (side) => check?.[side]?.by_state?.deleted ?? 0;
+  const removed = check?.after ? gone("after") - gone("before") : null;
+  const met =
+    expect === "applied"
+      ? outcome.answer === "applied" && removed === 0
+      : expect === "refused"
+        ? outcome.answer === "refused" && outcome.code === "FieldNotEditable"
+        : expect === "removed"
+          ? outcome.answer === "applied" && removed === fields
+          : null;
+  const expected =
+    met === null
+      ? ""
+      : ` | expected ${CITE_EXPECT[expect](fields)}: ${met ? "met" : "NOT MET"} (fields newly in deletions: ${removed ?? "?"})`;
   const pass =
     check?.ok === true &&
+    met !== false &&
     outcome.answer !== "unknown" &&
     (outcome.answer !== "refused" || outcome.word_unchanged === true);
   return {
     step: `cite: ${name} (${what})`,
     result: pass ? "PASS" : "FAIL",
-    got: `tool: ${tool} | ${fieldsLine(check)}`,
+    ...(met === null ? {} : { expect: CITE_EXPECT[expect](fields) }),
+    got: `tool: ${tool}${expected} | ${fieldsLine(check)}`,
   };
 }
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Are the fields of a .docx still whole after it was edited?
 
-  citation_fields_check.py --before A.docx --after B.docx [--expect-removed N] [--detail]
+  citation_fields_check.py --before A.docx --after B.docx [--expect-removed N]
+                           [--fld-data judge|note] [--detail]
 
 Reads both files (no Word) and compares the fields of every story (body,
 footnotes, endnotes, comments, headers, footers): complex fields (w:fldChar
@@ -22,17 +23,41 @@ It holds when
   - the instructions of B are those of A as a multiset, compared as the exact
     text of the concatenated instruction; with --expect-removed N, B lacks
     exactly N of them and has no other;
+  - no field of B is hollowed: a complex field that is still there (its
+    markers are not all inside tracked deletions) while its result, the runs
+    between separate and end, has no text left once the tracked changes are
+    accepted, although the result had text (in B itself, inside a deletion,
+    or in the same field of A). Deleting the visible text of a citation and
+    leaving its markers does this: the citation looks deleted, the field
+    stays, and the reference manager writes the text again at its next
+    refresh and keeps the reference in the bibliography. A field whose
+    markers AND result all lie inside tracked deletions is deleted as a
+    whole (state "deleted", shown as "in deletions") and is not hollowed;
+  - no result of a field that is still there differs from the result the
+    same field has in A (compared with the tracked changes accepted on both
+    sides): a result with a tracked deletion or insertion inside it, or
+    other words. This fails as result-changed, because the text of a field
+    is written by the reference manager: a tool that edits it leaves a
+    citation that no longer says what its instruction records, and the next
+    refresh overwrites the edit or asks the author about it;
   - the w:fldData of B are those of A (white space apart); with
-    --expect-removed, B has none that A lacks;
+    --expect-removed, B has none that A lacks. With --fld-data note a
+    difference is printed as a NOTE line and does not fail: for a file whose
+    w:fldData Word itself rewrites on every save (the invented EndNote data
+    of the test fixture) the difference says nothing about a tool;
   - the ZOTERO_* properties of docProps/custom.xml and the EN.* and ZOTERO*
     document variables of word/settings.xml are the same.
 A itself must be balanced too: a broken A makes the comparison mean nothing.
 
+The results of w:fldSimple and w:hyperlink are not read: hollowed and
+result-changed are told for complex fields only.
+
 Not judged, only listed:
   text_changed  a live Zotero or EndNote citation whose visible text is no
                 longer the text its instruction records (plainCitation,
-                DisplayText). The field is whole; the plugin will notice the
-                difference at its next refresh.
+                DisplayText). A is not looked at: a citation the author
+                changed by hand before the edits is listed here and does not
+                fail; one an edit changed fails as result-changed above.
   flattened     a field that lies whole in a tracked deletion while its
                 visible text stands again, as plain inserted text, in the
                 same paragraph: an edit replaced a range that held the field.
@@ -270,6 +295,11 @@ def read(path):
     return out
 
 
+def accepted_text(field):
+    """The result as it reads once every tracked change is accepted."""
+    return "".join(t for t, ctx in field["result"] if ctx != "del")
+
+
 def brief(f):
     return {
         "id": f["id"],
@@ -300,7 +330,7 @@ def line(kind, f, before_layout, after_layout):
     )
 
 
-def compare(before, after, expect_removed=None):
+def compare(before, after, expect_removed=None, fld_data="judge"):
     failures = []
     lines = []
     by_id = {}
@@ -353,9 +383,15 @@ def compare(before, after, expect_removed=None):
     db = Counter(f["data"] for f in after["fields"] if f["data"])
     data = {"before": sum(da.values()), "after": sum(db.values()), "added": sum((db - da).values())}
     data["missing"] = sum((da - db).values())
-    if data["added"] or (expect_removed is None and data["missing"]):
-        failures.append("fldData")
-        lines.append(f'FAIL fldData | missing {data["missing"]}, not in the original {data["added"]}')
+    data["differs"] = bool(data["added"] or (expect_removed is None and data["missing"]))
+    data["judged"] = fld_data != "note"
+    if data["differs"]:
+        counts = f'missing {data["missing"]}, not in the original {data["added"]}'
+        if data["judged"]:
+            failures.append("fldData")
+            lines.append(f"FAIL fldData | {counts}")
+        else:
+            lines.append(f"NOTE fldData | {counts} (not judged: --fld-data note)")
 
     props = {}
     for key in ("props", "vars"):
@@ -367,6 +403,43 @@ def compare(before, after, expect_removed=None):
             for n in diff:
                 state = "lost" if n not in after[key] else "new" if n not in before[key] else "changed"
                 lines.append(f"FAIL {key} | {n} {state}")
+
+    # A field that is still there with nothing left of its result (hollowed),
+    # or with another result than the same field has in the before file.
+    was = {}
+    for f in before["fields"]:
+        if f["state"] != "deleted":
+            was.setdefault(f["id"], []).append(accepted_text(f))
+    hollowed = []
+    result_changed = []
+    for f in after["fields"]:
+        if f["form"] != "complex" or not f["closed"] or f["state"] == "deleted":
+            continue
+        now = accepted_text(f)
+        twins = was.get(f["id"], [])
+        # Its own text, deleted or not: a result that lies whole in a pending
+        # deletion is hollowed in every copy that still holds the deletion.
+        own = "".join(t for t, _ in f["result"])
+        if now in twins and (now.strip() or not own.strip()):
+            twins.remove(now)
+            continue
+        if not now.strip() and (own.strip() or "".join(twins).strip()):
+            old = next((t for t in twins if t.strip()), own)
+            hollowed.append({**brief(f), "was": old})
+            failures.append("hollowed")
+            lines.append(
+                line("hollowed", f, before_layout(f), " ".join(f["layout"]))
+                + f" | result: {json.dumps(old, ensure_ascii=False)} -> {json.dumps(now)}"
+            )
+        elif twins:
+            old = twins.pop(0)
+            result_changed.append({**brief(f), "was": old, "accepted": now})
+            failures.append("result-changed")
+            lines.append(
+                line("result-changed", f, before_layout(f), " ".join(f["layout"]))
+                + f" | result: {json.dumps(old, ensure_ascii=False)} -> "
+                + json.dumps(now, ensure_ascii=False)
+            )
 
     changed = []
     for f in after["fields"]:
@@ -404,6 +477,8 @@ def compare(before, after, expect_removed=None):
         "fld_data": data,
         "properties": props["props"],
         "doc_vars": props["vars"],
+        "hollowed": hollowed,
+        "result_changed": result_changed,
         "text_changed": changed,
         "flattened": flattened,
         "paragraphs": after["paragraphs"],
@@ -416,6 +491,12 @@ def main(argv=None):
     ap.add_argument("--after", required=True)
     ap.add_argument("--expect-removed", type=int, default=None)
     ap.add_argument(
+        "--fld-data",
+        choices=("judge", "note"),
+        default="judge",
+        help="note: a difference of w:fldData is printed and does not fail",
+    )
+    ap.add_argument(
         "--detail",
         action="store_true",
         help="the JSON line also lists every field (before.list, after.list) and the "
@@ -427,7 +508,7 @@ def main(argv=None):
     except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError) as e:
         print(json.dumps({"ok": False, "failures": ["unreadable"], "error": str(e)}))
         return 2
-    lines, result = compare(before, after, args.expect_removed)
+    lines, result = compare(before, after, args.expect_removed, args.fld_data)
     if not args.detail:
         del result["paragraphs"], result["before"]["list"], result["after"]["list"]
     for text in lines:
