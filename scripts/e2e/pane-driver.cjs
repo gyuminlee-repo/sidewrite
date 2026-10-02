@@ -787,6 +787,16 @@ const steps = {
     return view(page);
   },
 
+  // The name the response letter gives a supplementary file, set in its pane
+  // after the join: the field in the line of the manuscript, "Save name".
+  async "link-label"(page, a) {
+    await clearMessage(page);
+    await page.fill("#review-part-label", a.label, { timeout: 30_000 });
+    await page.click("#review-linked .review-part-label button", { timeout: 30_000 });
+    await waitMessage(page, 60_000, "^The response letter calls this file ");
+    return view(page);
+  },
+
   // "Leave this revision" in the supplementary file.
   async "link-leave"(page) {
     await clearMessage(page);

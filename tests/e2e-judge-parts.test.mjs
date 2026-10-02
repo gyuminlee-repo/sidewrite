@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
 import {
@@ -18,6 +19,10 @@ import {
   onlyOwnNames,
   partsBeforeJoin,
   partsBoth,
+  partsCited,
+  partsGuard,
+  partsPlan,
+  partsReopened,
   partsCrossState,
   partsGuardEdit,
   partsJoined,
@@ -775,4 +780,459 @@ test("the driver tells the pane of SI.docx from the pane of paper.docx", () => {
   assert.equal(isPaneOf({ url: "D:\\run\\xpaper.docx", file: "" }, "paper"), false);
   assert.equal(isPaneOf({ url: "", file: "" }, "SI"), false);
   assert.equal(isPaneOf(undefined, "SI"), false);
+});
+
+// ---- k to m: the letter of the manuscript and the supplementary file ----------------------
+
+const LABEL = "Supplementary Information";
+const QUOTE = "Starter cultures were incubated overnight at 30 degrees Celsius.";
+const FILE = { mtime: "2026-10-02T09:00:00.000Z", bytes: 20480 };
+const LATER = { mtime: "2026-10-02T09:05:00.000Z", bytes: 20480 };
+const DOC_STATE = { at: "2026-10-02T09:00:05.000Z", saved: true, file: FILE };
+const PART_CHANGED =
+  "FAIL part_state: SI.docx changed since Sidewrite last read it. Open it, save, press Refresh.";
+const planOf = (op) =>
+  partsPlan(revision({ "R1.1": { changes: [change("R1.1", 1)] } }), "R1.1", op);
+const appliedOf = (plan, error = null) => ({
+  ok: !error,
+  results: plan.ops.map((o) => ({ change_id: o.change_id, op: o.op, error })),
+});
+const responseView = (over = {}) => ({
+  ok: true,
+  message: "Checked: All checks passed, 2 warnings",
+  export_label: "Export letter (.docx)",
+  checks: ["WARN R1.2 pending_changes: 1 change is waiting for your decision in Word"],
+  cards: [
+    {
+      ref: "R1.1",
+      text: "We now state the temperature of the starter cultures.",
+      stale: "",
+      citations: [{ line: `${LABEL} [Revised in Supplementary Methods]`, quote: QUOTE }],
+      open_reqs: [],
+    },
+  ],
+  ...over,
+});
+const citedInput = (over = {}) => {
+  const plan = planOf("accept");
+  return {
+    named: { ...view(), message: `The response letter calls this file ${LABEL}.` },
+    label: LABEL,
+    plan,
+    applied: appliedOf(plan),
+    saved: { ok: true, saved: true },
+    refreshed: view({ message: "Every change is decided." }),
+    closed: { ok: true, closed: true },
+    fileAfter: FILE,
+    si: revision(
+      {
+        "R1.1": {
+          changes: [change("R1.1", 1, "accepted")],
+          response: {
+            citations: [{ kind: "revised", section: "Supplementary Methods", quote: QUOTE }],
+          },
+        },
+        "R1.2": { changes: [change("R1.2", 1)] },
+      },
+      { part_of: { ...PART_OF, label: LABEL }, doc_state: DOC_STATE },
+    ),
+    paper: revision(
+      {
+        "R1.1": {
+          response: {
+            text: "We now state the temperature.",
+            citations: [
+              { kind: "revised", section: "Supplementary Methods", quote: QUOTE, doc: "SI.docx" },
+            ],
+          },
+        },
+      },
+      { parts: [{ ...PARTS[0], doc: "/mnt/d/run/SI.docx", label: LABEL }] },
+    ),
+    drafted: responseView({ message: "Drafted R1.1." }),
+    check: responseView(),
+    exported: responseView({ message: "Exported: D:\\run\\paper.response.docx" }),
+    model: {
+      paragraphs: [
+        { kind: "comment_head", text: "Comment 1.1", ref: "R1.1" },
+        { kind: "response", text: "We now state the temperature.", ref: "R1.1" },
+        { kind: "location", text: `${LABEL} [Revised in Supplementary Methods]`, ref: "R1.1" },
+        { kind: "quote", text: QUOTE, ref: "R1.1" },
+      ],
+    },
+    log: "[response] export path=/mnt/d/run/paper.response.docx paragraphs=9 verify=ok",
+    ref: "R1.1",
+    names,
+    ...over,
+  };
+};
+
+test("the plan of rows k to m holds the changes of one comment, all with one decision", () => {
+  const rev = revision({
+    "R1.1": {
+      changes: [change("R1.1", 1), change("R1.1", 2, "pending", ["q1"], { word_comment_id: null })],
+    },
+    "R1.2": { changes: [change("R1.2", 1)] },
+  });
+  const accept = partsPlan(rev, "R1.1", "accept");
+  assert.deepEqual(
+    accept.ops.map((o) => [o.change_id, o.ref, o.op]),
+    [["R1.1-1", "R1.1", "accept"]],
+  );
+  // A change without its comment cannot be found in Word.
+  assert.deepEqual(accept.skipped, ["R1.1-2"]);
+  assert.deepEqual(
+    partsPlan(rev, "R1.1", "reject").ops.map((o) => o.op),
+    ["reject"],
+  );
+  assert.deepEqual(partsPlan(rev, "R1.3", "accept").ops, []);
+});
+
+test("row k passes when the accepted change of the supplement is counted, cited under the name of the file and exported", () => {
+  const v = partsCited(citedInput());
+  assert.equal(v.pass, true, v.got);
+  assert.equal(v.got, `${LABEL} [Revised in Supplementary Methods] | ${QUOTE}`);
+});
+
+test("row k says which step or check did not hold", () => {
+  const failing = (over) => failedNames(partsCited(citedInput(over)));
+  const plan = planOf("accept");
+  // Word did not find the change.
+  assert.deepEqual(failing({ applied: appliedOf(plan, "rationale comment not found") }), [
+    "SI.docx in Word: the change(s) of R1.1 accepted",
+  ]);
+  assert.match(
+    partsCited(citedInput({ applied: appliedOf(plan, "rationale comment not found") })).got,
+    /R1\.1-1 accept ERR rationale comment not found/,
+  );
+  // No change with its comment: nothing to apply.
+  assert.deepEqual(
+    failing({ plan: { ops: [], skipped: [] }, applied: { ok: false, error: "no change" } }),
+    ["SI.docx in Word: the change(s) of R1.1 accepted"],
+  );
+  // Office gave no Document.saved: the record cannot be confirmed.
+  const unsaved = citedInput();
+  unsaved.si.doc_state = { ...DOC_STATE, saved: null };
+  assert.deepEqual(failedNames(partsCited(unsaved)), [
+    "review file of SI.docx: the refresh was taken on a saved document, and the file on disk is still that file",
+  ]);
+  // Closing the document changed the file.
+  assert.deepEqual(failing({ fileAfter: LATER }), [
+    "review file of SI.docx: the refresh was taken on a saved document, and the file on disk is still that file",
+  ]);
+  // The refresh of the supplement wrote no citation.
+  const none = citedInput();
+  none.si.comments[0].response = { citations: [] };
+  assert.deepEqual(failedNames(partsCited(none)), [
+    "review file of SI.docx: what the letter may cite of R1.1 is written there, without line numbers",
+  ]);
+  // The name was not saved: the letter would call the file by its file name.
+  const unnamed = citedInput({ named: { ok: false, error: "no #review-part-label" } });
+  unnamed.paper.parts[0].label = "SI";
+  assert.deepEqual(failedNames(partsCited(unnamed)), [
+    "SI.docx pane: the file is given its name in the letter",
+  ]);
+  // The request is not counted, or the record of the file is not confirmed.
+  const open = responseView({
+    message: "Checked: 1 failed",
+    checks: ["FAIL R1.1 requirements: q1 is neither cited nor declined: state the temperature"],
+  });
+  assert.deepEqual(failing({ check: open, exported: null }), [
+    "paper.docx pane: no failing check for R1.1, none for the state of SI.docx",
+    "paper.docx pane: the letter is exported without force",
+  ]);
+  const unconfirmed = responseView({ message: "Checked: 1 failed", checks: [PART_CHANGED] });
+  assert.deepEqual(failing({ check: unconfirmed, exported: null }), [
+    "paper.docx pane: no failing check for R1.1, none for the state of SI.docx",
+    "paper.docx pane: the letter is exported without force",
+  ]);
+  // A failing check of another comment: the export is not pressed, and the row says why.
+  const other = responseView({
+    message: "Checked: 1 failed",
+    checks: ["FAIL R1.3 answered: no response and not declined"],
+  });
+  const held = partsCited(citedInput({ check: other, exported: null }));
+  assert.deepEqual(failedNames(held), ["paper.docx pane: the letter is exported without force"]);
+  assert.match(held.got, /not pressed, the button would force the export: .*FAIL R1\.3 answered/);
+  // The letter names the file by another name, has no quote, or a quote that is not the file's.
+  const model = (rows) => ({ model: { paragraphs: rows } });
+  const LETTER =
+    "letter: a location line of R1.1 names Supplementary Information, with a quote of SI.docx under it";
+  assert.deepEqual(
+    failing(
+      model([
+        { kind: "location", text: "SI [Revised in Supplementary Methods]", ref: "R1.1" },
+        { kind: "quote", text: QUOTE, ref: "R1.1" },
+      ]),
+    ),
+    [LETTER],
+  );
+  assert.deepEqual(
+    failing(
+      model([
+        { kind: "location", text: `${LABEL} [Revised in Supplementary Methods]`, ref: "R1.1" },
+      ]),
+    ),
+    [LETTER],
+  );
+  assert.deepEqual(
+    failing(
+      model([
+        { kind: "location", text: `${LABEL} [Revised in Supplementary Methods]`, ref: "R1.1" },
+        { kind: "quote", text: "Some other sentence.", ref: "R1.1" },
+      ]),
+    ),
+    [LETTER],
+  );
+  // The same line under another comment is not this comment's.
+  assert.deepEqual(
+    failing(
+      model([
+        { kind: "location", text: `${LABEL} [Revised in Supplementary Methods]`, ref: "R1.2" },
+        { kind: "quote", text: QUOTE, ref: "R1.2" },
+      ]),
+    ),
+    [LETTER],
+  );
+  assert.deepEqual(failing({ model: null }), [LETTER]);
+  // The verifier did not pass, or the export was held.
+  assert.deepEqual(failing({ log: "[response] export held fail=1" }), [
+    "the verifier passed on the exported letter",
+  ]);
+  // The card of the manuscript shows the file name instead of its name in the letter.
+  const card = responseView();
+  card.cards[0].citations[0].line = "SI [Revised in Supplementary Methods]";
+  assert.deepEqual(failing({ check: card }), [
+    "paper.docx pane: the card of R1.1 cites Supplementary Information",
+  ]);
+});
+
+const guardInput = (over = {}) => {
+  const plan = planOf("reject");
+  const letters = [{ file: "paper.response.docx", mtime: "2026-10-02T09:01:00.000Z", bytes: 9000 }];
+  return {
+    restored: { ok: true },
+    reopened: { ok: true, read_only: false },
+    plan,
+    applied: appliedOf(plan),
+    saved: { ok: true },
+    closed: { ok: true },
+    recorded: DOC_STATE,
+    recordedNow: DOC_STATE,
+    fileNow: LATER,
+    opened: responseView({ message: "Refreshed from the manuscript: 4 comments." }),
+    exported: responseView({
+      message: "Not exported: 1 failed. Fix them, or press Export anyway.",
+      export_label: "Export anyway",
+      checks: [PART_CHANGED],
+    }),
+    letters: [letters, letters],
+    export: [
+      { path: "/mnt/d/run/paper.response.docx" },
+      { path: "/mnt/d/run/paper.response.docx" },
+    ],
+    log: "[response] export held fail=1",
+    ref: "R1.1",
+    names,
+    ...over,
+  };
+};
+
+test("row l passes when the changed supplement fails the check with part_state and the letter is held", () => {
+  const v = partsGuard(guardInput());
+  assert.equal(v.pass, true, v.got);
+  assert.equal(v.got, PART_CHANGED);
+  // The pane refreshed by itself before the save: the guard still holds, and the row says so.
+  const early = partsGuard(
+    guardInput({
+      recordedNow: { at: "2026-10-02T09:04:00.000Z", saved: false, file: FILE },
+      exported: responseView({
+        message: "Not exported: 1 failed. Fix them, or press Export anyway.",
+        checks: [
+          "FAIL part_state: SI.docx had changes that were not saved when Sidewrite last read it. Open it, save, press Refresh.",
+        ],
+      }),
+    }),
+  );
+  assert.equal(early.pass, true, early.got);
+  assert.match(early.got, /the pane of SI\.docx refreshed by itself before the save/);
+});
+
+test("row l says which step or check did not hold", () => {
+  const failing = (over) => failedNames(partsGuard(guardInput(over)));
+  const STEPS =
+    "SI.docx: reopened as it was before the accept, the change(s) of R1.1 rejected in Word, saved, closed";
+  // The file could not be put back (still open in Word), or Word found no revision to reject.
+  assert.deepEqual(failing({ restored: { ok: false, error: "EBUSY" } }), [STEPS]);
+  assert.deepEqual(
+    failing({ applied: appliedOf(planOf("reject"), "no revision at the comment") }),
+    [STEPS],
+  );
+  // The pane refreshed by itself after the save: the record is the file on disk.
+  const late = partsGuard(
+    guardInput({
+      recordedNow: { at: "2026-10-02T09:06:00.000Z", saved: true, file: LATER },
+      exported: responseView({
+        message: "Not exported: 1 failed. Fix them, or press Export anyway.",
+        checks: ["FAIL R1.1 requirements: q1 is neither cited nor declined: state the temperature"],
+      }),
+    }),
+  );
+  assert.deepEqual(failedNames(late), [
+    "SI.docx on disk is no longer the file its review file records",
+    "paper.docx pane: the check fails with part_state for SI.docx",
+  ]);
+  assert.match(
+    late.got,
+    /the pane of SI\.docx refreshed by itself: doc_state\.at 2026-10-02T09:00:05\.000Z -> 2026-10-02T09:06:00\.000Z/,
+  );
+  // The last check had failed: the button would have forced the export.
+  assert.deepEqual(failing({ opened: responseView({ export_label: "Export anyway" }) }), [
+    "paper.docx pane: the export button did not offer to force",
+  ]);
+  // The guard did not refuse: the letter was written.
+  const written = guardInput({
+    exported: responseView({ message: "Exported: D:\\run\\paper.response.docx", checks: [] }),
+    log: "[response] export path=/mnt/d/run/paper.response.docx paragraphs=9 verify=ok",
+  });
+  written.letters = [
+    written.letters[0],
+    [{ ...written.letters[0][0], mtime: "2026-10-02T09:07:00.000Z" }],
+  ];
+  assert.deepEqual(failedNames(partsGuard(written)), [
+    "paper.docx pane: the check fails with part_state for SI.docx",
+    "paper.docx pane: the letter is not exported",
+    "daemon log: the export was held",
+  ]);
+  // Held for another reason only.
+  assert.deepEqual(
+    failing({
+      exported: responseView({
+        message: "Not exported: 1 failed. Fix them, or press Export anyway.",
+        checks: ["FAIL R1.1 stale: the cited changes are not the accepted changes; refresh"],
+      }),
+    }),
+    ["paper.docx pane: the check fails with part_state for SI.docx"],
+  );
+  // A part_state row of another file is not this file's.
+  assert.deepEqual(
+    failing({
+      exported: responseView({
+        message: "Not exported: 1 failed. Fix them, or press Export anyway.",
+        checks: [PART_CHANGED.replace("SI.docx", "Tables.docx")],
+      }),
+    }),
+    ["paper.docx pane: the check fails with part_state for SI.docx"],
+  );
+});
+
+const reopenedInput = (over = {}) => ({
+  reopened: { ok: true },
+  refreshed: view({ message: "Every change is decided." }),
+  fileNow: LATER,
+  si: revision(
+    { "R1.1": { changes: [change("R1.1", 1, "rejected")] } },
+    { part_of: PART_OF, doc_state: { at: "2026-10-02T09:10:00.000Z", saved: true, file: LATER } },
+  ),
+  check: responseView({
+    message: "Checked: 2 failed",
+    checks: [
+      "FAIL R1.1 requirements: q1 is neither cited nor declined: state the temperature",
+      "FAIL R1.1 stale: the cited changes are not the accepted changes; refresh",
+    ],
+    cards: [
+      {
+        ref: "R1.1",
+        text: "We now state the temperature.",
+        stale: "A cited change is no longer accepted",
+        citations: [],
+        open_reqs: ["q1 state the temperature"],
+      },
+    ],
+  }),
+  ref: "R1.1",
+  names,
+  ...over,
+});
+
+test("row m passes when the refreshed supplement leaves the request open and the answer stale", () => {
+  const v = partsReopened(reopenedInput());
+  assert.equal(v.pass, true, v.got);
+  assert.match(v.got, /^FAIL R1\.1 requirements: .* \| A cited change is no longer accepted$/);
+});
+
+test("row m says which check did not hold", () => {
+  const failing = (over) => failedNames(partsReopened(reopenedInput(over)));
+  // The refresh still reads the change as accepted.
+  const kept = reopenedInput();
+  kept.si.comments[0].changes[0].state = "accepted";
+  assert.deepEqual(failedNames(partsReopened(kept)), [
+    "review file of SI.docx: every change of R1.1 is rejected",
+  ]);
+  // The record is still not confirmed after the refresh.
+  const unconfirmed = reopenedInput();
+  unconfirmed.check.checks.push(PART_CHANGED);
+  assert.deepEqual(failedNames(partsReopened(unconfirmed)), [
+    "paper.docx pane: no failing check for the state of SI.docx",
+  ]);
+  const unsaved = reopenedInput();
+  unsaved.si.doc_state.saved = false;
+  assert.deepEqual(failedNames(partsReopened(unsaved)), [
+    "review file of SI.docx: the refresh was taken on a saved document, and the file on disk is that file",
+  ]);
+  // The request still counts as answered, or the answer is not marked.
+  const answered = reopenedInput();
+  answered.check.checks = [];
+  answered.check.cards[0].open_reqs = [];
+  assert.deepEqual(failedNames(partsReopened(answered)), [
+    "paper.docx pane: the request of R1.1 is open again",
+  ]);
+  const fresh = reopenedInput();
+  fresh.check.cards[0].stale = "";
+  assert.deepEqual(failedNames(partsReopened(fresh)), [
+    "paper.docx pane: the answer of R1.1 is marked stale",
+  ]);
+  // The pane of the supplement did not answer.
+  assert.deepEqual(failing({ refreshed: { ok: false, error: "pane not reachable" } }), [
+    "SI.docx: opened again and refreshed",
+  ]);
+});
+
+test("stage parts: rows k, l and m run before the leave, and Word is not asked for the supplement while it is closed", () => {
+  const runner = readFileSync(here("../scripts/e2e/run-acceptance.mjs"), "utf8");
+  const stage = runner.slice(runner.indexOf("async function mainParts()"));
+  const at = (id) => stage.search(new RegExp(`(partsRow|guarded)\\(\\s*"${id}",`));
+  const order = ["a", "b", "c", "d", "e", "f", "g", "g2", "h", "k", "l", "m", "j"].map(at);
+  assert.ok(
+    order.every((n) => n >= 0),
+    JSON.stringify(order),
+  );
+  assert.deepEqual(
+    order,
+    [...order].sort((x, y) => x - y),
+  );
+  // Rows k to m: the only calls bound to the supplement are the decision
+  // (decide) and the saves (two in row k, one in row l), all while it is
+  // open: row l skips them when the open failed.
+  const rows = stage.slice(at("k"), at("j"));
+  const bound = rows.match(/tryCom\("[a-z-]+", [^\n]*SI_DOC\)/g) ?? [];
+  assert.deepEqual(
+    bound.map((x) => x.match(/tryCom\("([a-z-]+)"/)[1]),
+    ["save", "save", "save"],
+  );
+  assert.match(
+    rows,
+    /isOpen \? tryCom\("save", \["-AllowDir", winPath\(RUN\)\], SI_DOC\) : NOT_OPEN/,
+  );
+  assert.match(rows, /decide\("reject", "reject-plan", isOpen\)/);
+  // The export of row k is pressed only when no check fails, the one of row l
+  // right after a refresh: neither is forced.
+  assert.match(
+    rows,
+    /check\.ok === false \|\| failing \? null : pane\("response-export", \{\}, P\)/,
+  );
+  assert.match(
+    rows,
+    /const opened = pane\("open-response", \{\}, P\);\s*const exported = pane\("response-export", \{\}, P\);/,
+  );
 });

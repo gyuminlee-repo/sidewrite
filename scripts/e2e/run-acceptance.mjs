@@ -63,6 +63,10 @@ import {
   PARTS_SEED_RULE,
   partsBeforeJoin,
   partsBoth,
+  partsCited,
+  partsGuard,
+  partsPlan,
+  partsReopened,
   partsCrossState,
   partsGuardEdit,
   partsJoined,
@@ -2057,7 +2061,227 @@ async function mainParts() {
     );
   }
 
-  // j. Leave.
+  // k to m. The letter of the manuscript and the changes of the supplement
+  // (step A3). A step that throws fails its row and the stage goes on: the
+  // leave of row j still runs.
+  const LABEL = "Supplementary Information";
+  const others = Object.keys(spec.requirements).filter((ref) => ref !== SI_ONLY);
+  const partsDir = path.join(RUN, "parts");
+  // The supplement as saved with its changes still pending. Word cannot
+  // reject a change it has accepted, so row l puts this file back first.
+  const pendingCopy = path.join(partsDir, "SI.pending.docx");
+  // word-com.ps1 finds a document by BindToMoniker, which would load a
+  // closed file: nothing is asked of the supplement while it is closed.
+  // open-edit and close-other are asked of the manuscript, which stays open.
+  const NOT_OPEN = { ok: false, error: `not tried: ${names.si} is not open in Word` };
+  const openSi = () => tryCom("open-edit", ["-Other", winPath(SI_DOC), "-AllowDir", winPath(RUN)]);
+  const closeSi = () => tryCom("close-other", ["-Other", winPath(SI_DOC)]);
+  // The ops are built once, from the review file while the changes are
+  // pending (as Word found them by their comments then), and applied with
+  // the decision of the row.
+  let pendingPlan = null;
+  const decide = (op, name, open = true) => {
+    pendingPlan ??= partsPlan(readJson(SI_REVISION), SI_ONLY, op);
+    const plan = { ...pendingPlan, ops: pendingPlan.ops.map((o) => ({ ...o, op })) };
+    const file = path.join(partsDir, `${name}.json`);
+    fs.writeFileSync(file, JSON.stringify(plan, null, 2));
+    const applied = !open
+      ? NOT_OPEN
+      : plan.ops.length
+        ? tryCom("apply", ["-PlanJson", winPath(file)], SI_DOC)
+        : { ok: false, error: `no change of ${SI_ONLY} with its comment in ${names.si}` };
+    return { plan, applied };
+  };
+  const letters = () =>
+    fs
+      .readdirSync(RUN)
+      .filter((f) => /\.response.*\.(docx|txt)$/.test(f))
+      .sort()
+      .map((f) => ({ file: f, ...statOf(path.join(RUN, f)) }));
+  const guarded = async (id, step, run) => {
+    try {
+      partsRow(id, step, await run());
+    } catch (e) {
+      partsRow(id, step, { pass: false, got: `the step threw: ${firstLine(e)}` });
+    }
+  };
+  fs.mkdirSync(partsDir, { recursive: true });
+
+  // k. The change of the supplement is accepted in Word; the letter of the
+  // manuscript counts it and cites it under the name of the file.
+  await guarded(
+    "k",
+    `the change of ${SI_ONLY} accepted in ${names.si}: the letter of ${names.paper} counts it and cites it under the name of the file`,
+    async () => {
+      const at = readLog(daemonLog).length;
+      const named = pane("link-label", { label: LABEL }, S);
+      // Saved once more, so that the copy is the file with the change pending.
+      const savedPending = tryCom("save", ["-AllowDir", winPath(RUN)], SI_DOC);
+      let copied = { ok: true };
+      try {
+        fs.copyFileSync(SI_DOC, pendingCopy);
+      } catch (e) {
+        copied = { ok: false, error: firstLine(e) };
+      }
+      const { plan, applied } = decide("accept", "accept-plan");
+      const saved = tryCom("save", ["-AllowDir", winPath(RUN)], SI_DOC);
+      const refreshed = pane("refresh", {}, S);
+      const closed = closeSi();
+      const fileAfter = statOf(SI_DOC);
+      const si = readJson(SI_REVISION);
+      // The manuscript: the other comments are declined, so that only the
+      // comment of the supplement decides whether the letter can be written.
+      pane("open-response", {}, P);
+      const declined = pane(
+        "response-decline",
+        {
+          comments: others.map((ref) => ({
+            ref,
+            reason: "This point is answered in the next round of the revision.",
+          })),
+          open_requests: false,
+        },
+        P,
+      );
+      const drafted = pane("response-draft", { ref: SI_ONLY }, P);
+      const check = pane("response-check", {}, P);
+      const failing = (check.checks ?? []).some((row) => /^FAIL /.test(row));
+      // Pressed only when nothing fails: the button would force the export.
+      const exported = check.ok === false || failing ? null : pane("response-export", {}, P);
+      record.parts.cited = {
+        named,
+        savedPending,
+        copied,
+        plan,
+        applied,
+        saved,
+        refreshed,
+        closed,
+        fileAfter,
+        doc_state: si?.doc_state ?? null,
+        declined,
+        drafted,
+        check,
+        exported,
+      };
+      return partsCited({
+        named,
+        label: LABEL,
+        plan,
+        applied,
+        saved,
+        refreshed,
+        closed,
+        fileAfter,
+        si,
+        paper: readJson(REVISION),
+        drafted,
+        check,
+        exported,
+        model: readJson(path.join(RUN, `${STEM}.response.model.json`)),
+        log: readLog(daemonLog).slice(at),
+        ref: SI_ONLY,
+        names,
+      });
+    },
+  );
+
+  // l. The supplement changes on disk and its pane does not refresh: the
+  // manuscript cannot confirm what its review file records.
+  await guarded(
+    "l",
+    `${names.si} changed and saved without a refresh: the check of ${names.paper} fails with part_state and the letter is not exported`,
+    async () => {
+      const at = readLog(daemonLog).length;
+      const recorded = readJson(SI_REVISION)?.doc_state ?? null;
+      // Closed in row k. Asked again, should that close have failed: the
+      // file cannot be put back while Word holds it.
+      closeSi();
+      let restored = { ok: true };
+      try {
+        fs.copyFileSync(pendingCopy, SI_DOC);
+      } catch (e) {
+        restored = { ok: false, error: firstLine(e) };
+      }
+      const reopened = openSi();
+      const isOpen = reopened.ok === true;
+      const { plan, applied } = decide("reject", "reject-plan", isOpen);
+      const saved = isOpen ? tryCom("save", ["-AllowDir", winPath(RUN)], SI_DOC) : NOT_OPEN;
+      const closed = isOpen ? closeSi() : NOT_OPEN;
+      const fileNow = statOf(SI_DOC);
+      const recordedNow = readJson(SI_REVISION)?.doc_state ?? null;
+      const lettersBefore = letters();
+      const exportBefore = readJson(REVISION)?.response_export ?? null;
+      // Refreshed, not checked: the button reads "Export letter (.docx)" and
+      // the export is asked for without force.
+      const opened = pane("open-response", {}, P);
+      const exported = pane("response-export", {}, P);
+      record.parts.guard = {
+        recorded,
+        restored,
+        reopened,
+        plan,
+        applied,
+        saved,
+        closed,
+        fileNow,
+        recordedNow,
+        opened,
+        exported,
+      };
+      return partsGuard({
+        restored,
+        reopened,
+        plan,
+        applied,
+        saved,
+        closed,
+        recorded,
+        recordedNow,
+        fileNow,
+        opened,
+        exported,
+        letters: [lettersBefore, letters()],
+        export: [exportBefore, readJson(REVISION)?.response_export ?? null],
+        log: readLog(daemonLog).slice(at),
+        ref: SI_ONLY,
+        names,
+      });
+    },
+  );
+
+  // m. Opened again and refreshed: the record is confirmed and says that the
+  // change was rejected.
+  await guarded(
+    "m",
+    `${names.si} opened again and refreshed: the request of ${SI_ONLY} is open again and its answer is stale`,
+    async () => {
+      // Closed in row l; Word gives the open document when it is not.
+      const reopened = openSi();
+      pane("open-review", {}, S);
+      const refreshed = pane("refresh", {}, S);
+      const fileNow = statOf(SI_DOC);
+      const si = readJson(SI_REVISION);
+      pane("open-response", {}, P);
+      const check = pane("response-check", {}, P);
+      record.parts.reopened = { reopened, refreshed, fileNow, doc_state: si?.doc_state, check };
+      return partsReopened({
+        reopened,
+        refreshed,
+        fileNow,
+        si,
+        check,
+        ref: SI_ONLY,
+        names,
+      });
+    },
+  );
+
+  // j. Leave. Row j reads the pane of the supplement: it must be open.
+  if (record.parts.reopened?.reopened?.ok !== true) {
+    openSi();
+    pane("open-review", {}, S);
+  }
   {
     const siBefore = readJson(SI_REVISION);
     const view = pane("link-leave", {}, S);

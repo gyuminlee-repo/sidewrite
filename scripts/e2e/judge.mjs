@@ -1977,6 +1977,288 @@ export function partsSessions(log, names) {
   };
 }
 
+// ---- k to m: the letter of the manuscript and the supplementary file --------
+// (README "Supplementary Word documents", step A3)
+
+// The ops of word-com.ps1 apply for the changes of one comment, all with one
+// decision ("accept" or "reject"). revision: the review file of the document
+// the plan is applied to.
+export function partsPlan(revision, ref, op) {
+  return buildComPlan(
+    { comments: (revision?.comments ?? []).filter((c) => c.ref === ref) },
+    { [ref]: op },
+  );
+}
+const planApplied = (applied, plan) =>
+  applied?.ok === true &&
+  (plan?.ops ?? []).length > 0 &&
+  (applied.results ?? []).length === plan.ops.length &&
+  applied.results.every((r) => !r.error);
+const appliedLine = (applied, plan) =>
+  applied?.ok === undefined && !applied?.error
+    ? "not tried"
+    : (applied?.error ??
+      `${(plan?.ops ?? []).length} op(s): ${
+        (applied?.results ?? [])
+          .map((r) => `${r.change_id} ${r.op}${r.error ? ` ERR ${r.error}` : ""}`)
+          .join("; ") || "no result"
+      }`);
+const statesOf = (rev, ref) =>
+  ((rev?.comments ?? []).find((c) => c.ref === ref)?.changes ?? []).map((ch) => ch.state);
+const sameFile = (a, b) => !!a && !!b && a.mtime === b.mtime && a.bytes === b.bytes;
+const fileLineOf = (f) => (f ? `${f.mtime}, ${f.bytes} bytes` : "not read");
+const failRows = (view, re) => (view?.checks ?? []).filter((row) => re.test(row));
+const cardOf = (view, ref) => (view?.cards ?? []).find((c) => c.ref === ref);
+// The row of the check that says the record of a supplementary file cannot
+// be confirmed (response-check.mjs partStateText: three reasons, one advice).
+const partStateRow = (name) =>
+  new RegExp(`^FAIL part_state: .*${escapeRe(name)}.* Open it, save, press Refresh\\.$`);
+
+// k. The change of the supplementary file was accepted in Word, the file
+// saved, refreshed and closed; then, in the manuscript, the answer was
+// drafted, checked and the letter exported without force.
+//   plan, applied: the ops and what word-com.ps1 apply answered
+//   named: the link-label step; label: the name it gave the file
+//   si, paper: the two review files after the steps; fileAfter: the file of
+//   the supplement on disk after it was closed
+//   check: the Response tab after "Run checks"; exported: after the export
+//   (null: not pressed, a check failed); model: the letter model on disk
+//   log: the daemon log of the row
+export function partsCited(r) {
+  const { ref, names, label } = r;
+  const states = statesOf(r.si, ref);
+  const state = r.si?.doc_state ?? null;
+  const own = ((r.si?.comments ?? []).find((c) => c.ref === ref)?.response?.citations ?? []).filter(
+    (c) => c.kind !== "removed",
+  );
+  const cited = (
+    (r.paper?.comments ?? []).find((c) => c.ref === ref)?.response?.citations ?? []
+  ).filter((c) => c.doc === names.si);
+  const card = cardOf(r.check, ref);
+  const failing = failRows(r.check, new RegExp(`^FAIL (${escapeRe(ref)} |part_state: )`));
+  const rows = r.model?.paragraphs ?? [];
+  const at = rows.findIndex(
+    (p) => p.kind === "location" && p.ref === ref && p.text.startsWith(`${label} [Revised in `),
+  );
+  const quote = at >= 0 && rows[at + 1]?.kind === "quote" ? rows[at + 1].text : null;
+  const link = (r.paper?.parts ?? []).find((p) => String(p.doc ?? "").endsWith(names.si));
+  return partsVerdict(
+    [
+      {
+        name: `${names.si} pane: the file is given its name in the letter`,
+        ok: r.named?.ok !== false && link?.label === label,
+        expect: `"${label}" in the link of ${names.paper}`,
+        found:
+          r.named?.error ??
+          `message "${r.named?.message ?? ""}", link label ${show(link?.label ?? null)}`,
+      },
+      {
+        name: `${names.si} in Word: the change(s) of ${ref} accepted`,
+        ok: planApplied(r.applied, r.plan),
+        expect: "every op applied",
+        found: appliedLine(r.applied, r.plan),
+      },
+      {
+        name: `${names.si}: saved through Word, then closed`,
+        ok: r.saved?.ok === true && r.closed?.ok === true,
+        expect: "save ok, close ok",
+        found: `save ${r.saved?.ok === true ? "ok" : (r.saved?.error ?? "not ok")}, close ${r.closed?.ok === true ? "ok" : (r.closed?.error ?? "not ok")}`,
+      },
+      {
+        name: `review file of ${names.si}: every change of ${ref} is accepted`,
+        ok: states.length > 0 && states.every((s) => s === "accepted"),
+        expect: "accepted",
+        found: r.refreshed?.error ?? states,
+      },
+      {
+        name: `review file of ${names.si}: the refresh was taken on a saved document, and the file on disk is still that file`,
+        ok: state?.saved === true && sameFile(state.file, r.fileAfter),
+        expect: `saved true, file ${fileLineOf(r.fileAfter)}`,
+        found: state
+          ? `saved ${show(state.saved)}, file ${fileLineOf(state.file)} (refreshed ${state.at})`
+          : "no doc_state",
+      },
+      {
+        name: `review file of ${names.si}: what the letter may cite of ${ref} is written there, without line numbers`,
+        ok: own.length > 0 && own.every((c) => c.quote && !c.lines),
+        expect: "at least one citation with a quote and no lines",
+        found: `${own.length} citation(s)${own.some((c) => c.lines) ? ", with lines" : ""} | refresh: ${r.refreshed?.error ?? r.refreshed?.message ?? ""}`,
+      },
+      {
+        name: `${names.paper} pane: an answer for ${ref} was drafted`,
+        ok: r.drafted?.ok !== false && String(card?.text ?? "").trim() !== "",
+        expect: "a text in the answer box",
+        found: r.drafted?.error ?? `${String(card?.text ?? "").length} characters`,
+      },
+      {
+        name: `${names.paper} pane: no failing check for ${ref}, none for the state of ${names.si}`,
+        ok: r.check?.ok !== false && /^Checked: /.test(r.check?.message ?? "") && !failing.length,
+        expect: "Checked: ..., no such FAIL row",
+        found: r.check?.error ?? (failing.length ? failing : (r.check?.message ?? "")),
+      },
+      {
+        name: `${names.paper} pane: the card of ${ref} cites ${label}`,
+        ok: (card?.citations ?? []).some((c) => c.line.startsWith(`${label} [`)),
+        expect: `a location line that starts with "${label} ["`,
+        found: (card?.citations ?? []).map((c) => c.line),
+      },
+      {
+        name: `${names.paper} pane: the letter is exported without force`,
+        ok: /^Exported/.test(r.exported?.message ?? ""),
+        expect: "Exported: ...",
+        found: r.exported
+          ? (r.exported.error ?? r.exported.message)
+          : `not pressed, the button would force the export: ${show(failRows(r.check, /^FAIL /))}`,
+      },
+      {
+        name: `letter: a location line of ${ref} names ${label}, with a quote of ${names.si} under it`,
+        ok: quote !== null && cited.some((c) => c.quote === quote),
+        expect: `"${label} [Revised in ...]", then a quote the review file of ${names.paper} records for ${names.si}`,
+        found:
+          at < 0
+            ? rows.filter((p) => p.kind === "location" && p.ref === ref).map((p) => p.text)
+            : `${rows[at].text} | ${show(quote)} | recorded: ${show(cited.map((c) => c.quote))}`,
+      },
+      {
+        name: "the verifier passed on the exported letter",
+        ok: /^\[response\] export path=.* verify=ok$/m.test(String(r.log ?? "")),
+        expect: "[response] export path=... verify=ok",
+        found:
+          (String(r.log ?? "").match(/^\[response\] export .*$/gm) ?? []).join(" ; ") ||
+          "no export line in the daemon log",
+      },
+    ],
+    at >= 0 ? `${rows[at].text} | ${show(quote)}` : "",
+  );
+}
+
+// l. The supplementary file was changed in Word and saved, and its pane did
+// not refresh: the manuscript's check fails with part_state and the letter
+// is not exported without force.
+//   restored: the file as it was before the accept was put back (Word cannot
+//   reject a change it has accepted); recorded: doc_state of the review file
+//   after row k; recordedNow: the same after this row's save and close;
+//   fileNow: the file on disk; opened: the Response tab before the export was
+//   pressed; exported: after it; letters, export: [before, after] of the
+//   letter files of the run and of response_export in the manuscript's file
+export function partsGuard(r) {
+  const { ref, names } = r;
+  const rows = failRows(r.exported, partStateRow(names.si));
+  const refreshedSince = r.recorded?.at !== r.recordedNow?.at;
+  const same = (pair) => JSON.stringify(pair?.[0] ?? null) === JSON.stringify(pair?.[1] ?? null);
+  return partsVerdict(
+    [
+      {
+        name: `${names.si}: reopened as it was before the accept, the change(s) of ${ref} rejected in Word, saved, closed`,
+        ok:
+          r.restored?.ok === true &&
+          r.reopened?.ok === true &&
+          planApplied(r.applied, r.plan) &&
+          r.saved?.ok === true &&
+          r.closed?.ok === true,
+        expect: "every step ok",
+        found: `put back: ${r.restored?.ok === true ? "ok" : (r.restored?.error ?? "not ok")}; open: ${r.reopened?.ok === true ? "ok" : (r.reopened?.error ?? "not ok")}; reject: ${appliedLine(r.applied, r.plan)}; save: ${r.saved?.ok === true ? "ok" : (r.saved?.error ?? "not ok")}; close: ${r.closed?.ok === true ? "ok" : (r.closed?.error ?? "not ok")}`,
+      },
+      {
+        name: `${names.si} on disk is no longer the file its review file records`,
+        ok: !!r.fileNow && !!r.recordedNow?.file && !sameFile(r.recordedNow.file, r.fileNow),
+        expect: `another time or size than ${fileLineOf(r.fileNow)}`,
+        found: `${fileLineOf(r.recordedNow?.file)}${
+          refreshedSince
+            ? ` (the pane of ${names.si} refreshed by itself: doc_state.at ${r.recorded?.at} -> ${r.recordedNow?.at})`
+            : ""
+        }`,
+      },
+      {
+        name: `${names.paper} pane: the export button did not offer to force`,
+        ok: r.opened?.ok !== false && r.opened?.export_label === "Export letter (.docx)",
+        expect: "Export letter (.docx)",
+        found: r.opened?.error ?? r.opened?.export_label ?? "",
+      },
+      {
+        name: `${names.paper} pane: the check fails with part_state for ${names.si}`,
+        ok: rows.length === 1,
+        expect: `FAIL part_state: ${names.si} changed since Sidewrite last read it. Open it, save, press Refresh.`,
+        found: r.exported?.error ?? failRows(r.exported, /^FAIL /),
+      },
+      {
+        name: `${names.paper} pane: the letter is not exported`,
+        ok: /^Not exported: /.test(r.exported?.message ?? "") && same(r.letters) && same(r.export),
+        expect:
+          "Not exported: ..., the letter files and the record of the last export as they were",
+        found: `${r.exported?.error ?? r.exported?.message ?? ""} | letter files ${same(r.letters) ? "unchanged" : show(r.letters?.[1])} | record ${same(r.export) ? "unchanged" : "changed"}`,
+      },
+      {
+        name: "daemon log: the export was held",
+        ok: /^\[response\] export held fail=[1-9]/m.test(String(r.log ?? "")),
+        expect: "[response] export held fail=n",
+        found:
+          (String(r.log ?? "").match(/^\[response\] export .*$/gm) ?? []).join(" ; ") ||
+          "no export line in the daemon log",
+      },
+    ],
+    `${rows[0] ?? ""}${refreshedSince ? ` | the pane of ${names.si} refreshed by itself before the save (doc_state.at ${r.recorded?.at} -> ${r.recordedNow?.at})` : ""}`,
+  );
+}
+
+// m. The supplementary file was opened again and refreshed: its record is
+// confirmed, the change is rejected, so the request is open again and the
+// answer that cited the change is stale.
+//   reopened: word-com.ps1 open-edit; refreshed: the refresh in its pane;
+//   si: its review file after it; fileNow: the file on disk;
+//   check: the Response tab of the manuscript after "Run checks"
+export function partsReopened(r) {
+  const { ref, names } = r;
+  const states = statesOf(r.si, ref);
+  const state = r.si?.doc_state ?? null;
+  const guard = failRows(r.check, partStateRow(names.si));
+  const open = failRows(r.check, new RegExp(`^FAIL ${escapeRe(ref)} requirements: `));
+  const card = cardOf(r.check, ref);
+  return partsVerdict(
+    [
+      {
+        name: `${names.si}: opened again and refreshed`,
+        ok: r.reopened?.ok === true && r.refreshed?.ok !== false,
+        expect: "open ok, refresh ok",
+        found: `open: ${r.reopened?.ok === true ? "ok" : (r.reopened?.error ?? "not ok")}; refresh: ${r.refreshed?.error ?? r.refreshed?.message ?? ""}`,
+      },
+      {
+        name: `review file of ${names.si}: every change of ${ref} is rejected`,
+        ok: states.length > 0 && states.every((s) => s === "rejected"),
+        expect: "rejected",
+        found: states,
+      },
+      {
+        name: `review file of ${names.si}: the refresh was taken on a saved document, and the file on disk is that file`,
+        ok: state?.saved === true && sameFile(state.file, r.fileNow),
+        expect: `saved true, file ${fileLineOf(r.fileNow)}`,
+        found: state
+          ? `saved ${show(state.saved)}, file ${fileLineOf(state.file)}`
+          : "no doc_state",
+      },
+      {
+        name: `${names.paper} pane: no failing check for the state of ${names.si}`,
+        ok: r.check?.ok !== false && /^Checked: /.test(r.check?.message ?? "") && !guard.length,
+        expect: "Checked: ..., no FAIL part_state row",
+        found: r.check?.error ?? (guard.length ? guard : (r.check?.message ?? "")),
+      },
+      {
+        name: `${names.paper} pane: the request of ${ref} is open again`,
+        ok: open.length > 0 && (card?.open_reqs ?? []).length > 0,
+        expect: `FAIL ${ref} requirements: ..., and the request shown as open on its card`,
+        found: `${show(open)} | open on the card: ${show(card?.open_reqs ?? [])}`,
+      },
+      {
+        name: `${names.paper} pane: the answer of ${ref} is marked stale`,
+        ok: String(card?.stale ?? "") !== "",
+        expect: "a stale line on the card (A cited change is no longer accepted)",
+        found: card ? card.stale : "no card",
+      },
+    ],
+    `${open[0] ?? ""} | ${card?.stale ?? ""}`,
+  );
+}
+
 // A line of the daemon log that names a document: is every document it
 // names one of this run's own files by its bare name ("SI.docx", as the link
 // lines of the daemon write them)? names: the file names of the run.
