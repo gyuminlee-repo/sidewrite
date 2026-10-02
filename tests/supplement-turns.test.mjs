@@ -27,6 +27,7 @@ import {
   outsideNotes,
 } from "../daemon/revision-parts.mjs";
 import { createReviewService, docState } from "../daemon/review-service.mjs";
+import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 import {
   buildReviewPrompt,
   rulesFor,
@@ -651,6 +652,76 @@ test("author answers are shared read-only: a turn in either file gets what was a
     );
     // A file in no revision asks nobody.
     assert.deepEqual(await texts("other.docx", "R1.1"), []);
+  } finally {
+    await w.cleanup();
+  }
+});
+
+test("the forbidden list is enforced before the edit in a supplement, by the pre-check of the manuscript", async () => {
+  const w = await world();
+  try {
+    // The rule is the manuscript's; the supplement copies it on its next load.
+    const added = await w.ask("paper.docx", "ledger_add", {
+      item: {
+        kind: "forbid",
+        text: "do not write novel",
+        check: { type: "regex", pattern: String.raw`\bnovel\b`, flags: "i" },
+      },
+    });
+    assert.equal(added.ok, true, added.error);
+    assert.equal((await w.ask("SI.docx", "review_load")).revision.ledger[0].id, "L1");
+    const sentence = "The invented carbon source was added to each flask.";
+    for (const key of ["paper.docx", "SI.docx"]) {
+      await w.ask(key, "review_refresh", { snapshot: snapOf("Methods", sentence) });
+    }
+    const calls = [];
+    const edit = (key, replace) =>
+      applyTrackedEdit(
+        {
+          ...w.service.trackedEditDeps(key),
+          call: async (name) => {
+            calls.push([key, name]);
+            return {
+              ok: true,
+              word_comment_id: 5,
+              paragraph_index: 1,
+              before: sentence,
+              after: sentence.replace("invented carbon source", replace),
+            };
+          },
+        },
+        {
+          comment_ref: "R1.2",
+          find: "invented carbon source",
+          replace,
+          rationale: { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] },
+        },
+        { ref: "R1.2" },
+      );
+    const blockedOf = async (name) =>
+      (await w.file(name)).comments
+        .find((c) => c.ref === "R1.2")
+        .blocked.map((x) => [x.state, x.blocked_by, x.args.replace]);
+    // In the supplement: refused by L1, Word is never called, and the
+    // blocked edit is on record in the supplement's own review file.
+    const inSupp = await edit("SI.docx", "novel carbon source");
+    assert.equal(inSupp.ok, false);
+    assert.deepEqual(inSupp.blocked_by, ["L1"]);
+    assert.deepEqual(calls, [], "Word was not called");
+    assert.deepEqual(await blockedOf("SI.docx"), [["blocked", ["L1"], "novel carbon source"]]);
+    assert.deepEqual(await blockedOf("paper.docx"), []);
+    assert.equal((await w.file("SI.docx")).comments[1].changes.length, 0);
+    // The same edit in the manuscript gets the same answer from the same check.
+    const inMain = await edit("paper.docx", "novel carbon source");
+    assert.deepEqual([inMain.ok, inMain.code, inMain.blocked_by], [false, inSupp.code, ["L1"]]);
+    assert.deepEqual(calls, []);
+    // An edit without the word goes to Word, from the pane of the supplement
+    // only, and is recorded in its review file.
+    const fine = await edit("SI.docx", "defined carbon source");
+    assert.equal(fine.ok, true, JSON.stringify(fine));
+    assert.deepEqual(calls, [["SI.docx", "office_tracked_edit"]]);
+    assert.equal((await w.file("SI.docx")).comments[1].changes.length, 1);
+    assert.equal((await w.file("paper.docx")).comments[1].changes.length, 0);
   } finally {
     await w.cleanup();
   }
