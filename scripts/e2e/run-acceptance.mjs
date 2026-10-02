@@ -36,6 +36,8 @@ import {
   FORBID_GUARD_EDIT,
   FORBID_GUARD_SEED_RULE,
   forbidBlockEvidence,
+  shotName,
+  stepTiming,
   JUDGES,
   judge,
   langEvidence,
@@ -136,6 +138,11 @@ const { values: opt } = parseArgs({
     // CONDITIONS). Repeat the flag or separate ids with commas.
     conditional: { type: "string", multiple: true, default: [] },
     "skip-knob": { type: "boolean", default: false },
+    // A PNG of the task pane after every pane step, the tabs before anything
+    // is pasted, the Word window once and the pane without a daemon, in
+    // <run folder>/shots, with shots/timings.json (how long each step took
+    // and what the pane showed meanwhile).
+    screenshots: { type: "boolean", default: false },
     // Leave out the second Word run on a compatibility mode 14 copy.
     "skip-mode14": { type: "boolean", default: false },
     // Leave out the Word run on the document of tracked special characters.
@@ -258,10 +265,19 @@ const psList = (cmd) =>
 const wordPids = () =>
   psList("(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','");
 
+// --screenshots: the PNG of each pane step and the record of its wait.
+const SHOTS = path.join(RUN, "shots");
+const timings = [];
+let shotNo = 0;
 let paneTag = "";
 let pane = (step, args = {}) => {
   const argsFile = path.join(RUN, `args-${paneTag}${step}.json`);
   fs.writeFileSync(argsFile, JSON.stringify(args));
+  const shot = opt.screenshots
+    ? path.join(SHOTS, shotName(++shotNo, `${paneTag}${step}`, args))
+    : null;
+  if (shot) fs.mkdirSync(SHOTS, { recursive: true });
+  const t0 = Date.now();
   let out;
   try {
     out = execFileSync(
@@ -276,7 +292,10 @@ let pane = (step, args = {}) => {
           ...process.env,
           PLAYWRIGHT_CORE: opt["playwright-core"],
           E2E_CDP_PORT: opt["cdp-port"],
-          WSLENV: [process.env.WSLENV, "PLAYWRIGHT_CORE", "E2E_CDP_PORT"].filter(Boolean).join(":"),
+          ...(shot ? { E2E_SHOT: winPath(shot) } : {}),
+          WSLENV: [process.env.WSLENV, "PLAYWRIGHT_CORE", "E2E_CDP_PORT", shot && "E2E_SHOT"]
+            .filter(Boolean)
+            .join(":"),
         },
       },
     );
@@ -284,8 +303,46 @@ let pane = (step, args = {}) => {
     out = e.stdout || JSON.stringify({ ok: false, error: e.message });
   }
   const line = String(out).replace(/\r/g, "").trim().split("\n").filter(Boolean).pop();
-  return JSON.parse(line);
+  const result = JSON.parse(line);
+  if (shot) {
+    timings.push(
+      stepTiming({
+        n: shotNo,
+        step: `${paneTag}${step}`,
+        args,
+        shot: path.basename(shot),
+        seconds: Math.round((Date.now() - t0) / 100) / 10,
+        result,
+      }),
+    );
+    fs.writeFileSync(path.join(SHOTS, "timings.json"), JSON.stringify(timings, null, 2));
+  }
+  return result;
 };
+// --screenshots only: a tab as it is, nothing pressed. Never a step of the
+// run: what it answers is not judged.
+const showTab = (tab) => (opt.screenshots ? pane("show-tab", { tab }) : null);
+// --screenshots only: the whole Word window of this run (pane beside the
+// document), drawn by the window itself (PrintWindow), so nothing of another
+// window is in the picture.
+function wordWindowShot(name) {
+  if (!opt.screenshots) return;
+  const file = path.join(SHOTS, name);
+  let got;
+  try {
+    got = powershell("word-shot.ps1", [
+      "-ProcessId",
+      String(record.word.launch.pid),
+      "-Out",
+      winPath(file),
+    ]);
+  } catch (e) {
+    got = { ok: false, error: String(e?.message ?? e).split("\n")[0] };
+  }
+  // A picture whose pane came out black is not kept (word-shot.ps1).
+  record.word_window_shot = { file: got.ok ? name : null, ...got };
+  save();
+}
 
 // ---- daemon ----------------------------------------------------------------
 const listening = (port) => {
@@ -486,7 +543,7 @@ async function propose(ref, label) {
 // Both flows: the run folder, the daemon, a Word of its own on the copy.
 async function setup() {
   fs.mkdirSync(TOOLS, { recursive: true });
-  for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1"])
+  for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1", "word-shot.ps1"])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   // The installed daemon holds both ports: it makes way for the run.
   resident = pauseResident();
@@ -529,6 +586,9 @@ async function setup() {
 
 // Stage 2 (procedure of the stage-2 plan, S2-18..S2-34).
 async function main() {
+  // --screenshots: the pane as it opens on a document nothing was done with,
+  // and every tab before anything is pasted or pressed.
+  for (const tab of ["chat", "review", "response", "tools", "library", "setup"]) showTab(tab);
   note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
   // A provider that cannot run review turns is refused here with its reason
   // (the step fails); the turns below then run with Claude.
@@ -544,7 +604,19 @@ async function main() {
   note("ledger-add", pane("ledger-add", { ledger_file: winPath(opt.ledger) }));
   note("check-all", pane("check-all"));
   note("preview", pane("preview", { ref: "R1.3" }), { label: "preview R1.3" });
-  for (const ref of ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"]) await propose(ref);
+  for (const ref of ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"]) {
+    await propose(ref);
+    // --screenshots: once a first tracked change is in, the Word window.
+    if (ref === "R1.1") wordWindowShot("word-window-after-R1.1.png");
+  }
+  if (opt.screenshots) {
+    // After the turns: the chat, the three model rows of Setup, and what
+    // "Check revised paragraphs" answers. None of it is judged.
+    showTab("chat");
+    showTab("setup");
+    showTab("review");
+    pane("check-paragraphs");
+  }
 
   // Knob: the model may avoid "novel" once it sees the forbidden list; then
   // the block is shown with the list left out of the prompt (procedure 8).
@@ -1493,6 +1565,18 @@ async function tidy() {
 if (STAGE === "s2") {
   // Verify commands first: S2-18 checks that the daemon still listens.
   verify();
+  if (opt.screenshots && !failed) {
+    // What a user sees when the daemon does not answer. After the verify
+    // commands, before the cleanup; nothing of it is judged.
+    await stopDaemon().catch((e) => (record.screenshots_error = e.message));
+    showTab("chat");
+    showTab("review");
+    pane("refresh-offline");
+    // The daemon again, for the Word runs of the cleanup that use it.
+    await startDaemon(daemonLog, {}, { append: true }).catch(
+      (e) => (record.screenshots_error = e.message),
+    );
+  }
   await tidy();
 } else {
   // Stage 3: its features before the cleanup, then the ones of

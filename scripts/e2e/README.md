@@ -221,6 +221,36 @@ Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
 `--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
 `--keep-on-fail` (leave Word and the daemon up after a failed step).
 
+`--screenshots` (off by default) saves two PNGs of the task pane after every
+pane step in `shots/` of the run folder: `NN-<step>[-<comment or tab>].png`
+is the window of the pane as the user sees it, with what the step was for
+scrolled into view (the card of its comment, else the message line), and
+`...-full.png` is the whole tab. The pane scrolls inside an element, so a
+full-page picture alone is the window again; for the whole tab the elements
+it scrolls in are let grow for the moment of the picture and every style and
+scroll position is put back. A step that takes that long is photographed 4 s
+and 20 s in as well (`-wait1`, `-wait2`, both files), with nothing scrolled:
+that is what the click left the user with. A step that fails is photographed
+too.
+
+`shots/timings.json` has a row per step: the seconds from the start of the
+step to its answer, the seconds of the turn as the step measured them, the
+size of the pane's window in CSS pixels and its pixel ratio, what the pane
+said during the wait (message, progress line, status, the models line),
+whether the progress line was in view then (`progress_in_view`), and whether
+the step waits for a model.
+
+Stage 2 adds pictures that are not steps of the run and are not judged: every
+tab before anything is pasted, the chat and Setup after the turns, the answer
+of "Check revised paragraphs", the Word window of the run once the first
+tracked change is in, and after the verify commands the pane with the daemon
+stopped ("Refresh status" pressed), after which the daemon is started again
+for the cleanup. The Word window is drawn by the window itself
+(`word-shot.ps1`, PrintWindow at the real pixel size), so no other window is
+in the picture and it is not moved or focused; when more than a tenth of it
+comes out black (the WebView2 pane can), no file is written and
+`word_window_shot` in `result.json` says `dropped` with the share.
+
 ## Pane steps
 
 `pane-driver.cjs <step> <args.json>` runs one step and prints one JSON line.
