@@ -188,10 +188,27 @@ export function createFigureService({
 
   // A folder this service writes to, made when it is not there. A link that
   // leads out of the manuscript folder is refused.
+  // Checked before anything is created: the nearest ancestor of the folder
+  // that exists (the figures folder itself may not be there yet) must
+  // resolve inside the manuscript folder, so no folder is ever made on the
+  // far side of a link. Checked again once it is there.
   async function writable(docDir, dir) {
+    const root = await realpath(docDir);
+    const inside = (real) => real === root || under(root, real);
+    const outside = () => refuse(`${dir} leads outside the manuscript folder.`);
+    let at = dir;
+    for (;;) {
+      const real = await realpath(at).catch((e) => (e.code === "ENOENT" ? null : outside()));
+      if (real !== null) {
+        if (!inside(real)) outside();
+        break;
+      }
+      const up = dirname(at);
+      if (up === at) outside();
+      at = up;
+    }
     await mkdir(dir, { recursive: true });
-    const [root, real] = await Promise.all([realpath(docDir), realpath(dir)]);
-    if (!under(root, real)) refuse(`${dir} leads outside the manuscript folder.`);
+    if (!under(root, await realpath(dir))) outside();
     return dir;
   }
 
