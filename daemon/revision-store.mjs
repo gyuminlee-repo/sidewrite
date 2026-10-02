@@ -400,6 +400,19 @@ const External = z.object({
   lost_facts: z.array(z.string()).default([]),
 });
 
+// A copy made from the saved manuscript. path: relative to the manuscript
+// folder ("/" separators) when the copy is under it, absolute otherwise.
+// sha256: the copy when it was made. source_sha256: the saved manuscript it
+// was made from.
+const Artifact = z.object({
+  path: z.string().min(1),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  at: z.string(),
+  source_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
+// mode: how the marked copy shows the changes (aux-service.mjs MARKED_MODES).
+const MarkedArtifact = Artifact.extend({ mode: z.string() });
+
 export const RevisionSchema = z.object({
   version: z.literal(REVISION_VERSION),
   manuscript: z.string(),
@@ -482,6 +495,13 @@ export const RevisionSchema = z.object({
       exported_at: z.string(),
       fail: z.number().int(),
       warn: z.number().int(),
+      // What the letter said and the bytes of the file that was written
+      // (response-model.mjs letterModelSha, sha256 of the docx). Not there:
+      // an export from before they were recorded, or a file an earlier daemon
+      // saved; the submission checklist then asks for a new export. They are
+      // optional and get no default, so such a file saves as it was loaded.
+      model_sha: z.string().nullish(),
+      docx_sha: z.string().nullish(),
     })
     .nullable()
     .default(null),
@@ -491,6 +511,14 @@ export const RevisionSchema = z.object({
     .object({ dir: z.string().min(1) })
     .nullable()
     .default(null),
+  // The copies made from the saved manuscript (aux-service.mjs marked_build,
+  // anonymize), each as it was when it was made and verified. Optional and
+  // without a default: a file from before them saves as it was loaded, and
+  // an earlier daemon drops them, after which the submission checklist asks
+  // for the copy again.
+  artifacts: z
+    .object({ marked: MarkedArtifact.nullish(), anonymized: Artifact.nullish() })
+    .nullish(),
 });
 
 // ---- paths ----------------------------------------------------------------
@@ -1317,3 +1345,16 @@ export function setProfile(rev, { journal_profile, overrides } = {}) {
 
 export const setRender = (rev, render) => ({ ...clone(rev), response_render: render });
 export const setExport = (rev, exported) => ({ ...clone(rev), response_export: exported });
+
+// The record of a copy made from the saved manuscript. kind: "marked" or
+// "anonymized". artifact null: the record of that copy is taken away.
+export function setArtifact(rev, kind, artifact) {
+  if (kind !== "marked" && kind !== "anonymized") throw new Error(`Unknown copy: ${kind}`);
+  const next = clone(rev);
+  const all = { ...(next.artifacts ?? {}) };
+  if (artifact) all[kind] = artifact;
+  else delete all[kind];
+  if (Object.keys(all).length) next.artifacts = all;
+  else delete next.artifacts;
+  return next;
+}

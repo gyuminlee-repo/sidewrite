@@ -6,7 +6,7 @@
 // Jobs (AUX_JOBS; they call a model or a Python tool): accepted at once, the
 // result follows as { type: "tools_event", event: "job_done", job_id, result }.
 //   selection_translate, selection_ask, profile_rules_extract, marked_build,
-//   anonymize
+//   anonymize, submission_check
 //
 // The selection requests get the selected text from the pane and answer with
 // text for the pane. They read no file and no revision, and nothing of the
@@ -34,8 +34,16 @@
 // the count rules of the ledger (count-check.mjs) over the snapshot and the
 // headings. Nothing of the result is stored.
 //
+// Submission checklist. submission_check answers the rows of "Before
+// submission" (submission-check.mjs) for the document as the pane read it
+// just now. The record is brought up to date with that document in memory
+// and is not saved; nothing of a row is stored.
+//
 // Nothing here writes to the open document. A copy (marked, anonymized) is a
 // new file next to the manuscript, made from the file as it was last saved.
+// A copy that was made and passed its check is put on record with its hash
+// and the hash of the manuscript it was made from (revision.artifacts); the
+// submission checklist compares both with the disk.
 //
 // Handler rules (as in response-service.mjs): the document of a pane is read
 // once per request (at(key)); a failure is an error reply, never a silent
@@ -44,8 +52,9 @@
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
+  setArtifact,
   localDocPath,
   revisionPathFor,
   decisionsPathFor,
@@ -63,10 +72,15 @@ import { SAVE_FIRST } from "./doc-bytes.mjs";
 import { runPy as defaultRunPy } from "./py-tool.mjs";
 import { runMarkedDiff } from "./marked-diff.mjs";
 import { runAnonymize } from "./anonymize.mjs";
-import { findFormatIssues } from "./format-check.mjs";
+import { findFormatIssues, formatRulesOn } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
-import { usableHeadings, writingJob } from "./response-service.mjs";
+import { refreshed, usableHeadings, writingJob } from "./response-service.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
+import { MANUSCRIPT, submissionPaths, submissionRows } from "./submission-check.mjs";
+import { sha256File } from "./figure-service.mjs";
+
+// The Tools tab names the format rules that are on (format-check.mjs).
+export { formatRulesOn };
 
 export const AUX_JOBS = new Set([
   "selection_translate",
@@ -74,6 +88,7 @@ export const AUX_JOBS = new Set([
   "profile_rules_extract",
   "marked_build",
   "anonymize",
+  "submission_check",
 ]);
 
 export const MARKED_MODES = ["track_changes", "color"];
@@ -94,20 +109,6 @@ export const buildAskPrompt = (text, question) => ({
 });
 
 const isObj = (x) => !!x && typeof x === "object" && !Array.isArray(x);
-const named = (x) => Array.isArray(x) && x.some((s) => typeof s === "string" && s);
-
-// The format rules a profile turns on, by name, for the line above the
-// findings. An empty table is always reported.
-export function formatRulesOn(profile = {}) {
-  const italics = profile.italics ?? {};
-  return [
-    italics.statistics === true && "statistics symbols in italics",
-    named(italics.genera) && "species names in italics",
-    named(italics.genes) && "gene names in italics",
-    named(profile.subscripts) && "formula digits in subscript",
-    profile.first_line_indent != null && "first-line indent",
-  ].filter(Boolean);
-}
 
 function selectedText(msg) {
   const text = String(msg.text ?? "").trim();
@@ -157,6 +158,43 @@ export function createAuxService({
       env,
       settingsDefault: langDefault?.() ?? null,
     });
+
+  // The saved manuscript as it is on the disk, before a copy is made from it
+  // (null: it cannot be read; the tool will say so itself).
+  const sourceHash = (d) => sha256File(d.doc).catch(() => null);
+  // Puts a copy that was made and passed its check on record
+  // (revision.artifacts), for the submission checklist: the copy as it is
+  // now and the manuscript it was made from. Recorded only when the
+  // manuscript on the disk is still the file it was before the tool ran;
+  // otherwise the record of that copy is taken away, and the checklist asks
+  // for the copy again. A record that cannot be written does not fail the
+  // copy: the file is there and the pane names it. A manuscript without a
+  // review file gets none for this: a copy made from the Tools tab alone
+  // leaves nothing else next to the manuscript.
+  async function recordCopy(d, kind, path, sourceBefore, extra = {}) {
+    if (!existsSync(d.path)) return;
+    try {
+      const sha256 = await sha256File(path);
+      const source = await sourceHash(d);
+      const same = !!source && source === sourceBefore;
+      const docDir = dirname(d.doc);
+      const rel = relative(docDir, path);
+      const inside = rel && !rel.startsWith("..") && !isAbsolute(rel);
+      const artifact = same
+        ? {
+            path: inside ? rel.split(sep).join("/") : path,
+            sha256,
+            at: new Date().toISOString(),
+            source_sha256: source,
+            ...extra,
+          }
+        : null;
+      await update(d, (rev) => setArtifact(rev, kind, artifact));
+      log(`[tools] ${kind} copy recorded=${same}`);
+    } catch (e) {
+      log(`[tools] ${kind} copy not recorded: ${e?.message ?? e}`);
+    }
+  }
 
   // The model of one job, or an error the pane shows.
   async function modelFor(key, what, options) {
@@ -306,6 +344,7 @@ export function createAuxService({
       if (!base64) throw new Error("Choose the earlier version (.docx) first.");
       if (base64.length > MAX_BASE64) throw new Error("The earlier version is too large to read.");
       const { profile } = await profileOf(d, await load(d));
+      const source = await sourceHash(d);
       const dir = await mkdtemp(join(tmpdir(), "marked-"));
       try {
         // A name of our own: the file name of the pane is not used as a path.
@@ -322,6 +361,7 @@ export function createAuxService({
         });
         log(`[tools] marked_build mode=${msg.mode} ok=${r.ok} path=${r.path ?? "-"}`);
         if (!r.ok) throw new Error(r.error);
+        await recordCopy(d, "marked", r.path, source, { mode: msg.mode });
         return {
           path: r.path,
           name: basename(r.path),
@@ -339,9 +379,13 @@ export function createAuxService({
     // report and the name it was set aside under come with the error.
     async anonymize(_msg, key) {
       const d = at(key);
+      const source = await sourceHash(d);
       const r = await runAnonymize({ src: d.doc, runPy, exists });
       log(`[tools] anonymize ok=${r.ok} total=${r.report?.total ?? "-"} path=${r.path ?? "-"}`);
       if (!r.ok && !r.report) throw new Error(r.error);
+      // Only a copy the verifier passed is put on record: one that was set
+      // aside as INCOMPLETE is not a copy to submit.
+      if (r.ok) await recordCopy(d, "anonymized", r.path, source);
       return { ...r, name: r.path ? basename(r.path) : null };
     },
 
@@ -375,6 +419,41 @@ export function createAuxService({
         `[tools] format_check paragraphs=${snapshot.paragraphs.length} headings=${headings.length} rules=${format.rules.length} findings=${format.findings.length} counts=${counts.length}`,
       );
       return { format, counts };
+    },
+
+    // The rows of the submission checklist for the open file. A job: it
+    // hashes files, and a plain request is waited for 10 s only. It reads
+    // only: the record is refreshed in memory, as the Response tab's check
+    // refreshes it, and is not saved.
+    async submission_check(msg, key) {
+      const d = at(key);
+      const snapshot = msg.snapshot;
+      if (!isObj(snapshot) || !Array.isArray(snapshot.paragraphs))
+        throw new Error("The request holds no document snapshot.");
+      const { headings } = usableHeadings(msg.headings, snapshot);
+      const stored = await load(d);
+      const { profile } = await profileOf(d, stored);
+      const revision = refreshed(stored, snapshot, headings, profile);
+      // The files the record names, as they are on the disk now: a path of
+      // the record is absolute, or relative to the manuscript folder with
+      // "/" (as the figure files are stored). null: not there or not readable.
+      const files = { [MANUSCRIPT]: await sourceHash(d) };
+      for (const path of submissionPaths(revision)) {
+        const abs = isAbsolute(path) ? path : join(dirname(d.doc), ...path.split("/"));
+        files[path] = await sha256File(abs).catch(() => null);
+      }
+      const rows = submissionRows({
+        revision,
+        profile,
+        live: { snapshot, headings, format: isObj(msg.format) ? msg.format : null },
+        files,
+        file: basename(d.doc),
+      });
+      const count = (state) => rows.filter((r) => r.state === state).length;
+      log(
+        `[tools] submission_check rows=${rows.length} ready=${count("ready")} not_ready=${count("not_ready")} not_applicable=${count("not_applicable")}`,
+      );
+      return { rows, doc_name: basename(d.doc) };
     },
 
     // Which saved file the copies are made from, and the profile in force.

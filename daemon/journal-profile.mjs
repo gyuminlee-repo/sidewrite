@@ -92,6 +92,10 @@ export function withDefaults(profile) {
   // The rule packs of a review turn (review-prompt.mjs POLICY_PACKS): on
   // unless a profile says false.
   p.policy_packs = { review_scope: true, ...(isObj(p.policy_packs) ? p.policy_packs : {}) };
+  // What the journal wants in the submission besides the manuscript
+  // (submission-check.mjs). anonymized_copy: true (a copy without author
+  // marks is needed), false (none is), null (the profile does not say).
+  p.submission = { anonymized_copy: null, ...(isObj(p.submission) ? p.submission : {}) };
   return p;
 }
 
