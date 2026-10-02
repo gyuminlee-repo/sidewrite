@@ -1,0 +1,16 @@
+{
+  "note": "Ledger of the parts acceptance stage: one forbidden word. Entered in the Review tab of the manuscript it gets L1, and the supplementary file copies it.",
+  "items": [
+    {
+      "kind": "forbid",
+      "text": "Do not call the strain or the carbon source novel",
+      "scope": "manuscript",
+      "check": {
+        "type": "regex",
+        "pattern": "\\bnovel(?:ty)?\\b",
+        "flags": "i",
+        "expect": "absent"
+      }
+    }
+  ]
+}
