@@ -356,6 +356,45 @@ of R1.2, `delete-sentence-zotero` with the turn of R1.1): when one of them
 goes in against the expectation, its own row fails first.
 `--screenshots` works as in the other stages.
 
+How the tools keep the rule (`taskpane/shared/field-text.js`, used by the
+daemon and the task pane alike). Before Word is called the daemon places the
+edit in the paragraph as the last status refresh gave it, which shows a field
+as U+0013 instruction U+0014 result U+0015: a range inside the text of a
+field, across its edge, or a replacement over a field is refused as
+`FieldNotEditable` (log line `[review] field edit refused <ref> why=<inside,
+partial or replace-across> by=daemon paragraph=<n>`). The task pane does the
+same on its own reviewed text. A deletion that holds a field whole with
+words on both sides goes to Word as `Range.delete()` on the range the search
+found. After every edit in a paragraph with fields the pane reads the fields
+again from the paragraph XML and compares them with those read before; a
+field that is hollowed, split, changed or gone makes it reject the tracked
+changes on the range of the edit and refuse (`why=after-edit by=pane
+found=<what> undone=1`). When Word cannot take the edit back the tool
+answers `FieldEditNotUndone`, the change stays on record without a comment
+and the model is told to leave it to the author.
+
+What that assumes of Word, and what a row shows when it does not hold. None
+of the Word side could be run when the tool was written; the first two lines
+were seen in the run of 2026-10-02.
+
+| Assumed                                                                                                                                                              | The row when it is wrong                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Range.getReviewedText` shows a field as U+0013 instruction U+0014 result U+0015 (seen)                                                                              | the cases expected `refused` are not refused beforehand: their rows read `why=after-edit by=pane` (taken back) and not `why=inside by=daemon`, or `applied` with `hollowed 1`                                                                     |
+| a search finds a sentence across a field (seen: the pane answered with its paragraph), and the range it finds runs from before the begin marker to after the end one | `delete-sentence`: `refused NotFound`, or `refused FieldNotEditable [why=after-edit by=pane ... found=split undone=1]` with `NOT MET`, the fields unchanged                                                                                       |
+| `Range.delete()` with change tracking on puts the whole range, field markers included, into a tracked deletion                                                       | the same row: `why=after-edit` with `found=split`, `hollowed` or `count_a->b`, `NOT MET`                                                                                                                                                          |
+| `Paragraph.getOoxml()` shows the tracked deletions and the field markers of the paragraph as the saved file does                                                     | a good deletion is taken back (`found=count_a->b`, `NOT MET`), or a hollowed field is not seen: `applied`, and the checker fails the row with `hollowed`                                                                                          |
+| `Range.getTrackedChanges().rejectAll()` on the range of the edit takes back that edit and nothing else (WordApi 1.6)                                                 | `applied (delete, no comment: FieldEditNotUndone)`, the daemon log has `[review] field edit not undone`, and the checker names the field                                                                                                          |
+| `Office.context.requirements.isSetSupported("WordApi", "1.6")` is true in this Word (the paragraph ids of the run are the 1.6 ones)                                  | `delete-sentence`: `refused FieldNotEditable [why=no-undo by=pane ...]`, `NOT MET`, nothing changed                                                                                                                                               |
+| after such a deletion the reviewed text of the paragraph no longer shows the field                                                                                   | the next edit in that paragraph is refused once as `StaleTarget` and the pane refreshes: the turn of R1.1 (the paragraph of `delete-sentence-zotero`) reads `stale 1` or more, and the refresh may list the paragraph as changed outside the tool |
+| the tracked-deleted sentence can still be found for the rationale comment                                                                                            | `applied (delete, no comment: CommentAnchorMissing)`: the change is recorded, its comment is missing                                                                                                                                              |
+
+Not covered: a paragraph inside a field that runs over several paragraphs (a
+bibliography) is refused by the daemon, which sees the whole document; the
+task pane alone sees it only in the first and the last paragraph of the
+field. `w:fldSimple` and `w:hyperlink` are guarded through the reviewed text
+and are not read by the check after the edit. A Word without WordApi 1.4
+gives no reviewed text and no field list; there the edit goes in as before.
+
 The Word side of the stage (`word-com.ps1 save` and `addins`, `save_as` of
 `marked-diff-word.ps1`, the pane steps `apply-seeded` and
 `tracked-edit-direct`) had not run in Word when it was written; its judges

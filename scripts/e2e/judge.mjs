@@ -1258,7 +1258,7 @@ export function citeCaseRow({ name, what, expect = null, fields = 0, outcome, ch
   const why = (outcome.log ?? []).map((l) => FIELD_REFUSED.exec(l)?.[1]).find(Boolean);
   const tool =
     outcome.answer === "applied"
-      ? `applied (${outcome.changes.map((c) => `${c.kind}${c.narrowed ? ", narrowed" : ""}`).join("; ") || "exception approved"})`
+      ? `applied (${outcome.changes.map((c) => `${c.kind}${c.narrowed ? ", narrowed" : ""}${c.comment_missing ? `, no comment: ${c.comment_missing}` : ""}`).join("; ") || "exception approved"})`
       : outcome.answer === "refused"
         ? `refused ${outcome.code}${why ? ` [${why}]` : ""}${outcome.word_unchanged ? "" : ", but the tracked changes of the document differ"}`
         : `no readable answer (${outcome.message ?? "-"})`;
