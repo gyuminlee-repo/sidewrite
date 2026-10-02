@@ -208,6 +208,86 @@ const Question = z.object({
   answered_at: z.string().nullable().default(null),
 });
 
+// ---- figure lane -------------------------------------------------------------
+//
+// A request that is answered by changing a figure, not the text. The figure
+// files are made outside this tool; a figure change records which file took
+// the place of which, what it answers, and the copy that goes to the journal
+// (figure-service.mjs). Paths, hashes and facts are read by the daemon.
+
+// A file as it was when it was recorded. path: relative to the manuscript
+// folder ("/" separators) when the file is under it, absolute otherwise.
+const FileRef = z.object({
+  path: z.string().min(1),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  bytes: z.number().int().nonnegative(),
+  mtime: z.string(),
+});
+
+// source: the file the author works on. view: the file that is rendered and
+// submitted when the source cannot be (an .ai file and its PDF or TIFF).
+const FigureSide = z.object({ source: FileRef, view: FileRef.nullable().default(null) });
+
+// A picture of one side for the comparison, under figures/.renders/. of: the
+// sha256 of the file it was rendered from.
+const FigureRender = z.object({
+  path: z.string().min(1),
+  of: z.string(),
+  dpi: z.number().int().positive(),
+  width: z.number().int().nonnegative(),
+  height: z.number().int().nonnegative(),
+});
+
+// What tools/figure_render.py read in one file.
+const FigureFacts = z.object({
+  type: z.string(),
+  pages: z.number().int().nonnegative(),
+  width_pt: z.number().nullable().default(null),
+  height_pt: z.number().nullable().default(null),
+  words: z.number().int().nonnegative().default(0),
+  images: z.number().int().nonnegative().default(0),
+  paths: z.number().int().nonnegative().default(0),
+  fonts: z.array(z.object({ name: z.string(), embedded: z.boolean() })).default([]),
+});
+
+export const FigureChangeSchema = z.object({
+  // "<ref>-f<n>", never given out twice under a comment (figure_seq).
+  id: z.string(),
+  // The label in the manuscript ("Figure 2").
+  figure: z.string().min(1),
+  kind: z.enum(["revised", "new"]),
+  requirement_ids: z.array(z.string()).default([]),
+  // One sentence of the author on what changed. It reaches the letter only
+  // through the answer prose.
+  summary: z.string().default(""),
+  // null for a new figure.
+  before: FigureSide.nullable().default(null),
+  after: FigureSide,
+  renders: z
+    .object({
+      before: FigureRender.nullable().default(null),
+      after: FigureRender.nullable().default(null),
+    })
+    .default({ before: null, after: null }),
+  facts: z
+    .object({
+      before: FigureFacts.nullable().default(null),
+      after: FigureFacts.nullable().default(null),
+    })
+    .default({ before: null, after: null }),
+  made_by: z.enum(["author", "executor"]).default("author"),
+  // The tool that made the after file, when one did.
+  executor: z.string().nullable().default(null),
+  state: z.enum(["proposed", "adopted", "rejected"]).default("proposed"),
+  // The copy under figures/submission/ and its hash when it was made.
+  adopted: z
+    .object({ path: z.string(), sha256: z.string(), at: z.string() })
+    .nullable()
+    .default(null),
+  created_at: z.string(),
+  decided_at: z.string().nullable().default(null),
+});
+
 const Comment = z.object({
   // R<reviewer>.<n>; E.<n> is the editor letter with reviewer 0.
   ref: z.string().regex(/^(?:R\d+|E)\.\d+$/),
@@ -243,6 +323,10 @@ const Comment = z.object({
     .object({ reason: z.string().min(1) })
     .nullable()
     .default(null),
+  // Figure changes for this comment, and the highest f-number ever given out
+  // under it (null: a file from before the figure lane).
+  figure_changes: z.array(FigureChangeSchema).default([]),
+  figure_seq: z.number().int().nonnegative().nullable().default(null),
 });
 
 // A paragraph the LLM check could not judge (abstain). Not a violation; it
@@ -396,6 +480,12 @@ export const RevisionSchema = z.object({
     })
     .nullable()
     .default(null),
+  // The folder of the figure files, relative to the manuscript folder
+  // (null: "figures").
+  figure_lane: z
+    .object({ dir: z.string().min(1) })
+    .nullable()
+    .default(null),
 });
 
 // ---- paths ----------------------------------------------------------------
@@ -515,9 +605,10 @@ function requireComment(rev, ref) {
   return c;
 }
 
-// Replace the comment list with the user-edited one. Changes, blocked edits
-// and status of a ref that survives are kept. Dropping a ref that already
-// has changes is refused: its edits are in the document. A dropped ref in
+// Replace the comment list with the user-edited one. Changes, figure changes,
+// blocked edits and status of a ref that survives are kept. Dropping a ref
+// that already has changes is refused: its edits are in the document. The
+// same holds for figure changes: their files are in the submission folder. A dropped ref in
 // `keep` (work on it is still open, review-service.mjs heldRefs) stays, after
 // the listed ones.
 export function replaceComments(rev, incoming, keep = new Set()) {
@@ -541,6 +632,8 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       changes: old ? clone(old.changes) : [],
       blocked: old ? clone(old.blocked) : [],
       blocked_seq: old ? blockedSeq(old) : 0,
+      figure_changes: old ? clone(old.figure_changes ?? []) : [],
+      figure_seq: old ? figureSeq(old) : 0,
       response: old ? clone(old.response ?? null) : null,
       declined: old ? clone(old.declined ?? null) : null,
       questions: old ? clone(old.questions ?? []) : [],
@@ -557,6 +650,10 @@ export function replaceComments(rev, incoming, keep = new Set()) {
     if (seen.has(old.ref)) continue;
     if (old.changes.length > 0) {
       throw new Error(`Comment ${old.ref} has ${old.changes.length} recorded change(s); keep it`);
+    }
+    const figures = (old.figure_changes ?? []).length;
+    if (figures > 0) {
+      throw new Error(`Comment ${old.ref} has ${figures} figure change(s); keep it`);
     }
     if (keep.has(old.ref)) list.push(clone(old));
   }
@@ -639,6 +736,11 @@ function blockedSeq(comment) {
   return Math.max(comment?.blocked_seq ?? 0, ...ids.map((id) => idNumber(id, `${comment.ref}-b`)));
 }
 
+function figureSeq(comment) {
+  const ids = (comment?.figure_changes ?? []).map((f) => f.id);
+  return Math.max(comment?.figure_seq ?? 0, ...ids.map((id) => idNumber(id, `${comment.ref}-f`)));
+}
+
 // On load: write the counters down, so they hold after the ids they were
 // read from are gone.
 function withCounters(rev) {
@@ -646,6 +748,7 @@ function withCounters(rev) {
   for (const c of rev.comments) {
     c.requirement_seq = requirementSeq(c);
     c.blocked_seq = blockedSeq(c);
+    c.figure_seq = figureSeq(c);
   }
   return rev;
 }
@@ -773,6 +876,82 @@ export function addChange(rev, ref, change, now = new Date()) {
   c.changes.push(row);
   if (c.status === "pending") c.status = "in_progress";
   return { revision: next, change: row };
+}
+
+// ---- figure changes ------------------------------------------------------------
+
+function requireFigure(comment, id) {
+  const f = (comment.figure_changes ?? []).find((x) => x.id === id);
+  if (!f) throw new Error(`No figure change ${id} under ${comment.ref}`);
+  return f;
+}
+
+// A figure change under a comment, state proposed. Its id comes from the
+// figure counter of the comment, so the id of a removed one is never given
+// to another. Requests it names must be listed under the comment.
+export function addFigureChange(rev, ref, change, now = new Date()) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  const known = new Set(c.requirements.map((r) => r.id));
+  for (const id of change.requirement_ids ?? [])
+    if (!known.has(id)) throw new Error(`No requirement ${id} under ${ref}`);
+  c.figure_seq = figureSeq(c) + 1;
+  const row = FigureChangeSchema.parse({
+    ...change,
+    id: `${ref}-f${c.figure_seq}`,
+    state: "proposed",
+    adopted: null,
+    created_at: now.toISOString(),
+    decided_at: null,
+  });
+  (c.figure_changes ??= []).push(row);
+  if (c.status === "pending") c.status = "in_progress";
+  return { revision: next, figure: row };
+}
+
+// What may change on a figure change after it was recorded. The words of the
+// author (label, summary, the requests it answers) only while it is
+// proposed; renders and facts (computed) at any time. Files, state and the
+// adopted copy have their own functions.
+const FIGURE_WORDS = ["figure", "summary", "requirement_ids"];
+const FIGURE_COMPUTED = ["renders", "facts"];
+export function updateFigureChange(rev, ref, id, patch = {}) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  const f = requireFigure(c, id);
+  const words = FIGURE_WORDS.filter((k) => k in patch);
+  if (words.length && f.state !== "proposed")
+    throw new Error(`${id} is ${f.state}; reopen it before changing it`);
+  if ("requirement_ids" in patch) {
+    const known = new Set(c.requirements.map((r) => r.id));
+    for (const q of patch.requirement_ids ?? [])
+      if (!known.has(q)) throw new Error(`No requirement ${q} under ${ref}`);
+  }
+  const take = Object.fromEntries(
+    [...words, ...FIGURE_COMPUTED.filter((k) => k in patch)].map((k) => [k, patch[k]]),
+  );
+  Object.assign(f, FigureChangeSchema.parse({ ...f, ...clone(take) }));
+  return next;
+}
+
+// proposed -> adopted (with the copy that was made) or rejected; adopted or
+// rejected -> proposed (reopen: the record of the copy goes, the file stays).
+export function setFigureState(rev, ref, id, state, { adopted = null } = {}, now = new Date()) {
+  const next = clone(rev);
+  const f = requireFigure(requireComment(next, ref), id);
+  const from = state === "proposed" ? ["adopted", "rejected"] : ["proposed"];
+  if (!from.includes(f.state)) throw new Error(`${id} is ${f.state}; it cannot become ${state}`);
+  if (state === "adopted" && !adopted) throw new Error(`${id}: adopting needs the copy`);
+  Object.assign(
+    f,
+    FigureChangeSchema.parse({
+      ...f,
+      state,
+      adopted: state === "adopted" ? adopted : null,
+      decided_at: state === "proposed" ? null : now.toISOString(),
+    }),
+  );
+  return next;
 }
 
 // A change that was applied without its rationale comment (comment_missing)

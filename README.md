@@ -357,6 +357,20 @@ The Response tab writes the point-by-point response letter from the review on th
 | `CC_OFFICE_PYTHON`         | `python3`                 | Python executable for the letter tools.                                                                                                                                                                                                                                                        |
 | `CC_OFFICE_CONFIG_DIR`     | `~/.claude/office-addins` | Root of the user profile folder (`<dir>/journal_profiles`).                                                                                                                                                                                                                                    |
 
+### Figure changes (figures page)
+
+Some reviewer requests are answered by a figure, not by the text: a control curve added, an axis relabelled, a new panel. The Review tab marks such a request as outside the Word file. The figures page records which figure file answers it.
+
+1. Change the figure in any tool and save it under a new name. The old file stays.
+2. With the manuscript open in Word and the Sidewrite pane connected, open `http://127.0.0.1:47834/figures/` in a browser. The page lists the reviewer comments of that manuscript, the ones with a request outside the Word file first.
+3. Under a comment press "Add figure change": tick the requests it answers, enter the figure label ("Figure 2"), choose the old and the new file (from the `figures` folder next to the manuscript, or paste a path) and say in one sentence what changed. A new figure has only a new file. For an `.ai` source, also name the PDF or TIFF saved from it: that file is shown and submitted.
+4. The page shows both files side by side, as an overlay with a slider and as a difference picture, with what it read in them: page size, file type, live text, embedded fonts. Different pixel sizes are reported.
+5. Adopt or Reject. Adopt copies the new file to `figures/submission/` and adds a row to `figures/submission/FILE_SOURCES.md` (figure, comment, source file and its SHA-256, the copy and its SHA-256, date). A file of the same name that is already there is kept and the copy gets `-2`, `-3`. Adopt refuses a file that was saved again after it was recorded: save it under a new name and record that one.
+
+Sidewrite writes only to `figures/.renders/` (the pictures of the comparison, named by content hash), `figures/submission/` and `<manuscript>.revision.json`. The figure files you name are only read. The page answers only from this computer, only with the token of the running daemon, and only for a manuscript that is open in a connected Word pane.
+
+The pictures need PyMuPDF (`pip install pymupdf`). Without it the page says so, and figure changes are still recorded and adopted. File types: PDF, `.ai` saved with PDF compatibility, SVG, PNG, JPEG, TIFF.
+
 ### Tools tab (Word)
 
 The Tools tab never writes to the open document. A copy is a new file next to the manuscript, made from the file as it was last saved, so save before you make one.
