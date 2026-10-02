@@ -311,7 +311,10 @@ test("the figures route is asked before the static files and may name only docum
   const block = code.slice(at, code.indexOf("});", at));
   assert.match(block, /origin: HTTP_ORIGIN,/);
   assert.match(block, /token: BRIDGE_TOKEN,/);
-  assert.match(block, /listPanes: \(\) => bridge\.listPanes\(\),/);
+  // The bridge is made after the HTTP server: until then no pane is connected.
+  assert.match(block, /listPanes: \(\) => figureBridge\?\.listPanes\(\) \?\? \[\],/);
+  assert.match(code, /\n\}\);\nfigureBridge = bridge;\n/);
+  assert.ok(code.indexOf("let figureBridge = null;") < at);
   assert.match(block, /service: createFigureService\(\),/);
   const route = code.indexOf("if (await figureHttp(req, res)) return;");
   assert.ok(route > 0);

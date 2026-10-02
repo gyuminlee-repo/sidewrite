@@ -88,6 +88,7 @@
     doc = manuscripts.length ? manuscripts[Math.max(at, 0)].doc : null;
     pick.value = String(Math.max(at, 0));
     pick.disabled = manuscripts.length < 2;
+    pick.hidden = pick.previousElementSibling.hidden = !manuscripts.length;
     pick.title = manuscripts.find((m) => m.doc === doc)?.path ?? "";
   }
 

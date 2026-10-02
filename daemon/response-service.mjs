@@ -24,7 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   localDocPath,
@@ -55,6 +55,7 @@ import {
 } from "./journal-profile.mjs";
 import {
   STALE_ORDER,
+  adoptedFigures,
   citationsFor,
   keepLines,
   markStale,
@@ -68,6 +69,7 @@ import { checkResponses, summarize, wordCount } from "./response-check.mjs";
 import { buildGlossPrompt, buildResponsePrompt, parseDraft } from "./response-prompt.mjs";
 import { runPy as defaultRunPy } from "./py-tool.mjs";
 import { freeOutputIndex, outputName, MAX_OUTPUT_NAMES } from "./output-name.mjs";
+import { sha256File } from "./figure-service.mjs";
 
 export const RESPONSE_JOBS = new Set([
   "profile_propose",
@@ -152,8 +154,39 @@ const draftInput = (c) => ({
   change_state: JSON.stringify([
     (c.changes ?? []).map((ch) => [ch.id, ch.state]),
     c.response?.stale_at?.change_state ?? null,
+    // The figure changes the prompt listed, with their states.
+    (c.figure_changes ?? []).map((f) => [f.id, f.state]),
   ]),
 });
+
+// The adopted copy of a figure is the file the letter names: a row for each
+// one that is gone or is no longer the file that was adopted. Reads the disk
+// (checkResponses is pure, so these rows are added where the checks are
+// gathered). doc: the local path of the manuscript.
+export async function figureFileRows(revision, doc) {
+  const rows = [];
+  for (const c of revision.comments ?? []) {
+    for (const f of adoptedFigures(c)) {
+      const path = f.adopted?.path ?? "";
+      const abs = isAbsolute(path) ? path : join(dirname(doc), ...path.split("/"));
+      const sha = await sha256File(abs).catch(() => null);
+      const detail =
+        sha === null
+          ? `the adopted copy of ${f.figure} is missing: ${path}`
+          : sha !== f.adopted.sha256
+            ? `the adopted copy of ${f.figure} is not the file that was adopted: ${path}`
+            : null;
+      if (detail)
+        rows.push({
+          id: "figure_file",
+          level: "fail",
+          ref: c.ref,
+          detail: `${detail}; reopen the figure change on the figures page and adopt it again`,
+        });
+    }
+  }
+  return rows;
+}
 
 // The citations a pane says its card showed (response_save), reduced to what
 // staleReasons reads. null: the request holds none (a pane that does not send
@@ -176,6 +209,9 @@ function shownCitations(list) {
 //   - the stale marks are judged against the citations as saved, before the
 //     fresh ones take their place. quote_changed and change_state then stay
 //     until the answer is written again; lines_old follows the PDF.
+//   - the adopted figure changes are saved with the citations the same way
+//     (figure_ids): an answer that stood while a figure change was adopted
+//     or taken back is marked change_state by the same rule
 export function refreshed(rev, snapshot, headings, profile) {
   let next = applyStates(rev, classifyRevision(rev, snapshot));
   const level = profile.response_letter.section_level;
@@ -185,8 +221,9 @@ export function refreshed(rev, snapshot, headings, profile) {
       citationsFor(c, snapshot, headings, { level }),
       c.response?.citations ?? [],
     );
-    if (!c.response && !fresh.length) continue;
-    next = setCitations(next, c.ref, fresh);
+    const figures = adoptedFigures(c).map((f) => f.id);
+    if (!c.response && !fresh.length && !figures.length) continue;
+    next = setCitations(next, c.ref, fresh, undefined, figures);
   }
   return next;
 }
@@ -283,7 +320,10 @@ export function createResponseService({
   // checkResponses plus the LLM-checked rules of the response scope, asked
   // once per rule for all answers. job: taken when the first rule needs it.
   async function allChecks(d, key, { revision, snapshot, headings, profile }) {
-    const rows = checkResponses({ revision, snapshot, headings, profile });
+    const rows = [
+      ...checkResponses({ revision, snapshot, headings, profile }),
+      ...(await figureFileRows(revision, d.doc)),
+    ];
     const rules = (revision.ledger ?? []).filter(
       (i) => inScope(i, "response") && i.check?.type === "llm",
     );
@@ -715,6 +755,7 @@ export function createResponseService({
             lang: L.lang,
             words,
             change_ids: built.changeIds,
+            figure_ids: built.figureIds,
             instruction_ids: built.instructionIds,
             forbid_ids: built.forbidIds,
           },

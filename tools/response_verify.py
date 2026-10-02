@@ -10,6 +10,10 @@ Standard library only.
   --manuscript  JSON list of strings: the manuscript paragraphs in the accepted
                 view, in document order
 
+A figure line (kind "figure": an adopted figure change, with the name of the
+submitted file) is checked like any other paragraph, on count, text and
+colour; it cites a file, so no quote follows it.
+
 The file on disk is read back (tools/response_read.py) and checked on five axes:
   count                the docx has as many paragraphs as the model
   text                 every paragraph reads as its model row
@@ -121,7 +125,8 @@ _MODEL = {"paragraphs": [
     {"kind": "response", "text": "We now give it.", "color": "C00000"},
     {"kind": "location", "text": "[Revised in 2. Methods, line 9]", "color": "0070C0"},
     {"kind": "quote", "text": "The temperature was held at 30 °C.", "color": "0070C0"},
-    {"kind": "location", "text": "[Removed from 1. Introduction]", "color": "0070C0", "removed": True}]}
+    {"kind": "location", "text": "[Removed from 1. Introduction]", "color": "0070C0", "removed": True},
+    {"kind": "figure", "text": "[Revised Figure 2, file fig2_v2.pdf]", "color": "0070C0"}]}
 _MANUSCRIPT = ["2. Methods", "Flasks were shaken. The temperature was held at 30 °C. Samples were drawn."]
 
 
@@ -151,6 +156,11 @@ def selftest():
         del m["paragraphs"][2]
         return m
 
+    def refiled():
+        m = copy.deepcopy(_MODEL)
+        m["paragraphs"][7]["text"] = "[Revised Figure 2, file fig2_v3.pdf]"
+        return m
+
     cases = [
         ("good letter", [], _read(_MODEL), _MODEL, _MANUSCRIPT),
         ("a run in another colour", ["colour"], _read(recoloured()), _MODEL, _MANUSCRIPT),
@@ -159,6 +169,9 @@ def selftest():
         ("a location line without its quote", ["location_has_quote"], _read(without_quote()), without_quote(), _MANUSCRIPT),
         ("a quote that is not in the manuscript", ["quote_in_manuscript"], _read(_MODEL), _MODEL,
          ["2. Methods", "The temperature was kept at 30 °C."]),
+        # A figure line cites a file, not a sentence: the good letter ends with
+        # one and no quote, and passes. Its words are checked like any other.
+        ("a figure line that names another file", ["text"], _read(refiled()), _MODEL, _MANUSCRIPT),
     ]
     out = []
     for name, want, read, model, manuscript in cases:

@@ -182,6 +182,11 @@ const Response = z.object({
   // The text this one replaced (the last draft, or the letter of an earlier round).
   previous: z.string().nullable().default(null),
   citations: z.array(Citation).default([]),
+  // Ids of the adopted figure changes of the comment at the last refresh
+  // (the figure line of the letter is computed from them, as the location
+  // lines are from the citations). An answer written for another set is
+  // marked change_state (response-quotes.mjs staleReasons).
+  figure_ids: z.array(z.string()).default([]),
   stale: z.array(z.enum(["quote_changed", "change_state", "lines_old"])).default([]),
   // For quote_changed and change_state: the manuscript text (snapshotHash)
   // in which the saved citations were last found not to fit, answer or no
@@ -1275,11 +1280,17 @@ export function setDeclined(rev, ref, declined) {
   return next;
 }
 
-// The computed citations of a comment and, when given, its stale marks.
-export function setCitations(rev, ref, citations, stale) {
+// The computed citations of a comment and, when given, its stale marks and
+// the ids of its adopted figure changes.
+export function setCitations(rev, ref, citations, stale, figureIds) {
   const next = clone(rev);
   const c = requireComment(next, ref);
-  c.response = Response.parse({ ...(c.response ?? {}), citations, ...(stale ? { stale } : {}) });
+  c.response = Response.parse({
+    ...(c.response ?? {}),
+    citations,
+    ...(stale ? { stale } : {}),
+    ...(figureIds ? { figure_ids: figureIds } : {}),
+  });
   return next;
 }
 

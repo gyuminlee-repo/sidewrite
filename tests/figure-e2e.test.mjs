@@ -1,7 +1,8 @@
 // The figure lane end to end without Word: the real bridge with a WebSocket
 // client as the pane, the figures routes over HTTP, the real Python renderer
 // and the invented fixture figure (scripts/e2e/make_figure_fixture.py).
-// propose -> render -> adopt, then the copy on disk is the recorded one.
+// propose -> render -> adopt, then the copy on disk is the recorded one and
+// the response letter cites it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -10,6 +11,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { missing } from "./fixtures/py-packages.mjs";
 import { figureWorld, sha256, listing } from "./helpers/figure-world.mjs";
+import { buildLetterModel } from "../daemon/response-model.mjs";
+import { checkResponses } from "../daemon/response-check.mjs";
+import { figureFileRows } from "../daemon/response-service.mjs";
+import { withDefaults } from "../daemon/journal-profile.mjs";
 
 const FIXTURE = fileURLToPath(new URL("../scripts/e2e/make_figure_fixture.py", import.meta.url));
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -85,6 +90,28 @@ test(
           `\\| Figure 2 \\| R1\\.1 \\| adopted \\| figures/fig2_after\\.pdf \\| ${start[1]} \\| fig2_after\\.pdf \\| ${start[1]} \\|`,
         ),
       );
+      // The letter names the adopted copy, and its request is answered.
+      const rev = await w.rev();
+      const profile = withDefaults({ colors: { response_revised: "0070C0" } });
+      assert.deepEqual(
+        buildLetterModel(rev, profile).paragraphs.filter((x) => x.kind === "figure"),
+        [
+          {
+            kind: "figure",
+            text: "[Revised Figure 2, file fig2_after.pdf]",
+            color: "0070C0",
+            ref: "R1.1",
+            reviewer: 1,
+          },
+        ],
+      );
+      assert.deepEqual(await figureFileRows(rev, w.doc), []);
+      const unanswered = checkResponses({ revision: rev, snapshot: { paragraphs: [] }, profile })
+        .filter((x) => x.id === "requirements")
+        .map((x) => x.detail);
+      assert.deepEqual(unanswered, [
+        "q2 is neither cited nor declined: give the unit of the time axis",
+      ]);
       const files = await listing(w.dir);
       assert.equal(files.filter((x) => x.startsWith("figures/.renders/")).length, 4);
     } finally {

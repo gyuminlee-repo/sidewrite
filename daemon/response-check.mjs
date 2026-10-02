@@ -6,7 +6,7 @@
 //
 //   answered        every comment has a response or is declined
 //   requirements    every request of a comment is answered by an accepted
-//                   change or declined
+//                   change or an adopted figure change, or declined
 //   declined_reason every declined comment and declined request has a reason
 //                   that is not blank
 //   stale           the cited changes are still the accepted changes
@@ -25,14 +25,26 @@
 //                   and other reviewers are looked for)
 //   rule_*          profile rules of the answer text: word cap, opening
 //   warn only       lost_facts, pending_changes, rule_quote_words, translation
-//                   (the second language is on and an answer has none)
+//                   (the second language is on and an answer has none),
+//                   undecided_figures (a figure change is neither adopted
+//                   nor rejected)
+//
+// Whether the adopted copy of a figure is still the file that was adopted is
+// read from the disk, so the service adds that row (figure_file,
+// response-service.mjs figureFileRows).
 //
 // The profile must have its defaults filled (journal-profile.mjs).
 // LLM-checked ledger items are not run here; the service runs them.
 
 import { checkRegexItem, inScope } from "./ledger-check.mjs";
 import { lostFacts } from "./edit-facts.mjs";
-import { CITABLE, viewText, snapshotHash, staleReasons } from "./response-quotes.mjs";
+import {
+  CITABLE,
+  adoptedFigures,
+  viewText,
+  snapshotHash,
+  staleReasons,
+} from "./response-quotes.mjs";
 import { answerProse, glossLine } from "./response-model.mjs";
 import { normalizeParaText } from "./revision-classify.mjs";
 
@@ -99,7 +111,12 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
 
     const declined = new Map((r?.declined_requirements ?? []).map((d) => [d.id, d.reason]));
     const accepted = (c.changes ?? []).filter((ch) => CITABLE.has(ch.state));
-    const answered = new Set(accepted.flatMap((ch) => ch.rationale?.requirement_ids ?? []));
+    const figures = c.figure_changes ?? [];
+    const proposed = figures.filter((f) => f.state === "proposed");
+    const answered = new Set([
+      ...accepted.flatMap((ch) => ch.rationale?.requirement_ids ?? []),
+      ...adoptedFigures(c).flatMap((f) => f.requirement_ids ?? []),
+    ]);
     for (const q of c.requirements ?? []) {
       if (declined.has(q.id) && blank(declined.get(q.id)))
         add("declined_reason", "fail", c.ref, `${q.id} is declined without a reason: ${q.text}`);
@@ -107,7 +124,12 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
       const pending = (c.changes ?? []).some(
         (ch) => ch.state === "pending" && (ch.rationale?.requirement_ids ?? []).includes(q.id),
       );
-      const why = pending ? "has only pending changes in Word" : "is neither cited nor declined";
+      const figure = proposed.some((f) => (f.requirement_ids ?? []).includes(q.id));
+      const why = pending
+        ? "has only pending changes in Word"
+        : figure
+          ? "has only a figure change that is not adopted yet"
+          : "is neither cited nor declined";
       add("requirements", "fail", c.ref, `${q.id} ${why}: ${q.text}`);
     }
 
@@ -124,6 +146,15 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
         "warn",
         c.ref,
         `${undecided.join(", ")}: decide them in Word; only accepted changes are cited`,
+      );
+
+    // The same for a figure change: the letter prints its line once adopted.
+    if (proposed.length)
+      add(
+        "undecided_figures",
+        "warn",
+        c.ref,
+        `${proposed.length} figure change(s) not decided: adopt or reject on the figures page; only adopted figure changes are cited`,
       );
 
     // An edit that was sent to Word and never answered may be in the
@@ -159,7 +190,7 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
           "stale",
           "fail",
           c.ref,
-          "change_state: the accepted changes are not the ones this answer was written for; read the answer, then save or draft it again",
+          "change_state: the accepted changes or adopted figure changes are not the ones this answer was written for; read the answer, then save or draft it again",
         );
     }
 

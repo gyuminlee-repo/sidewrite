@@ -56,6 +56,7 @@ test("a revision.json from before the figure lane loads, and saving it changes n
     for (const c of saved.comments) {
       delete c.figure_changes;
       delete c.figure_seq;
+      if (c.response) delete c.response.figure_ids;
     }
     delete saved.figure_lane;
     assert.deepEqual(saved, raw);
