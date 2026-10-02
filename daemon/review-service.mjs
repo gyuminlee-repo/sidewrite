@@ -91,6 +91,8 @@ import {
   linkedChanges,
   linkedAnswers,
   outsideNotes,
+  citedInMain,
+  partsForLetter,
 } from "./revision-parts.mjs";
 import {
   classifyRevision,
@@ -483,7 +485,19 @@ export function createReviewService({
     } catch (e) {
       log(`[review] linked files not read: ${e?.message ?? e}`);
     }
-    return { ...linkedSummary(d.doc, revision), note, changes };
+    // For a supplement: which of its changes the letter cites, as the
+    // manuscript's review file has them (the Response tab of the supplement
+    // shows them), and its own state for the letter: was its last refresh
+    // taken on a saved document.
+    const cited = main?.revision ? citedInMain(main.revision, basename(d.doc)) : null;
+    return {
+      ...linkedSummary(d.doc, revision),
+      note,
+      changes,
+      ...(link
+        ? { cited_in_main: cited ?? [], saved_at_refresh: revision.doc_state?.saved ?? null }
+        : {}),
+    };
   }
   // The other open panes of a revision load their file again.
   function tellLinked(d, docs) {
@@ -1019,6 +1033,8 @@ export function createReviewService({
         label: String(msg.label ?? "").trim() || basename(own).replace(/\.[^.]+$/, ""),
         joined_at: new Date().toISOString(),
       };
+      if (String(msg.label ?? "").trim().length > 80)
+        throw new Error("The name is too long (at most 80 characters).");
       const main = await loadMain(own, partOf);
       if (!main.revision?.comments.length) {
         throw new Error(
@@ -1060,7 +1076,31 @@ export function createReviewService({
       );
       log(`[review] link join ${basename(own)} -> ${name} comments=${revision.comments.length}`);
       tellLinked(d, [mainDoc, own, ...partDocs(mainDoc, saved)]);
-      return { revision, linked: await linkedReply(d, revision) };
+      return { revision, linked: await linkedReply(d, revision, await linkOf(d)) };
+    },
+    // What the response letter calls this supplementary file ("Supplementary
+    // Information"), set from its own pane after the join. Written at both
+    // ends like the join: this file first, then the manuscript. An empty
+    // label is the file name without its extension.
+    async review_link_label(msg, key) {
+      const d = at(key);
+      const own = resolve(d.doc);
+      const label = String(msg.label ?? "").trim();
+      if (label.length > 80) throw new Error("The name is too long (at most 80 characters).");
+      const before = await load(d);
+      if (!before.part_of) throw new Error("This file is not part of another revision.");
+      const main = await loadMain(own, before.part_of);
+      const revision = await update(d, (rev) =>
+        rev.part_of ? setPartOf(rev, { ...rev.part_of, label }) : null,
+      );
+      const entry = partEntry(main, own);
+      if (entry)
+        await withRevision(main.path, main.doc, (m) =>
+          addPart(m, { doc: entry.doc, label, joined_at: entry.joined_at }),
+        );
+      log(`[review] link label ${basename(own)} set=${label ? 1 : 0}`);
+      tellLinked(d, [main.doc, ...partDocs(main.doc, main.revision)]);
+      return { revision, linked: await linkedReply(d, revision, await linkOf(d)) };
     },
     // The link is taken away at both ends, this file first. The copy of what
     // the manuscript owns goes with it; what is this file's own stays.
@@ -1336,6 +1376,16 @@ export function createReviewService({
       } catch {
         onDisk = null;
       }
+      // The supplementary files of a manuscript, as their review files have
+      // them (plain reads, before the chain of this file): the stale marks
+      // of the saved answers judge the citations of those files against them.
+      let parts = [];
+      try {
+        const head = await load(d);
+        if (head.parts?.length) parts = await partsForLetter(d.doc, head);
+      } catch (e) {
+        log(`[review] linked files not read: ${e?.message ?? e}`);
+      }
       const revision = await update(d, (file) => {
         // What this daemon knows Word applied goes in first, as it was applied.
         const u = recordUnsaved(d, file);
@@ -1360,7 +1410,7 @@ export function createReviewService({
           next = r.revision;
           external = r.added;
         }
-        next = afterRefresh?.(next, snapshot) ?? next;
+        next = afterRefresh?.(next, snapshot, parts) ?? next;
         stale = staleChanges(old, next);
         moved = changeStates(file) !== changeStates(next);
         const now = new Date();

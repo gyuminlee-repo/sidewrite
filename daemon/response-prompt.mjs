@@ -36,6 +36,30 @@ const FIGURE_RULES = new Map([
     "If no change is listed as in the manuscript and no figure change as adopted, do not say that anything was revised.",
   ],
 ]);
+// The same two rules for a comment with changes in a supplementary file, and
+// for one with both.
+const PART_RULES = new Map([
+  [
+    RESPONSE_RULES[2],
+    "Never claim a change that is not listed as in the manuscript or as in a supplementary file.",
+  ],
+  [
+    RESPONSE_RULES[3],
+    "If no change is listed as in the manuscript or as in a supplementary file, do not say that anything was revised.",
+  ],
+]);
+const PART_FIGURE_RULES = new Map([
+  [
+    RESPONSE_RULES[2],
+    "Never claim a change that is not listed as in the manuscript, as in a supplementary file or as an adopted figure change.",
+  ],
+  [
+    RESPONSE_RULES[3],
+    "If no change is listed as in the manuscript or as in a supplementary file and no figure change as adopted, do not say that anything was revised.",
+  ],
+]);
+const PART_RULE =
+  "Report a change in a supplementary file like one in the manuscript. Do not write file names. The tool adds the line that names the file after your text.";
 const FIGURE_RULE =
   "Say what changed in a figure or other file only as the list of adopted figure changes says it. Do not write file names. The tool adds the figure line after your text.";
 const FIGURE_NOT_DONE = {
@@ -60,7 +84,17 @@ function edit(ch) {
 // comment: a revision.json comment whose change states are current.
 // profile: with defaults and the response language filled (effectiveProfile).
 // ledger: revision.ledger. previous: an earlier answer to keep the facts of.
-export function buildResponsePrompt({ comment, profile, ledger = [], previous = null }) {
+// parts: the changes of this comment in the supplementary Word files of the
+// revision, [{ name, label, changes }] with the states of their own review
+// files (response-quotes.mjs partChanges). A file without a change for the
+// comment adds nothing, and without parts the prompt reads as before.
+export function buildResponsePrompt({
+  comment,
+  profile,
+  ledger = [],
+  previous = null,
+  parts = [],
+}) {
   const L = profile.response_letter;
   const mine = ledger.filter((i) => inScope(i, "response"));
   const instructions = mine.filter((i) => i.kind === "instruction");
@@ -109,6 +143,36 @@ export function buildResponsePrompt({ comment, profile, ledger = [], previous = 
       );
   }
 
+  // Changes in the supplementary files, after those of the manuscript, with
+  // the same rows.
+  const partDone = [];
+  const withChanges = parts.filter((p) => (p.changes ?? []).length);
+  for (const p of withChanges) {
+    const here = p.changes.filter((ch) => CITABLE.has(ch.state));
+    lines.push(
+      "",
+      `Changes in ${p.label} (${p.name}) for this comment (accepted, or revised by the author; you may report them):`,
+    );
+    for (const ch of here) {
+      const ids = ch.rationale?.requirement_ids ?? [];
+      const answers = ids.length ? ` (answers ${ids.join(", ")})` : "";
+      const what =
+        ch.state === "user_edited" ? `revised by the author by hand at ${q(ch.find)}` : edit(ch);
+      lines.push(`- [${ch.id}] ${what}${answers}`);
+      if (ch.rationale) lines.push(`  What: ${ch.rationale.what} Why: ${ch.rationale.why}`);
+      partDone.push(`${p.name}#${ch.id}`);
+    }
+    if (!here.length) lines.push("- (none)");
+    const open = p.changes.filter((ch) => !CITABLE.has(ch.state));
+    if (open.length) {
+      lines.push("", `Not in ${p.label} (do not report any of these):`);
+      for (const ch of open)
+        lines.push(
+          `- [${ch.id}] ${NOT_DONE[ch.state] ?? "not in the file"}; do not claim: ${edit(ch)}`,
+        );
+    }
+  }
+
   // Figure changes: only for a comment that has one, so every other prompt
   // reads as before.
   const figures = comment.figure_changes ?? [];
@@ -154,10 +218,17 @@ export function buildResponsePrompt({ comment, profile, ledger = [], previous = 
     );
 
   lines.push("", "Rules:");
+  const claim = withChanges.length
+    ? figures.length
+      ? PART_FIGURE_RULES
+      : PART_RULES
+    : figures.length
+      ? FIGURE_RULES
+      : new Map();
   const rules = [
-    ...(figures.length
-      ? [...RESPONSE_RULES.map((r) => FIGURE_RULES.get(r) ?? r), FIGURE_RULE]
-      : RESPONSE_RULES),
+    ...RESPONSE_RULES.map((r) => claim.get(r) ?? r),
+    ...(withChanges.length ? [PART_RULE] : []),
+    ...(figures.length ? [FIGURE_RULE] : []),
     ...(L.max_words ? [`At most ${L.max_words} words.`] : []),
   ];
   rules.forEach((r, n) => lines.push(`${n + 1}. ${r.replace("{lang}", L.lang)}`));
@@ -166,6 +237,8 @@ export function buildResponsePrompt({ comment, profile, ledger = [], previous = 
     system: RESPONSE_SYSTEM,
     prompt: lines.join("\n"),
     changeIds: done.map((ch) => ch.id),
+    // "<file>#<change id>" of the changes listed as in a supplementary file.
+    partChangeIds: partDone,
     figureIds: adopted.map((f) => f.id),
     instructionIds: instructions.map((i) => i.id),
     forbidIds: forbids.map((i) => i.id),

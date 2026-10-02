@@ -64,7 +64,7 @@ import {
   setProfile,
 } from "./revision-store.mjs";
 import { wrapHandlers } from "./handler-wrap.mjs";
-import { refuseInPart } from "./revision-parts.mjs";
+import { partsForLetter, refuseInPart } from "./revision-parts.mjs";
 import { effectiveProfile, mergeProfile, regexProblems } from "./journal-profile.mjs";
 import { extractGuidelineRules } from "./guideline-extract.mjs";
 import { splitSentences } from "./review-split.mjs";
@@ -436,7 +436,9 @@ export function createAuxService({
       const { headings } = usableHeadings(msg.headings, snapshot);
       const stored = await load(d);
       const { profile } = await profileOf(d, stored);
-      const revision = refreshed(stored, snapshot, headings, profile);
+      // The supplementary Word files, from their review files (never Word).
+      const parts = stored.parts?.length ? await partsForLetter(d.doc, stored) : [];
+      const revision = refreshed(stored, snapshot, headings, profile, parts);
       // The files the record names, as they are on the disk now: a path of
       // the record is absolute, or relative to the manuscript folder with
       // "/" (as the figure files are stored). null: not there or not readable.
@@ -454,6 +456,7 @@ export function createAuxService({
         live: { snapshot, headings, format: isObj(msg.format) ? msg.format : null, saved },
         files,
         file: basename(d.doc),
+        parts,
       });
       const count = (state) => rows.filter((r) => r.state === state).length;
       log(

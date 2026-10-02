@@ -106,7 +106,8 @@ test("the response service is wired to the same one-shot router and its handlers
 test("a Review refresh marks saved responses stale with the rule of the Response tab", () => {
   const at = code.indexOf("const review = createReviewService({");
   const block = code.slice(at, code.indexOf("\n});", at));
-  assert.match(block, /afterRefresh: \(rev, snap\) => markStale\(rev, snap\)/);
+  // parts: the supplementary files, so a citation of one is judged against it.
+  assert.match(block, /afterRefresh: \(rev, snap, parts\) => markStale\(rev, snap, parts\)/);
   assert.match(code, /import \{ markStale \} from "\.\/response-quotes\.mjs";/);
 });
 

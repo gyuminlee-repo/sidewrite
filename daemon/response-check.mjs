@@ -9,12 +9,21 @@
 //                   change or an adopted figure change, or declined
 //   declined_reason every declined comment and declined request has a reason
 //                   that is not blank
+//                   in the manuscript or in a supplementary file of the
+//                   revision (parts), or by an adopted figure change
+//   part_state      what the review file of a supplementary file records can
+//                   be trusted: its last status refresh was taken on a saved
+//                   document and the file on disk is still that file
+//                   (revision-parts.mjs partUnconfirmed)
 //   stale           the cited changes are still the accepted changes
 //   quote_exact     every quote is in its manuscript paragraph, character for
-//                   character, in the accepted view
+//                   character, in the accepted view; a quote of a
+//                   supplementary file in the paragraph of that file as its
+//                   review file stores it
 //   section         every citation names a manuscript heading
 //   lines           every quote has one line range, read from the PDF of the
-//                   manuscript text as it is now
+//                   manuscript text as it is now (a quote of a supplementary
+//                   file has none in this version, and needs none)
 //   ledger          response-scope ledger rules (regex) hold in every answer
 //   prose_position  the answer holds no location line or line number of its
 //                   own; the tool adds them
@@ -41,6 +50,8 @@ import { lostFacts } from "./edit-facts.mjs";
 import {
   CITABLE,
   adoptedFigures,
+  partChanges,
+  partCitable,
   viewText,
   snapshotHash,
   staleReasons,
@@ -78,9 +89,26 @@ function lineWordRe(frame) {
   return new RegExp(String.raw`(?<![\p{L}\p{N}])${body}(?![\p{L}\p{N}])`, "iu");
 }
 
-export function checkResponses({ revision, snapshot, headings = [], profile }) {
+// What the author is told about a supplementary file whose record cannot be
+// trusted (revision-parts.mjs partUnconfirmed), with the way to put it right.
+export function partStateText(part) {
+  const fix = "Open it, save, press Refresh.";
+  if (part.why === "no_record")
+    return `Sidewrite has not read ${part.name} since it joined this revision. ${fix}`;
+  if (part.why === "unsaved")
+    return `${part.name} had changes that were not saved when Sidewrite last read it. ${fix}`;
+  return `${part.name} changed since Sidewrite last read it. ${fix}`;
+}
+
+// parts: the supplementary Word files of the revision (revision-parts.mjs
+// partsForLetter); none for a manuscript without one.
+export function checkResponses({ revision, snapshot, headings = [], profile, parts = [] }) {
   const rows = [];
   const add = (id, level, ref, detail) => rows.push({ id, level, ref, detail });
+  const partByName = new Map(parts.map((p) => [p.name, p]));
+  // A supplementary file is read from its review file only. While that
+  // record cannot be confirmed, nothing of the letter can be relied on.
+  for (const p of parts) if (!p.confirmed) add("part_state", "fail", null, partStateText(p));
   const L = profile.response_letter;
   const texts = new Map((snapshot.paragraphs ?? []).map((p) => [p.index, viewText(p)]));
   const headSet = new Set(headings.map((h) => normalizeParaText(h.text)));
@@ -116,7 +144,12 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
     const answered = new Set([
       ...accepted.flatMap((ch) => ch.rationale?.requirement_ids ?? []),
       ...adoptedFigures(c).flatMap((f) => f.requirement_ids ?? []),
+      // An accepted change in any file of the revision answers a request.
+      ...parts.flatMap((p) =>
+        partCitable(p, c.ref).flatMap((ch) => ch.rationale?.requirement_ids ?? []),
+      ),
     ]);
+    const pendingIn = (p) => partChanges(p, c.ref).filter((ch) => ch.state === "pending");
     for (const q of c.requirements ?? []) {
       if (declined.has(q.id) && blank(declined.get(q.id)))
         add("declined_reason", "fail", c.ref, `${q.id} is declined without a reason: ${q.text}`);
@@ -125,11 +158,16 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
         (ch) => ch.state === "pending" && (ch.rationale?.requirement_ids ?? []).includes(q.id),
       );
       const figure = proposed.some((f) => (f.requirement_ids ?? []).includes(q.id));
+      const elsewhere = parts.find((p) =>
+        pendingIn(p).some((ch) => (ch.rationale?.requirement_ids ?? []).includes(q.id)),
+      );
       const why = pending
         ? "has only pending changes in Word"
-        : figure
-          ? "has only a figure change that is not adopted yet"
-          : "is neither cited nor declined";
+        : elsewhere
+          ? `has only pending changes in ${elsewhere.name}`
+          : figure
+            ? "has only a figure change that is not adopted yet"
+            : "is neither cited nor declined";
       add("requirements", "fail", c.ref, `${q.id} ${why}: ${q.text}`);
     }
 
@@ -147,6 +185,17 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
         c.ref,
         `${undecided.join(", ")}: decide them in Word; only accepted changes are cited`,
       );
+
+    for (const p of parts) {
+      const n = pendingIn(p).length;
+      if (n)
+        add(
+          "undecided_changes",
+          "warn",
+          c.ref,
+          `${n} pending in ${p.name}: decide them in Word there, save and refresh; only accepted changes are cited`,
+        );
+    }
 
     // The same for a figure change: the letter prints its line once adopted.
     if (proposed.length)
@@ -169,7 +218,7 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
       );
 
     // quote_changed is the quote_exact axis and lines_old the lines axis below.
-    const staleNow = staleReasons(c, snapshot, render).includes("change_state");
+    const staleNow = staleReasons(c, snapshot, render, parts).includes("change_state");
     if (staleNow)
       add("stale", "fail", c.ref, "the cited changes are not the accepted changes; refresh");
     // The marks kept from an earlier refresh (response-quotes.mjs markStale):
@@ -196,7 +245,24 @@ export function checkResponses({ revision, snapshot, headings = [], profile }) {
 
     for (const cit of r?.citations ?? []) {
       if (cit.problem) {
-        add("quote_exact", "fail", c.ref, cit.problem);
+        add("quote_exact", "fail", c.ref, cit.doc ? `${cit.doc}: ${cit.problem}` : cit.problem);
+        continue;
+      }
+      // A citation of a supplementary file: its section is a heading of that
+      // file (its own pane named it) and it has no line numbers. Its quote
+      // must stand in the paragraph of that file, as its review file has it.
+      if (cit.doc) {
+        const quote = String(cit.quote ?? "");
+        const here = partByName.get(cit.doc)?.paragraphs?.[cit.paragraph_index] ?? "";
+        if (cit.kind === "revised" && (!quote || !here.includes(quote)))
+          add(
+            "quote_exact",
+            "fail",
+            c.ref,
+            `quote is not in ${cit.doc} as it was last read: ${quote.slice(0, 60)}`,
+          );
+        if (cit.kind === "revised" && L.max_quote_words && wordCount(quote) > L.max_quote_words)
+          add("rule_quote_words", "warn", c.ref, `${wordCount(quote)} words quoted`);
         continue;
       }
       // No section is not a failure: the line is written without one

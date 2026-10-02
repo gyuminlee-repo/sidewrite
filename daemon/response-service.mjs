@@ -45,7 +45,7 @@ import {
 import { classifyRevision } from "./revision-classify.mjs";
 import { appendDecisions, decisionRecord } from "./decision-log.mjs";
 import { wrapHandlers } from "./handler-wrap.mjs";
-import { refuseInPart } from "./revision-parts.mjs";
+import { linkedChanges, partsForLetter, refuseInPart } from "./revision-parts.mjs";
 import { checkLlmItem, inScope } from "./ledger-check.mjs";
 import {
   effectiveProfile,
@@ -60,6 +60,8 @@ import {
   citationsFor,
   keepLines,
   markStale,
+  partChanges,
+  partCitations,
   snapshotHash,
   staleReasons,
   viewText,
@@ -145,14 +147,15 @@ export function usableHeadings(headings, snapshot) {
 // What a draft is written from, as one value per stale mark: the sentences
 // the letter quotes for the comment, and its changes with their states (the
 // prompt lists each change as in the manuscript, revised by hand, or not in
-// it). Compared when the draft is saved (response_draft).
+// it). Compared when the draft is saved (response_draft). parts: the
+// supplementary files, whose changes for the comment the prompt lists too.
 //
 // The Review tab's refresh does not replace the citations, so an edit it saw
 // leaves both of these as they were. For that each value also carries the
 // manuscript text in which the citations were last found not to fit
 // (stale_at, set by markStale): it changes with every further edit of a
 // cited sentence, whether a mark was there before or not.
-const draftInput = (c) => ({
+const draftInput = (c, parts = []) => ({
   quote_changed: JSON.stringify([
     (c.response?.citations ?? []).map((x) => [x.kind, x.quote, x.problem]),
     c.response?.stale_at?.quote_changed ?? null,
@@ -162,6 +165,10 @@ const draftInput = (c) => ({
     c.response?.stale_at?.change_state ?? null,
     // The figure changes the prompt listed, with their states.
     (c.figure_changes ?? []).map((f) => [f.id, f.state]),
+    // And the changes in the supplementary files.
+    ...(parts.length
+      ? [parts.map((p) => [p.name, partChanges(p, c.ref).map((ch) => [ch.id, ch.state])])]
+      : []),
   ]),
 });
 
@@ -205,6 +212,8 @@ function shownCitations(list) {
     quote: String(x?.quote ?? ""),
     paragraph_index: Number.isInteger(x?.paragraph_index) ? x.paragraph_index : null,
     change_ids: (Array.isArray(x?.change_ids) ? x.change_ids : []).map(String),
+    // The supplementary file it is in, when it is in one.
+    ...(typeof x?.doc === "string" && x.doc ? { doc: x.doc } : {}),
   }));
 }
 
@@ -218,18 +227,26 @@ function shownCitations(list) {
 //   - the adopted figure changes are saved with the citations the same way
 //     (figure_ids): an answer that stood while a figure change was adopted
 //     or taken back is marked change_state by the same rule
-export function refreshed(rev, snapshot, headings, profile) {
+//   - parts: the supplementary Word files of the revision
+//     (revision-parts.mjs partsForLetter). The citations of their accepted
+//     changes come after those of the manuscript, each with the name of its
+//     file (doc) and without line numbers, read from the review file of the
+//     part and checked against it (response-quotes.mjs partCitations). They
+//     are judged stale like the others: an answer that stood while a change
+//     in a part was accepted or taken back is marked change_state.
+export function refreshed(rev, snapshot, headings, profile, parts = []) {
   let next = applyStates(rev, classifyRevision(rev, snapshot));
   const level = profile.response_letter.section_level;
-  next = markStale(next, snapshot);
+  next = markStale(next, snapshot, parts);
   for (const c of next.comments) {
     const fresh = keepLines(
       citationsFor(c, snapshot, headings, { level }),
-      c.response?.citations ?? [],
+      (c.response?.citations ?? []).filter((x) => !x.doc),
     );
+    const elsewhere = parts.flatMap((p) => partCitations(p, c.ref));
     const figures = adoptedFigures(c).map((f) => f.id);
-    if (!c.response && !fresh.length && !figures.length) continue;
-    next = setCitations(next, c.ref, fresh, undefined, figures);
+    if (!c.response && !fresh.length && !figures.length && !elsewhere.length) continue;
+    next = setCitations(next, c.ref, [...fresh, ...elsewhere], undefined, figures);
   }
   return next;
 }
@@ -307,13 +324,27 @@ export function createResponseService({
     return { snapshot, headings, dropped };
   }
 
+  // The supplementary Word files of the manuscript, as their review files
+  // have them: plain reads and one stat each, before the chain of the
+  // manuscript's own file (no update of one file inside that of another).
+  // Nothing is read from Word for them.
+  const partsOf = (d, rev) => (rev.parts?.length ? partsForLetter(d.doc, rev) : []);
+  // What the pane shows of them on a card (never saved): where the requests
+  // stand in the other files, and which of them cannot be relied on.
+  const partsReply = (parts) => ({
+    linked_changes: linkedChanges(parts),
+    parts_unconfirmed: parts.filter((p) => !p.confirmed).map((p) => p.name),
+  });
+
   // The revision brought up to date with the document, saved, and its profile.
   async function current(d, msg) {
     const { snapshot, headings, dropped } = docOf(msg);
     if (dropped) log(`[response] headings dropped=${dropped}`);
-    const { profile } = await profileOf(d, await load(d));
-    const revision = await update(d, (rev) => refreshed(rev, snapshot, headings, profile));
-    return { snapshot, headings, dropped, profile, revision };
+    const stored = await load(d);
+    const { profile } = await profileOf(d, stored);
+    const parts = await partsOf(d, stored);
+    const revision = await update(d, (rev) => refreshed(rev, snapshot, headings, profile, parts));
+    return { snapshot, headings, dropped, profile, revision, parts };
   }
   // What the pane found as headings, for a run that cites no section: how
   // many, at which levels, how many the snapshot did not confirm. No text.
@@ -336,9 +367,9 @@ export function createResponseService({
 
   // checkResponses plus the LLM-checked rules of the response scope, asked
   // once per rule for all answers. job: taken when the first rule needs it.
-  async function allChecks(d, key, { revision, snapshot, headings, profile }) {
+  async function allChecks(d, key, { revision, snapshot, headings, profile, parts }) {
     const rows = [
-      ...checkResponses({ revision, snapshot, headings, profile }),
+      ...checkResponses({ revision, snapshot, headings, profile, parts }),
       ...(await figureFileRows(revision, d.doc)),
     ];
     const rules = (revision.ledger ?? []).filter(
@@ -622,7 +653,7 @@ export function createResponseService({
       const d = at(key);
       const state = await current(d, msg);
       logHeadings(state);
-      return { revision: state.revision };
+      return { revision: state.revision, ...partsReply(state.parts) };
     },
 
     // The author's own text and decisions. text: the answer; declined:
@@ -656,9 +687,10 @@ export function createResponseService({
       const moved =
         comment0 && shown.length
           ? staleReasons(
-              { changes: comment0.changes, response: { citations: shown } },
+              { ref, changes: comment0.changes, response: { citations: shown } },
               state.snapshot,
               null,
+              state.parts,
             )
           : [];
       const marked = moved.length > 0;
@@ -704,6 +736,7 @@ export function createResponseService({
       if (marked) log(`[response] save ${ref} shown citations do not fit: ${moved.join(",")}`);
       return {
         revision,
+        ...(state ? partsReply(state.parts) : {}),
         warnings: marked
           ? [
               "The manuscript changed under this answer. Read it against the citations shown now, then save it again.",
@@ -719,16 +752,21 @@ export function createResponseService({
       const job = await oneshotJob(key, writingJob(env));
       if (!job?.run)
         throw new Error("No model is available for drafting. Pick a provider in Setup.");
-      const { snapshot, headings, profile, revision: before } = await current(d, msg);
+      const { snapshot, headings, profile, revision: before, parts } = await current(d, msg);
       const comment = findComment(before, ref);
       if (!comment) throw new Error(`No reviewer comment ${ref}`);
       const L = profile.response_letter;
-      const written = draftInput(comment);
+      const written = draftInput(comment, parts);
       const built = buildResponsePrompt({
         comment,
         profile,
         ledger: before.ledger,
         previous: comment.response?.text || comment.response?.previous || null,
+        parts: parts.map((p) => ({
+          name: p.name,
+          label: p.label,
+          changes: partChanges(p, ref),
+        })),
       });
       const drafted = parseDraft(await job.run({ system: built.system, prompt: built.prompt }));
       if (drafted.error) throw new Error(drafted.error);
@@ -743,10 +781,13 @@ export function createResponseService({
       // again since (a sentence edited, a change decided). The draft is kept,
       // and what it was not written for is marked, as a refresh marks it.
       let moved = [];
+      // The supplementary files as they are on record now: a change decided
+      // there while the model wrote is a change of what the draft was told.
+      const partsNow = await partsOf(d, before);
       const revision = await update(d, (rev) => {
         const now = findComment(rev, ref);
         if (!now) throw new Error(`No reviewer comment ${ref}`);
-        const input = draftInput(now);
+        const input = draftInput(now, partsNow);
         moved = Object.keys(written).filter((k) => input[k] !== written[k]);
         const next = setResponse(rev, ref, { text: drafted.text, gloss, source: "model" });
         const r = findComment(next, ref).response;
@@ -772,6 +813,7 @@ export function createResponseService({
             lang: L.lang,
             words,
             change_ids: built.changeIds,
+            ...(built.partChangeIds.length ? { part_change_ids: built.partChangeIds } : {}),
             figure_ids: built.figureIds,
             instruction_ids: built.instructionIds,
             forbid_ids: built.forbidIds,
@@ -782,10 +824,10 @@ export function createResponseService({
       log(
         `[response] draft ${ref} lang=${L.lang} model=${job.model} words=${words} citations=${citations}`,
       );
-      const checks = checkResponses({ revision, snapshot, headings, profile }).filter(
+      const checks = checkResponses({ revision, snapshot, headings, profile, parts }).filter(
         (row) => row.ref === ref,
       );
-      return { revision, checks, warnings };
+      return { revision, checks, warnings, ...partsReply(parts) };
     },
 
     // The translation paragraph of the answer as it is saved (after the author
@@ -886,7 +928,7 @@ export function createResponseService({
       const checks = await allChecks(d, key, state);
       const summary = summarize(checks);
       log(`[response] check fail=${summary.fail} warn=${summary.warn}`);
-      return { revision: state.revision, checks, summary };
+      return { revision: state.revision, checks, summary, ...partsReply(state.parts) };
     },
 
     // format: "docx" (the letter, with its model and the manuscript paragraph
@@ -915,8 +957,15 @@ export function createResponseService({
         log(`[response] export text files=${paths.length}`);
         return { exported: true, paths, wanted, checks, summary };
       }
+      // The paragraphs the quotes are checked against: those of the
+      // manuscript, then those of each supplementary file as its review file
+      // has them. The verifier looks for every quote in this one list.
+      const quoted = [
+        ...snapshot.paragraphs.map(viewText),
+        ...state.parts.flatMap((p) => p.paragraphs),
+      ];
       const { paths, wanted, paragraphs, verify } = await oneExport(d.doc, () =>
-        writeLetter(d, model, snapshot.paragraphs.map(viewText), overwrite),
+        writeLetter(d, model, quoted, overwrite),
       );
       // The two hashes are what the submission checklist compares later: the
       // letter is current while the model built then is the model built now

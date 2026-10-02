@@ -12,9 +12,12 @@
 //     then the manuscript. Either end alone is put right by the next load of
 //     the supplement.
 
-import { access, readdir } from "node:fs/promises";
+import { access, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadRevision, localDocPath, revisionPathFor } from "./revision-store.mjs";
+import { partLabel } from "./response-quotes.mjs";
+
+export { partLabel };
 
 const SIDECAR = /\.revision\.json$/i;
 const under = (dir, path) => path.startsWith(dir + sep);
@@ -153,7 +156,61 @@ export async function loadParts(mainDoc, mainRev) {
     } catch {
       revision = null;
     }
-    out.push({ doc, name: basename(doc), label: p.label, revision });
+    out.push({ doc, name: basename(doc), label: p.label, joined_at: p.joined_at, revision });
+  }
+  return out;
+}
+
+// The file of a document as it is on the disk now, in the form a status
+// refresh records it (review-service.mjs review_refresh doc_state.file), or
+// null when it cannot be read.
+export async function fileOnDisk(doc, statFile = stat) {
+  try {
+    const s = await statFile(doc);
+    return { mtime: s.mtime.toISOString(), bytes: s.size };
+  } catch {
+    return null;
+  }
+}
+
+// Can what the review file of a supplement records still be trusted? The
+// manuscript reads a supplement from its review file only, never from Word,
+// so the record must be of the file as it is on the disk now:
+//   - the supplement was refreshed after it joined (doc_state, not older
+//     than the link),
+//   - on a document without unsaved changes (doc_state.saved === true; not
+//     known counts as unsaved),
+//   - and the file still has the time and the size recorded then.
+// Returns null when it can, else why not: "no_record" (no review file, or
+// never refreshed since the join), "unsaved", "changed" (the file is not the
+// one that was read, or cannot be read now).
+export function partUnconfirmed({ revision, joined_at }, onDisk) {
+  const ds = revision?.doc_state ?? null;
+  if (!ds || (joined_at && ds.at < joined_at)) return "no_record";
+  if (ds.saved !== true) return "unsaved";
+  if (!ds.file || !onDisk || ds.file.mtime !== onDisk.mtime || ds.file.bytes !== onDisk.bytes)
+    return "changed";
+  return null;
+}
+
+// The supplements of a manuscript as the response letter, its checks and the
+// submission checklist read them: loadParts, each with
+//   label       what the letter calls the file (partLabel)
+//   paragraphs  the text of the file at its last status refresh (the
+//               accepted view, as its review file stores it)
+//   confirmed   false: the record cannot be trusted (why: partUnconfirmed)
+// Plain reads of the review files and one stat per file; nothing of Word.
+export async function partsForLetter(mainDoc, mainRev, { statFile = stat } = {}) {
+  const out = [];
+  for (const p of await loadParts(mainDoc, mainRev)) {
+    const why = partUnconfirmed(p, await fileOnDisk(p.doc, statFile));
+    out.push({
+      ...p,
+      label: partLabel(p.label, p.name),
+      paragraphs: p.revision?.snapshot?.paragraphs ?? [],
+      confirmed: why === null,
+      why,
+    });
   }
   return out;
 }
@@ -187,17 +244,40 @@ export async function sessionDocKey(doc) {
   }
 }
 
+// For the pane of a supplement: which of its changes the letter of the
+// manuscript cites, as the review file of the manuscript has them
+// (response-quotes.mjs partCitations wrote them at its last refresh):
+//   [{ ref, kind, section, quote, change_ids }]
+// name: the file name of the supplement. A citation with a problem is not
+// printed by the letter and is left out.
+export function citedInMain(mainRev, name) {
+  return (mainRev?.comments ?? []).flatMap((c) =>
+    (c.response?.citations ?? [])
+      .filter((cit) => cit.doc === name && !cit.problem)
+      .map((cit) => ({
+        ref: c.ref,
+        kind: cit.kind,
+        section: cit.section,
+        quote: cit.quote,
+        change_ids: cit.change_ids,
+      })),
+  );
+}
+
 // The link of a document as a reply tells it to the pane (never saved):
 //   part_of: { doc, name, label } of its manuscript, or null
 //   parts: [{ doc, name, label }] of its supplements
 export function linkedSummary(doc, rev) {
   const dir = dirname(doc);
   const main = rev.part_of ? resolvePart(dir, rev.part_of.manuscript) : null;
+  // label: what the response letter calls the supplement (never empty).
   return {
-    part_of: main ? { doc: main, name: basename(main), label: rev.part_of.label } : null,
+    part_of: main
+      ? { doc: main, name: basename(main), label: partLabel(rev.part_of.label, basename(doc)) }
+      : null,
     parts: (rev.parts ?? []).map((p) => {
       const part = resolvePart(dir, p.doc);
-      return { doc: part, name: basename(part), label: p.label };
+      return { doc: part, name: basename(part), label: partLabel(p.label, basename(part)) };
     }),
   };
 }

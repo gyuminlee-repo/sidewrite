@@ -697,7 +697,7 @@ const review = createReviewService({
   listPanes: () => bridge.listPanes(),
   // The answers of the response letter that a change of the manuscript made
   // out of date (same rule as the Response tab).
-  afterRefresh: (rev, snap) => markStale(rev, snap),
+  afterRefresh: (rev, snap, parts) => markStale(rev, snap, parts),
 });
 
 // Response tab (C2): the response letter. Drafts and LLM checks go through

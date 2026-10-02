@@ -171,6 +171,12 @@ const Citation = z.object({
   lines_pdf: z.string().nullable().default(null),
   // Why the change could not be placed ("unlocated", "sentence not found").
   problem: z.string().nullable().default(null),
+  // The file name of the supplementary document the change is in, in the
+  // review file of the manuscript (response-quotes.mjs partCitations). Not
+  // there: the manuscript itself. change_ids and paragraph_index are then
+  // those of that file, so the identity of a cited change is (doc, id).
+  // Optional and without a default: a citation from before it saves as it was.
+  doc: z.string().min(1).nullish(),
 });
 
 const Response = z.object({
