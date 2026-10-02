@@ -1,0 +1,11 @@
+Fake review for software testing. It refers to tests/fixtures/citation_manuscript.docx, an invented manuscript with invented references. No real study, journal, or person is involved.
+
+Reviewer #1: Comments to the Author
+
+Comment 1: In the Introduction, the sentence that says oxygen transfer falls as the fill volume rises is hard to follow. Please reword that sentence; keep its two references.
+
+Comment 2: In the Methods, the sentence about the reader having been calibrated against dry weight in an earlier study is not needed. Please delete that sentence.
+
+Comment 3: The paragraph of the Introduction about baffles ("It has been said by several invented authors ...") is wordy. Please rewrite this paragraph for clarity; the references must stay where they belong.
+
+Comment 4: Please read the wording of the Introduction and the Methods once more for small slips.

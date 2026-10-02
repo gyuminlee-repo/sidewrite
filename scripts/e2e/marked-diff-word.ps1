@@ -10,7 +10,10 @@
 # then for action "accept" Revisions.AcceptAll() and for "reject"
 # Revisions.RejectAll() run, the structure is read, and the document is
 # closed without saving. A file Word refuses to open is a job with ok = false
-# and the error text.
+# and the error text. A job may carry save_as (a path under the run folder;
+# the cite stage of run-acceptance.mjs): the document as it is after the
+# action is then written there as a .docx before it is closed. The file that
+# was opened is never written.
 #
 # Writes -Out (JSON: { jobs: [...] }) after every job and prints one JSON
 # line at the end: { ok, error, pid, preexisting, jobs, quit }.
@@ -90,6 +93,13 @@ function RunJob($app, $job) {
     elseif ($job.action -eq "reject") { $doc.Revisions.RejectAll() | Out-Null }
     $res.revisions_left = [int]$doc.Revisions.Count
     $res.shape = Shape $doc
+    if ($job.save_as) {
+      $dest = [string]$job.save_as
+      if (-not (Under $dest)) { throw "save_as is outside the run folder" }
+      # 12 = wdFormatXMLDocument (as replay-open.ps1 writes its repaired copy)
+      try { $doc.SaveAs2($dest, 12) } catch { $doc.SaveAs2([ref]$dest, [ref]12) }
+      $res.saved_as = [string]$doc.FullName
+    }
     $res.ok = $true
   } catch {
     $res.error = "read: " + $_.Exception.Message
@@ -98,7 +108,7 @@ function RunJob($app, $job) {
     try { $doc.Saved = $true } catch { $res.close_note = "Saved could not be set: " + $_.Exception.Message }
     try { $doc.Close(0) | Out-Null } catch { $res.close_note = "Close(0): " + $_.Exception.Message }
   }
-  if ((OpenNames $app) -contains $job.path) {
+  if (((OpenNames $app) -contains $job.path) -or ($job.save_as -and ((OpenNames $app) -contains $job.save_as))) {
     $res.ok = $false
     $res.error = "the document could not be closed: " + $res.close_note
   }

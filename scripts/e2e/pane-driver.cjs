@@ -748,6 +748,56 @@ const steps = {
     return view(page);
   },
 
+  // The same two presses, whatever comes of them (the cite stage: the edit
+  // is expected to go in, and then no message is shown). The wait ends when
+  // the message line shows an error (the edit was refused) or the card of
+  // a.ref no longer has the row (the edit went in and its item left the
+  // list). row_gone says which.
+  async "apply-seeded"(page, a) {
+    const label = `Blocked by ${a.blocked_by}:`;
+    const row = () => card(page, a.ref).locator(".review-blocked", { hasText: label });
+    await clearMessage(page);
+    await openCard(page, a.ref);
+    await row().locator("button", { hasText: "Allow exception" }).click();
+    await row().locator("button", { hasText: "Apply despite" }).click();
+    await page.waitForFunction(
+      ([ref, text]) => {
+        const m = document.getElementById("review-message");
+        if ((m?.textContent.trim() ?? "") !== "" && m.classList.contains("form-error")) return true;
+        const c = [...document.querySelectorAll(".review-comment")].find(
+          (x) => x.querySelector(".review-comment-head strong")?.textContent.trim() === ref,
+        );
+        if (!c) return false;
+        return ![...c.querySelectorAll(".review-blocked")].some((b) =>
+          b.textContent.includes(text),
+        );
+      },
+      [a.ref, label],
+      { timeout: 180_000, polling: 250 },
+    );
+    const v = await view(page);
+    return { row_gone: !v.message_error, ...v };
+  },
+
+  // The pane's own office_tracked_edit (tools-word.js toolTrackedEdit), called
+  // with a.args as the daemon sends them. The cite stage sends the first part
+  // of a rewritten paragraph this way (plain_only): no step of the pane
+  // reaches office_tracked_rewrite without a model. `result` is what the
+  // function answered, `threw` the error it raised.
+  async "tracked-edit-direct"(page, a) {
+    return page.evaluate(
+      async ([origin, args]) => {
+        const m = await import(`${origin}/shared/tools-word.js`);
+        try {
+          return { result: await m.toolTrackedEdit(args) };
+        } catch (e) {
+          return { threw: String(e?.message ?? e), code: e?.code ?? null };
+        }
+      },
+      [ORIGIN, a.args],
+    );
+  },
+
   async "clean-tool"(page) {
     await openFold(page, "review-submit-box");
     await clearMessage(page);
@@ -1032,7 +1082,9 @@ const steps = {
       const s = await m.collectReviewSnapshot();
       return s.paragraphs.map((p) => ({
         index: p.index,
+        id: p.id,
         text: p.text,
+        reviewed_text: p.reviewed_text,
         w_ins: p.w_ins,
         w_del: p.w_del,
         tracked: p.tracked,

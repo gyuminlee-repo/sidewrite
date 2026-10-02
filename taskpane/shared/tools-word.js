@@ -10,6 +10,13 @@ import {
   isToolComment,
   planBackupDelete,
 } from "./review-view.js";
+import {
+  fieldRefusal,
+  fieldVerdict,
+  fieldView,
+  fieldsKept,
+  paragraphFields,
+} from "./field-text.js";
 //
 // Word tool implementations + Word-specific helpers.
 //
@@ -1569,7 +1576,60 @@ export async function toolHeaderFooter({ which, text }) {
 // loaded before the daemon was updated would apply the edit unchecked.
 // "tracked_rewrite": it takes the parts of a rewritten paragraph (no_comment,
 // plain_only below; daemon/review-tools.mjs REWRITE_CAP).
-export const PANE_CAPS = ["target_hash", "tracked_rewrite"];
+// "field_guard": it refuses an edit in the text of a field, and after an
+// edit in a paragraph with fields it checks that every field is as it was
+// or went as a whole, and takes the edit back otherwise (FIELD_CAP).
+export const PANE_CAPS = ["target_hash", "tracked_rewrite", "field_guard"];
+
+// The complex fields of a paragraph as its XML has them (field-text.js
+// paragraphFields: instruction, result, and whether the markers lie in a
+// tracked change), or null when the XML cannot be read.
+async function readFields(context, para) {
+  try {
+    const oox = para.getOoxml();
+    await context.sync();
+    return paragraphFields(oox.value);
+  } catch {
+    return null;
+  }
+}
+
+// Can this Word reject the tracked changes of a range
+// (Range.getTrackedChanges, TrackedChangeCollection.rejectAll: WordApi 1.6)?
+function canReject() {
+  try {
+    return Office.context.requirements.isSetSupported("WordApi", "1.6") === true;
+  } catch {
+    return false;
+  }
+}
+
+// Take a tracked edit back: the tracked changes on the ranges of the edit
+// are rejected. true only when the paragraph then has its fields and its
+// reviewed text as before the edit: whether Word did it is read from the
+// document, not from the call. A tracked change of the same author that
+// touched the edit may have been merged with it by Word and goes back with
+// it; the paragraph then does not read as before and this says false.
+async function takeBack(context, para, ranges, fields, reviewedBefore) {
+  for (const r of ranges) {
+    if (!r) continue;
+    try {
+      r.getTrackedChanges().rejectAll();
+      await context.sync();
+    } catch {
+      /* the next range, then the document decides */
+    }
+  }
+  const now = await readFields(context, para);
+  const text = await getReviewedTextBatch(context, [para.getRange("Whole")]);
+  return (
+    !!now &&
+    fieldsKept(fields, now, 0) === null &&
+    !!text &&
+    reviewedBefore != null &&
+    paragraphHash(text[0]) === paragraphHash(reviewedBefore)
+  );
+}
 
 // What a paragraph holds besides plain text, or null. A rewrite as a whole
 // replaces runs of words and would cut through such a thing. A Word that
@@ -1618,6 +1678,21 @@ async function notPlain(context, para) {
 // No hash (the daemon could not tell the paragraph, so it judged none) is
 // refused as well. expected_paragraph ({ index, id }: where the daemon saw
 // the paragraph) only goes into the message.
+// Fields (field-text.js). An edit leaves every field of the paragraph as it
+// was or removes one as a whole; nothing in between.
+//   Before the edit: the range is placed in the reviewed text of the
+//   paragraph, which shows the fields. Inside the text of a field, across
+//   its edge, or a replacement over a field: refused (FieldNotEditable),
+//   nothing changed. A deletion that holds a field whole, with words on
+//   both sides (a sentence with its citation), is made with Range.delete(),
+//   so that Word puts the field into the tracked deletion from its begin
+//   marker to its end marker; only in a Word that can take the edit back.
+//   After the edit: the fields of the paragraph are read again from its XML
+//   and compared with those read before (fieldsKept). A field that is
+//   hollowed, split, changed or gone: the edit is taken back (takeBack) and
+//   refused as FieldNotEditable, reason after-edit. When Word cannot take
+//   it back, the result is applied:true with code FieldEditNotUndone, so
+//   the daemon records the change and the author sees it.
 export async function toolTrackedEdit({
   find,
   replace,
@@ -1735,9 +1810,33 @@ export async function toolTrackedEdit({
             : `The paragraph of "${find}" was not checked before the edit; nothing was changed`,
         };
       }
-      const inserted = isInsert
-        ? hit.insertText(insert_after, Word.InsertLocation.after)
-        : target.insertText(editReplace, Word.InsertLocation.replace);
+      // The fields of the paragraph, and where the edit lies among them.
+      const fields = await readFields(context, para);
+      const verdict = reviewed
+        ? fieldVerdict(
+            fieldView(reviewed[0]),
+            find,
+            isInsert ? { insert_after } : { replace },
+            narrowed ? { find: editFind, replace: editReplace } : null,
+          )
+        : { ok: true, remove: 0, unknown: true };
+      const refused = (reason, extra = {}) => ({
+        ok: false,
+        code: "FieldNotEditable",
+        reason,
+        paragraph_index: paragraphIndex,
+        message: fieldRefusal(reason, extra.detail ? `(${extra.detail})` : ""),
+        ...extra,
+      });
+      if (!verdict.ok) return refused(verdict.reason);
+      // A deletion that takes a field with it: only when the paragraph can
+      // be checked after it and the edit can be taken back.
+      const takesField = verdict.remove > 0;
+      if (takesField && !(fields && canReject())) return refused("no-undo");
+      let inserted = null;
+      if (isInsert) inserted = hit.insertText(insert_after, Word.InsertLocation.after);
+      else if (takesField) target.delete();
+      else inserted = target.insertText(editReplace, Word.InsertLocation.replace);
       // A failure of the sync that carries the edit is treated as not
       // applied (the batch failed) and propagates.
       await context.sync();
@@ -1754,6 +1853,29 @@ export async function toolTrackedEdit({
         // flags an applied result without this (an older task pane).
         target_checked: true,
       };
+      // The fields after the edit. A deletion whose place among the fields
+      // could not be told beforehand may take fields with it, as a whole.
+      if (fields && (fields.length || fields.stray)) {
+        const now = await readFields(context, para);
+        const mayRemove = takesField
+          ? verdict.remove
+          : verdict.unknown && !isInsert && editReplace === ""
+            ? Infinity
+            : 0;
+        const broke = now ? fieldsKept(fields, now, mayRemove) : takesField ? "unreadable" : null;
+        if (broke) {
+          const back = await takeBack(context, para, [target, inserted], fields, reviewed?.[0]);
+          if (back) return refused("after-edit", { detail: broke, undone: true });
+          return {
+            ok: false,
+            code: "FieldEditNotUndone",
+            applied: true,
+            detail: broke,
+            message: `The edit is in the document, but it did not leave a citation or another field of its paragraph whole (${broke}) and could not be taken back. Reject this change in Word.`,
+            ...applied,
+          };
+        }
+      }
       // A part of a rewrite without a comment of its own: done.
       if (no_comment) return { ok: true, word_comment_id: null, no_comment: true, ...applied };
       // The range the comment of this edit goes on, or undefined.
