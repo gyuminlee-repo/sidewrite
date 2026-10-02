@@ -212,7 +212,7 @@ test("windowsProbe: one read-only PowerShell command with the names of the insta
   const ps = windowsProbe();
   assert.doesNotMatch(ps, /[^\x20-\x7e]/, "one ASCII line");
   assert.ok(ps.includes(DEVELOPER_KEY.replace(/^HKCU\\/, "HKCU:\\")));
-  assert.ok(ps.includes("Draftspect\\manifests\\word.xml"));
+  assert.ok(ps.includes("Sidewrite\\manifests\\word.xml"));
   assert.ok(ps.includes(`'${TASK_NAME}'`));
   assert.ok(ps.includes("47834"));
   assert.match(ps, /ConvertTo-Json -Compress$/);

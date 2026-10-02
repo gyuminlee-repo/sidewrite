@@ -11,7 +11,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const unitName = "draftspect-daemon";
+export const unitName = "sidewrite-daemon";
 export const HEALTH_URL = "http://127.0.0.1:47834/health";
 
 const SYSTEM_PATH = ["/usr/local/bin", "/usr/bin", "/bin"];
@@ -45,7 +45,7 @@ export function renderUnit({ node, repo, logFile, extraPath = [] }) {
 #          daemon unless CC_OFFICE_CLAUDE_PATH names another.
 # No variable of a terminal or of an agent session reaches the daemon.
 [Unit]
-Description=Draftspect daemon (bridge between Word and Claude)
+Description=Sidewrite daemon (bridge between Word and Claude)
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

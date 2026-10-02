@@ -27,7 +27,7 @@ class Embed(unittest.TestCase):
     def test_manifest_id_version(self):
         self.assertEqual(
             embed.manifest_id_version(MANIFEST.read_text(encoding="utf-8")),
-            ("27ee7761-18ca-4fae-b482-4171d5afa6cd", "0.1.2.0"),
+            ("8d614a6d-ebdc-4ce9-b61d-1c744496624b", "0.1.2.0"),
         )
         with self.assertRaises(ValueError):
             embed.manifest_id_version("<OfficeApp><Id>not-a-guid</Id></OfficeApp>")
@@ -42,7 +42,7 @@ class Embed(unittest.TestCase):
         digest = hashlib.sha256(SRC.read_bytes()).hexdigest()
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "tagged.docx"
-            embed.embed(SRC, out, "27ee7761-18ca-4fae-b482-4171d5afa6cd", "0.1.2.0")
+            embed.embed(SRC, out, "8d614a6d-ebdc-4ce9-b61d-1c744496624b", "0.1.2.0")
             with zipfile.ZipFile(out) as z:
                 we = z.read(embed.WE_PART).decode()
                 tp = z.read(embed.TP_PART).decode()
@@ -67,7 +67,7 @@ class SourceIsNeverWritten(unittest.TestCase):
     (38,766 bytes became 22). The output is refused when it is the source by
     any name, and it is written to a temp file first."""
 
-    ARGS = ("27ee7761-18ca-4fae-b482-4171d5afa6cd", "0.1.2.0")
+    ARGS = ("8d614a6d-ebdc-4ce9-b61d-1c744496624b", "0.1.2.0")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

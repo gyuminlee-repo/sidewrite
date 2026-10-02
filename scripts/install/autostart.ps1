@@ -20,7 +20,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-$name = "Draftspect WSL keep-alive"
+$name = "Sidewrite WSL keep-alive"
 $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
 
 if ($Remove) {
