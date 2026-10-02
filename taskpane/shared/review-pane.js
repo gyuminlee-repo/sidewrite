@@ -124,6 +124,9 @@ export function initReviewPane({
   // (tools-pane.js job): its job_done comes as a tools_event, which that
   // pane waits for. The submission checklist is such a job.
   toolsJob = null,
+  // () => called after a refresh in a supplementary file wrote what the
+  // letter cites from it (taskpane.js: the Response tab reads it again).
+  onPartRefreshed = () => {},
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -944,10 +947,13 @@ export function initReviewPane({
   // its list comes from, with the way out. A file with no review of its own:
   // the box to join the revision of a manuscript (nothing joins by itself).
   async function joinRevision(main) {
-    const r = await ask("review_link_join", { main });
+    // The name the response letter gives this file; none typed: its file name.
+    const label = $("review-link-label")?.value.trim() ?? "";
+    const r = await ask("review_link_join", { main, ...(label ? { label } : {}) });
     state.linked = r.linked ?? null;
     state.linkCandidates = [];
     $("review-link-path").value = "";
+    if ($("review-link-label")) $("review-link-label").value = "";
     say(`Joined the revision of ${partOf()?.name ?? "the manuscript"}.`);
   }
   function renderLink() {
@@ -972,6 +978,35 @@ export function initReviewPane({
       line.append(el("div", { class: "review-linked-text", text: partOfText(main) }));
       if (state.linked.note)
         line.append(el("div", { class: "form-error", text: state.linked.note }));
+      // What the response letter calls this file, set here at any time.
+      const name = el("input", {
+        type: "text",
+        id: "review-part-label",
+        maxlength: "80",
+        "aria-label": "Name of this file in the response letter",
+      });
+      name.value = main.label ?? "";
+      const saveName = el("button", {
+        type: "button",
+        class: "btn-secondary btn-small",
+        text: "Save name",
+      });
+      saveName.addEventListener(
+        "click",
+        guard(async () => {
+          const r = await ask("review_link_label", { label: name.value });
+          state.linked = r.linked ?? state.linked;
+          say(`The response letter calls this file ${partOf()?.label}.`);
+        }),
+      );
+      line.append(
+        el(
+          "div",
+          { class: "review-part-label" },
+          el("label", { for: "review-part-label", text: "Name in the response letter" }),
+          el("div", { class: "review-link-typed" }, name, saveName),
+        ),
+      );
       line.append(leave);
     } else if (parts.length) {
       line.append(el("div", { class: "review-linked-text", text: linkedFilesText(parts) }));
@@ -1503,6 +1538,22 @@ export function initReviewPane({
     const saved = await documentSaved();
     const snapshot = await word.collectReviewSnapshot();
     const r = await ask("review_refresh", { snapshot, saved });
+    // A supplementary file: the citations of its accepted changes (section
+    // and quote) go into its own review file after every refresh, from the
+    // same snapshot. The response letter of the manuscript reads them from
+    // there; it never reads this document itself. A failure is told and
+    // does not undo the refresh: the manuscript then says that the record
+    // of this file is incomplete.
+    let notCited = "";
+    if (partOf()) {
+      try {
+        const headings = (await word.collectHeadings?.()) ?? [];
+        await ask("response_state", { snapshot, headings });
+        onPartRefreshed();
+      } catch (e) {
+        notCited = ` What the letter cites from this file was not brought up to date (${e.message}); press Refresh status again.`;
+      }
+    }
     // Word refuses Comment.resolved in a document in compatibility mode
     // (GeneralException on every comment). The refresh itself has succeeded,
     // so its counts are still shown and the refusal is added to them.
@@ -1521,8 +1572,9 @@ export function initReviewPane({
       : "";
     // One sentence on what to do next; the full counts are under Details.
     report(
-      countsSentence(c, inv, { outside: r.external?.length ?? 0, unresolved: unresolved.length }),
-      !inv.ok,
+      countsSentence(c, inv, { outside: r.external?.length ?? 0, unresolved: unresolved.length }) +
+        notCited,
+      !inv.ok || !!notCited,
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
         invariantText(inv) +

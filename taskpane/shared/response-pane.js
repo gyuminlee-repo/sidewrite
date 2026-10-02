@@ -18,10 +18,12 @@ import {
   proposalRows,
   overridesFromForm,
   openRequirements,
+  openRequirementNote,
   undecidedText,
   nextStep,
   exportMessage,
   letterFromText,
+  citedInLetter,
 } from "./response-view.js";
 
 const CONNECTION_LOST =
@@ -59,6 +61,11 @@ export function initResponsePane({
     jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
     partOf: null, // the manuscript this file belongs to, when it is a supplementary file
+    linked: null, // the `linked` of the last review_load (parts, cited_in_main)
+    // Where the requests stand in the supplementary files of this manuscript,
+    // [{ file, ref, state, requirement_ids }], as the last reply had them.
+    linkedChanges: [],
+    partsUnconfirmed: [], // names of the supplementary files whose record cannot be relied on
   };
 
   function el(tag, props = {}, ...kids) {
@@ -80,7 +87,13 @@ export function initResponsePane({
     const r = await sendRequest(type, payload);
     if (!r.ok) throw new Error(r.error || `${type} failed`);
     if (r.revision) state.revision = r.revision;
+    takeParts(r);
     return r;
+  }
+  // What a reply says about the supplementary files (never stored).
+  function takeParts(r) {
+    if (Array.isArray(r?.linked_changes)) state.linkedChanges = r.linked_changes;
+    if (Array.isArray(r?.parts_unconfirmed)) state.partsUnconfirmed = r.parts_unconfirmed;
   }
   // A job answers { accepted, job_id } at once; its result comes in a
   // job_done response_event, possibly before the answer.
@@ -97,6 +110,7 @@ export function initResponsePane({
     result ??= await new Promise((resolve, reject) => state.jobs.set(job_id, { resolve, reject }));
     if (!result.ok) throw new Error(result.error || `${type} failed`);
     if (result.revision) state.revision = result.revision;
+    takeParts(result);
     return result;
   }
   function jobDone(msg) {
@@ -177,6 +191,14 @@ export function initResponsePane({
   }
   const comments = () => state.revision?.comments ?? [];
   const letter = () => state.profile?.profile?.response_letter ?? null;
+  // The supplementary Word files of this manuscript: file name -> what the
+  // letter calls it. null for a manuscript without one (the lines of the
+  // letter then name no file).
+  const partLabels = () => {
+    const parts = state.linked?.parts ?? [];
+    return parts.length ? Object.fromEntries(parts.map((p) => [p.name, p.label])) : null;
+  };
+  const elsewhere = (ref) => state.linkedChanges.filter((x) => x.ref === ref);
 
   // ---- rendering ----------------------------------------------------------
   function renderProfile() {
@@ -318,20 +340,14 @@ export function initResponsePane({
     const declined = c.response?.declined_requirements ?? [];
     const saveDeclined = (list) =>
       ask("response_save", { ref: c.ref, declined_requirements: list });
-    for (const q of openRequirements(c)) {
+    for (const q of openRequirements(c, elsewhere(c.ref))) {
       const key = `${c.ref}:${q.id}`;
       box.append(
         el(
           "div",
           { class: "response-req" },
           el("span", {
-            text: `${q.id} ${q.text}: no accepted change${
-              q.pending
-                ? " (a change is pending in Word)"
-                : q.figure
-                  ? " (a figure or file waits for your decision on the figures page)"
-                  : ""
-            }`,
+            text: `${q.id} ${q.text}: no accepted change${openRequirementNote(q)}`,
           }),
           reasonInput(key, "response-req-reason"),
           action("Decline", async () => {
@@ -361,7 +377,7 @@ export function initResponsePane({
     // What the letter will print under the answer. Computed by the daemon.
     for (const cit of c.response?.citations ?? []) {
       const shown = letter()
-        ? citationText(cit, letter())
+        ? citationText(cit, letter(), partLabels())
         : { line: cit.problem ? `Not located: ${cit.problem}` : "", quote: cit.quote || null };
       const row = el("div", { class: "response-citation" });
       if (shown.line) row.append(el("div", { class: "response-citation-line", text: shown.line }));
@@ -393,6 +409,7 @@ export function initResponsePane({
     $("response-part-note").textContent = state.partOf ? letterFromText(state.partOf) : "";
     $("response-part-note").hidden = !state.partOf;
     $("response-main").hidden = !!state.partOf;
+    renderCited();
     actionButtons = STATIC_BUTTONS.map((id) => $(id));
     renderProfile();
     renderProposal();
@@ -413,6 +430,31 @@ export function initResponsePane({
     const last = state.revision?.response_export?.path;
     $("response-output").textContent = state.output || (last ? `Last export: ${last}` : "");
     setBusy(state.busy);
+  }
+
+  // A supplementary file: which of its changes the letter of the manuscript
+  // cites, as the review file of the manuscript has them. Nothing to press.
+  function renderCited() {
+    const box = $("response-part-cited");
+    if (!box) return;
+    box.hidden = !state.partOf;
+    if (!state.partOf) return box.replaceChildren();
+    const accepted = comments()
+      .flatMap((c) => c.changes ?? [])
+      .filter((ch) => ch.state === "accepted" || ch.state === "user_edited").length;
+    const view = citedInLetter(state.linked, accepted, letter());
+    box.replaceChildren(
+      el("div", { class: "response-part-head", text: view.head }),
+      ...view.rows.map((r) =>
+        el(
+          "div",
+          { class: "response-citation", "data-ref": r.ref },
+          el("div", { class: "response-citation-line", text: r.line }),
+          r.quote ? el("div", { class: "response-citation-quote", text: r.quote }) : null,
+        ),
+      ),
+      ...view.notes.map((t) => el("div", { class: "response-part-todo", text: t })),
+    );
   }
 
   // ---- actions ------------------------------------------------------------
@@ -593,7 +635,12 @@ export function initResponsePane({
   // The saved state: no call into Word.
   async function load() {
     state.profile = await ask("profile_get");
-    state.partOf = (await ask("review_load")).linked?.part_of ?? null;
+    const loaded = await ask("review_load");
+    state.linked = loaded.linked ?? null;
+    state.partOf = state.linked?.part_of ?? null;
+    // Where the requests stand in the supplementary files, until a request
+    // of this tab brings them fresher.
+    state.linkedChanges = state.linked?.changes ?? [];
     if (state.profile.problems?.length)
       say(`Profile problem: ${state.profile.problems.join("; ")}`, true);
   }

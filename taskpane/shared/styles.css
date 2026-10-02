@@ -1716,6 +1716,29 @@ body {
   flex: 1 1 140px;
   min-width: 0;
 }
+/* A supplementary file: the name the letter gives it, and on its Response
+   tab the changes the letter cites. */
+.review-part-label {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.review-part-label label {
+  display: block;
+  color: var(--fg-muted);
+}
+.response-part-cited {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.response-part-head {
+  color: var(--fg-muted);
+}
+.response-part-todo {
+  color: var(--status-err);
+}
 .review-part-note,
 .response-part-note {
   font-size: 12px;

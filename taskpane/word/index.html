@@ -134,6 +134,13 @@
             the requests and the rules are then shown here and stay the same in both files. Nothing
             is joined until you press a button.
           </p>
+          <label for="review-link-label">Name of this file in the response letter (optional)</label>
+          <input
+            type="text"
+            id="review-link-label"
+            maxlength="80"
+            placeholder="Supplementary Information"
+          />
           <div id="review-link-candidates" class="review-link-candidates"></div>
           <label for="review-link-path">Or type the path of the manuscript</label>
           <div class="review-link-typed">
@@ -358,6 +365,8 @@
         <!-- In a supplementary file the letter is written from the manuscript:
              this sentence takes the place of the tab (response-pane.js). -->
         <p id="response-part-note" class="response-part-note" hidden></p>
+        <!-- In a supplementary file: which of its changes the letter cites. -->
+        <div id="response-part-cited" class="response-part-cited" hidden></div>
         <div id="response-main" class="response-main">
           <div id="response-next" class="response-next"></div>
           <div id="response-message" hidden></div>

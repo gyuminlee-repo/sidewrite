@@ -211,7 +211,12 @@ test("after the join: the rows of the manuscript, read-only, with Propose change
   // The line that says where the list comes from, with the way out.
   const line = t.$("review-linked");
   assert.equal(line.hidden, false);
-  assert.deepEqual(texts(line), [partOfText(MAIN), "Leave this revision"]);
+  assert.deepEqual(texts(line), [
+    partOfText(MAIN),
+    "Name in the response letter",
+    "Save name",
+    "Leave this revision",
+  ]);
   assert.equal(buttons(line, "Leave this revision").length, 1);
   // The same rows as the manuscript.
   const list = t.$("review-comments");
@@ -499,9 +504,10 @@ test("Propose changes in a supplementary file starts a turn for this file, after
   const button = buttons(cardOf(t, "R1.2"), "Propose changes")[0];
   assert.equal(button.disabled, false);
   await button.click();
+  // (response_state: what the letter cites from this file, after every refresh.)
   assert.deepEqual(
-    t.requests.slice(-2).map((r) => r.type),
-    ["review_refresh", "review_propose"],
+    t.requests.slice(-3).map((r) => r.type),
+    ["review_refresh", "response_state", "review_propose"],
   );
   assert.equal(t.sent("review_refresh")[0].payload.saved, false);
   assert.equal(t.sent("review_propose")[0].payload.ref, "R1.2");
@@ -599,4 +605,104 @@ test("the supplementary file's pane shows where a request stands in the manuscri
     saved: null,
   });
   assert.deepEqual(requestRows(cardOf(old, "R1.1")), [["open", "Not yet"]]);
+});
+
+// ---- step A3: what the letter cites from a supplementary file -------------------
+
+test("a refresh in a supplementary file writes its citations from the same snapshot; in a manuscript it does not", async () => {
+  const snapshot = { paragraphs: [{ index: 0, text: "Supplementary Methods" }], comments: [] };
+  const headings = [{ index: 0, level: 1, text: "Supplementary Methods" }];
+  const told = [];
+  const make = async (linked, fail = false) => {
+    globalThis.document = fakeDocument();
+    const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+    const requests = [];
+    const pane = initReviewPane({
+      sendRequest: async (type, payload) => {
+        requests.push({ type, payload });
+        if (type === "response_state" && fail) return { ok: false, error: "no headings" };
+        const base = { ok: true, revision: REVISION };
+        if (type === "review_refresh") return { ...base, rows: [], counts: COUNTS, external: [] };
+        return { ...base, path: "/m/x.revision.json", linked };
+      },
+      word: {
+        collectReviewSnapshot: async () => snapshot,
+        collectHeadings: async () => headings,
+        documentSaved: async () => true,
+        resolveComment: async () => {},
+      },
+      onTurnStarted() {},
+      isTurnInFlight: () => false,
+      onPartRefreshed: () => told.push("refreshed"),
+    });
+    await pane.reload();
+    const $ = (id) => document.getElementById(id);
+    return { requests, $, sent: (type) => requests.filter((r) => r.type === type) };
+  };
+  // A supplementary file.
+  const part = await make({ part_of: MAIN, parts: [], note: null, changes: [] });
+  await part.$("review-refresh").click();
+  assert.deepEqual(
+    part.requests.slice(-2).map((r) => r.type),
+    ["review_refresh", "response_state"],
+  );
+  assert.deepEqual(part.sent("response_state")[0].payload, { snapshot, headings });
+  assert.equal(part.sent("review_refresh")[0].payload.snapshot, snapshot);
+  assert.deepEqual(told, ["refreshed"]);
+  // The manuscript itself, and a file in no revision: the letter tab does that.
+  for (const linked of [
+    { part_of: null, parts: [{ doc: "/m/SI.docx", name: "SI.docx", label: "SI" }], note: null },
+    FREE,
+  ]) {
+    const t = await make(linked);
+    await t.$("review-refresh").click();
+    assert.equal(t.sent("review_refresh").length, 1);
+    assert.equal(t.sent("response_state").length, 0);
+  }
+  // The citations could not be written: the refresh stands and the line says so.
+  const bad = await make({ part_of: MAIN, parts: [], note: null, changes: [] }, true);
+  await bad.$("review-refresh").click();
+  assert.match(
+    bad.$("review-message").textContent,
+    /What the letter cites from this file was not brought up to date \(no headings\); press Refresh status again\.$/,
+  );
+  assert.equal(told.length, 1);
+});
+
+test("the name of a supplementary file in the letter: typed when joining, or set afterwards in its own pane", async () => {
+  // When joining: the optional field of the join box goes with the request.
+  const t = await setup({ revision: EMPTY, linked: FREE, candidates: CANDIDATES });
+  t.$("review-link-label").value = "  Supplementary Information ";
+  await t.$("review-link-candidates").children[0].click();
+  assert.deepEqual(t.sent("review_link_join")[0].payload, {
+    main: "/m/paper.docx",
+    label: "Supplementary Information",
+  });
+  assert.equal(t.$("review-link-label").value, "");
+  // Afterwards: the field of the linked line shows the name and saves a new one.
+  const line = t.$("review-linked");
+  const input = findAll(line, (n) => n.tagName === "INPUT")[0];
+  assert.equal(input.value, "SI");
+  assert.equal(input.attributes.maxlength, "80");
+  input.value = "Supplementary Methods";
+  await buttons(line, "Save name")[0].click();
+  assert.deepEqual(t.sent("review_link_label")[0].payload, { label: "Supplementary Methods" });
+});
+
+test("the Word page has the field for the name in the letter, and the place for what the letter cites", async () => {
+  const html = await readFile(new URL("../taskpane/word/index.html", import.meta.url), "utf8");
+  assert.match(
+    html,
+    /id="review-link-label"[^>]*maxlength="80"|maxlength="80"[^>]*id="review-link-label"|id="review-link-label"\s+maxlength="80"/s,
+  );
+  assert.match(
+    html,
+    /<label for="review-link-label">Name of this file in the response letter \(optional\)<\/label>/,
+  );
+  assert.match(html, /id="response-part-cited"/);
+  const pane = await readFile(new URL("../taskpane/shared/taskpane.js", import.meta.url), "utf8");
+  assert.match(
+    pane,
+    /onPartRefreshed: \(\) => responsePane\?\.onEvent\(\{ event: "linked_changed" \}\)/,
+  );
 });

@@ -1381,10 +1381,14 @@ Office.onReady((info) => {
           if (turn.endIf(id)) setAgentStatus("idle", "Ready");
         };
       },
+      // A supplementary file was refreshed: its Response tab shows which of
+      // its changes the letter cites, and reads that again.
+      onPartRefreshed: () => responsePane?.onEvent({ event: "linked_changed" }),
       word: {
         collectReviewSnapshot,
         documentSaved,
-        // Read for the submission checklist, as the Tools tab reads them.
+        // Read for the submission checklist, as the Tools tab reads them, and
+        // in a supplementary file for what the letter cites from it.
         collectHeadings,
         readFormatSnapshot,
         selectionParagraphs,
