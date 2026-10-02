@@ -1,0 +1,11 @@
+Fake review for software testing. It refers to tests/fixtures/parts_paper.docx and tests/fixtures/parts_si.docx, an invented manuscript and its invented supplementary file. No real study, journal, or person is involved.
+
+Reviewer #1: Comments to the Author
+
+Comment 1: The Supplementary Methods do not say at which temperature the starter cultures were incubated. Please state in the Supplementary Methods that the starter cultures were incubated at 30 degrees Celsius, as Supplementary Table S1 already says. Nothing has to change in the main manuscript for this.
+
+Comment 2: The shaking speed is missing twice: the Methods of the manuscript say the main cultures were shaken "at a constant speed", and the Supplementary Methods say the same of the starter flasks. Please give the speed, 180 rpm, in both places.
+
+Comment 3: In the Results of the manuscript, "grew good" should read "grew well".
+
+Comment 4: Figure 1 has no unit on its vertical axis. Please add the unit to the axis in the figure file.

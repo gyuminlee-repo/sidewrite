@@ -24,6 +24,7 @@
 // Not seen, assumed: how a field that lies whole in a tracked deletion
 // reads there (taken to be absent, marks and all).
 
+const DOC_PART = 'pkg:name="/word/document.xml"';
 const BEGIN = "\u0013";
 const SEPARATE = "\u0014";
 const END = "\u0015";
@@ -44,6 +45,35 @@ const DETAILS = {
     "The task pane is older than the daemon and does not check fields. Tell the author to reload the task pane (close and reopen it).",
   "after-edit": "Word did not keep the field whole, so the edit was taken back.",
 };
+// What an undo of a tracked edit came to (tools-word.js takeBack), told from
+// the fields of the paragraph and from three reviewed texts of it: before
+// the edit, after the edit, and after the undo.
+//   "clean"  the fields are as before the edit and the paragraph reads as
+//            before the edit: the edit is gone and nothing else is.
+//   "kept"   the edit is still in the document: a field is still not as it
+//            was, or the paragraph still reads as it did after the edit.
+//            Also the answer whenever a text could not be read: an edit
+//            nobody can vouch for as gone is reported as in the document.
+//   "more"   the fields are as before, the paragraph reads neither as before
+//            the edit nor as after it: the edit is gone, and so is something
+//            else (Word had merged the edit with a pending change of the
+//            same author next to it, and rejected both).
+// fieldsOk: fieldsKept(before, now, 0) === null. The texts are compared as
+// the caller hands them in (the task pane: their paragraphHash).
+export function undoOutcome({ fieldsOk, before, after, undone }) {
+  if (!fieldsOk || before == null || undone == null) return "kept";
+  if (undone === before) return "clean";
+  if (after == null || undone === after) return "kept";
+  return "more";
+}
+// What the model is told when Word took more back than the edit.
+export const UNDO_TOOK_MORE =
+  "While the edit was taken back, Word also took back an earlier pending change in the same paragraph. The edit is not in the document. The task pane is refreshing the status: read the paragraph again before you edit it, and do not repeat this edit.";
+
+// A paragraph whose fields could not be read at the last status refresh: the
+// edit is refused although nothing says that it touches a field.
+export const FIELDS_UNREAD =
+  "Not applied: the task pane could not read this paragraph as Word shows it with its fields (citations, a reference list), so an edit here could cut through one unseen. Nothing was changed. Tell the author to press Refresh status in the Review tab; if the paragraph still cannot be read, it has to be changed by hand in Word.";
 export const fieldRefusal = (reason, extra = "") =>
   `${FIELD_REFUSAL} ${DETAILS[reason] ?? ""}${extra ? ` ${extra}` : ""} Nothing was changed.`.replace(
     /\s+/g,
@@ -132,6 +162,31 @@ export function fieldViews(texts) {
 
 // Does this text (getReviewedText) show a field?
 export const hasFieldMarks = (s) => MARKS.test(String(s ?? ""));
+
+// Is a paragraph one whose fields nobody has seen? Yes, when its reviewed
+// text (or that of a paragraph before it: a field that runs over several
+// paragraphs is carried from there) was not read at the last status refresh,
+// unless the document is known to hold no field at all.
+//   read.unreviewed  indexes of the paragraphs without reviewed text
+//   read.fields      does the document hold a field anywhere: true, false,
+//                    or null when that is not known
+//   read.unknown     true: the snapshot says nothing about what was read
+// No `read` at all (a caller that knows nothing of this): not refused.
+export function fieldsUnread(read, index) {
+  if (!read || read.fields === false) return false;
+  if (read.unknown) return true;
+  return Array.isArray(read.unreviewed) && read.unreviewed.some((k) => k <= index);
+}
+
+// Does the XML of a paragraph (Paragraph.getOoxml) hold a field of any kind:
+// a complex field, a simple field or a hyperlink?
+export function xmlHasField(xml) {
+  const s = String(xml ?? "");
+  const at = s.indexOf(DOC_PART);
+  const end = at === -1 ? -1 : s.indexOf("</pkg:part>", at);
+  const doc = at === -1 ? s : s.slice(at, end === -1 ? undefined : end);
+  return /<w:(?:fldChar|fldSimple|instrText|delInstrText|hyperlink)\b/.test(doc);
+}
 
 const collapse = (s) =>
   String(s ?? "")
@@ -224,7 +279,6 @@ export function spliceShown(text, find, to, insert = false) {
 
 // ---- the fields of a paragraph, from its XML --------------------------------
 
-const DOC_PART = 'pkg:name="/word/document.xml"';
 const SIDE = { ins: "ins", moveTo: "ins", del: "del", moveFrom: "del" };
 const XML_TOKEN = new RegExp(
   [

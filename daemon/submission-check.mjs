@@ -12,16 +12,27 @@
 //   revision  the record, brought up to date with `live.snapshot` in memory
 //             (response-service.mjs refreshed)
 //   profile   with defaults filled (journal-profile.mjs effectiveProfile)
-//   live      { snapshot, headings, format } as the pane read them: the
-//             snapshot of collectReviewSnapshot (paragraphs with w_ins and
+//   live      { snapshot, headings, format, saved } as the pane read them:
+//             the snapshot of collectReviewSnapshot (paragraphs with w_ins and
 //             w_del, comments), the usable headings, the format read of
-//             readFormatSnapshot (null when it could not be read)
+//             readFormatSnapshot (null when it could not be read), and
+//             whether Word said the document has no unsaved changes
+//             (Word.Document.saved: true, false, anything else: not known)
 //   files     { <path as the record holds it>: sha256 | null } for the paths
 //             of submissionPaths(revision): the file as it is on the disk
 //             now, null when it is not there. A path that was not handed in
 //             counts as not there. The saved manuscript itself is under the
 //             key MANUSCRIPT.
-//   file      the name of the open manuscript; every row is about that file
+//   file      the name of the open manuscript; a row is about that file
+//             unless it names another one
+//   parts     the supplementary Word files of the revision
+//             (revision-parts.mjs partsForLetter). They are not open in this
+//             pane: the rows about tracked changes, tool comments and a clean
+//             file get one line per file, from what that file's own pane
+//             recorded at its last status refresh (doc_state), and only when
+//             that record is confirmed (the refresh was taken on a saved
+//             document and the file on disk is still that file). Otherwise
+//             the line is not ready: open the file and refresh.
 //
 //   go        where the row is fixed, or null:
 //             { tab, target }   a tab of the pane and the id of an element
@@ -115,14 +126,16 @@ export function submissionPaths(revision) {
 // Rows 1 and 2: the pure checks of the response letter. The `requirements`
 // rows are the open requests; every other failing row is an answer that does
 // not pass.
-function answerRows({ revision, profile, live }) {
+function answerRows({ revision, profile, live, parts }) {
   const fails = checkResponses({
     revision,
     snapshot: live.snapshot,
     headings: live.headings ?? [],
     profile,
+    parts,
   }).filter((r) => r.level === "fail");
-  const answers = fails.filter((r) => r.id !== "requirements");
+  // (part_state is about a file, not an answer: the rows of that file say it.)
+  const answers = fails.filter((r) => r.id !== "requirements" && r.id !== "part_state");
   const requests = fails.filter((r) => r.id === "requirements");
   const unanswered = (revision.comments ?? []).flatMap((c) =>
     (c.questions ?? []).filter((q) => !String(q.answer ?? "").trim()).map(() => c.ref),
@@ -235,6 +248,61 @@ function documentRows({ live }) {
   return rows;
 }
 
+// Rows 3 to 5 once more for each supplementary file, from the state its own
+// pane recorded (doc_state: paragraphs with tracked changes, comments, those
+// of the tool). No button: the fix is in that file.
+function partRows({ parts }) {
+  return parts.flatMap((p) => {
+    const row = (id, state, text) => ({ id, file: p.name, state, text, go: null });
+    if (!p.confirmed) {
+      const text = `Open ${p.name} and refresh: Sidewrite cannot confirm what it last read there (save the file first).`;
+      return ["changes_decided", "tool_comments", "file_clean"].map((id) =>
+        row(id, NOT_READY, text),
+      );
+    }
+    const s = p.revision.doc_state;
+    const tracked = s.tracked_paragraphs;
+    const tool = s.tool_comments;
+    const other = s.comments - tool;
+    const left = [
+      tracked && `${n(tracked, "paragraph")} with tracked changes`,
+      tool && `${n(tool, "comment")} of the tool`,
+      other && `${n(other, "comment")} of yours or the reviewers`,
+    ].filter(Boolean);
+    return [
+      tracked
+        ? row(
+            "changes_decided",
+            NOT_READY,
+            `${n(tracked, "paragraph")} of ${p.name} still ${tracked === 1 ? "holds" : "hold"} tracked changes. Accept or reject them in Word, save and refresh there.`,
+          )
+        : row(
+            "changes_decided",
+            READY,
+            `No tracked change is waiting for a decision in ${p.name}.`,
+          ),
+      tool
+        ? row(
+            "tool_comments",
+            NOT_READY,
+            `${n(tool, "comment")} of the tool ${tool === 1 ? "is" : "are"} still in ${p.name}. Remove ${tool === 1 ? "it" : "them"} there, save and refresh.`,
+          )
+        : row("tool_comments", READY, `The tool's comments are removed from ${p.name}.`),
+      left.length
+        ? row(
+            "file_clean",
+            NOT_READY,
+            `${p.name} is not clean yet. Left in it: ${left.join(", ")}.`,
+          )
+        : row(
+            "file_clean",
+            READY,
+            `${p.name} is clean: no tracked changes and no comments are left.`,
+          ),
+    ];
+  });
+}
+
 // Row 6: the format rules of the profile and the count rules of the ledger,
 // as the Tools tab's "Run checks" reads them.
 function formatRow({ revision, profile, live }) {
@@ -290,6 +358,12 @@ function letterRow({ revision, profile, files }) {
     return notReady(
       `Export the letter again: ${name} was written before the tool recorded what it said, so it cannot be compared with the answers as they are now.`,
     );
+  // Ready needs a record that says no check failed: anything but the integer
+  // 0 (no number, a text, a fraction) is not that.
+  if (!Number.isInteger(x.fail) || x.fail < 0)
+    return notReady(
+      `Export the letter again: ${name} has no usable record of how its checks ended.`,
+    );
   if (x.fail > 0)
     return notReady(
       `${name} was exported while ${n(x.fail, "check")} failed. Fix ${x.fail === 1 ? "it" : "them"} in the Response tab, then export the letter again.`,
@@ -343,18 +417,28 @@ function copyRow(id, what, artifact, files, go) {
   };
 }
 
-function copyRows({ revision, profile, files }) {
+// What the rows about a file made from the saved manuscript say when the
+// open document has changes that are not saved: the copy was made from the
+// file on the disk, and the hashes below compare that file, so they would
+// read "made from the manuscript as it is saved now" for a copy that is old.
+export const UNSAVED_TEXT =
+  "This document has changes that are not saved. Save it, then press Check now again.";
+export const UNSAVED_UNKNOWN = "Whether the document has unsaved changes could not be checked.";
+
+function copyRows({ revision, profile, files, live }) {
   const wanted = profile.submission?.anonymized_copy;
+  // saved: false, the row is not ready whatever the hashes say. Not known
+  // (Word gave no boolean): the row as the hashes give it, and it says so.
+  const row = (id, what, artifact, go) =>
+    live.saved === false
+      ? { id, state: NOT_READY, text: UNSAVED_TEXT, go: null }
+      : ((r) => (live.saved === true ? r : { ...r, text: `${r.text} ${UNSAVED_UNKNOWN}` }))(
+          copyRow(id, what, artifact, files, go),
+        );
   return [
-    copyRow("marked_copy", "marked copy", revision.artifacts?.marked, files, TO_MARKED),
+    row("marked_copy", "marked copy", revision.artifacts?.marked, TO_MARKED),
     wanted === true
-      ? copyRow(
-          "anonymized_copy",
-          "anonymized copy",
-          revision.artifacts?.anonymized,
-          files,
-          TO_ANONYMIZE,
-        )
+      ? row("anonymized_copy", "anonymized copy", revision.artifacts?.anonymized, TO_ANONYMIZE)
       : {
           id: "anonymized_copy",
           state: NOT_APPLICABLE,
@@ -422,14 +506,15 @@ function figuresRow({ revision, files }) {
   };
 }
 
-export function submissionRows({ revision, profile, live, files = {}, file = null }) {
-  const input = { revision, profile, live, files };
+export function submissionRows({ revision, profile, live, files = {}, file = null, parts = [] }) {
+  const input = { revision, profile, live, files, parts };
   return [
     ...answerRows(input),
     ...documentRows(input),
+    ...partRows(input),
     formatRow(input),
     letterRow(input),
     ...copyRows(input),
     figuresRow(input),
-  ].map((row) => ({ ...row, file }));
+  ].map((row) => ({ ...row, file: row.file ?? file }));
 }

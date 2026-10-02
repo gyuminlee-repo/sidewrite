@@ -1713,6 +1713,66 @@ test("Preview prompt and Propose changes send the same paragraphs under the sele
   assert.equal(selectionReads, 2);
 });
 
+// An edit of a turn was taken back and Word took an earlier pending change
+// of the paragraph with it: the pane refreshes, and the card of the comment
+// that was proposed says one sentence that stays after the turn ended.
+test("undo_took_more refreshes the status and puts one sentence in the card of the comment, which stays when the turn ends", async () => {
+  const SENTENCE =
+    "While taking back an edit that would have damaged a citation, Word also took back an earlier pending change in the same paragraph. Check the paragraph and ask for that change again if you still want it.";
+  const revision = {
+    comments: ["R1.1", "R1.2"].map((ref) => ({
+      ref,
+      reviewer: 1,
+      text: "Reword the sentence.",
+      requirements: [],
+      status: "in_progress",
+      changes: [],
+      blocked: [],
+    })),
+    ledger: [],
+  };
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+  const now = { paragraphs: [{ index: 0, text: "A material." }], comments: [] };
+  const t = await setup({
+    revision,
+    respond: {
+      review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision }),
+      review_propose: () => ({ ok: true, started: true, ref: "R1.2", revision }),
+    },
+    word: { collectReviewSnapshot: async () => now },
+  });
+  const notices = () =>
+    findAll(t.$("review-comments"), (n) => /review-card-notice/.test(n.attributes.class ?? "")).map(
+      (n) => n.textContent,
+    );
+  const refreshes = () => t.requests.filter((r) => r.type === "review_refresh").length;
+  assert.deepEqual(notices(), []);
+  t.pane.onEvent({
+    type: "review_event",
+    event: "undo_took_more",
+    ref: "R1.2",
+    paragraph_index: 0,
+  });
+  await settle();
+  assert.equal(refreshes(), 1, "the review state is read from the document again");
+  assert.deepEqual(notices(), [SENTENCE]);
+  assert.doesNotMatch(SENTENCE, /[\u2014]|R1\.\d-\d|[0-9a-f]{8}/);
+  // The end of the turn writes its own result line; the sentence stays.
+  t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.2", ok: true });
+  await settle();
+  assert.deepEqual(notices(), [SENTENCE]);
+  // It is in the card of that comment only.
+  const card = findAll(
+    t.$("review-comments"),
+    (n) => n.attributes["data-ref"] === "R1.2" || n.attributes["data-comment"] === "R1.2",
+  );
+  if (card.length)
+    assert.equal(
+      findAll(card[0], (n) => /review-card-notice/.test(n.attributes.class ?? "")).length,
+      1,
+    );
+});
+
 // H2: a tracked edit the task pane refused because its paragraph changed
 // (StaleTarget). The daemon has the document only from a status refresh, so
 // it asks for one. H1: an attempt that is still with Word is not listed.
@@ -1749,7 +1809,8 @@ test("stale_target refreshes the status with the document as it is now; a runnin
   await settle();
   assert.deepEqual(
     t.requests.filter((r) => r.type === "review_refresh").map((r) => r.payload),
-    [{ snapshot: now }],
+    // saved: this Word did not say whether the document has unsaved changes.
+    [{ snapshot: now, saved: null }],
   );
   // H1: Word applied an edit and the daemon could not save its record.
   const loads = () => t.requests.filter((r) => r.type === "review_load").length;

@@ -39,6 +39,9 @@ export const shownCitations = (comment) =>
     quote: c.quote,
     paragraph_index: c.paragraph_index,
     change_ids: c.change_ids,
+    // The supplementary file the citation is in, when it is in one: the
+    // daemon judges it against that file, not against the manuscript.
+    ...(c.doc ? { doc: c.doc } : {}),
   }));
 
 // The line of a card whose saved answer has no second-language paragraph
@@ -70,8 +73,25 @@ function renderFrame(frame, { section = "", lines = null } = {}) {
 
 // A citation as the letter will print it: the location line and the quote
 // under it. letter: response_letter of the profile.
-export function citationText(cit, letter) {
-  if (cit.problem) return { line: `Not located: ${cit.problem}`, quote: null };
+// labels: for a revision with supplementary Word files, { <file name>: what
+// the letter calls it }; every line then names its file (daemon fileLine),
+// the manuscript by letter.main_label. null: a manuscript on its own.
+export function citationText(cit, letter, labels = null) {
+  if (cit.problem)
+    return {
+      line: `Not located${cit.doc ? ` in ${cit.doc}` : ""}: ${cit.problem}`,
+      quote: null,
+    };
+  if (labels && typeof letter.file_line === "string" && letter.file_line) {
+    const plain = citationText(cit, letter);
+    const file = cit.doc
+      ? (labels[cit.doc] ?? String(cit.doc).replace(/\.[^.]+$/, ""))
+      : (letter.main_label ?? "Manuscript");
+    return {
+      line: letter.file_line.replace("{file}", () => file).replace("{line}", () => plain.line),
+      quote: plain.quote,
+    };
+  }
   const removed = cit.kind === "removed";
   // No section known: the section-less frame (daemon locationLine).
   const frame = cit.section
@@ -152,25 +172,56 @@ const CITED = new Set(["accepted", "user_edited"]);
 // change (the rule of daemon/response-check.mjs `requirements`).
 // pending: a change for it still waits in Word. figure: a figure change for
 // it still waits for a decision on the figures page.
-export function openRequirements(comment) {
+// elsewhere: the changes of this comment in the supplementary Word files of
+// the revision, [{ file, state, requirement_ids }] (the daemon's
+// linked_changes). An accepted one answers a request like one of the
+// manuscript; a pending one is named with its file (pending_in).
+export function openRequirements(comment, elsewhere = []) {
   if (comment?.declined) return [];
   const changes = comment?.changes ?? [];
   const idsOf = (pred) =>
     new Set(changes.filter(pred).flatMap((ch) => ch.rationale?.requirement_ids ?? []));
+  const away = (elsewhere ?? []).filter((x) => x.ref === undefined || x.ref === comment?.ref);
+  const answeredAway = new Set(
+    away.filter((x) => CITED.has(x.state)).flatMap((x) => x.requirement_ids ?? []),
+  );
+  const pendingIn = (id) =>
+    away.find((x) => x.state === "pending" && (x.requirement_ids ?? []).includes(id))?.file ?? null;
   const figureIds = (state) =>
     new Set(
       (comment?.figure_changes ?? [])
         .filter((f) => f.state === state)
         .flatMap((f) => f.requirement_ids ?? []),
     );
-  const answered = new Set([...idsOf((ch) => CITED.has(ch.state)), ...figureIds("adopted")]);
+  const answered = new Set([
+    ...idsOf((ch) => CITED.has(ch.state)),
+    ...figureIds("adopted"),
+    ...answeredAway,
+  ]);
   const pending = idsOf((ch) => ch.state === "pending");
   const figure = figureIds("proposed");
   const declined = new Set((comment?.response?.declined_requirements ?? []).map((d) => d.id));
   return (comment?.requirements ?? [])
     .filter((q) => !answered.has(q.id) && !declined.has(q.id))
-    .map((q) => ({ id: q.id, text: q.text, pending: pending.has(q.id), figure: figure.has(q.id) }));
+    .map((q) => ({
+      id: q.id,
+      text: q.text,
+      pending: pending.has(q.id),
+      figure: figure.has(q.id),
+      // The supplementary file a change for it waits in, when there is one.
+      ...(pendingIn(q.id) ? { pending_in: pendingIn(q.id) } : {}),
+    }));
 }
+
+// Why an open request is open, for its line on the card.
+export const openRequirementNote = (q) =>
+  q.pending
+    ? " (a change is pending in Word)"
+    : q.pending_in
+      ? ` (a change is pending in ${q.pending_in})`
+      : q.figure
+        ? " (a figure or file waits for your decision on the figures page)"
+        : "";
 
 // Changes of a comment that are neither accepted nor rejected yet: still
 // tracked in Word (pending) or not found in the document (unlocated). The
@@ -225,7 +276,10 @@ export function nextStep(revision, summary) {
   const noLines = comments.some(
     (c) =>
       (c.response?.stale ?? []).includes("lines_old") ||
-      (c.response?.citations ?? []).some((x) => x.kind === "revised" && !x.problem && !x.lines),
+      // (A citation of a supplementary file has no line numbers.)
+      (c.response?.citations ?? []).some(
+        (x) => x.kind === "revised" && !x.problem && !x.lines && !x.doc,
+      ),
   );
   if (noLines)
     return {
@@ -259,4 +313,46 @@ export function exportMessage(r) {
       ? ` (${kept.join(", ")} ${kept.length === 1 ? "was" : "were"} already there and ${kept.length === 1 ? "was" : "were"} kept).`
       : ""
   }`;
+}
+
+// The Response tab of a supplementary file (main: the manuscript it belongs to).
+export const letterFromText = (main) => `The letter is written from ${main.name}.`;
+
+// The same tab: which changes of this file the letter cites. linked: the
+// `linked` of review_load in a supplementary file (cited_in_main: what the
+// review file of the manuscript holds for this file; saved_at_refresh: was
+// this file's last status refresh taken on a saved document). accepted: how
+// many changes of this file are accepted. Returns
+//   { head, rows: [{ ref, line, quote }], notes: [string] }
+export function citedInLetter(linked, accepted, letter) {
+  const main = linked?.part_of;
+  const cited = linked?.cited_in_main ?? [];
+  if (!main) return { head: "", rows: [], notes: [] };
+  const L = letter ?? {};
+  const rows = cited.map((c) => {
+    const where = c.section ? ` in ${c.section}` : "";
+    return {
+      ref: c.ref,
+      line: `${c.ref}: ${c.kind === "removed" ? "Removed" : "Revised"}${where}`,
+      quote: c.kind === "removed" ? null : c.quote,
+    };
+  });
+  const citedIds = new Set(cited.flatMap((c) => c.change_ids ?? []));
+  const missing = Math.max(0, accepted - citedIds.size);
+  const notes = [];
+  if (linked.saved_at_refresh !== true)
+    notes.push(
+      `This file had unsaved changes when it was last read. Save it, then press Refresh status on the Review tab: until then ${main.name} cannot use what is recorded here.`,
+    );
+  if (missing)
+    notes.push(
+      `${count(missing, "accepted change")} of this file ${missing === 1 ? "is" : "are"} not in the letter yet. Open ${main.name} and press "Refresh from the manuscript" on its Response tab.`,
+    );
+  return {
+    head: rows.length
+      ? `Cited in the letter as ${main.label || L.main_label || "this file"}, as ${main.name} last read this file:`
+      : `The letter cites no change of this file yet. It cites a change once you accepted it in Word, saved, and refreshed here and in ${main.name}.`,
+    rows,
+    notes,
+  };
 }

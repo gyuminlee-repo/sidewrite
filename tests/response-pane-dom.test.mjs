@@ -911,3 +911,179 @@ test("a card counts an adopted figure change as the answer, and follows a decisi
   const html = await read("taskpane/word/index.html");
   assert.equal(html.split('id="review-figures-all"').length - 1, 1);
 });
+
+// ---- step A3: a manuscript with a supplementary Word file ---------------------------
+
+const PART_CITATION = {
+  change_ids: ["R1.2-1"],
+  kind: "revised",
+  section: "Supplementary Methods",
+  paragraph_index: 1,
+  quote: "Cultures were incubated at 30 °C.",
+  lines: null,
+  lines_pdf: null,
+  problem: null,
+  doc: "SI.docx",
+};
+const LINKED_MAIN = {
+  part_of: null,
+  parts: [{ doc: "/m/SI.docx", name: "SI.docx", label: "Supplementary Information" }],
+  note: null,
+  changes: [
+    { file: "SI.docx", ref: "R1.2", id: "R1.2-1", state: "accepted", requirement_ids: ["q1"] },
+    { file: "SI.docx", ref: "R1.2", id: "R1.2-2", state: "pending", requirement_ids: ["q2"] },
+  ],
+};
+const WITH_PART = () =>
+  revisionOf([
+    C1({
+      response: {
+        text: "We now state the unit.",
+        stale: [],
+        citations: [{ ...CITATION, lines: { start: 9, end: 9, match_count: 1 } }],
+      },
+    }),
+    C2({
+      requirements: [
+        { id: "q1", text: "state the temperature in the supplement" },
+        { id: "q2", text: "state the shaking speed in the supplement" },
+        { id: "q3", text: "name the strain" },
+      ],
+      response: { text: "We now state both.", stale: [], citations: [PART_CITATION] },
+    }),
+  ]);
+const FILE_LETTER = { ...LETTER, file_line: "{file} {line}", main_label: "Manuscript" };
+const partSetup = (more = {}) =>
+  setup({
+    revision: WITH_PART(),
+    respond: {
+      profile_get: () => ({
+        ...PROFILE,
+        profile: { ...PROFILE.profile, response_letter: FILE_LETTER },
+      }),
+      review_load: () => ({ ok: true, revision: WITH_PART(), linked: LINKED_MAIN }),
+      ...more,
+    },
+  });
+const lines = (card) => byClass(card, "response-citation-line").map((n) => n.textContent);
+
+test("a manuscript with a supplementary file: every line of a card names its file, and a change accepted there answers its request", async () => {
+  const t = await partSetup();
+  assert.deepEqual(lines(t.card("R1.1")), [
+    "Manuscript [Revised in 2. Materials and Methods, line 9]",
+  ]);
+  assert.deepEqual(lines(t.card("R1.2")), [
+    "Supplementary Information [Revised in Supplementary Methods]",
+  ]);
+  assert.deepEqual(
+    byClass(t.card("R1.2"), "response-citation-quote").map((n) => n.textContent),
+    ["Cultures were incubated at 30 °C."],
+  );
+  // q1: answered in SI.docx. q2: pending there, said with the file. q3: open.
+  const open = byClass(t.card("R1.2"), "response-req").map((n) => n.children[0].textContent);
+  assert.deepEqual(open, [
+    "q2 state the shaking speed in the supplement: no accepted change (a change is pending in SI.docx)",
+    "q3 name the strain: no accepted change",
+  ]);
+  // The tab does not ask for line numbers of a citation that has none to get.
+  assert.doesNotMatch(t.$("response-next").textContent, /update line numbers/);
+});
+
+test("Save tells the daemon which file a shown citation is in", async () => {
+  const t = await partSetup();
+  await button(t.card("R1.2"), "Save").click();
+  assert.deepEqual(t.sent("response_save")[0].payload.shown, [
+    {
+      kind: "revised",
+      quote: "Cultures were incubated at 30 °C.",
+      paragraph_index: 1,
+      change_ids: ["R1.2-1"],
+      doc: "SI.docx",
+    },
+  ]);
+  // A citation of the manuscript carries no file.
+  await button(t.card("R1.1"), "Save").click();
+  assert.equal("doc" in t.sent("response_save")[1].payload.shown[0], false);
+});
+
+test("a reply brings where the requests stand in the supplementary file now: the card follows it", async () => {
+  const t = await partSetup({
+    response_state: () => ({
+      ok: true,
+      revision: WITH_PART(),
+      // The pending change was accepted in SI.docx since the tab was loaded.
+      linked_changes: LINKED_MAIN.changes.map((x) => ({ ...x, state: "accepted" })),
+      parts_unconfirmed: [],
+    }),
+  });
+  await t.$("response-refresh").click();
+  await tick();
+  assert.deepEqual(
+    byClass(t.card("R1.2"), "response-req").map((n) => n.children[0].textContent),
+    ["q3 name the strain: no accepted change"],
+  );
+});
+
+test("the Response tab of a supplementary file says where the letter is written and which of its changes it cites", async () => {
+  const MAIN = { doc: "/m/paper.docx", name: "paper.docx", label: "Supplementary Information" };
+  const own = (state) =>
+    revisionOf([
+      C1({ changes: [{ id: "R1.1-1", state, rationale: { requirement_ids: ["q1"] } }] }),
+      C2({ changes: [{ id: "R1.2-1", state: "accepted", rationale: { requirement_ids: [] } }] }),
+    ]);
+  const part = (linked, revision = own("accepted")) =>
+    setup({
+      revision,
+      respond: {
+        review_load: () => ({
+          ok: true,
+          revision,
+          linked: { part_of: MAIN, parts: [], ...linked },
+        }),
+      },
+    });
+  const read = (t) => ({
+    note: t.$("response-part-note").textContent,
+    head: byClass(t.$("response-part-cited"), "response-part-head").map((n) => n.textContent),
+    lines: lines(t.$("response-part-cited")),
+    quotes: byClass(t.$("response-part-cited"), "response-citation-quote").map(
+      (n) => n.textContent,
+    ),
+    todo: byClass(t.$("response-part-cited"), "response-part-todo").map((n) => n.textContent),
+  });
+  // Both accepted changes are cited by the manuscript.
+  const cited = [
+    {
+      ref: "R1.1",
+      kind: "revised",
+      section: "Supplementary Methods",
+      quote: "Q one.",
+      change_ids: ["R1.1-1"],
+    },
+    { ref: "R1.2", kind: "removed", section: null, quote: "", change_ids: ["R1.2-1"] },
+  ];
+  let t = await part({ cited_in_main: cited, saved_at_refresh: true });
+  assert.equal(t.$("response-main").hidden, true);
+  assert.equal(t.$("response-part-cited").hidden, false);
+  assert.deepEqual(read(t), {
+    note: "The letter is written from paper.docx.",
+    head: ["Cited in the letter as Supplementary Information, as paper.docx last read this file:"],
+    lines: ["R1.1: Revised in Supplementary Methods", "R1.2: Removed"],
+    quotes: ["Q one."],
+    todo: [],
+  });
+  // One accepted change is not in the letter yet, and the last refresh was
+  // taken with unsaved changes.
+  t = await part({ cited_in_main: cited.slice(0, 1), saved_at_refresh: false });
+  assert.deepEqual(read(t).todo, [
+    "This file had unsaved changes when it was last read. Save it, then press Refresh status on the Review tab: until then paper.docx cannot use what is recorded here.",
+    '1 accepted change of this file is not in the letter yet. Open paper.docx and press "Refresh from the manuscript" on its Response tab.',
+  ]);
+  // Nothing cited yet.
+  t = await part({ cited_in_main: [], saved_at_refresh: true }, own("pending"));
+  assert.match(read(t).head[0], /^The letter cites no change of this file yet\./);
+  // The manuscript itself: no such list.
+  t = await setup();
+  assert.equal(t.$("response-part-cited").hidden, true);
+  assert.equal(t.$("response-part-cited").children.length, 0);
+});

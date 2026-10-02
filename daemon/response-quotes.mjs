@@ -225,6 +225,85 @@ export function citationsFor(comment, snapshot, headings = [], { level = null } 
   return out;
 }
 
+// ---- supplementary documents (revision-parts.mjs partsForLetter) -------------
+// A part is a supplementary Word file of the revision as the manuscript reads
+// it: { name, label, revision, paragraphs, confirmed, why }. Everything about
+// it comes from its own review file, as its own pane wrote it at its last
+// status refresh: the states of its changes, the text of the file
+// (paragraphs) and the citations of its accepted changes (section and quote;
+// its pane computes them, because only it knows the headings of the file).
+
+// What the response letter calls a supplementary file: the label of its
+// link, or its file name without the extension.
+export const partLabel = (label, name) =>
+  String(label ?? "").trim() || String(name ?? "").replace(/\.[^.]+$/, "");
+
+// The changes of comment `ref` in a part.
+export const partChanges = (part, ref) =>
+  (part?.revision?.comments ?? []).find((c) => c.ref === ref)?.changes ?? [];
+
+// Those that are in the file now: only they answer a request and are cited.
+export const partCitable = (part, ref) =>
+  partChanges(part, ref).filter((ch) => CITABLE.has(ch.state));
+
+// The citations a part gives the letter for comment `ref`, as citations of
+// the manuscript's review file (doc: the file name; no line numbers). What
+// the part stored is not taken on trust:
+//   - a stored citation is used only when every change it names is accepted
+//     in the part now (the states are the part's own, of the same refresh);
+//   - a quote must stand in the paragraph of the part it names, as the part
+//     stored its text; otherwise the citation carries a problem and is not
+//     printed (the check fails on it);
+//   - an accepted change no stored citation names (the pane of the part did
+//     not get to write its citations) gets a citation with a problem, so it
+//     is never counted as cited in silence.
+export function partCitations(part, ref) {
+  const accepted = new Set(partCitable(part, ref).map((ch) => ch.id));
+  const stored =
+    (part?.revision?.comments ?? []).find((c) => c.ref === ref)?.response?.citations ?? [];
+  const out = [];
+  const covered = new Set();
+  for (const cit of stored) {
+    const ids = cit.change_ids ?? [];
+    if (cit.doc || !ids.length || !ids.every((id) => accepted.has(id))) continue;
+    ids.forEach((id) => covered.add(id));
+    const revised = (cit.kind ?? "revised") === "revised";
+    const quote = String(cit.quote ?? "");
+    const here = part.paragraphs?.[cit.paragraph_index] ?? "";
+    const problem =
+      cit.problem ??
+      (revised && (!quote || !here.includes(quote))
+        ? "the quote is not in the file as it was last read"
+        : null);
+    out.push({
+      change_ids: [...ids],
+      kind: revised ? "revised" : "removed",
+      section: cit.section ?? null,
+      paragraph_index: cit.paragraph_index ?? null,
+      quote: problem ? "" : quote,
+      lines: null,
+      lines_pdf: null,
+      problem,
+      doc: part.name,
+    });
+  }
+  for (const id of accepted) {
+    if (covered.has(id)) continue;
+    out.push({
+      change_ids: [id],
+      kind: "revised",
+      section: null,
+      paragraph_index: null,
+      quote: "",
+      lines: null,
+      lines_pdf: null,
+      problem: "no citation on record; open the file and press Refresh",
+      doc: part.name,
+    });
+  }
+  return out;
+}
+
 // Fresh citations keep the line range of an old one with the same quote in
 // the same paragraph.
 export function keepLines(fresh, old = []) {
@@ -254,11 +333,33 @@ export function keepLines(fresh, old = []) {
 //                  response_save) is not judged on figures.
 //   lines_old      the manuscript text changed since the PDF the line
 //                  numbers were read from (render: revision.response_render)
-export function staleReasons(comment, snapshot, render) {
+// parts: the supplementary files (partsForLetter). A citation that names a
+// file (doc) is judged against that file as its review file has it: its
+// quote against the stored text of its paragraph, its changes against the
+// accepted changes of that file for this comment. A file that is no longer
+// a part makes its citations change_state. null: the parts are not known to
+// this caller, and citations with a doc are not judged at all (the citations
+// a pane says it showed, response_save).
+export function staleReasons(comment, snapshot, render, parts = []) {
   const r = comment?.response;
   if (!r) return [];
   const out = new Set();
-  const cits = r.citations ?? [];
+  const all = r.citations ?? [];
+  const cits = all.filter((c) => !c.doc);
+  if (parts) {
+    const byName = new Map(parts.map((p) => [p.name, p]));
+    for (const c of all) {
+      if (!c.doc || c.kind !== "revised" || !c.quote) continue;
+      const here = byName.get(c.doc)?.paragraphs?.[c.paragraph_index] ?? "";
+      if (!here.includes(c.quote)) out.add("quote_changed");
+    }
+    const docs = new Set([...parts.map((p) => p.name), ...all.flatMap((c) => c.doc ?? [])]);
+    for (const doc of docs) {
+      const cited = new Set(all.filter((c) => c.doc === doc).flatMap((c) => c.change_ids ?? []));
+      const now = new Set(partCitable(byName.get(doc), comment.ref).map((ch) => ch.id));
+      if (cited.size !== now.size || [...cited].some((id) => !now.has(id))) out.add("change_state");
+    }
+  }
   const texts = new Map((snapshot?.paragraphs ?? []).map((p) => [p.index, viewText(p)]));
   const changes = new Map((comment.changes ?? []).map((ch) => [ch.id, ch]));
   for (const c of cits) {
@@ -280,6 +381,7 @@ export function staleReasons(comment, snapshot, render) {
     if (r.figure_ids.length !== figures.length || figures.some((id) => !r.figure_ids.includes(id)))
       out.add("change_state");
   }
+  // (cits: the citations of the manuscript itself; a supplement has no lines.)
   if (cits.length && render && render.snapshot_hash !== snapshotHash(snapshot))
     out.add("lines_old");
   return ["quote_changed", "change_state", "lines_old"].filter((x) => out.has(x));
@@ -320,13 +422,14 @@ export function staleReasons(comment, snapshot, render) {
 //   profile_set            not touched; a redraft in another language is a
 //                          response_draft like any other
 //   refresh (this fn)      kept; set when the saved citations no longer fit
+// parts: the supplementary files of the manuscript (staleReasons).
 export const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
-export function markStale(rev, snapshot) {
+export function markStale(rev, snapshot, parts = []) {
   const next = structuredClone(rev);
   let text = null; // snapshotHash, when a reason is found
   for (const c of next.comments ?? []) {
     if (!c.response) continue;
-    const now = staleReasons(c, snapshot, next.response_render);
+    const now = staleReasons(c, snapshot, next.response_render, parts);
     const kept = c.response.stale ?? [];
     const hasText = !!c.response.text?.trim();
     c.response.stale = STALE_ORDER.filter((s) =>

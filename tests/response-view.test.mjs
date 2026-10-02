@@ -20,7 +20,7 @@ import {
   nextStep,
   exportMessage,
 } from "../taskpane/shared/response-view.js";
-import { locationLine } from "../daemon/response-lines.mjs";
+import { fileLine, locationLine } from "../daemon/response-lines.mjs";
 import { checkResponses } from "../daemon/response-check.mjs";
 import { withDefaults } from "../daemon/journal-profile.mjs";
 
@@ -439,4 +439,88 @@ test("undecidedText: an edit Word did not answer is told on the card as well", (
     "2 edits got no answer from Word: settle them on the Review tab.",
   );
   assert.equal(undecidedText({ changes: [], blocked: [{ state: "blocked" }] }), "");
+});
+
+// ---- step A3: supplementary Word files -------------------------------------------
+
+test("openRequirements: an accepted change in a supplementary file answers a request; a pending one names its file", () => {
+  const comment = {
+    ref: "R1.1",
+    requirements: [
+      { id: "q1", text: "a" },
+      { id: "q2", text: "b" },
+      { id: "q3", text: "c" },
+    ],
+    changes: [],
+  };
+  const away = (state, ids, file = "SI.docx") => ({
+    file,
+    ref: "R1.1",
+    state,
+    requirement_ids: ids,
+  });
+  assert.deepEqual(
+    openRequirements(comment, [
+      away("accepted", ["q1"]),
+      away("pending", ["q2"]),
+      away("rejected", ["q3"]),
+    ]),
+    [
+      { id: "q2", text: "b", pending: false, figure: false, pending_in: "SI.docx" },
+      { id: "q3", text: "c", pending: false, figure: false },
+    ],
+  );
+  // A change of another comment answers nothing here.
+  assert.equal(openRequirements(comment, [{ ...away("accepted", ["q1"]), ref: "R9.9" }]).length, 3);
+  // Without the list the card reads as before.
+  assert.equal(openRequirements(comment).length, 3);
+});
+
+test("citationText and shownCitations with a supplementary file", () => {
+  const letter = { ...P };
+  const main = { kind: "revised", section: "Results", quote: "Q.", lines: { start: 3, end: 4 } };
+  const part = {
+    kind: "revised",
+    section: "Methods S2",
+    quote: "S.",
+    lines: null,
+    doc: "SI.docx",
+    change_ids: ["R1.1-1"],
+    paragraph_index: 2,
+  };
+  const labels = { "SI.docx": "Supplementary Information" };
+  assert.equal(
+    citationText(main, letter, labels).line,
+    "Manuscript [Revised in Results, lines 3-4]",
+  );
+  assert.deepEqual(citationText(part, letter, labels), {
+    line: "Supplementary Information [Revised in Methods S2]",
+    quote: "S.",
+  });
+  // A file the pane has no label for: its name without the extension.
+  assert.equal(citationText(part, letter, {}).line, "SI [Revised in Methods S2]");
+  // A manuscript on its own: as before.
+  assert.equal(citationText(main, letter).line, "[Revised in Results, lines 3-4]");
+  assert.equal(citationText(main, letter, null).line, "[Revised in Results, lines 3-4]");
+  // The pane's line is the daemon's line.
+  assert.equal(citationText(part, letter, labels).line, fileLine(part, letter, labels));
+  assert.equal(citationText(main, letter, labels).line, fileLine(main, letter, labels));
+  // A problem names the file.
+  assert.equal(
+    citationText({ ...part, problem: "no citation on record" }, letter, labels).line,
+    "Not located in SI.docx: no citation on record",
+  );
+  assert.deepEqual(shownCitations({ response: { citations: [part, main] } }), [
+    { kind: "revised", quote: "S.", paragraph_index: 2, change_ids: ["R1.1-1"], doc: "SI.docx" },
+    { kind: "revised", quote: "Q.", paragraph_index: undefined, change_ids: undefined },
+  ]);
+});
+
+test("nextStep does not ask for line numbers of a citation in a supplementary file", () => {
+  const rev = (cit) => ({
+    comments: [{ ref: "R1.1", response: { text: "a", stale: [], citations: [cit] } }],
+  });
+  const cit = { kind: "revised", quote: "S.", lines: null, problem: null };
+  assert.equal(nextStep(rev(cit), null).id, "locate");
+  assert.equal(nextStep(rev({ ...cit, doc: "SI.docx" }), null).id, "check");
 });

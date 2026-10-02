@@ -117,3 +117,93 @@ test("migrates a v1 sessions.json: the un-hostable old id is dropped", async () 
     assert.equal(await getSessionId("excel", "/tmp/legacy"), null);
   });
 });
+
+// ---- a hint per document, for the files of a revision with parts ----------------
+
+test("a document with a hint of its own never reads the hint of its folder, and does not change it", async () => {
+  await withFakeHome(async ({ saveSessionId, getSessionId }, fakeHome) => {
+    const cwd = "/tmp/paperdir";
+    const main = `${cwd}/paper.docx`;
+    const si = `${cwd}/SI.docx`;
+    // The manuscript ran a turn before it had a supplementary file.
+    await saveSessionId("word", cwd, "folder-sid");
+    // The supplement asks by its own path: nothing yet, not the folder's.
+    assert.equal(await getSessionId("word", cwd, si), null);
+    assert.equal(await getSessionId("word", cwd, main), null);
+    await saveSessionId("word", cwd, "si-sid", si);
+    await saveSessionId("word", cwd, "main-sid", main);
+    assert.equal(await getSessionId("word", cwd, si), "si-sid");
+    assert.equal(await getSessionId("word", cwd, main), "main-sid");
+    // Any other document of the folder still gets the hint stored before.
+    assert.equal(await getSessionId("word", cwd), "folder-sid");
+    assert.equal(await getSessionId("word", cwd, null), "folder-sid");
+    // Per host, as the folder hint is.
+    assert.equal(await getSessionId("excel", cwd, si), null);
+    const state = await readStateFile(fakeHome);
+    assert.deepEqual(state.folders[cwd].sessions, { word: "folder-sid" });
+    assert.deepEqual(state.folders[cwd].docs, {
+      [si]: { word: "si-sid" },
+      [main]: { word: "main-sid" },
+    });
+    assert.equal(state.version, 2);
+  });
+});
+
+test("a sessions.json from before the hints per document is read as it is", async () => {
+  await withFakeHome(async ({ getSessionId, saveSessionId }, fakeHome) => {
+    const dir = join(fakeHome, ".claude", "office-addins");
+    await mkdir(dir, { recursive: true });
+    const before = {
+      version: 2,
+      folders: {
+        "/tmp/old": {
+          last_used: "2026-05-01T00:00:00.000Z",
+          display_name: "old",
+          sessions: { word: "kept-sid" },
+        },
+      },
+    };
+    await writeFile(join(dir, "sessions.json"), JSON.stringify(before, null, 2) + "\n");
+    assert.equal(await getSessionId("word", "/tmp/old"), "kept-sid");
+    assert.equal(await getSessionId("word", "/tmp/old", "/tmp/old/SI.docx"), null);
+    // Reading writes nothing: the file is byte for byte what it was.
+    assert.deepEqual(await readStateFile(fakeHome), before);
+    // A folder hint saved now adds no member.
+    await saveSessionId("word", "/tmp/old", "next-sid");
+    assert.deepEqual(Object.keys((await readStateFile(fakeHome)).folders["/tmp/old"]).sort(), [
+      "display_name",
+      "last_used",
+      "sessions",
+    ]);
+  });
+});
+
+test("the line of a turn names the document, the session, the id asked for, and how the session came about", async () => {
+  await withFakeHome(async ({ turnSessionLine }) => {
+    // A new session: no id was asked for.
+    assert.equal(
+      turnSessionLine({ doc: "SI.docx", sessionId: "aaa" }),
+      "[agent] turn doc=SI.docx session=aaa asked=- (started)",
+    );
+    // The first turn of a loop that resumed the stored session.
+    assert.equal(
+      turnSessionLine({ doc: "/mnt/d/my run/paper.docx", sessionId: "bbb", asked: "bbb" }),
+      "[agent] turn doc=/mnt/d/my run/paper.docx session=bbb asked=bbb (resumed)",
+    );
+    // The SDK answered with another id than the one asked for: the line
+    // still says whose transcript was asked for.
+    assert.equal(
+      turnSessionLine({ doc: "SI.docx", sessionId: "ccc", asked: "bbb" }),
+      "[agent] turn doc=SI.docx session=ccc asked=bbb (started)",
+    );
+    // A later turn of the same loop.
+    assert.equal(
+      turnSessionLine({ doc: "SI.docx", sessionId: "aaa", known: "aaa" }),
+      "[agent] turn doc=SI.docx session=aaa asked=- (continued)",
+    );
+    assert.equal(
+      turnSessionLine({ sessionId: "aaa" }),
+      "[agent] turn doc=- session=aaa asked=- (started)",
+    );
+  });
+});

@@ -21,7 +21,12 @@ import {
   FIELD_CAP,
 } from "../daemon/review-tools.mjs";
 import { paragraphHash } from "../daemon/doc-diff.mjs";
-import { fieldView, FIELD_REFUSAL } from "../taskpane/shared/field-text.js";
+import {
+  fieldView,
+  FIELD_REFUSAL,
+  undoOutcome,
+  UNDO_TOOK_MORE,
+} from "../taskpane/shared/field-text.js";
 import { refusalsFromLog } from "../scripts/e2e/replay-lib.mjs";
 
 const B = "\u0013";
@@ -337,7 +342,9 @@ const XML = {
 //   word(op)   what Word makes of an edit: the key of XML the paragraph has
 //              after it, and (reviewed) its reviewed text
 //   api16      Office says WordApi 1.6 is there (tracked changes of a range)
-//   rejects    rejectAll() puts the paragraph back as it was
+//   rejects    true: rejectAll() puts the paragraph back as it was; false:
+//              it changes nothing; { xml, reviewed }: what the paragraph is
+//              after it (Word took back less, or more, than the edit)
 //   reviewed   what getReviewedText gives before the edit
 //   ooxml      false: Paragraph.getOoxml throws
 function fakeWord({
@@ -374,7 +381,8 @@ function fakeWord({
     getTrackedChanges: () => ({
       rejectAll() {
         s.rejected += 1;
-        if (rejects) Object.assign(s, { xml: "live", reviewed });
+        if (rejects === true) Object.assign(s, { xml: "live", reviewed });
+        else if (rejects) Object.assign(s, rejects);
       },
     }),
   });
@@ -510,6 +518,118 @@ test("task pane: an edit that broke a field and cannot be taken back is reported
   assert.deepEqual([r.paragraph_index, r.paragraph_id, r.target_checked], [1, "U1", true]);
   assert.equal(r.before, fieldView(HALLIVANE).text);
   assert.deepEqual([s.rejected, s.comments.length, s.mode], [1, 0, "Off"]);
+});
+
+// ---- the undo: clean, still there, or more than the edit ------------------------
+
+// The paragraph in its reviewed text at three moments. Before the edit it
+// holds a pending change of an earlier comment ("every hour", counted as
+// accepted); the edit hollows the field; an undo that takes the neighbour
+// with it leaves the text the paragraph had before that earlier change.
+const HOLLOWED = HALLIVANE.replace(`${S}(Hallivane, 2016)${E}`, `${S}${E}`);
+const NEIGHBOUR_GONE = HALLIVANE.replace("every hour", "each hour");
+const hollowing = () => ({ xml: "hollow", reviewed: HOLLOWED });
+
+test("the outcome of an undo is told from the fields and three texts: before the edit, after it, after the undo", () => {
+  const o = (fieldsOk, before, after, undone) => undoOutcome({ fieldsOk, before, after, undone });
+  // The paragraph reads as before the edit and its fields are as before.
+  assert.equal(o(true, "B", "A", "B"), "clean");
+  // It still reads as after the edit, or a field is still not as it was.
+  assert.equal(o(true, "B", "A", "A"), "kept");
+  assert.equal(o(false, "B", "A", "B"), "kept");
+  assert.equal(o(false, "B", "A", "X"), "kept");
+  // The fields are as before and it reads as neither: more went than the edit.
+  assert.equal(o(true, "B", "A", "X"), "more");
+  // A text that could not be read: never "gone".
+  assert.equal(o(true, null, "A", "X"), "kept");
+  assert.equal(o(true, "B", "A", null), "kept");
+  assert.equal(o(true, "B", null, "X"), "kept");
+  assert.equal(o(true, "B", null, "B"), "clean");
+});
+
+test("task pane: a clean undo is refused as before, with nothing left of the edit", async () => {
+  const s = fakeWord({ word: hollowing });
+  const r = await call(SENTENCE, "");
+  assert.deepEqual(
+    [r.ok, r.code, r.reason, r.detail, r.undone, r.took_more, r.applied],
+    [false, "FieldNotEditable", "after-edit", "hollowed", true, undefined, undefined],
+  );
+  assert.match(r.message, /Nothing was changed\.$/);
+  assert.deepEqual([s.rejected, s.xml, s.reviewed, s.comments.length], [1, "live", HALLIVANE, 0]);
+});
+
+test("task pane: an edit that is still in the document after the undo is reported as applied", async () => {
+  // Word rejected nothing: the field is still hollow, the text still the edited one.
+  let s = fakeWord({ word: hollowing, rejects: false });
+  let r = await call(SENTENCE, "");
+  assert.deepEqual(
+    [r.ok, r.applied, r.code, r.detail, r.took_more],
+    [false, true, "FieldEditNotUndone", "hollowed", undefined],
+  );
+  assert.equal(s.reviewed, HOLLOWED);
+  // The fields read whole again, the paragraph still reads as after the edit.
+  s = fakeWord({ word: hollowing, rejects: { xml: "live" } });
+  r = await call(SENTENCE, "");
+  assert.deepEqual([r.ok, r.applied, r.code], [false, true, "FieldEditNotUndone"]);
+  assert.match(r.message, /could not be taken back\. Reject this change in Word\./);
+});
+
+test("task pane: an undo that took a pending change next to the edit with it is refused, not applied, and says so", async () => {
+  const s = fakeWord({ word: hollowing, rejects: { xml: "live", reviewed: NEIGHBOUR_GONE } });
+  const r = await call(SENTENCE, "");
+  assert.deepEqual(
+    [r.ok, r.code, r.reason, r.detail, r.undone, r.took_more, r.applied],
+    [false, "FieldNotEditable", "after-edit", "hollowed", true, true, undefined],
+  );
+  assert.deepEqual([r.paragraph_index, r.paragraph_id], [1, "U1"]);
+  assert.ok(r.message.startsWith(FIELD_REFUSAL));
+  assert.ok(r.message.endsWith(UNDO_TOOK_MORE));
+  assert.match(r.message, /also took back an earlier pending change in the same paragraph/);
+  // "Nothing was changed" would be wrong here.
+  assert.doesNotMatch(r.message, /Nothing was changed/);
+  assert.deepEqual(
+    [s.rejected, s.xml, s.reviewed, s.comments.length, s.mode],
+    [1, "live", NEIGHBOUR_GONE, 0, "Off"],
+  );
+});
+
+test("daemon: an undo that took more is not recorded as applied; the attempt goes, a refresh is asked for, the model is told", async () => {
+  const took = [];
+  const d = deps({
+    ok: false,
+    code: "FieldNotEditable",
+    reason: "after-edit",
+    detail: "hollowed",
+    undone: true,
+    took_more: true,
+    paragraph_index: 2,
+    message: `${FIELD_REFUSAL} Word did not keep the field whole (hollowed), so the edit was taken back. ${UNDO_TOOK_MORE}`,
+  });
+  d.onUndoTookMore = async (x) => took.push([x.ref, x.paragraph_index]);
+  const r = await applyTrackedEdit(d, edit(SENTENCE, ""), TURN);
+  assert.deepEqual(
+    [r.ok, r.code, r.took_more, r.applied],
+    [false, "FieldNotEditable", true, undefined],
+  );
+  assert.match(r.message, /do not repeat this edit/);
+  assert.deepEqual([d.edits.length, d.notApplied], [0, ["R1.2-b1"]]);
+  assert.deepEqual(took, [["R1.2", 2]]);
+  assert.deepEqual(d.lines, [
+    "[review] field edit refused R1.2 why=after-edit by=pane paragraph=2 found=hollowed undone=1 took_more=1",
+  ]);
+  // A clean undo asks for no refresh.
+  const clean = deps({
+    ok: false,
+    code: "FieldNotEditable",
+    reason: "after-edit",
+    detail: "hollowed",
+    undone: true,
+    paragraph_index: 2,
+    message: "m",
+  });
+  clean.onUndoTookMore = async (x) => took.push(x.ref);
+  await applyTrackedEdit(clean, edit(SENTENCE, ""), TURN);
+  assert.equal(took.length, 1);
 });
 
 test("task pane: without a way to take the edit back, or to read the paragraph, a deletion over a field is not tried", async () => {

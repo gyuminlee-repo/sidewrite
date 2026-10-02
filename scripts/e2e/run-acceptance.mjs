@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Review acceptance run without hands: daemon, a separate Word process with
 // a CDP port on its add-in pane, the Review tab steps, the author's Word
-// steps over COM, the feature_list verify commands, cleanup. Five flows:
+// steps over COM, the feature_list verify commands, cleanup. Six flows:
 // stage 2 (main), stage 2.5 (mainS25), stage 3 (mainS3), stage 4 (mainS4,
-// the Tools tab) and stage cite (mainCite, reference-manager fields), chosen
-// by --stage or --features.
+// the Tools tab), stage cite (mainCite, reference-manager fields) and stage
+// parts (mainParts, a manuscript and its supplementary Word file, two panes),
+// chosen by --stage or --features.
 // Runs from WSL; Word, its pane and COM are on Windows. See README.md.
 
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +59,23 @@ import {
   modelsEvidence,
   norm,
   ollamaSplitEvidence,
+  foreignLogLines,
+  PARTS_SEED_RULE,
+  partsBeforeJoin,
+  partsBoth,
+  partsCited,
+  partsGuard,
+  partsPlan,
+  partsReopened,
+  partsCrossState,
+  partsGuardEdit,
+  partsJoined,
+  partsKeep,
+  partsLeft,
+  partsMainOutside,
+  partsSavedLine,
+  partsSessions,
+  partsSuppChange,
   openCheckEvidence,
   openEvidence,
   pluginsEvidence,
@@ -107,9 +125,14 @@ const { values: opt } = parseArgs({
     guideline: { type: "string", default: path.join(REPO, "tests/fixtures/fake_guideline.txt") },
     baseline: { type: "string", default: path.join(REPO, "tests/fixtures/aux_manuscript_v1.docx") },
     "translate-lang": { type: "string", default: "German" },
-    // Default: tests/fixtures/fake_review.txt; stage cite: cite_review.txt.
+    // Stage parts: the supplementary file opened next to the manuscript.
+    // Default: tests/fixtures/parts_si.docx (scripts/e2e/make_parts_fixture.py).
+    supplement: { type: "string" },
+    // Default: tests/fixtures/fake_review.txt; stage cite: cite_review.txt;
+    // stage parts: parts_review.txt.
     review: { type: "string" },
-    ledger: { type: "string", default: path.join(REPO, "tests/fixtures/review_ledger.json") },
+    // Default: tests/fixtures/review_ledger.json; stage parts: parts_ledger.json.
+    ledger: { type: "string" },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
     // Default /tmp/daemon-<stage>-e2e.log.
     log: { type: "string" },
@@ -174,31 +197,39 @@ if (!opt["base-dir"] && !opt["run-dir"])
 if (!opt["playwright-core"])
   die("--playwright-core (Windows path of a playwright-core package) is required");
 
+// Stages without a feature list: their rows and markers are their result.
+const NO_FEATURES = ["cite", "parts"];
 let STAGE;
 try {
   STAGE = (opt.stage ?? stageOf(opt.features ?? defaultFeatures("s2"))).toLowerCase();
-  // Stage cite has no feature list: its rows and markers are its result.
-  if (STAGE !== "cite") {
+  if (!NO_FEATURES.includes(STAGE)) {
     if (!/^s\d+$/.test(STAGE))
-      throw new Error(`--stage takes s2, s25, s3, s4 or cite, not ${opt.stage}`);
+      throw new Error(`--stage takes s2, s25, s3, s4, cite or parts, not ${opt.stage}`);
     opt.features ??= defaultFeatures(STAGE);
     featureIds(opt.features);
   }
 } catch (e) {
   die(e.message);
 }
-if (!["s2", "s25", "s3", "s4", "cite"].includes(STAGE))
-  die(`there is no flow for stage ${STAGE} (s2, s25, s3, s4, cite)`);
+if (!["s2", "s25", "s3", "s4", "cite", "parts"].includes(STAGE))
+  die(`there is no flow for stage ${STAGE} (s2, s25, s3, s4, cite, parts)`);
 opt.fixture ??= path.join(
   REPO,
   "tests/fixtures",
-  { s4: "aux_manuscript.docx", cite: "citation_manuscript.docx" }[STAGE] ??
-    "review_manuscript.docx",
+  { s4: "aux_manuscript.docx", cite: "citation_manuscript.docx", parts: "parts_paper.docx" }[
+    STAGE
+  ] ?? "review_manuscript.docx",
 );
+opt.supplement ??= path.join(REPO, "tests/fixtures/parts_si.docx");
 opt.review ??= path.join(
   REPO,
   "tests/fixtures",
-  STAGE === "cite" ? "cite_review.txt" : "fake_review.txt",
+  { cite: "cite_review.txt", parts: "parts_review.txt" }[STAGE] ?? "fake_review.txt",
+);
+opt.ledger ??= path.join(
+  REPO,
+  "tests/fixtures",
+  STAGE === "parts" ? "parts_ledger.json" : "review_ledger.json",
 );
 let AFTER_CLEANUP = [];
 try {
@@ -230,6 +261,10 @@ const DOC14 = path.join(MODE14_DIR, "review_manuscript.docx");
 // Stage cite: the copies of the document Word saved, and the two Word wrote
 // with every change accepted and rejected.
 const CITE_DIR = path.join(RUN, "cite");
+// Stage parts: the supplementary file next to the manuscript (paper.docx),
+// and its review file.
+const SI_DOC = path.join(RUN, "SI.docx");
+const SI_REVISION = path.join(RUN, "SI.revision.json");
 const SPECIAL_DIR = path.join(RUN, "special");
 const DOC_SPECIAL = path.join(SPECIAL_DIR, "tracked_special.docx");
 const winPath = (p) => execFileSync("wslpath", ["-w", p], { encoding: "utf8" }).trim();
@@ -296,45 +331,76 @@ const SHOTS = path.join(RUN, "shots");
 const timings = [];
 let shotNo = 0;
 let paneTag = "";
-let pane = (step, args = {}) => {
-  const argsFile = path.join(RUN, `args-${paneTag}${step}.json`);
+// One call of the pane driver: the program, its arguments and its
+// environment. doc: the document whose pane is driven (its file name without
+// the ending; stage parts has two panes in one Word), null for the only pane.
+function driverCall(step, args, doc, shot) {
+  const tag = `${paneTag}${doc ? `${doc}-` : ""}`;
+  const argsFile = path.join(RUN, `args-${tag}${step}.json`);
   fs.writeFileSync(argsFile, JSON.stringify(args));
+  return {
+    file: unixPath(opt["win-node"]),
+    argv: [winPath(path.join(TOOLS, "pane-driver.cjs")), step, winPath(argsFile)],
+    options: {
+      cwd: RUN,
+      encoding: "utf8",
+      timeout: 30 * 60_000,
+      maxBuffer: 64 << 20,
+      env: {
+        ...process.env,
+        PLAYWRIGHT_CORE: opt["playwright-core"],
+        E2E_CDP_PORT: opt["cdp-port"],
+        ...(doc ? { E2E_PANE_DOC: doc } : {}),
+        ...(shot ? { E2E_SHOT: winPath(shot) } : {}),
+        WSLENV: [
+          process.env.WSLENV,
+          "PLAYWRIGHT_CORE",
+          "E2E_CDP_PORT",
+          doc && "E2E_PANE_DOC",
+          shot && "E2E_SHOT",
+        ]
+          .filter(Boolean)
+          .join(":"),
+      },
+    },
+  };
+}
+// The one JSON line a driver call printed.
+const driverAnswer = (out) =>
+  JSON.parse(String(out).replace(/\r/g, "").trim().split("\n").filter(Boolean).pop());
+// A driver call that does not hold up this process, so two panes can be
+// driven at the same time (stage parts). No screenshot.
+function paneAsync(step, args = {}, doc = null) {
+  const call = driverCall(step, args, doc, null);
+  return new Promise((resolve) => {
+    execFile(call.file, call.argv, call.options, (err, stdout) => {
+      try {
+        resolve(driverAnswer(stdout || JSON.stringify({ ok: false, error: err?.message })));
+      } catch (e) {
+        resolve({ ok: false, error: `no answer of the driver: ${err?.message ?? e.message}` });
+      }
+    });
+  });
+}
+let pane = (step, args = {}, doc = null) => {
   const shot = opt.screenshots
-    ? path.join(SHOTS, shotName(++shotNo, `${paneTag}${step}`, args))
+    ? path.join(SHOTS, shotName(++shotNo, `${paneTag}${doc ? `${doc}-` : ""}${step}`, args))
     : null;
   if (shot) fs.mkdirSync(SHOTS, { recursive: true });
+  const call = driverCall(step, args, doc, shot);
   const t0 = Date.now();
   let out;
   try {
-    out = execFileSync(
-      unixPath(opt["win-node"]),
-      [winPath(path.join(TOOLS, "pane-driver.cjs")), step, winPath(argsFile)],
-      {
-        cwd: RUN,
-        encoding: "utf8",
-        timeout: 30 * 60_000,
-        maxBuffer: 64 << 20,
-        env: {
-          ...process.env,
-          PLAYWRIGHT_CORE: opt["playwright-core"],
-          E2E_CDP_PORT: opt["cdp-port"],
-          ...(shot ? { E2E_SHOT: winPath(shot) } : {}),
-          WSLENV: [process.env.WSLENV, "PLAYWRIGHT_CORE", "E2E_CDP_PORT", shot && "E2E_SHOT"]
-            .filter(Boolean)
-            .join(":"),
-        },
-      },
-    );
+    out = execFileSync(call.file, call.argv, call.options);
   } catch (e) {
     out = e.stdout || JSON.stringify({ ok: false, error: e.message });
   }
-  const line = String(out).replace(/\r/g, "").trim().split("\n").filter(Boolean).pop();
-  const result = JSON.parse(line);
+  const result = driverAnswer(out);
   if (shot) {
     timings.push(
       stepTiming({
         n: shotNo,
-        step: `${paneTag}${step}`,
+        step: `${paneTag}${doc ? `${doc}-` : ""}${step}`,
         args,
         shot: path.basename(shot),
         seconds: Math.round((Date.now() - t0) / 100) / 10,
@@ -592,6 +658,9 @@ async function setup() {
   record.word.preexisting = wordPids();
 
   embedTaskpane(opt.fixture, DOC);
+  // Stage parts: the supplementary file, tagged the same way; it is opened
+  // in the same Word later (mainParts).
+  if (STAGE === "parts") embedTaskpane(opt.supplement, SI_DOC);
   // Stage 4: the journal profile whose format rules find what the fixture
   // plants, next to the manuscript, and named as the default of this daemon.
   const env = {};
@@ -1652,6 +1721,586 @@ async function mainCite() {
   });
 }
 
+// ---- stage parts -----------------------------------------------------------
+// A manuscript and its supplementary Word file in one Word, each with its
+// pane, one daemon (README.md "Stage parts"). The steps a to j of the README
+// are the rows "parts a: ..." to "parts j: ..." of the table.
+
+const readJson = (file) => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null);
+const statOf = (file) => {
+  try {
+    const s = fs.statSync(file);
+    return { mtime: s.mtime.toISOString(), bytes: s.size };
+  } catch {
+    return null;
+  }
+};
+// A judged row of the stage (a judge of judge.mjs gave `evidence`), with its
+// marker, and a row that is only told.
+function partsRow(id, step, evidence) {
+  marker(`parts-${id}`, evidence);
+  record.parts.checks[id] = evidence;
+  const row = {
+    step: `parts ${id}: ${step}`,
+    result: evidence.pass ? "PASS" : "FAIL",
+    got: evidence.got,
+  };
+  rows.push(row);
+  save();
+  console.log(`${row.result}  ${row.step}  ${String(row.got)}`);
+}
+function partsNote(step, got) {
+  rows.push({ step: `parts: ${step} (not judged)`, result: "NOTE", got });
+  save();
+  console.log(`NOTE  parts: ${step}  ${got}`);
+}
+const tryCom = (action, extra, doc) => {
+  try {
+    return com(action, extra, doc);
+  } catch (e) {
+    return { ok: false, error: firstLine(e) };
+  }
+};
+
+async function mainParts() {
+  const spec = JSON.parse(
+    execFileSync("python3", [path.join(HERE, "make_parts_fixture.py"), "--spec"], {
+      encoding: "utf8",
+    }),
+  );
+  const names = spec.names;
+  const P = path.basename(DOC, ".docx"); // the stems the driver picks a pane by
+  const S = path.basename(SI_DOC, ".docx");
+  const { si_only: SI_ONLY, both: BOTH } = spec.refs;
+  const comments = Object.keys(spec.requirements).length;
+  record.parts = { spec, checks: {}, saved_probe: [] };
+  const turns = () => count(daemonLog, /^\[agent\] turn complete/gm);
+  // One turn in one pane, waited for in the log like propose().
+  const proposeIn = async (doc, ref) => {
+    const before = turns();
+    const r = pane("propose", { ref }, doc);
+    await until(() => turns() > before, 60_000, "turn complete").catch(() => {});
+    return note("propose", r, {
+      label: `${doc}.docx: propose ${ref}`,
+      ctx: { ref, turnCompleted: turns() > before },
+    });
+  };
+  const savedProbe = (at) => {
+    const point = { at, saved: pane("doc-saved", {}, S), file: statOf(SI_DOC) };
+    record.parts.saved_probe.push(point);
+    save();
+  };
+
+  // The manuscript: the review, the comment list with its requests, the rule.
+  note("open-review", pane("open-review", {}, P), {
+    label: `${names.paper}: open-review`,
+    ctx: { revisionPath: REVISION },
+  });
+  if (opt.provider) {
+    note("select-provider", pane("select-provider", { role: "turn", id: opt.provider }, P), {
+      label: `${names.paper}: select-provider turn=${opt.provider}`,
+      ctx: { id: opt.provider },
+    });
+    pane("open-review", {}, P);
+  }
+  note("split", pane("split", { review_file: winPath(opt.review) }, P), {
+    label: `${names.paper}: split`,
+    judge: "parts-split",
+  });
+  note("edit-draft", pane("edit-draft", { requirements: spec.requirements }, P), {
+    label: `${names.paper}: edit-draft`,
+    judge: "parts-draft",
+    ctx: { requirements: spec.requirements },
+  });
+  note("ledger-add", pane("ledger-add", { ledger_file: winPath(opt.ledger) }, P), {
+    label: `${names.paper}: ledger-add`,
+    judge: "parts-ledger",
+  });
+
+  // The supplementary file, in the same Word. Its pane opens with it.
+  const opened = tryCom("open-edit", ["-Other", winPath(SI_DOC), "-AllowDir", winPath(RUN)]);
+  record.parts.open = opened;
+  rows.push({
+    step: `parts: ${names.si} opened in the Word of the run`,
+    result: opened.ok === true && opened.read_only === false ? "PASS" : "FAIL",
+    got: opened.ok
+      ? `read_only=${opened.read_only} windows=${opened.windows} documents=${(opened.documents ?? []).length}`
+      : opened.error,
+  });
+  console.log(`${rows.at(-1).result}  ${rows.at(-1).step}  ${rows.at(-1).got}`);
+  save();
+  if (opened.ok !== true) throw new Error(`${names.si} could not be opened: ${opened.error}`);
+  const atOpen = note("open-review", pane("open-review", {}, S), {
+    label: `${names.si}: open-review`,
+    ctx: { revisionPath: SI_REVISION },
+  });
+  if (opt.provider) {
+    note("select-provider", pane("select-provider", { role: "turn", id: opt.provider }, S), {
+      label: `${names.si}: select-provider turn=${opt.provider}`,
+      ctx: { id: opt.provider },
+    });
+    pane("open-review", {}, S);
+  }
+  savedProbe("opened, before any edit");
+
+  // a. Before the join.
+  partsRow(
+    "a",
+    "before the join the supplementary file offers the manuscript and nothing is linked",
+    partsBeforeJoin({
+      view: atOpen,
+      si: readJson(SI_REVISION),
+      paper: readJson(REVISION),
+      names,
+      comments,
+    }),
+  );
+
+  // b. Join by the candidate; the manuscript's pane follows without a press.
+  const joined = pane("link-join", { main: names.paper }, S);
+  const mainLinked = pane(
+    "wait-linked",
+    { until: `^Linked files: ${names.si.replace(".", "\\.")}$` },
+    P,
+  );
+  record.parts.join = { joined, mainLinked };
+  partsRow(
+    "b",
+    "joined by the candidate: the rows, the read-only rules, the link in both files",
+    partsJoined({
+      view: joined,
+      mainView: mainLinked,
+      si: readJson(SI_REVISION),
+      paper: readJson(REVISION),
+      names,
+    }),
+  );
+
+  // c. The manuscript's turn for the comment that concerns only the supplement.
+  {
+    const before = readJson(REVISION);
+    const wordBefore = tryCom("state", [], DOC);
+    await proposeIn(P, SI_ONLY);
+    partsRow(
+      "c",
+      `the turn in ${names.paper} for ${SI_ONLY} notes the request as another file's and changes nothing`,
+      partsMainOutside({
+        before,
+        after: readJson(REVISION),
+        word: tryCom("state", [], DOC),
+        wordBefore,
+        ref: SI_ONLY,
+        names,
+      }),
+    );
+  }
+
+  // d. The supplement's turn for the same comment.
+  const texts = () => {
+    const r = pane("snapshot", {}, P);
+    return r.ok === false ? null : (r.paragraphs ?? []).map((p) => p.text);
+  };
+  {
+    const paperBefore = readJson(REVISION);
+    const siBefore = readJson(SI_REVISION);
+    const wordBefore = tryCom("state", [], SI_DOC);
+    const textsBefore = texts();
+    await proposeIn(S, SI_ONLY);
+    partsRow(
+      "d",
+      `the turn in ${names.si} for ${SI_ONLY}: a tracked change with its rationale comment, in its own files only`,
+      partsSuppChange({
+        siBefore,
+        si: readJson(SI_REVISION),
+        paperBefore,
+        paper: readJson(REVISION),
+        word: tryCom("state", [], SI_DOC),
+        wordBefore,
+        paperTexts: [textsBefore, texts()],
+        ref: SI_ONLY,
+        names,
+      }),
+    );
+    savedProbe("after a tracked edit, not saved");
+  }
+
+  // e. The forbid guard in the supplementary file, by the way of forbidGuard().
+  {
+    note("refresh", pane("refresh", {}, S), {
+      label: `${names.si}: refresh (before the forbid guard item)`,
+    });
+    const rule = (readJson(SI_REVISION)?.ledger ?? []).find((i) => i.kind === "forbid")?.id;
+    const seeded = addBlocked(await loadRevision(SI_REVISION, winPath(SI_DOC)), spec.guard.ref, {
+      args: partsGuardEdit(spec.guard),
+      blocked_by: [PARTS_SEED_RULE],
+    });
+    await saveRevision(SI_REVISION, seeded.revision);
+    const seedId = seeded.blocked.id;
+    const shown = pane("refresh", {}, S);
+    const onCard = (shown.comments ?? [])
+      .find((c) => c.ref === spec.guard.ref)
+      ?.blocked.some((b) => b.startsWith(`Blocked by ${PARTS_SEED_RULE}:`));
+    const wordBefore = tryCom("state", [], SI_DOC);
+    const at = readLog(daemonLog).length;
+    const step = onCard
+      ? pane("allow-exception", { ref: spec.guard.ref, blocked_by: PARTS_SEED_RULE }, S)
+      : {
+          ok: false,
+          error: `the seeded item is not on the card of ${spec.guard.ref} in the pane of ${names.si} after the refresh`,
+        };
+    const evidence = forbidBlockEvidence({
+      step,
+      log: readLog(daemonLog).slice(at),
+      revision: readJson(SI_REVISION),
+      before: seeded.revision,
+      word: tryCom("state", [], SI_DOC),
+      wordBefore,
+      seedId,
+      ref: spec.guard.ref,
+      rule: rule ?? "L1",
+    });
+    record.parts.forbid_guard = { seed: seedId, rule, step };
+    partsRow("e", `an edit with "${spec.forbidden_word}" sent to ${names.si} is blocked there`, {
+      ...evidence,
+      got: `${names.si}, rule ${rule ?? "not in its review file"}: ${Object.entries(evidence.checks)
+        .map(([k, v]) => `${k} ${v}`)
+        .join("; ")} | ${evidence.message ?? "-"}`,
+    });
+    const cleaned = dropBlocked(
+      await loadRevision(SI_REVISION, winPath(SI_DOC)),
+      spec.guard.ref,
+      seedId,
+    );
+    if (cleaned) await saveRevision(SI_REVISION, cleaned);
+  }
+
+  // f. The manuscript's pane shows where the request stands, nothing pressed.
+  {
+    const view = pane(
+      "wait-state",
+      { ref: SI_ONLY, until: `to review in ${names.si.replace(".", "\\.")}$` },
+      P,
+    );
+    record.parts.cross = view;
+    partsRow(
+      "f",
+      `${names.paper} shows ${SI_ONLY} as changed in ${names.si}, waiting for the decision, without Refresh`,
+      partsCrossState({ view, si: readJson(SI_REVISION), ref: SI_ONLY, names }),
+    );
+  }
+
+  // g. A turn in each pane at the same time, for the comment of both files.
+  {
+    const paperBefore = readJson(REVISION);
+    const siBefore = readJson(SI_REVISION);
+    const wordPaperBefore = tryCom("state", [], DOC);
+    const wordSiBefore = tryCom("state", [], SI_DOC);
+    const at = readLog(daemonLog).length;
+    const before = turns();
+    const [inPaper, inSi] = await Promise.all([
+      paneAsync("propose", { ref: BOTH }, P),
+      paneAsync("propose", { ref: BOTH }, S),
+    ]);
+    await until(() => turns() >= before + 2, 60_000, "two turns complete").catch(() => {});
+    record.parts.both = { paper: inPaper, si: inSi };
+    partsRow(
+      "g",
+      `both panes propose for ${BOTH} at the same time: each change in its own document and review file`,
+      partsBoth({
+        paperBefore,
+        paper: readJson(REVISION),
+        siBefore,
+        si: readJson(SI_REVISION),
+        wordPaper: tryCom("state", [], DOC),
+        wordPaperBefore,
+        wordSi: tryCom("state", [], SI_DOC),
+        wordSiBefore,
+        log: readLog(daemonLog).slice(at),
+        steps: { paper: inPaper, si: inSi },
+        ref: BOTH,
+        names,
+      }),
+    );
+    // The whole log: rows c and d ran a turn in each pane before this one.
+    partsRow(
+      "g2",
+      "the turns of the two panes ran on different Agent SDK sessions",
+      partsSessions(readLog(daemonLog), names),
+    );
+  }
+
+  // h. The manuscript may not drop the comment that has changes in the supplement.
+  {
+    const before = readJson(REVISION);
+    const step = pane(
+      "save-without",
+      { review_file: winPath(opt.review), drop: SI_ONLY, requirements: spec.requirements },
+      P,
+    );
+    record.parts.keep = step;
+    partsRow(
+      "h",
+      `${names.paper}: saving the list without ${SI_ONLY} is refused`,
+      partsKeep({ step, before, after: readJson(REVISION), ref: SI_ONLY, names }),
+    );
+  }
+
+  // i. Not judged: Document.saved and the file on disk around a save.
+  {
+    savedProbe("before the save");
+    const saved = tryCom("save", ["-AllowDir", winPath(RUN)], SI_DOC);
+    record.parts.save = saved;
+    savedProbe("after the save through Word");
+    // What a status refresh then writes into the review file.
+    pane("refresh", {}, S);
+    const state = readJson(SI_REVISION)?.doc_state ?? null;
+    record.parts.doc_state = state;
+    partsNote(
+      `Document.saved in ${names.si} and its file on disk`,
+      `${partsSavedLine(record.parts.saved_probe)} | save: ${saved.ok ? `saved=${saved.saved}` : saved.error} | doc_state after a refresh: ${JSON.stringify(state)}`,
+    );
+  }
+
+  // k to m. The letter of the manuscript and the changes of the supplement
+  // (step A3). A step that throws fails its row and the stage goes on: the
+  // leave of row j still runs.
+  const LABEL = "Supplementary Information";
+  const others = Object.keys(spec.requirements).filter((ref) => ref !== SI_ONLY);
+  const partsDir = path.join(RUN, "parts");
+  // The supplement as saved with its changes still pending. Word cannot
+  // reject a change it has accepted, so row l puts this file back first.
+  const pendingCopy = path.join(partsDir, "SI.pending.docx");
+  // word-com.ps1 finds a document by BindToMoniker, which would load a
+  // closed file: nothing is asked of the supplement while it is closed.
+  // open-edit and close-other are asked of the manuscript, which stays open.
+  const NOT_OPEN = { ok: false, error: `not tried: ${names.si} is not open in Word` };
+  const openSi = () => tryCom("open-edit", ["-Other", winPath(SI_DOC), "-AllowDir", winPath(RUN)]);
+  const closeSi = () => tryCom("close-other", ["-Other", winPath(SI_DOC)]);
+  // The ops are built once, from the review file while the changes are
+  // pending (as Word found them by their comments then), and applied with
+  // the decision of the row.
+  let pendingPlan = null;
+  const decide = (op, name, open = true) => {
+    pendingPlan ??= partsPlan(readJson(SI_REVISION), SI_ONLY, op);
+    const plan = { ...pendingPlan, ops: pendingPlan.ops.map((o) => ({ ...o, op })) };
+    const file = path.join(partsDir, `${name}.json`);
+    fs.writeFileSync(file, JSON.stringify(plan, null, 2));
+    const applied = !open
+      ? NOT_OPEN
+      : plan.ops.length
+        ? tryCom("apply", ["-PlanJson", winPath(file)], SI_DOC)
+        : { ok: false, error: `no change of ${SI_ONLY} with its comment in ${names.si}` };
+    return { plan, applied };
+  };
+  const letters = () =>
+    fs
+      .readdirSync(RUN)
+      .filter((f) => /\.response.*\.(docx|txt)$/.test(f))
+      .sort()
+      .map((f) => ({ file: f, ...statOf(path.join(RUN, f)) }));
+  const guarded = async (id, step, run) => {
+    try {
+      partsRow(id, step, await run());
+    } catch (e) {
+      partsRow(id, step, { pass: false, got: `the step threw: ${firstLine(e)}` });
+    }
+  };
+  fs.mkdirSync(partsDir, { recursive: true });
+
+  // k. The change of the supplement is accepted in Word; the letter of the
+  // manuscript counts it and cites it under the name of the file.
+  await guarded(
+    "k",
+    `the change of ${SI_ONLY} accepted in ${names.si}: the letter of ${names.paper} counts it and cites it under the name of the file`,
+    async () => {
+      const at = readLog(daemonLog).length;
+      const named = pane("link-label", { label: LABEL }, S);
+      // Saved once more, so that the copy is the file with the change pending.
+      const savedPending = tryCom("save", ["-AllowDir", winPath(RUN)], SI_DOC);
+      let copied = { ok: true };
+      try {
+        fs.copyFileSync(SI_DOC, pendingCopy);
+      } catch (e) {
+        copied = { ok: false, error: firstLine(e) };
+      }
+      const { plan, applied } = decide("accept", "accept-plan");
+      const saved = tryCom("save", ["-AllowDir", winPath(RUN)], SI_DOC);
+      const refreshed = pane("refresh", {}, S);
+      const closed = closeSi();
+      const fileAfter = statOf(SI_DOC);
+      const si = readJson(SI_REVISION);
+      // The manuscript: the other comments are declined, so that only the
+      // comment of the supplement decides whether the letter can be written.
+      pane("open-response", {}, P);
+      const declined = pane(
+        "response-decline",
+        {
+          comments: others.map((ref) => ({
+            ref,
+            reason: "This point is answered in the next round of the revision.",
+          })),
+          open_requests: false,
+        },
+        P,
+      );
+      const drafted = pane("response-draft", { ref: SI_ONLY }, P);
+      const check = pane("response-check", {}, P);
+      const failing = (check.checks ?? []).some((row) => /^FAIL /.test(row));
+      // Pressed only when nothing fails: the button would force the export.
+      const exported = check.ok === false || failing ? null : pane("response-export", {}, P);
+      record.parts.cited = {
+        named,
+        savedPending,
+        copied,
+        plan,
+        applied,
+        saved,
+        refreshed,
+        closed,
+        fileAfter,
+        doc_state: si?.doc_state ?? null,
+        declined,
+        drafted,
+        check,
+        exported,
+      };
+      return partsCited({
+        named,
+        label: LABEL,
+        plan,
+        applied,
+        saved,
+        refreshed,
+        closed,
+        fileAfter,
+        si,
+        paper: readJson(REVISION),
+        drafted,
+        check,
+        exported,
+        model: readJson(path.join(RUN, `${STEM}.response.model.json`)),
+        log: readLog(daemonLog).slice(at),
+        ref: SI_ONLY,
+        names,
+      });
+    },
+  );
+
+  // l. The supplement changes on disk and its pane does not refresh: the
+  // manuscript cannot confirm what its review file records.
+  await guarded(
+    "l",
+    `${names.si} changed and saved without a refresh: the check of ${names.paper} fails with part_state and the letter is not exported`,
+    async () => {
+      const at = readLog(daemonLog).length;
+      const recorded = readJson(SI_REVISION)?.doc_state ?? null;
+      // Closed in row k. Asked again, should that close have failed: the
+      // file cannot be put back while Word holds it.
+      closeSi();
+      let restored = { ok: true };
+      try {
+        fs.copyFileSync(pendingCopy, SI_DOC);
+      } catch (e) {
+        restored = { ok: false, error: firstLine(e) };
+      }
+      const reopened = openSi();
+      const isOpen = reopened.ok === true;
+      const { plan, applied } = decide("reject", "reject-plan", isOpen);
+      const saved = isOpen ? tryCom("save", ["-AllowDir", winPath(RUN)], SI_DOC) : NOT_OPEN;
+      const closed = isOpen ? closeSi() : NOT_OPEN;
+      const fileNow = statOf(SI_DOC);
+      const recordedNow = readJson(SI_REVISION)?.doc_state ?? null;
+      const lettersBefore = letters();
+      const exportBefore = readJson(REVISION)?.response_export ?? null;
+      // Refreshed, not checked: the button reads "Export letter (.docx)" and
+      // the export is asked for without force.
+      const opened = pane("open-response", {}, P);
+      const exported = pane("response-export", {}, P);
+      record.parts.guard = {
+        recorded,
+        restored,
+        reopened,
+        plan,
+        applied,
+        saved,
+        closed,
+        fileNow,
+        recordedNow,
+        opened,
+        exported,
+      };
+      return partsGuard({
+        restored,
+        reopened,
+        plan,
+        applied,
+        saved,
+        closed,
+        recorded,
+        recordedNow,
+        fileNow,
+        opened,
+        exported,
+        letters: [lettersBefore, letters()],
+        export: [exportBefore, readJson(REVISION)?.response_export ?? null],
+        log: readLog(daemonLog).slice(at),
+        ref: SI_ONLY,
+        names,
+      });
+    },
+  );
+
+  // m. Opened again and refreshed: the record is confirmed and says that the
+  // change was rejected.
+  await guarded(
+    "m",
+    `${names.si} opened again and refreshed: the request of ${SI_ONLY} is open again and its answer is stale`,
+    async () => {
+      // Closed in row l; Word gives the open document when it is not.
+      const reopened = openSi();
+      pane("open-review", {}, S);
+      const refreshed = pane("refresh", {}, S);
+      const fileNow = statOf(SI_DOC);
+      const si = readJson(SI_REVISION);
+      pane("open-response", {}, P);
+      const check = pane("response-check", {}, P);
+      record.parts.reopened = { reopened, refreshed, fileNow, doc_state: si?.doc_state, check };
+      return partsReopened({
+        reopened,
+        refreshed,
+        fileNow,
+        si,
+        check,
+        ref: SI_ONLY,
+        names,
+      });
+    },
+  );
+
+  // j. Leave. Row j reads the pane of the supplement: it must be open.
+  if (record.parts.reopened?.reopened?.ok !== true) {
+    openSi();
+    pane("open-review", {}, S);
+  }
+  {
+    const siBefore = readJson(SI_REVISION);
+    const view = pane("link-leave", {}, S);
+    record.parts.leave = view;
+    partsRow(
+      "j",
+      `${names.si} leaves: the join box is back, the link is gone in both files, its changes stay`,
+      partsLeft({
+        view,
+        siBefore,
+        si: readJson(SI_REVISION),
+        paper: readJson(REVISION),
+        names,
+        comments,
+      }),
+    );
+  }
+}
+
 // The saved document of stage cite in a Word of its own (word-own.ps1, the
 // Word judge of the marked copies): opened as it is, once with
 // Revisions.AcceptAll() and once with Revisions.RejectAll(), each result
@@ -1980,7 +2629,9 @@ async function cleanup() {
 let failed = null;
 try {
   await setup();
-  await { s2: main, s25: mainS25, s3: mainS3, s4: mainS4, cite: mainCite }[STAGE]();
+  await { s2: main, s25: mainS25, s3: mainS3, s4: mainS4, cite: mainCite, parts: mainParts }[
+    STAGE
+  ]();
 } catch (e) {
   failed = e;
   record.error = String(e?.stack ?? e);
@@ -1990,10 +2641,14 @@ try {
 // hello, no log line may name a document outside the run folder.
 function isolationCheck() {
   const own = [winPath(RUN), RUN];
-  const foreign = [LOG, KNOB_LOG]
-    .flatMap((f) => readLog(f).split("\n"))
-    .filter((l) => /\.docx\b/i.test(l) && !own.some((p) => l.includes(p)))
-    .filter((l) => !/^\[bridge\] hello received|^\[diag\] hello /.test(l));
+  // Stage parts: the daemon writes the link between the two files of the
+  // run with their bare names ("link join SI.docx -> paper.docx").
+  const bare = STAGE === "parts" ? [path.basename(DOC), path.basename(SI_DOC)] : [];
+  const foreign = foreignLogLines(
+    [LOG, KNOB_LOG].flatMap((f) => readLog(f).split("\n")),
+    own,
+    bare,
+  );
   record.isolation = { foreign_lines: foreign.slice(0, 20), count: foreign.length };
   rows.push({
     step: "no tool call on other documents",
@@ -2006,8 +2661,8 @@ isolationCheck();
 // Before the mode-14 check starts a daemon with a log of its own.
 const mainLogs = runLogs();
 function verify(ids) {
-  // Stage cite has no feature list and no feature range.
-  if (STAGE === "cite") return;
+  // Stages cite and parts have no feature list and no feature range.
+  if (NO_FEATURES.includes(STAGE)) return;
   try {
     runFeatures(ids);
   } catch (e) {

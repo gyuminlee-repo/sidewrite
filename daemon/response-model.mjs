@@ -11,8 +11,8 @@
 // Headings, location lines, quotes, line ranges and figure lines are computed.
 
 import { createHash } from "node:crypto";
-import { locationLine, renderFrame } from "./response-lines.mjs";
-import { adoptedFigures } from "./response-quotes.mjs";
+import { fileLine, locationLine, renderFrame } from "./response-lines.mjs";
+import { adoptedFigures, partLabel } from "./response-quotes.mjs";
 
 // One value for "what the letter says": the sha256 of the paragraphs in
 // order, each as [kind, text, color, ref]. A list per paragraph, so the order
@@ -104,6 +104,16 @@ export function buildLetterModel(rev, profile, { gloss = false } = {}) {
   const body = profile.colors.response_body ?? null;
   const revised = profile.colors.response_revised ?? null;
   const paragraphs = [];
+  // A revision with supplementary Word files (rev.parts): every location
+  // line names its file. Without one the line is as it always was.
+  const parts = rev.parts ?? [];
+  const labels = Object.fromEntries(
+    parts.map((p) => {
+      const name = String(p.doc).split(/[\\/]/).pop();
+      return [name, partLabel(p.label, name)];
+    }),
+  );
+  const lineOf = (cit) => (parts.length ? fileLine(cit, L, labels) : locationLine(cit, L));
   // Editor (reviewer 0) first, then the reviewers; the stored order is kept
   // inside each of them (sort is stable).
   const comments = [...(rev.comments ?? [])].sort((a, b) => a.reviewer - b.reviewer);
@@ -142,7 +152,7 @@ export function buildLetterModel(rev, profile, { gloss = false } = {}) {
     if (c.declined && !citations.length && !figures.length) add("declined", L.declined_line, body);
     for (const cit of citations) {
       const removed = cit.kind === "removed";
-      add("location", locationLine(cit, L), revised, { removed });
+      add("location", lineOf(cit), revised, { removed });
       if (!removed) add("quote", cit.quote, revised);
     }
     for (const f of figures) add("figure", figureLine(f, L), revised);

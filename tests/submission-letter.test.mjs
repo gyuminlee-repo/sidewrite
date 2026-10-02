@@ -174,6 +174,18 @@ test("row 7: an export that was forced while checks failed is not ready", () => 
   );
 });
 
+test("row 7: a record whose count of failed checks is not the integer 0 reads export again", () => {
+  for (const fail of [undefined, null, NaN, "0", -1, 0.5]) {
+    const r = letter(exported({ stored: { fail } }));
+    assert.equal(r.state, "not_ready", `fail=${String(fail)}`);
+    assert.equal(
+      r.text,
+      "Export the letter again: paper_response.docx has no usable record of how its checks ended.",
+    );
+    assert.deepEqual(r.go, { tab: "response", target: "response-export" });
+  }
+});
+
 test("row 7: a record without the hashes (an older daemon wrote or saved it) reads export again", () => {
   for (const stored of [
     { model_sha: null, docx_sha: null },

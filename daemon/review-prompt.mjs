@@ -13,13 +13,18 @@ import { termBlock } from "../taskpane/shared/named-terms.js";
 // other rules are how the tool works and always stay.
 export const POLICY_PACKS = { review_scope: [1, 2, 3] };
 
-export function rulesFor(profile = {}) {
+// part: the turn runs in a supplementary file ({ main_name }, see
+// buildReviewPrompt). The rule about what is not in this file then reads for
+// that file, at the same index.
+export function rulesFor(profile = {}, part = null) {
   const off = new Set(
     Object.entries(POLICY_PACKS)
       .filter(([name]) => profile?.policy_packs?.[name] === false)
       .flatMap(([, indexes]) => indexes),
   );
-  return REVIEW_RULES.filter((_, i) => !off.has(i));
+  return REVIEW_RULES.map((r, i) =>
+    part && i === OUTSIDE_RULE ? outsideRuleInPart(part) : r,
+  ).filter((_, i) => !off.has(i));
 }
 
 export const REVIEW_RULES = [
@@ -41,6 +46,13 @@ export const REVIEW_RULES = [
   'Before you end the turn, check: every request has a change, a question or a note; no changed paragraph states a claim and its denial together; the term you changed is not left elsewhere without being named. End your answer with the line "Same term still at: " followed by the ids of the paragraphs where it is left, or "none".',
   "Citations and other fields (cross-references, the reference list) are not edited: they are written by the reference manager. When you reword, keep each one where it is and change only the words around it. To remove one, delete its whole sentence in ONE office_tracked_edit, never the citation text on its own. `find` takes the text as Word shows it, without the instruction of the field.",
 ];
+
+// The rule that tells what is not in this file from what only the author
+// knows, by its index in REVIEW_RULES, and its text in a supplementary file:
+// there the manuscript itself is one of the other files.
+export const OUTSIDE_RULE = 11;
+export const outsideRuleInPart = (part) =>
+  `Tell apart what is not in this file from what only the author knows. This file is a supplementary file: what the comment asks of the main manuscript (${part.main_name}), a figure file, another supplementary file, the title page, the response letter or any other file is declared with office_requirement_outside: it is not a question. Use office_ask_author only for what the author's records or judgement must settle. A request the reviewer made conditional ("unless it was verified", "if this was controlled for") is not decided by you: ask whether the condition holds; that this file does not mention it settles nothing.`;
 
 // The fence of one prompt: a string that is not in the comment, so no line
 // of the comment can close the block it stands in. random: for tests.
@@ -238,6 +250,15 @@ export function buildReviewPrompt({
   lang = "English",
   profile = {},
   includeForbid = true,
+  // The turn runs in a supplementary file of a manuscript:
+  // { name, main_name, outside: [{ id, text, why }] }. name: this file;
+  // outside: the requests of this comment the turn of the manuscript noted
+  // as belonging to another file (revision-parts.mjs outsideNotes). The
+  // text of the manuscript is not given: the turn works on this file only.
+  part = null,
+  // What the author answered to questions asked in the other files of the
+  // revision: [{ file, ref, id, question, answer }] (linkedAnswers).
+  linkedAnswers = [],
   fence, // tests give one; a turn takes a new one (commentFence)
 }) {
   const inScope = ledger.filter(inManuscriptScope);
@@ -250,6 +271,11 @@ export function buildReviewPrompt({
   const lines = [
     ...(paper.lines.length ? [...paper.lines, ""] : []),
     `[Review turn ${comment.ref}]`,
+    ...(part
+      ? [
+          `You are working in ${part.name}, a supplementary file of ${part.main_name}. Where the text below says "the manuscript", it means this file, ${part.name}: it is the only file you read and change in this turn.`,
+        ]
+      : []),
     ...commentBlock(comment, fence),
     "",
   ];
@@ -273,6 +299,20 @@ export function buildReviewPrompt({
       "No list of requests was extracted for this comment: list what the comment asks for yourself first, then handle each one.",
       "",
     );
+  }
+  // What the turn of the manuscript left for another file: the requests
+  // this file is most likely to answer.
+  if (part?.outside?.length) {
+    lines.push(
+      `Requests the turn in ${part.main_name} noted as belonging to another file (its note follows each). They are the ones this file is most likely to answer: answer here those that are about ${part.name}, and note the others as outside this file:`,
+    );
+    for (const o of part.outside) {
+      const why = String(o.why ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+      lines.push(`- [${o.id}] ${o.text}${why ? ` (note: ${why})` : ""}`);
+    }
+    lines.push("");
   }
   // The terms the comment names, with every paragraph that holds them now.
   const terms = termBlock(comment, manuscript?.paragraphs ?? [], manuscript?.ids ?? null);
@@ -303,13 +343,18 @@ export function buildReviewPrompt({
     String(t ?? "")
       .replace(/\s+/g, " ")
       .trim();
-  if (answers.length) {
+  if (answers.length || linkedAnswers.length) {
     lines.push(
       "",
       "Author answers (what the author said when asked; they hold like author instructions, and a number in them may be written):",
     );
     for (const q of answers)
       lines.push(`- [${q.ref} ${q.id}] ${one(q.question)} Answer: ${one(q.answer)}`);
+    // Asked in another file of the revision; the answer holds here too.
+    for (const q of linkedAnswers)
+      lines.push(
+        `- [${q.ref} ${q.id}, asked in ${q.file}] ${one(q.question)} Answer: ${one(q.answer)}`,
+      );
   }
   const waiting = (comment.questions ?? []).filter((q) => !q.answer);
   if (waiting.length) {
@@ -323,7 +368,7 @@ export function buildReviewPrompt({
   if (forbids.length) for (const i of forbids) lines.push(`- [${i.id}] ${i.text}`);
   else lines.push("- (none listed)");
   lines.push("", "Rules:");
-  rulesFor(profile).forEach((r, n) => lines.push(`${n + 1}. ${r.replace("{lang}", lang)}`));
+  rulesFor(profile, part).forEach((r, n) => lines.push(`${n + 1}. ${r.replace("{lang}", lang)}`));
   lines.push("", `Call office_tracked_edit with comment_ref "${comment.ref}".`);
   return {
     text: lines.join("\n"),
@@ -333,6 +378,9 @@ export function buildReviewPrompt({
     section: comment.section || null,
     // The other comments the overview names.
     overviewRefs: overview.refs,
+    // The requests the turn of the manuscript left for another file, as told
+    // to a turn in a supplementary file.
+    outsideIds: (part?.outside ?? []).map((o) => o.id),
     // How the manuscript went in, and its paragraph hashes (for the next turn).
     manuscript: {
       mode: paper.mode,

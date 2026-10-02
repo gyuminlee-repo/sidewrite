@@ -1162,12 +1162,29 @@ test("the pane steps wait for the message their own action ends with", async () 
   const waits = [...driver.matchAll(/waitMessage\(page, [^,]+, "((?:[^"\\]|\\.)*)"\)/g)].map((m) =>
     JSON.parse(`"${m[1]}"`),
   );
-  assert.deepEqual(waits, ["^Split into ", "forbidden rule", "candidate rule\\(s\\) by "]);
+  // In the order of the source: split, the three steps of the parts stage
+  // (link-label, link-leave, and save-without, which splits again),
+  // allow-exception, suggest-ledger.
+  assert.deepEqual(waits, [
+    "^Split into ",
+    "^The response letter calls this file ",
+    "left the revision of",
+    "^Split into ",
+    "forbidden rule",
+    "candidate rule\\(s\\) by ",
+  ]);
   assert.match(
     "Split into 5 comments (found by the numbering in the text). Check the list, then press Save comment list.",
     new RegExp(waits[0]),
   );
-  assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[2]));
+  assert.match(
+    "The response letter calls this file Supplementary Information.",
+    new RegExp(waits[1]),
+  );
+  assert.ok(pane.includes("say(`The response letter calls this file ${partOf()?.label}.`)"));
+  assert.match("This file left the revision of paper.docx.", new RegExp(waits[2]));
+  assert.ok(pane.includes("say(`This file left the revision of ${main.name}.`)"));
+  assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[5]));
   // allow-exception: the refusal of the forbid guard, as the daemon words it.
   assert.ok(read("../daemon/review-tools.mjs").includes("matches forbidden rule(s) ${open.join("));
   const HOLD = "Waiting for the daemon to confirm the stored provider choice...";

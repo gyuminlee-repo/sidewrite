@@ -1128,6 +1128,7 @@ export const citeEdit = (c, ref = CITE_SEED_REF) => ({
 // of review-tools.mjs applyTrackedEdit and tools-word.js toolTrackedEdit.
 const REFUSAL_TEXTS = [
   [/is not rewritten as a whole/, "ParagraphNotPlain"],
+  [/could not read this paragraph as Word shows it/, "FieldsUnread"],
   [/would change the text of a citation or another field/, "FieldNotEditable"],
   [/" not found$/, "NotFound"],
   [/^Paragraph not found: /, "HintNotFound"],
@@ -1428,6 +1429,857 @@ export function pluginsEvidence(addins) {
   };
 }
 
+// ---- stage parts ---------------------------------------------------------------
+// A manuscript (paper.docx) and its supplementary Word file (SI.docx) in one
+// revision: the link, the copied comment list, a turn in each file, the
+// forbid guard in the supplementary file, where a request stands in the
+// other file, two turns at once, and leaving. The documents, the review and
+// which comment is of which kind are those of make_parts_fixture.py (--spec).
+//
+// Every judge below returns { pass, checks, got }. checks: one boolean per
+// named check. got: for each failed check its name (which pane or file), what
+// was expected and what was found, so a failed row can be read from the log
+// alone; when all pass, one line of what was found.
+
+// The rule a seeded edit is put on file with (cite uses the same trick): the
+// ledger of the stage has one rule, L1, so "Allow exception" lifts nothing
+// that exists and L1 has to refuse the edit.
+export const PARTS_SEED_RULE = "L9";
+
+// The edit the run sends to the supplementary file for the forbid guard, in
+// the form the daemon stores a blocked edit (FORBID_GUARD_EDIT has it too).
+export const partsGuardEdit = (guard) => ({
+  comment_ref: guard.ref,
+  find: guard.find,
+  replace: guard.replace,
+  rationale: {
+    what: "Called the carbon source novel.",
+    why: "Written by the acceptance run to show the forbid guard in a supplementary file; no model wrote it.",
+    addresses: "the wording of the Supplementary Methods",
+  },
+});
+
+const partsComment = (rev, ref) => (rev?.comments ?? []).find((c) => c.ref === ref) ?? null;
+const changeIds = (rev, ref) => (partsComment(rev, ref)?.changes ?? []).map((ch) => ch.id);
+const newChanges = (before, after, ref) => {
+  const had = new Set(changeIds(before, ref));
+  return (partsComment(after, ref)?.changes ?? []).filter((ch) => !had.has(ch.id));
+};
+const baseName = (p) =>
+  String(p ?? "")
+    .split(/[\\/]/)
+    .pop();
+const show = (x) => (typeof x === "string" ? x : JSON.stringify(x));
+// checks: [{ name, ok, expect, found }]. ok: what was found when all pass.
+function partsVerdict(checks, ok = "") {
+  const failed = checks.filter((c) => !c.ok);
+  return {
+    pass: failed.length === 0,
+    checks: Object.fromEntries(checks.map((c) => [c.name, !!c.ok])),
+    got: failed.length
+      ? failed
+          .map((c) => `${c.name}: expected ${show(c.expect)}, found ${show(c.found)}`)
+          .join(" | ")
+      : ok,
+  };
+}
+const wordRevisions = (word) => (word?.ok === true ? (word.revisions ?? []).length : null);
+// Rationale comments of the tool for `ref` among the comments Word lists.
+const toolComments = (word, ref) =>
+  (word?.comments ?? []).filter((c) => String(c.text ?? "").startsWith(`[${ref}]`)).length;
+
+// a. Before the join. view: the Review tab of the supplementary file as it
+// opened. si, paper: the two review files (null: no such file yet).
+export function partsBeforeJoin({ view, si, paper, names, comments }) {
+  const want = `Join the revision of ${names.paper}, ${comments} comment${comments === 1 ? "" : "s"}`;
+  return partsVerdict(
+    [
+      {
+        name: `${names.si} pane: the join box is shown`,
+        ok: view?.link_box?.shown === true,
+        expect: true,
+        found: view?.link_box?.shown ?? view?.error ?? null,
+      },
+      {
+        name: `${names.si} pane: the candidate`,
+        ok: (view?.link_box?.candidates ?? []).includes(want),
+        expect: want,
+        found: view?.link_box?.candidates ?? [],
+      },
+      {
+        name: `${names.si} pane: no comment row before the join`,
+        ok: (view?.comments ?? []).length === 0 && view?.ok !== false,
+        expect: 0,
+        found: (view?.comments ?? []).map((c) => c.ref),
+      },
+      {
+        name: `review file of ${names.si}: no link (nothing joins by itself)`,
+        ok: !si?.part_of,
+        expect: "no part_of",
+        found: si?.part_of ?? null,
+      },
+      {
+        name: `review file of ${names.paper}: no linked file`,
+        ok: (paper?.parts ?? []).length === 0,
+        expect: "no parts",
+        found: paper?.parts ?? null,
+      },
+    ],
+    `join box with "${want}"; no link in either review file`,
+  );
+}
+
+// b. After the join by the candidate. view: the supplementary file's pane
+// after the join; mainView: the manuscript's pane after it waited, nothing
+// pressed, for the line of linked files (wait-linked).
+export function partsJoined({ view, mainView, si, paper, names }) {
+  const mainRefs = (paper?.comments ?? []).map((c) => c.ref);
+  const rows = (view?.comments ?? []).map((c) => c.ref);
+  const ids = (rev) =>
+    (rev?.comments ?? []).map((c) => [c.ref, (c.requirements ?? []).map((r) => [r.id, r.text])]);
+  const note = `These rules are edited in ${names.paper}.`;
+  const line = `Linked files: ${names.si}`;
+  return partsVerdict(
+    [
+      {
+        name: `${names.si} pane: the rows of the manuscript`,
+        ok: mainRefs.length > 0 && JSON.stringify(rows) === JSON.stringify(mainRefs),
+        expect: mainRefs,
+        found: view?.error ?? rows,
+      },
+      {
+        name: `${names.si} pane: the rules are shown read-only with their note`,
+        ok:
+          (view?.ledger ?? []).length === (paper?.ledger ?? []).length &&
+          (view?.ledger ?? []).length > 0 &&
+          view?.ledger_edit_buttons === 0 &&
+          view?.ledger_note === note,
+        expect: `${(paper?.ledger ?? []).length} rule(s), no Edit or Remove button, "${note}"`,
+        found: `${(view?.ledger ?? []).length} rule(s), ${view?.ledger_edit_buttons} Edit/Remove button(s), "${view?.ledger_note ?? ""}"`,
+      },
+      {
+        name: `${names.si} pane: Propose changes on every row`,
+        ok: rows.length > 0 && (view?.comments ?? []).every((c) => c.can_propose === true),
+        expect: "a Propose changes button in every card",
+        found: (view?.comments ?? []).filter((c) => !c.can_propose).map((c) => c.ref),
+      },
+      {
+        name: `review file of ${names.si}: part_of names ${names.paper}`,
+        ok: baseName(si?.part_of?.manuscript) === names.paper,
+        expect: names.paper,
+        found: si?.part_of ?? null,
+      },
+      {
+        name: `review file of ${names.paper}: parts lists ${names.si}`,
+        ok: (paper?.parts ?? []).some((p) => baseName(p.doc) === names.si),
+        expect: names.si,
+        found: paper?.parts ?? null,
+      },
+      {
+        name: "request ids are the same in both review files",
+        ok: mainRefs.length > 0 && JSON.stringify(ids(si)) === JSON.stringify(ids(paper)),
+        expect: ids(paper),
+        found: ids(si),
+      },
+      {
+        name: `${names.paper} pane: "${line}" without a reload`,
+        ok: mainView?.matched === true && mainView?.linked === line,
+        expect: line,
+        found: mainView?.error ?? mainView?.linked ?? "",
+      },
+    ],
+    `${rows.length} rows in ${names.si}; both review files hold the link; ${names.paper} shows "${line}"`,
+  );
+}
+
+// c. The turn of the manuscript for the comment that concerns only the
+// supplementary file: every request noted as belonging to another file, no
+// change. before, after: the manuscript's review file. word, wordBefore:
+// word-com.ps1 state of the manuscript.
+export function partsMainOutside({ before, after, word, wordBefore, ref, names }) {
+  const c = partsComment(after, ref);
+  const wanted = (c?.requirements ?? []).map((r) => r.id);
+  const noted = (c?.requirements_outside ?? []).map((n) => n.id);
+  const added = newChanges(before, after, ref);
+  const n = [wordRevisions(wordBefore), wordRevisions(word)];
+  return partsVerdict(
+    [
+      {
+        name: `review file of ${names.paper}: ${ref} requests noted as belonging to another file`,
+        ok: wanted.length > 0 && wanted.every((id) => noted.includes(id)),
+        expect: wanted,
+        found: `outside ${show(noted)}, questions ${(c?.questions ?? []).length}, changes ${(c?.changes ?? []).length}`,
+      },
+      {
+        name: `review file of ${names.paper}: no change recorded for ${ref}`,
+        ok: added.length === 0,
+        expect: 0,
+        found: added.map((ch) => `${ch.id} ${ch.kind} "${ch.text ?? ""}"`),
+      },
+      {
+        name: `${names.paper} in Word: no new tracked change`,
+        ok: n[0] !== null && n[0] === n[1],
+        expect: n[0],
+        found: n[1] ?? word?.error ?? null,
+      },
+    ],
+    `outside ${show(noted)}: ${(c?.requirements_outside ?? []).map((x) => x.why).join("; ")}`,
+  );
+}
+
+// d. The turn of the supplementary file for the same comment: a tracked
+// change with its rationale comment in SI.docx, recorded in its review file
+// and not in the manuscript's, and the manuscript's text as it was.
+// paperTexts: the paragraph texts of the manuscript before and after
+// (the pane's snapshot step), or null where they could not be read.
+export function partsSuppChange({
+  siBefore,
+  si,
+  paperBefore,
+  paper,
+  word,
+  wordBefore,
+  paperTexts,
+  ref,
+  names,
+}) {
+  const added = newChanges(siBefore, si, ref);
+  const inMain = newChanges(paperBefore, paper, ref);
+  const n = [wordRevisions(wordBefore), wordRevisions(word)];
+  const comments = toolComments(word, ref);
+  const [textsBefore, textsAfter] = paperTexts ?? [null, null];
+  const same =
+    Array.isArray(textsBefore) &&
+    Array.isArray(textsAfter) &&
+    JSON.stringify(textsBefore) === JSON.stringify(textsAfter);
+  const differs = same
+    ? null
+    : Array.isArray(textsBefore) && Array.isArray(textsAfter)
+      ? (textsAfter.findIndex((t, i) => t !== textsBefore[i]) ?? -1)
+      : "the text could not be read";
+  return partsVerdict(
+    [
+      {
+        name: `review file of ${names.si}: a change recorded for ${ref}`,
+        ok: added.length >= 1,
+        expect: "at least 1",
+        found: added.length,
+      },
+      {
+        name: `${names.si} in Word: a tracked change with a [${ref}] rationale comment`,
+        ok:
+          n[0] !== null &&
+          n[1] > n[0] &&
+          comments >= 1 &&
+          added.every((ch) => ch.word_comment_id != null),
+        expect: `more tracked changes than ${n[0]}, a comment that begins [${ref}], every change with its comment`,
+        found: `${n[1] ?? word?.error} tracked change(s), ${comments} [${ref}] comment(s), without a comment: ${show(added.filter((ch) => ch.word_comment_id == null).map((ch) => ch.id))}`,
+      },
+      {
+        name: `review file of ${names.paper}: no change recorded for ${ref}`,
+        ok: inMain.length === 0,
+        expect: 0,
+        found: inMain.map((ch) => ch.id),
+      },
+      {
+        name: `${names.paper} in Word: its text is as it was`,
+        ok: same,
+        expect: "the same paragraphs",
+        found: differs === null ? "the same" : `differs at paragraph ${differs}`,
+      },
+    ],
+    `${added.length} change(s) in ${names.si}: ${added.map((ch) => `${ch.id} "${ch.text ?? ""}"`).join("; ")}`,
+  );
+}
+
+// f. The manuscript's pane, nothing pressed, after the supplementary file
+// got its change: the row of the comment and the request the change names.
+// view: the wait-state step of the manuscript's pane. si: the review file of
+// the supplementary file (which requests its changes name).
+export function partsCrossState({ view, si, ref, names }) {
+  const card = (view?.comments ?? []).find((c) => c.ref === ref);
+  const pending = (partsComment(si, ref)?.changes ?? []).filter((ch) =>
+    ["pending", "unlocated"].includes(ch.state),
+  );
+  const named = [...new Set(pending.flatMap((ch) => ch.rationale?.requirement_ids ?? []))];
+  const label = new RegExp(`^\\d+ changes? to review in ${escapeRe(names.si)}$`);
+  const text = `Waiting for your decision in ${names.si}`;
+  const rows = (card?.requests ?? []).filter((r) => named.includes(r.id));
+  return partsVerdict(
+    [
+      {
+        name: `review file of ${names.si}: a pending change of ${ref} names a request`,
+        ok: named.length > 0,
+        expect: "at least one request id in rationale.requirement_ids",
+        found: pending.map(
+          (ch) => `${ch.id} ${ch.state} ${show(ch.rationale?.requirement_ids ?? [])}`,
+        ),
+      },
+      {
+        name: `${names.paper} pane: the row of ${ref} says the change waits in ${names.si} (no Refresh pressed)`,
+        ok: view?.matched === true && label.test(card?.state ?? ""),
+        expect: `n change(s) to review in ${names.si}`,
+        found: view?.error ?? card?.state ?? "no such row",
+      },
+      {
+        name: `${names.paper} pane: the request shows "${text}"`,
+        ok:
+          rows.length > 0 && rows.every((r) => r.state === "waiting_elsewhere" && r.text === text),
+        expect: named.map((id) => `${id}: ${text}`),
+        found: (card?.requests ?? []).map((r) => `${r.id}: ${r.state} "${r.text}"`),
+      },
+    ],
+    `${ref}: ${card?.state}; ${rows.map((r) => `${r.id} ${r.text}`).join("; ")}`,
+  );
+}
+
+// g. A turn in each pane at the same time for the comment that concerns
+// both files. log: the daemon log written while the two ran. steps: the
+// answers of the two propose steps.
+export function partsBoth({
+  paperBefore,
+  paper,
+  siBefore,
+  si,
+  wordPaper,
+  wordPaperBefore,
+  wordSi,
+  wordSiBefore,
+  log,
+  steps,
+  ref,
+  names,
+}) {
+  const text = String(log ?? "");
+  const lines = text.split("\n");
+  const at = (re) => lines.findIndex((l) => re.test(l));
+  const esc = escapeRe(ref);
+  // Both turns were queued before either ended.
+  const prompts = lines
+    .map((l, i) =>
+      new RegExp(`^\\[review\\] prompt ${esc} `).test(l) && !/\(preview\)$/.test(l) ? i : -1,
+    )
+    .filter((i) => i >= 0);
+  const firstEnd = at(new RegExp(`^\\[review\\] turn done ${esc}`));
+  const overlap = prompts.length >= 2 && (firstEnd < 0 || prompts[1] < firstEnd);
+  const file = (label, before, after, word, wordBefore) => {
+    const added = newChanges(before, after, ref);
+    const n = [wordRevisions(wordBefore), wordRevisions(word)];
+    const had = toolComments(wordBefore, ref);
+    const now = toolComments(word, ref);
+    return [
+      {
+        name: `review file of ${label}: a change recorded for ${ref}`,
+        ok: added.length >= 1,
+        expect: "at least 1",
+        found: added.length,
+      },
+      {
+        name: `${label} in Word: its own tracked change(s) with their [${ref}] comments`,
+        ok: n[0] !== null && n[1] > n[0] && now - had >= 1 && now - had <= added.length,
+        expect: `more tracked changes than ${n[0]}; between 1 and ${added.length} new [${ref}] comment(s)`,
+        found: `${n[1] ?? word?.error} tracked change(s), ${now - had} new [${ref}] comment(s)`,
+      },
+    ];
+  };
+  const bad = (re) => lines.filter((l) => re.test(l));
+  const unknown = bad(/outcome unknown|OutcomeUnknown/);
+  const crossed = bad(
+    /tool_result .* from another pane|tool_result for unknown id|late result dropped/,
+  );
+  const added = (before, after) => newChanges(before, after, ref).map((ch) => ch.id);
+  return partsVerdict(
+    [
+      {
+        name: "both propose steps ended without an error",
+        ok: steps?.paper?.ok !== false && steps?.si?.ok !== false,
+        expect: "two turns that ended",
+        found: `${names.paper}: ${steps?.paper?.error ?? "ended"}; ${names.si}: ${steps?.si?.error ?? "ended"}`,
+      },
+      {
+        name: "the two turns ran at the same time",
+        ok: overlap,
+        expect: `two "[review] prompt ${ref}" lines before the first "[review] turn done ${ref}"`,
+        found: `prompt lines at ${show(prompts)}, first turn done at ${firstEnd}`,
+      },
+      ...file(names.paper, paperBefore, paper, wordPaper, wordPaperBefore),
+      ...file(names.si, siBefore, si, wordSi, wordSiBefore),
+      {
+        name: "no edit whose outcome is unknown",
+        ok: unknown.length === 0,
+        expect: "no such log line",
+        found: unknown.slice(0, 3),
+      },
+      {
+        name: "no tool result crossed between the panes",
+        ok: crossed.length === 0,
+        expect: "no such log line",
+        found: crossed.slice(0, 3),
+      },
+    ],
+    `${names.paper}: ${show(added(paperBefore, paper))}; ${names.si}: ${show(added(siBefore, si))}`,
+  );
+}
+
+// h. The manuscript's comment list saved without the comment that has
+// changes in the supplementary file: refused, the list as it was.
+// step: the save-without step of the manuscript's pane.
+export function partsKeep({ step, before, after, ref, names }) {
+  const refs = (rev) => (rev?.comments ?? []).map((c) => c.ref);
+  const want = new RegExp(
+    `Comment ${escapeRe(ref)} has recorded change\\(s\\) in ${escapeRe(names.si)}; keep it`,
+  );
+  return partsVerdict(
+    [
+      {
+        name: `${names.paper} pane: the save is refused with the reason`,
+        ok: step?.ok !== false && step?.message_error === true && want.test(step?.message ?? ""),
+        expect: `Comment ${ref} has recorded change(s) in ${names.si}; keep it`,
+        found: step?.error ?? step?.message ?? "",
+      },
+      {
+        name: `review file of ${names.paper}: the comment list is as it was`,
+        ok:
+          refs(after).includes(ref) && JSON.stringify(refs(after)) === JSON.stringify(refs(before)),
+        expect: refs(before),
+        found: refs(after),
+      },
+    ],
+    step?.message ?? "",
+  );
+}
+
+// j. After "Leave this revision" in the supplementary file. view: its pane
+// after the step; siBefore: its review file before the step.
+export function partsLeft({ view, siBefore, si, paper, names, comments }) {
+  const want = `Join the revision of ${names.paper}, ${comments} comment${comments === 1 ? "" : "s"}`;
+  const all = (rev) =>
+    (rev?.comments ?? []).flatMap((c) => c.changes.map((ch) => `${c.ref}/${ch.id}`));
+  const lost = all(siBefore).filter((id) => !all(si).includes(id));
+  return partsVerdict(
+    [
+      {
+        name: `${names.si} pane: the join box is shown again, with the manuscript`,
+        ok: view?.link_box?.shown === true && (view?.link_box?.candidates ?? []).includes(want),
+        expect: want,
+        found:
+          view?.error ??
+          `shown ${view?.link_box?.shown}, ${show(view?.link_box?.candidates ?? [])}`,
+      },
+      {
+        name: `review file of ${names.si}: the link is gone`,
+        ok: !!si && !si.part_of,
+        expect: "no part_of",
+        found: si?.part_of ?? (si ? null : "no review file"),
+      },
+      {
+        name: `review file of ${names.paper}: the link is gone`,
+        ok: !!paper && (paper.parts ?? []).length === 0,
+        expect: "no parts",
+        found: paper?.parts ?? (paper ? null : "no review file"),
+      },
+      {
+        name: `review file of ${names.si}: its own changes are kept`,
+        ok: all(siBefore).length > 0 && lost.length === 0,
+        expect: all(siBefore),
+        found: all(si),
+      },
+    ],
+    `${names.si} left; it keeps ${all(si).length} change(s)`,
+  );
+}
+
+// i (not judged). One line of what Word said about unsaved changes and what
+// the file on disk was, at each point the run read them.
+// points: [{ at, saved: the doc-saved step, file: { mtime, bytes } | null }]
+export function partsSavedLine(points) {
+  return points
+    .map((p) => {
+      const s = p.saved ?? {};
+      const saved =
+        s.ok === false
+          ? `not read (${s.error})`
+          : `Document.saved=${show(s.raw)} (${s.raw_type}${s.error ? `, ${s.error}` : ""}), sent as ${show(s.saved)}`;
+      const file = p.file ? `mtime ${p.file.mtime}, ${p.file.bytes} bytes` : "file not read";
+      return `${p.at}: ${saved}; ${file}`;
+    })
+    .join(" | ");
+}
+
+// Which Agent SDK session each pane's turns ran on, from the line the daemon
+// prints for every turn (daemon/sessions.mjs turnSessionLine, no debug flag):
+//   [agent] turn doc=<path> session=<id> asked=<id or -> (started|resumed|continued)
+// The line names the document by its path; the documents of the run are told
+// apart by their file names here (the isolation check, foreignLogLines, is
+// what reads the folder). The two panes must not share a session: no id a turn of one document ran
+// on, or was asked to resume, may be an id of the other document (asked is
+// read too, should the SDK give a resumed session a new id). A file of a
+// revision with parts has a resume hint of its own (sessions.mjs), so with
+// both files in one folder each pane starts or resumes its own.
+// names: { paper, si }, the file names of the run.
+export function partsSessions(log, names) {
+  const rows = [
+    ...String(log ?? "").matchAll(
+      /^\[agent\] turn doc=(.*) session=(\S+) asked=(\S+) \((started|resumed|continued)\)$/gm,
+    ),
+  ].map((m) => ({
+    doc: m[1].split(/[\\/]/).pop(),
+    session: m[2],
+    asked: m[3] === "-" ? null : m[3],
+    how: m[4],
+  }));
+  const idsOf = (doc) =>
+    new Set(rows.filter((r) => r.doc === doc).flatMap((r) => [r.session, r.asked].filter(Boolean)));
+  const ran = (doc) => [...new Set(rows.filter((r) => r.doc === doc).map((r) => r.session))];
+  const paper = idsOf(names.paper);
+  const si = idsOf(names.si);
+  const shared = [...paper].filter((id) => si.has(id));
+  const short = (id) => String(id).slice(0, 8);
+  const told = (doc) =>
+    `${doc}: ${
+      rows
+        .filter((r) => r.doc === doc && r.how !== "continued")
+        .map(
+          (r) =>
+            `${r.how} ${short(r.session)}${r.asked && r.asked !== r.session ? ` (asked ${short(r.asked)})` : ""}`,
+        )
+        .join(", ") || "no turn"
+    }`;
+  const line = rows.length
+    ? `${told(names.paper)}; ${told(names.si)}`
+    : "no turn line in the log (a daemon from before the line?)";
+  return {
+    rows,
+    line,
+    ...partsVerdict(
+      [
+        {
+          name: `${names.paper}: a turn ran on a session`,
+          ok: ran(names.paper).length > 0,
+          expect: "at least one [agent] turn line",
+          found: line,
+        },
+        {
+          name: `${names.si}: a turn ran on a session`,
+          ok: ran(names.si).length > 0,
+          expect: "at least one [agent] turn line",
+          found: line,
+        },
+        {
+          name: "the two panes share no session",
+          ok: shared.length === 0,
+          expect: "no session id in common, run on or asked for",
+          found: `${shared.map(short).join(", ")} in both: ${line}`,
+        },
+      ],
+      line,
+    ),
+  };
+}
+
+// ---- k to m: the letter of the manuscript and the supplementary file --------
+// (README "Supplementary Word documents", step A3)
+
+// The ops of word-com.ps1 apply for the changes of one comment, all with one
+// decision ("accept" or "reject"). revision: the review file of the document
+// the plan is applied to.
+export function partsPlan(revision, ref, op) {
+  return buildComPlan(
+    { comments: (revision?.comments ?? []).filter((c) => c.ref === ref) },
+    { [ref]: op },
+  );
+}
+const planApplied = (applied, plan) =>
+  applied?.ok === true &&
+  (plan?.ops ?? []).length > 0 &&
+  (applied.results ?? []).length === plan.ops.length &&
+  applied.results.every((r) => !r.error);
+const appliedLine = (applied, plan) =>
+  applied?.ok === undefined && !applied?.error
+    ? "not tried"
+    : (applied?.error ??
+      `${(plan?.ops ?? []).length} op(s): ${
+        (applied?.results ?? [])
+          .map((r) => `${r.change_id} ${r.op}${r.error ? ` ERR ${r.error}` : ""}`)
+          .join("; ") || "no result"
+      }`);
+const statesOf = (rev, ref) =>
+  ((rev?.comments ?? []).find((c) => c.ref === ref)?.changes ?? []).map((ch) => ch.state);
+const sameFile = (a, b) => !!a && !!b && a.mtime === b.mtime && a.bytes === b.bytes;
+const fileLineOf = (f) => (f ? `${f.mtime}, ${f.bytes} bytes` : "not read");
+const failRows = (view, re) => (view?.checks ?? []).filter((row) => re.test(row));
+const cardOf = (view, ref) => (view?.cards ?? []).find((c) => c.ref === ref);
+// The row of the check that says the record of a supplementary file cannot
+// be confirmed (response-check.mjs partStateText: three reasons, one advice).
+const partStateRow = (name) =>
+  new RegExp(`^FAIL part_state: .*${escapeRe(name)}.* Open it, save, press Refresh\\.$`);
+
+// k. The change of the supplementary file was accepted in Word, the file
+// saved, refreshed and closed; then, in the manuscript, the answer was
+// drafted, checked and the letter exported without force.
+//   plan, applied: the ops and what word-com.ps1 apply answered
+//   named: the link-label step; label: the name it gave the file
+//   si, paper: the two review files after the steps; fileAfter: the file of
+//   the supplement on disk after it was closed
+//   check: the Response tab after "Run checks"; exported: after the export
+//   (null: not pressed, a check failed); model: the letter model on disk
+//   log: the daemon log of the row
+export function partsCited(r) {
+  const { ref, names, label } = r;
+  const states = statesOf(r.si, ref);
+  const state = r.si?.doc_state ?? null;
+  const own = ((r.si?.comments ?? []).find((c) => c.ref === ref)?.response?.citations ?? []).filter(
+    (c) => c.kind !== "removed",
+  );
+  const cited = (
+    (r.paper?.comments ?? []).find((c) => c.ref === ref)?.response?.citations ?? []
+  ).filter((c) => c.doc === names.si);
+  const card = cardOf(r.check, ref);
+  const failing = failRows(r.check, new RegExp(`^FAIL (${escapeRe(ref)} |part_state: )`));
+  const rows = r.model?.paragraphs ?? [];
+  const at = rows.findIndex(
+    (p) => p.kind === "location" && p.ref === ref && p.text.startsWith(`${label} [Revised in `),
+  );
+  const quote = at >= 0 && rows[at + 1]?.kind === "quote" ? rows[at + 1].text : null;
+  const link = (r.paper?.parts ?? []).find((p) => String(p.doc ?? "").endsWith(names.si));
+  return partsVerdict(
+    [
+      {
+        name: `${names.si} pane: the file is given its name in the letter`,
+        ok: r.named?.ok !== false && link?.label === label,
+        expect: `"${label}" in the link of ${names.paper}`,
+        found:
+          r.named?.error ??
+          `message "${r.named?.message ?? ""}", link label ${show(link?.label ?? null)}`,
+      },
+      {
+        name: `${names.si} in Word: the change(s) of ${ref} accepted`,
+        ok: planApplied(r.applied, r.plan),
+        expect: "every op applied",
+        found: appliedLine(r.applied, r.plan),
+      },
+      {
+        name: `${names.si}: saved through Word, then closed`,
+        ok: r.saved?.ok === true && r.closed?.ok === true,
+        expect: "save ok, close ok",
+        found: `save ${r.saved?.ok === true ? "ok" : (r.saved?.error ?? "not ok")}, close ${r.closed?.ok === true ? "ok" : (r.closed?.error ?? "not ok")}`,
+      },
+      {
+        name: `review file of ${names.si}: every change of ${ref} is accepted`,
+        ok: states.length > 0 && states.every((s) => s === "accepted"),
+        expect: "accepted",
+        found: r.refreshed?.error ?? states,
+      },
+      {
+        name: `review file of ${names.si}: the refresh was taken on a saved document, and the file on disk is still that file`,
+        ok: state?.saved === true && sameFile(state.file, r.fileAfter),
+        expect: `saved true, file ${fileLineOf(r.fileAfter)}`,
+        found: state
+          ? `saved ${show(state.saved)}, file ${fileLineOf(state.file)} (refreshed ${state.at})`
+          : "no doc_state",
+      },
+      {
+        name: `review file of ${names.si}: what the letter may cite of ${ref} is written there, without line numbers`,
+        ok: own.length > 0 && own.every((c) => c.quote && !c.lines),
+        expect: "at least one citation with a quote and no lines",
+        found: `${own.length} citation(s)${own.some((c) => c.lines) ? ", with lines" : ""} | refresh: ${r.refreshed?.error ?? r.refreshed?.message ?? ""}`,
+      },
+      {
+        name: `${names.paper} pane: an answer for ${ref} was drafted`,
+        ok: r.drafted?.ok !== false && String(card?.text ?? "").trim() !== "",
+        expect: "a text in the answer box",
+        found: r.drafted?.error ?? `${String(card?.text ?? "").length} characters`,
+      },
+      {
+        name: `${names.paper} pane: no failing check for ${ref}, none for the state of ${names.si}`,
+        ok: r.check?.ok !== false && /^Checked: /.test(r.check?.message ?? "") && !failing.length,
+        expect: "Checked: ..., no such FAIL row",
+        found: r.check?.error ?? (failing.length ? failing : (r.check?.message ?? "")),
+      },
+      {
+        name: `${names.paper} pane: the card of ${ref} cites ${label}`,
+        ok: (card?.citations ?? []).some((c) => c.line.startsWith(`${label} [`)),
+        expect: `a location line that starts with "${label} ["`,
+        found: (card?.citations ?? []).map((c) => c.line),
+      },
+      {
+        name: `${names.paper} pane: the letter is exported without force`,
+        ok: /^Exported/.test(r.exported?.message ?? ""),
+        expect: "Exported: ...",
+        found: r.exported
+          ? (r.exported.error ?? r.exported.message)
+          : `not pressed, the button would force the export: ${show(failRows(r.check, /^FAIL /))}`,
+      },
+      {
+        name: `letter: a location line of ${ref} names ${label}, with a quote of ${names.si} under it`,
+        ok: quote !== null && cited.some((c) => c.quote === quote),
+        expect: `"${label} [Revised in ...]", then a quote the review file of ${names.paper} records for ${names.si}`,
+        found:
+          at < 0
+            ? rows.filter((p) => p.kind === "location" && p.ref === ref).map((p) => p.text)
+            : `${rows[at].text} | ${show(quote)} | recorded: ${show(cited.map((c) => c.quote))}`,
+      },
+      {
+        name: "the verifier passed on the exported letter",
+        ok: /^\[response\] export path=.* verify=ok$/m.test(String(r.log ?? "")),
+        expect: "[response] export path=... verify=ok",
+        found:
+          (String(r.log ?? "").match(/^\[response\] export .*$/gm) ?? []).join(" ; ") ||
+          "no export line in the daemon log",
+      },
+    ],
+    at >= 0 ? `${rows[at].text} | ${show(quote)}` : "",
+  );
+}
+
+// l. The supplementary file was changed in Word and saved, and its pane did
+// not refresh: the manuscript's check fails with part_state and the letter
+// is not exported without force.
+//   restored: the file as it was before the accept was put back (Word cannot
+//   reject a change it has accepted); recorded: doc_state of the review file
+//   after row k; recordedNow: the same after this row's save and close;
+//   fileNow: the file on disk; opened: the Response tab before the export was
+//   pressed; exported: after it; letters, export: [before, after] of the
+//   letter files of the run and of response_export in the manuscript's file
+export function partsGuard(r) {
+  const { ref, names } = r;
+  const rows = failRows(r.exported, partStateRow(names.si));
+  const refreshedSince = r.recorded?.at !== r.recordedNow?.at;
+  const same = (pair) => JSON.stringify(pair?.[0] ?? null) === JSON.stringify(pair?.[1] ?? null);
+  return partsVerdict(
+    [
+      {
+        name: `${names.si}: reopened as it was before the accept, the change(s) of ${ref} rejected in Word, saved, closed`,
+        ok:
+          r.restored?.ok === true &&
+          r.reopened?.ok === true &&
+          planApplied(r.applied, r.plan) &&
+          r.saved?.ok === true &&
+          r.closed?.ok === true,
+        expect: "every step ok",
+        found: `put back: ${r.restored?.ok === true ? "ok" : (r.restored?.error ?? "not ok")}; open: ${r.reopened?.ok === true ? "ok" : (r.reopened?.error ?? "not ok")}; reject: ${appliedLine(r.applied, r.plan)}; save: ${r.saved?.ok === true ? "ok" : (r.saved?.error ?? "not ok")}; close: ${r.closed?.ok === true ? "ok" : (r.closed?.error ?? "not ok")}`,
+      },
+      {
+        name: `${names.si} on disk is no longer the file its review file records`,
+        ok: !!r.fileNow && !!r.recordedNow?.file && !sameFile(r.recordedNow.file, r.fileNow),
+        expect: `another time or size than ${fileLineOf(r.fileNow)}`,
+        found: `${fileLineOf(r.recordedNow?.file)}${
+          refreshedSince
+            ? ` (the pane of ${names.si} refreshed by itself: doc_state.at ${r.recorded?.at} -> ${r.recordedNow?.at})`
+            : ""
+        }`,
+      },
+      {
+        name: `${names.paper} pane: the export button did not offer to force`,
+        ok: r.opened?.ok !== false && r.opened?.export_label === "Export letter (.docx)",
+        expect: "Export letter (.docx)",
+        found: r.opened?.error ?? r.opened?.export_label ?? "",
+      },
+      {
+        name: `${names.paper} pane: the check fails with part_state for ${names.si}`,
+        ok: rows.length === 1,
+        expect: `FAIL part_state: ${names.si} changed since Sidewrite last read it. Open it, save, press Refresh.`,
+        found: r.exported?.error ?? failRows(r.exported, /^FAIL /),
+      },
+      {
+        name: `${names.paper} pane: the letter is not exported`,
+        ok: /^Not exported: /.test(r.exported?.message ?? "") && same(r.letters) && same(r.export),
+        expect:
+          "Not exported: ..., the letter files and the record of the last export as they were",
+        found: `${r.exported?.error ?? r.exported?.message ?? ""} | letter files ${same(r.letters) ? "unchanged" : show(r.letters?.[1])} | record ${same(r.export) ? "unchanged" : "changed"}`,
+      },
+      {
+        name: "daemon log: the export was held",
+        ok: /^\[response\] export held fail=[1-9]/m.test(String(r.log ?? "")),
+        expect: "[response] export held fail=n",
+        found:
+          (String(r.log ?? "").match(/^\[response\] export .*$/gm) ?? []).join(" ; ") ||
+          "no export line in the daemon log",
+      },
+    ],
+    `${rows[0] ?? ""}${refreshedSince ? ` | the pane of ${names.si} refreshed by itself before the save (doc_state.at ${r.recorded?.at} -> ${r.recordedNow?.at})` : ""}`,
+  );
+}
+
+// m. The supplementary file was opened again and refreshed: its record is
+// confirmed, the change is rejected, so the request is open again and the
+// answer that cited the change is stale.
+//   reopened: word-com.ps1 open-edit; refreshed: the refresh in its pane;
+//   si: its review file after it; fileNow: the file on disk;
+//   check: the Response tab of the manuscript after "Run checks"
+export function partsReopened(r) {
+  const { ref, names } = r;
+  const states = statesOf(r.si, ref);
+  const state = r.si?.doc_state ?? null;
+  const guard = failRows(r.check, partStateRow(names.si));
+  const open = failRows(r.check, new RegExp(`^FAIL ${escapeRe(ref)} requirements: `));
+  const card = cardOf(r.check, ref);
+  return partsVerdict(
+    [
+      {
+        name: `${names.si}: opened again and refreshed`,
+        ok: r.reopened?.ok === true && r.refreshed?.ok !== false,
+        expect: "open ok, refresh ok",
+        found: `open: ${r.reopened?.ok === true ? "ok" : (r.reopened?.error ?? "not ok")}; refresh: ${r.refreshed?.error ?? r.refreshed?.message ?? ""}`,
+      },
+      {
+        name: `review file of ${names.si}: every change of ${ref} is rejected`,
+        ok: states.length > 0 && states.every((s) => s === "rejected"),
+        expect: "rejected",
+        found: states,
+      },
+      {
+        name: `review file of ${names.si}: the refresh was taken on a saved document, and the file on disk is that file`,
+        ok: state?.saved === true && sameFile(state.file, r.fileNow),
+        expect: `saved true, file ${fileLineOf(r.fileNow)}`,
+        found: state
+          ? `saved ${show(state.saved)}, file ${fileLineOf(state.file)}`
+          : "no doc_state",
+      },
+      {
+        name: `${names.paper} pane: no failing check for the state of ${names.si}`,
+        ok: r.check?.ok !== false && /^Checked: /.test(r.check?.message ?? "") && !guard.length,
+        expect: "Checked: ..., no FAIL part_state row",
+        found: r.check?.error ?? (guard.length ? guard : (r.check?.message ?? "")),
+      },
+      {
+        name: `${names.paper} pane: the request of ${ref} is open again`,
+        ok: open.length > 0 && (card?.open_reqs ?? []).length > 0,
+        expect: `FAIL ${ref} requirements: ..., and the request shown as open on its card`,
+        found: `${show(open)} | open on the card: ${show(card?.open_reqs ?? [])}`,
+      },
+      {
+        name: `${names.paper} pane: the answer of ${ref} is marked stale`,
+        ok: String(card?.stale ?? "") !== "",
+        expect: "a stale line on the card (A cited change is no longer accepted)",
+        found: card ? card.stale : "no card",
+      },
+    ],
+    `${open[0] ?? ""} | ${card?.stale ?? ""}`,
+  );
+}
+
+// A line of the daemon log that names a document: is every document it
+// names one of this run's own files by its bare name ("SI.docx", as the link
+// lines of the daemon write them)? names: the file names of the run.
+export function onlyOwnNames(line, names) {
+  const tokens = String(line ?? "").match(/[^\s"'()=]+\.docx\b/gi) ?? [];
+  return tokens.length > 0 && tokens.every((t) => names.includes(t));
+}
+
+// The lines of the daemon log that name a document outside the run. own:
+// the run folder as the log may write it (Windows and WSL path); names: the
+// bare file names of the run (stage parts only, [] elsewhere). The hello of
+// another Word's pane is not a tool call and is left out. A turn line
+// ("[agent] turn doc=<path> ...") names its document by path, so one of
+// another folder is foreign whatever its file name is.
+export function foreignLogLines(lines, own, names = []) {
+  return (lines ?? [])
+    .filter((l) => /\.docx\b/i.test(l) && !own.some((p) => l.includes(p)))
+    .filter((l) => !onlyOwnNames(l, names))
+    .filter((l) => !/^\[bridge\] hello received|^\[diag\] hello /.test(l));
+}
+
 export const JUDGES = {
   "open-review": (r, ctx) => ({
     pass: r.file === `Review file: ${ctx.revisionPath}`,
@@ -1472,6 +2324,30 @@ export const JUDGES = {
       got: refs,
     };
   },
+  // The parts stage: the four comments of tests/fixtures/parts_review.txt,
+  // the requests the run typed, and the one rule of parts_ledger.json.
+  "parts-split": (r) => ({
+    pass:
+      /^Split into /.test(r.message) &&
+      r.draft_refs.filter((x) => /^R\d+\.\d+$/.test(x)).join(",") === "R1.1,R1.2,R1.3,R1.4",
+    expect: "Split into n comments, R1.1 to R1.4 among them",
+    got: `${r.message} refs=${r.draft_refs.join(",")}`,
+  }),
+  "parts-draft": (r, ctx = {}) => {
+    const refs = r.comments.map((c) => c.ref).join(",");
+    const want = Object.entries(ctx.requirements ?? {}).map(([ref, lines]) => [ref, lines.length]);
+    const got = r.comments.map((c) => [c.ref, (c.requests ?? []).length]);
+    return {
+      pass: refs === "R1.1,R1.2,R1.3,R1.4" && JSON.stringify(got) === JSON.stringify(want),
+      expect: `cards R1.1 to R1.4 with ${JSON.stringify(want)} requests`,
+      got: `${refs} | requests ${JSON.stringify(got)}`,
+    };
+  },
+  "parts-ledger": (r) => ({
+    pass: r.ledger.length === 1 && has(r.ledger[0], "L1 forbid"),
+    expect: "L1 forbid",
+    got: r.ledger.join(" | "),
+  }),
   "ledger-add": (r) => ({
     pass:
       r.ledger.length === 3 &&

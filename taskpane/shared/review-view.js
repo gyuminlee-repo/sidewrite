@@ -534,15 +534,22 @@ export function requirementsFromText(text) {
 // that holds:
 //   changed            a change in Word that is not rejected names it
 //   figure_changed     an adopted figure change names it (figures page)
+//   changed_elsewhere  an accepted change in another file of the revision
+//                      names it (file: the name of that file)
 //   needs_author       a question with its id has no answer yet
 //   figure_waiting     a figure change that names it waits for a decision
+//   waiting_elsewhere  a change in another file of the revision names it and
+//                      waits for the author's decision there (file)
 //   outside_this_file  the model noted it as belonging to another file (why)
 //   open               none of these: nobody spoke of it
 // A turn has to end every request as changed, needs_author or
 // outside_this_file; open is what a request is until then, so a request
 // passed over in silence shows. A rejected figure change counts for nothing,
-// like a rejected change.
-export function requirementStates(comment) {
+// like a rejected change, in this file or in another.
+// elsewhere: the changes on record for this comment in the other files of
+// the revision (changesElsewhere), each in the state the last status refresh
+// of that file gave it. The two states they give are never saved.
+export function requirementStates(comment, elsewhere = []) {
   const used = new Set();
   for (const ch of comment?.changes ?? []) {
     if (ch.state === "rejected") continue;
@@ -560,23 +567,66 @@ export function requirementStates(comment) {
     (comment?.questions ?? []).filter((q) => !q.answer).map((q) => q.requirement_id),
   );
   const outside = new Map((comment?.requirements_outside ?? []).map((n) => [n.id, n.why]));
+  // id -> the file of the first change elsewhere that names it, decided and waiting.
+  const away = (states) => {
+    const files = new Map();
+    for (const x of elsewhere) {
+      if (!states.includes(x.state)) continue;
+      for (const id of x.requirement_ids ?? []) if (!files.has(id)) files.set(id, x.file);
+    }
+    return files;
+  };
+  const changedAway = away(DECIDED_ELSEWHERE);
+  const waitingAway = away(WAITING_ELSEWHERE);
   return (comment?.requirements ?? []).map((r) => {
     const state = used.has(r.id)
       ? "changed"
       : adopted.has(r.id)
         ? "figure_changed"
-        : asked.has(r.id)
-          ? "needs_author"
-          : proposed.has(r.id)
-            ? "figure_waiting"
-            : outside.has(r.id)
-              ? "outside_this_file"
-              : "open";
-    return { ...r, state, ...(state === "outside_this_file" ? { why: outside.get(r.id) } : {}) };
+        : changedAway.has(r.id)
+          ? "changed_elsewhere"
+          : asked.has(r.id)
+            ? "needs_author"
+            : proposed.has(r.id)
+              ? "figure_waiting"
+              : waitingAway.has(r.id)
+                ? "waiting_elsewhere"
+                : outside.has(r.id)
+                  ? "outside_this_file"
+                  : "open";
+    return {
+      ...r,
+      state,
+      ...(state === "outside_this_file" ? { why: outside.get(r.id) } : {}),
+      ...(state === "changed_elsewhere" ? { file: changedAway.get(r.id) } : {}),
+      ...(state === "waiting_elsewhere" ? { file: waitingAway.get(r.id) } : {}),
+    };
   });
 }
 
-const inState = (comment, state) => requirementStates(comment).filter((r) => r.state === state);
+// A change in another file of the revision, by its stored state: decided in
+// favour of the change, or still waiting for the author in that file. A
+// rejected one counts for nothing.
+const DECIDED_ELSEWHERE = ["accepted", "user_edited"];
+const WAITING_ELSEWHERE = ["pending", "unlocated"];
+// The changes on record for one comment in the other files of the revision
+// (linked.changes of the last load: [{ file, ref, id, state, requirement_ids }]).
+export const changesElsewhere = (linked, ref) =>
+  (linked?.changes ?? []).filter((x) => x.ref === ref);
+// The files in which changes of a comment wait for the author, and those in
+// which one was accepted: { waiting: [{ file, n }], changed: [file] }.
+function elsewhereSummary(elsewhere = []) {
+  const waiting = new Map();
+  const changed = new Set();
+  for (const x of elsewhere) {
+    if (WAITING_ELSEWHERE.includes(x.state)) waiting.set(x.file, (waiting.get(x.file) ?? 0) + 1);
+    else if (DECIDED_ELSEWHERE.includes(x.state)) changed.add(x.file);
+  }
+  return { waiting: [...waiting].map(([file, n]) => ({ file, n })), changed: [...changed] };
+}
+
+const inState = (comment, state, elsewhere = []) =>
+  requirementStates(comment, elsewhere).filter((r) => r.state === state);
 
 // The address of the figures page (daemon/figure-http.mjs) for a manuscript,
 // at one comment. origin: where the daemon serves the pane and that page.
@@ -608,24 +658,26 @@ const figuresWaitingText = (n) =>
   `${n} figure${n === 1 ? "" : "s"} or file${n === 1 ? "" : "s"} ${n === 1 ? "waits" : "wait"} for your decision`;
 
 // Requests of a comment nobody spoke of (open).
-export function unaddressedRequirements(comment) {
-  return inState(comment, "open").map(({ state, ...r }) => r);
+export function unaddressedRequirements(comment, elsewhere = []) {
+  return inState(comment, "open", elsewhere).map(({ state, ...r }) => r);
 }
 
 // What a request is, in words, for the list "What the reviewer asks".
 export function requestStateText(r) {
   if (r.state === "changed") return "Changed";
   if (r.state === "figure_changed") return "Changed in a figure or other file";
+  if (r.state === "changed_elsewhere") return `Changed in ${r.file}`;
   if (r.state === "needs_author") return "Needs your answer";
   if (r.state === "figure_waiting") return "A figure or file waits for your decision";
+  if (r.state === "waiting_elsewhere") return `Waiting for your decision in ${r.file}`;
   if (r.state === "outside_this_file")
     return r.why ? `In another file: ${r.why}` : "In another file";
   return "Not yet";
 }
 
 // After a turn: "2 requests of R1.2 have no change yet: ...", the requests in words; "" when none is.
-export function openRequestsText(comment) {
-  const open = inState(comment, "open");
+export function openRequestsText(comment, elsewhere = []) {
+  const open = inState(comment, "open", elsewhere);
   if (!open.length) return "";
   return `${open.length} request${open.length === 1 ? "" : "s"} of ${comment.ref} ${open.length === 1 ? "has" : "have"} no change yet: ${open.map((r) => `\u201c${r.text}\u201d`).join("; ")}.`;
 }
@@ -691,11 +743,15 @@ export function consistencyLines(c) {
 //   - changes applied without their rationale comment (invariantReport's
 //     `uncommented`), and edits Word did not answer (outcome_unknown)
 //   - ledger rules whose last check found violations
-export function doneBlockers(comment, ledger) {
+export function doneBlockers(comment, ledger, elsewhere = []) {
   const out = [];
-  const open = unaddressedRequirements(comment);
+  const open = unaddressedRequirements(comment, elsewhere);
   if (open.length) out.push(`${open.map((r) => `"${r.text}"`).join(", ")} has no change`);
-  const asked = inState(comment, "needs_author");
+  // Changes of this comment in another file of the revision that wait there.
+  for (const w of elsewhereSummary(elsewhere).waiting) {
+    out.push(`${w.n} ${w.n === 1 ? "change is" : "changes are"} not decided in ${w.file}`);
+  }
+  const asked = inState(comment, "needs_author", elsewhere);
   if (asked.length)
     out.push(
       `${asked.map((r) => `"${r.text}"`).join(", ")} ${asked.length === 1 ? "waits" : "wait"} for the author's answer`,
@@ -796,7 +852,9 @@ export function ledgerCheckFromText(text) {
 // that got no answer is outcome_unknown and is shown.
 export const inFlightEdit = (b) => b.state === "applying" && (b.blocked_by ?? []).length === 0;
 
-export function pendingDecisions(revision) {
+// linked: the link of the document as the last load gave it (its changes
+// tell where a request stands in the other files of the revision).
+export function pendingDecisions(revision, linked = null) {
   const blocked = [];
   const requirements = [];
   const ruleText = (id) => (revision?.ledger ?? []).find((i) => i.id === id)?.text ?? id;
@@ -817,7 +875,7 @@ export function pendingDecisions(revision) {
           : `${who}: Word did not answer an edit (${quoted(newText)}). Open the comment to check it.`,
       });
     }
-    for (const r of requirementStates(c)) {
+    for (const r of requirementStates(c, changesElsewhere(linked, c.ref))) {
       const kind = {
         open: "request_open",
         needs_author: "request_asked",
@@ -892,7 +950,13 @@ export function firstLine(text, max = 100) {
 //   decided       changes (or adopted figure changes) exist and none waits
 //   not_started   none of the above
 // attention: the author has something to do here.
-export function commentState(comment, { working = null, now = Date.now(), noChange = false } = {}) {
+// elsewhere: the changes of this comment in the other files of the revision
+// (changesElsewhere). One that waits there is to_review, named with its
+// file; an accepted one is decided when this file has nothing of its own.
+export function commentState(
+  comment,
+  { working = null, now = Date.now(), noChange = false, elsewhere = [] } = {},
+) {
   if (working) {
     return {
       kind: "working",
@@ -916,10 +980,23 @@ export function commentState(comment, { working = null, now = Date.now(), noChan
   }
   const figures = proposedFigures(comment);
   if (figures) return { kind: "to_review", label: figuresWaitingText(figures), attention: true };
+  const away = elsewhereSummary(elsewhere);
+  if (away.waiting.length) {
+    return {
+      kind: "to_review",
+      label: away.waiting
+        .map((w) => `${w.n} change${w.n === 1 ? "" : "s"} to review in ${w.file}`)
+        .join(", "),
+      attention: true,
+    };
+  }
   if (changes.length || (comment?.figure_changes ?? []).some((f) => f.state === "adopted"))
     return { kind: "decided", label: "All changes decided", attention: false };
+  if (away.changed.length) {
+    return { kind: "decided", label: `Changed in ${away.changed.join(", ")}`, attention: false };
+  }
   if (noChange) return { kind: "no_change", label: "No change proposed", attention: true };
-  const reqs = requirementStates(comment);
+  const reqs = requirementStates(comment, elsewhere);
   if (reqs.length && reqs.every((r) => r.state === "outside_this_file")) {
     return { kind: "no_change", label: "Belongs to another file", attention: false };
   }
@@ -1021,6 +1098,12 @@ export function candidateLabel(c) {
   return `${kind}, ${check}: ${c.text}`;
 }
 
+// What the card of a comment says after an edit of its turn was taken back
+// and Word took an earlier pending change of the paragraph back with it
+// (review_event undo_took_more).
+export const UNDO_TOOK_MORE_TEXT =
+  "While taking back an edit that would have damaged a citation, Word also took back an earlier pending change in the same paragraph. Check the paragraph and ask for that change again if you still want it.";
+
 // ---- "Before submission": the checklist (daemon/submission-check.mjs) -------
 
 export const SUBMISSION_STATE_LABELS = {
@@ -1043,3 +1126,18 @@ export function submissionGoLabel(go, here = "review") {
   if (!go.tab || !go.target) return "";
   return go.tab === here ? "Go there" : `Go to the ${TAB_NAMES[go.tab] ?? go.tab} tab`;
 }
+
+// ---- a supplementary file in the revision of a manuscript -------------------------
+// (daemon/revision-parts.mjs linkedSummary: part_of is the manuscript of this
+// file, parts are the supplementary files of this manuscript.)
+
+// The button of a manuscript this file could join.
+export const joinLabel = (c) =>
+  `Join the revision of ${c.name}, ${c.comments} comment${c.comments === 1 ? "" : "s"}`;
+// The line of a manuscript that has supplementary files.
+export const linkedFilesText = (parts) => `Linked files: ${parts.map((p) => p.name).join(", ")}`;
+// The line of a supplementary file, and the note where something of the
+// manuscript is shown.
+export const partOfText = (main) =>
+  `This file is part of the revision of ${main.name}. The comments, requests and rules below are edited in ${main.name}.`;
+export const editedInText = (main) => `edited in ${main.name}`;

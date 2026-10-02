@@ -20,6 +20,10 @@
 #   open-check      -Other <path>: open another document read-only in the same
 #                   Word, without repair, and leave it open; its paragraph count
 #   close-other     -Other <path>: close that document without saving
+#   open-edit       -Other <path> -AllowDir <dir>: open another document of
+#                   the run folder in the same Word, writable and visible, and
+#                   leave it open (stage parts: the supplementary file next to
+#                   its manuscript); refused when it is not under AllowDir
 #   save            -AllowDir <dir>: save the document in place, with its
 #                   tracked changes and comments, also when Word holds it
 #                   unchanged; refused when it is not under AllowDir
@@ -216,6 +220,29 @@ switch ($Action) {
       # FileName, ConfirmConversions, ReadOnly, AddToRecentFiles, ..., Visible, OpenAndRepair
       $o = $app.Documents.Open($Other, $false, $true, $false, $m, $m, $m, $m, $m, $m, $m, $true, $false)
       Out ([ordered]@{ ok = $true; opened = $true; repaired = $false; paragraphs = $o.Paragraphs.Count; path = $o.FullName; read_only = [bool]$o.ReadOnly })
+    } catch {
+      Out ([ordered]@{ ok = $false; opened = $false; error = $_.Exception.Message })
+    } finally {
+      $app.DisplayAlerts = $alerts
+    }
+  }
+  "open-edit" {
+    $app = $d.Application
+    $allow = (Norm $AllowDir).TrimEnd("\") + "\"
+    if (-not $AllowDir -or -not (Norm $Other).StartsWith($allow, [System.StringComparison]::OrdinalIgnoreCase)) {
+      Out ([ordered]@{ ok = $false; opened = $false; error = "the document is not in the run folder"; path = $Other })
+      break
+    }
+    $alerts = $app.DisplayAlerts
+    $m = [Type]::Missing
+    try {
+      # No dialog: a file Word would have to repair fails here instead.
+      $app.DisplayAlerts = 0
+      # FileName, ConfirmConversions, ReadOnly, AddToRecentFiles, ..., Visible, OpenAndRepair
+      $o = $app.Documents.Open($Other, $false, $false, $false, $m, $m, $m, $m, $m, $m, $m, $true, $false)
+      $names = @()
+      foreach ($x in $app.Documents) { $names += [string]$x.FullName }
+      Out ([ordered]@{ ok = $true; opened = $true; path = $o.FullName; read_only = [bool]$o.ReadOnly; windows = $o.Windows.Count; documents = $names })
     } catch {
       Out ([ordered]@{ ok = $false; opened = $false; error = $_.Exception.Message })
     } finally {

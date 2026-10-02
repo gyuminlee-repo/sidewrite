@@ -47,6 +47,19 @@ export function locationLine(cit, L) {
   return renderFrame(frame, { section: cit.section, lines: fmtLines(cit.lines, L) });
 }
 
+// The location line of the letter when the revision has supplementary
+// files: every line then names its file (the frame file_line of the profile:
+// "{file} {line}"), the manuscript by main_label. labels: file name -> what
+// the letter calls it. Without a frame the line is as it was.
+export function fileLine(cit, L, labels = {}) {
+  const line = locationLine(cit, L);
+  if (typeof L.file_line !== "string" || !L.file_line) return line;
+  const file = cit.doc
+    ? (labels[cit.doc] ?? String(cit.doc).replace(/\.[^.]+$/, ""))
+    : (L.main_label ?? "Manuscript");
+  return L.file_line.replace("{file}", () => file).replace("{line}", () => line);
+}
+
 // One request per quoted sentence, with the text of its paragraph so a phrase
 // that also occurs elsewhere is looked up inside that paragraph.
 // The id is "<ref>#<position of the citation>".
@@ -54,7 +67,8 @@ export function lineRequests(comments, snapshot) {
   const byIndex = new Map((snapshot.paragraphs ?? []).map((p) => [p.index, viewText(p)]));
   return comments.flatMap((c) =>
     (c.response?.citations ?? []).flatMap((cit, i) =>
-      cit.kind === "revised" && cit.quote
+      // A citation of a supplementary file (doc) has no line numbers.
+      cit.kind === "revised" && cit.quote && !cit.doc
         ? [
             {
               id: `${c.ref}#${i}`,

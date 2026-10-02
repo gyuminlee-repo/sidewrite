@@ -4,6 +4,7 @@
 // pane's context; the service then re-read the document path from that
 // context after the tool call, threw, and lost a tracked edit Word had
 // applied ("late result dropped: no pending tracked edit").
+import { plainPane } from "./helpers/plain-pane.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, access } from "node:fs/promises";
@@ -96,7 +97,7 @@ async function pane(port, doc, caps = PANE_CAPS) {
       const request_id = `r${++n}`;
       return new Promise((resolve) => {
         waiters.set(request_id, resolve);
-        ws.send(JSON.stringify({ type, request_id, ...payload }));
+        ws.send(JSON.stringify({ type, request_id, ...plainPane(payload) }));
       });
     },
     send: (obj) => ws.send(JSON.stringify(obj)),

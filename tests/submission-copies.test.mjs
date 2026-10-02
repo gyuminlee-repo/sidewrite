@@ -85,6 +85,99 @@ test("row 8: no record, a copy that is gone and a copy that was changed are each
   assert.match(edited.text, /^paper_marked\.docx was changed after it was made/);
 });
 
+const UNSAVED =
+  "This document has changes that are not saved. Save it, then press Check now again.";
+const NOT_CHECKED = " Whether the document has unsaved changes could not be checked.";
+const COPIES = {
+  marked: artifact("paper_marked.docx", { mode: "track_changes" }),
+  anonymized: artifact("paper_anonymized.docx"),
+};
+const COPY_FILES = {
+  "paper_marked.docx": COPY,
+  "paper_anonymized.docx": COPY,
+  [MANUSCRIPT]: SOURCE,
+};
+const copyRows = (saved) =>
+  submissionRows({
+    revision: recordOf((r) => (r.artifacts = COPIES)),
+    profile: ASKS,
+    live: { ...live, saved },
+    files: COPY_FILES,
+    file: FILE,
+  });
+
+test("rows 8 and 9: a document with unsaved changes is not ready although the copies match the saved file", () => {
+  // Saved: both ready (the copies were made from the file on the disk).
+  for (const id of ["marked_copy", "anonymized_copy"])
+    assert.equal(rowOf(copyRows(true), id).state, "ready", id);
+  // The author accepted changes in Word and did not save: the file on the
+  // disk still hashes as it did, and the copy is old all the same.
+  for (const id of ["marked_copy", "anonymized_copy"]) {
+    const r = rowOf(copyRows(false), id);
+    assert.equal(r.state, "not_ready", id);
+    assert.equal(r.text, UNSAVED);
+    assert.equal(r.go, null);
+  }
+  // The other rows do not depend on it.
+  const rest = (rows) => rows.filter((r) => !/_copy$/.test(r.id));
+  assert.deepEqual(rest(copyRows(false)), rest(copyRows(true)));
+  // An anonymized copy the journal does not ask for stays not needed.
+  const plain = submissionRows({
+    revision: recordOf((r) => (r.artifacts = COPIES)),
+    profile: profileOf(),
+    live: { ...live, saved: false },
+    files: COPY_FILES,
+    file: FILE,
+  });
+  assert.equal(rowOf(plain, "anonymized_copy").state, "not_applicable");
+});
+
+test("rows 8 and 9: when Word did not say whether the document is saved, the rows are as before and say so", () => {
+  for (const saved of [null, undefined, "true"]) {
+    const marked = rowOf(copyRows(saved), "marked_copy");
+    assert.equal(marked.state, "ready");
+    assert.equal(
+      marked.text,
+      `The marked copy was made from the manuscript as it is saved now: paper_marked.docx.${NOT_CHECKED}`,
+    );
+    assert.equal(rowOf(copyRows(saved), "anonymized_copy").text.endsWith(NOT_CHECKED), true);
+  }
+  // A row that is not ready for another reason keeps its sentence and gets the note too.
+  const gone = submissionRows({
+    revision: recordOf((r) => (r.artifacts = COPIES)),
+    profile: ASKS,
+    live: { ...live, saved: null },
+    files: { [MANUSCRIPT]: SOURCE },
+    file: FILE,
+  });
+  assert.equal(
+    rowOf(gone, "marked_copy").text,
+    `The marked copy is gone: paper_marked.docx. Make it again.${NOT_CHECKED}`,
+  );
+});
+
+test("Check now with unsaved changes: the service hands the flag on and answers it", async () => {
+  const t = await world();
+  try {
+    assert.equal((await build(t)).ok, true);
+    const saved = await t.ask("submission_check", { ...t.withDoc(ACCEPTED), saved: true });
+    assert.equal(saved.saved, true);
+    assert.equal(saved.rows.find((r) => r.id === "marked_copy").state, "ready");
+    const unsaved = await t.ask("submission_check", { ...t.withDoc(ACCEPTED), saved: false });
+    assert.equal(unsaved.saved, false);
+    const row = unsaved.rows.find((r) => r.id === "marked_copy");
+    assert.equal(row.state, "not_ready");
+    assert.equal(row.text, UNSAVED);
+    // A pane that sends nothing (an older one): not known, never taken for saved.
+    const { saved: _, ...older } = t.withDoc(ACCEPTED);
+    const old = await t.ask("submission_check", older);
+    assert.equal(old.saved, null);
+    assert.equal(old.rows.find((r) => r.id === "marked_copy").text.endsWith(NOT_CHECKED), true);
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("the rows of the cleanup stand before the marked copy", () => {
   const ids = rows().map((r) => r.id);
   for (const id of ["changes_decided", "tool_comments", "file_clean"])

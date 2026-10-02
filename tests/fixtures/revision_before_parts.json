@@ -1,0 +1,216 @@
+{
+  "version": 1,
+  "manuscript": "/work/paper/paper.docx",
+  "updated_at": "2026-09-30T08:00:00.000Z",
+  "comments": [
+    {
+      "ref": "R1.1",
+      "reviewer": 1,
+      "text": "State the incubation temperature.",
+      "section": "Major comments",
+      "requirements": [
+        {
+          "id": "q1",
+          "text": "state the temperature"
+        },
+        {
+          "id": "q2",
+          "text": "give the unit"
+        }
+      ],
+      "status": "in_progress",
+      "changes": [
+        {
+          "id": "R1.1-1",
+          "word_comment_id": "7",
+          "paragraph_index": 1,
+          "paragraph_id": null,
+          "kind": "replace",
+          "find": "30 degrees",
+          "text": "30 degrees Celsius",
+          "before": "Cells grew at 30 degrees.",
+          "after": "Cells grew at 30 degrees Celsius.",
+          "rationale": {
+            "what": "unit",
+            "why": "asked",
+            "addresses": "R1.1",
+            "requirement_ids": ["q2"]
+          },
+          "override_of": [],
+          "lost_facts": [],
+          "unsourced_terms": [],
+          "from_review": [],
+          "narrowed_from": null,
+          "rewrite_id": null,
+          "context": null,
+          "duplicate_before": false,
+          "comment_missing": null,
+          "comment_cleaned_at": null,
+          "created_at": "2026-09-30T08:00:00.000Z",
+          "state": "pending",
+          "checked_at": null
+        }
+      ],
+      "blocked": [
+        {
+          "id": "R1.1-b1",
+          "args": {
+            "find": "a",
+            "replace": "novel"
+          },
+          "blocked_by": ["L1"],
+          "created_at": "2026-09-30T08:00:00.000Z",
+          "state": "blocked",
+          "attempt": null
+        }
+      ],
+      "requirement_seq": 2,
+      "blocked_seq": 1,
+      "questions": [],
+      "named_terms": ["temperature"],
+      "same_term_at": [],
+      "requirements_outside": [],
+      "response": null,
+      "declined": null,
+      "figure_changes": [],
+      "figure_seq": 0
+    },
+    {
+      "ref": "R1.2",
+      "reviewer": 1,
+      "text": "Add the control strain to Table S3.",
+      "requirements": [
+        {
+          "id": "q1",
+          "text": "add the control strain"
+        }
+      ],
+      "status": "pending",
+      "changes": [],
+      "blocked": [],
+      "requirement_seq": 1,
+      "blocked_seq": 0,
+      "questions": [
+        {
+          "id": "a1",
+          "requirement_id": "q1",
+          "question": "Which control strain?",
+          "why": "not in the text",
+          "asked_at": "2026-09-30T08:00:00.000Z",
+          "answer": "",
+          "answered_at": null
+        }
+      ],
+      "named_terms": [],
+      "same_term_at": [],
+      "requirements_outside": [
+        {
+          "id": "q1",
+          "why": "Table S3 is another file.",
+          "at": "2026-09-30T08:00:00.000Z"
+        }
+      ],
+      "response": null,
+      "declined": null,
+      "figure_changes": [],
+      "figure_seq": 0
+    },
+    {
+      "ref": "E.1",
+      "reviewer": 0,
+      "text": "Follow the journal style.",
+      "requirements": [],
+      "status": "pending",
+      "changes": [],
+      "blocked": [],
+      "requirement_seq": 0,
+      "blocked_seq": 0,
+      "questions": [],
+      "named_terms": [],
+      "same_term_at": [],
+      "requirements_outside": [],
+      "response": null,
+      "declined": null,
+      "figure_changes": [],
+      "figure_seq": 0
+    }
+  ],
+  "ledger": [
+    {
+      "id": "L1",
+      "kind": "forbid",
+      "text": "do not write novel",
+      "scope": "manuscript",
+      "check": {
+        "type": "regex",
+        "pattern": "\\bnovel\\b",
+        "flags": "i",
+        "expect": "absent"
+      },
+      "source": null,
+      "status": "ok",
+      "violation_count": 0,
+      "checked_at": "2026-09-30T08:00:00.000Z",
+      "violations": [],
+      "unsure": [],
+      "checked_hashes": ["aa"]
+    },
+    {
+      "id": "L2",
+      "kind": "instruction",
+      "text": "Abstract under 250 words",
+      "scope": "manuscript",
+      "check": {
+        "type": "count",
+        "target": "section_words",
+        "section": "Abstract",
+        "max": 250
+      },
+      "source": null,
+      "status": "unchecked",
+      "violation_count": 0,
+      "checked_at": null,
+      "violations": [],
+      "unsure": [],
+      "checked_hashes": null
+    },
+    {
+      "id": "L3",
+      "kind": "instruction",
+      "text": "Name every strain in the supplement",
+      "scope": "supplement",
+      "check": {
+        "type": "llm"
+      },
+      "source": null,
+      "status": "unchecked",
+      "violation_count": 0,
+      "checked_at": null,
+      "violations": [],
+      "unsure": [],
+      "checked_hashes": null
+    }
+  ],
+  "ledger_seq": 3,
+  "snapshot": {
+    "taken_at": "2026-09-30T08:00:00.000Z",
+    "paragraphs": ["Title", "Cells grew at 30 degrees."],
+    "ids": ["p0", "p1"]
+  },
+  "external": [],
+  "consistency": null,
+  "journal_profile": null,
+  "profile_overrides": {},
+  "response_render": null,
+  "response_export": null,
+  "figure_lane": null,
+  "artifacts": {
+    "marked": {
+      "path": "paper_marked.docx",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "at": "2026-09-30T08:00:00.000Z",
+      "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mode": "color"
+    }
+  }
+}

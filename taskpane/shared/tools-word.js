@@ -11,11 +11,15 @@ import {
   planBackupDelete,
 } from "./review-view.js";
 import {
+  FIELD_REFUSAL,
   fieldRefusal,
   fieldVerdict,
   fieldView,
   fieldsKept,
   paragraphFields,
+  undoOutcome,
+  UNDO_TOOK_MORE,
+  xmlHasField,
 } from "./field-text.js";
 //
 // Word tool implementations + Word-specific helpers.
@@ -1605,12 +1609,15 @@ function canReject() {
 }
 
 // Take a tracked edit back: the tracked changes on the ranges of the edit
-// are rejected. true only when the paragraph then has its fields and its
-// reviewed text as before the edit: whether Word did it is read from the
-// document, not from the call. A tracked change of the same author that
-// touched the edit may have been merged with it by Word and goes back with
-// it; the paragraph then does not read as before and this says false.
-async function takeBack(context, para, ranges, fields, reviewedBefore) {
+// are rejected. What came of it is read from the document, not from the
+// call (field-text.js undoOutcome): "clean" when the paragraph then has its
+// fields and its reviewed text as before the edit; "kept" when the edit is
+// still there; "more" when the edit is gone and the paragraph still does not
+// read as before. A tracked change of the same author that touched the edit
+// may have been merged with it by Word and goes back with it: that is "more".
+// reviewedBefore, reviewedAfter: the reviewed text of the paragraph before
+// the edit and after it.
+async function takeBack(context, para, ranges, fields, reviewedBefore, reviewedAfter) {
   for (const r of ranges) {
     if (!r) continue;
     try {
@@ -1622,13 +1629,13 @@ async function takeBack(context, para, ranges, fields, reviewedBefore) {
   }
   const now = await readFields(context, para);
   const text = await getReviewedTextBatch(context, [para.getRange("Whole")]);
-  return (
-    !!now &&
-    fieldsKept(fields, now, 0) === null &&
-    !!text &&
-    reviewedBefore != null &&
-    paragraphHash(text[0]) === paragraphHash(reviewedBefore)
-  );
+  const hash = (t) => (t == null ? null : paragraphHash(t));
+  return undoOutcome({
+    fieldsOk: !!now && fieldsKept(fields, now, 0) === null,
+    before: hash(reviewedBefore),
+    after: hash(reviewedAfter),
+    undone: hash(text?.[0]),
+  });
 }
 
 // What a paragraph holds besides plain text, or null. A rewrite as a whole
@@ -1692,7 +1699,9 @@ async function notPlain(context, para) {
 //   hollowed, split, changed or gone: the edit is taken back (takeBack) and
 //   refused as FieldNotEditable, reason after-edit. When Word cannot take
 //   it back, the result is applied:true with code FieldEditNotUndone, so
-//   the daemon records the change and the author sees it.
+//   the daemon records the change and the author sees it. When the undo
+//   took a pending change next to the edit with it, the refusal carries
+//   took_more:true: nothing is recorded and the review state is read again.
 export async function toolTrackedEdit({
   find,
   replace,
@@ -1864,8 +1873,28 @@ export async function toolTrackedEdit({
             : 0;
         const broke = now ? fieldsKept(fields, now, mayRemove) : takesField ? "unreadable" : null;
         if (broke) {
-          const back = await takeBack(context, para, [target, inserted], fields, reviewed?.[0]);
-          if (back) return refused("after-edit", { detail: broke, undone: true });
+          // The paragraph with the edit in it, read before the undo: the
+          // undo is judged against it and against the text before the edit.
+          const edited = await getReviewedTextBatch(context, [para.getRange("Whole")]);
+          const back = await takeBack(
+            context,
+            para,
+            [target, inserted],
+            fields,
+            reviewed?.[0],
+            edited?.[0],
+          );
+          if (back === "clean") return refused("after-edit", { detail: broke, undone: true });
+          // The edit is gone, and a pending change next to it went with it.
+          // Not applied: the daemon records nothing and asks for a refresh,
+          // which reads the change that vanished from the document.
+          if (back === "more")
+            return {
+              ...refused("after-edit", { detail: broke, undone: true }),
+              took_more: true,
+              paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
+              message: `${FIELD_REFUSAL} Word did not keep the field whole (${broke}), so the edit was taken back. ${UNDO_TOOK_MORE}`,
+            };
           return {
             ok: false,
             code: "FieldEditNotUndone",
@@ -2131,7 +2160,7 @@ function isoOrNull(d) {
 // same set as getComments) for the "Delete ALL comments" backup.
 export async function collectReviewSnapshot({ replies = false } = {}) {
   return await Word.run(async (context) => {
-    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const { paragraphs, idMode, trackChangesOn } = await getParagraphsWithIds(context);
     const oox = paragraphs.items.map((p) => p.getOoxml());
     const comments = context.document.body.getComments();
     comments.load("items/id, items/content, items/resolved, items/authorName");
@@ -2156,6 +2185,13 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
       probes.map(({ ps }) => ps.items[0] ?? null),
     );
     return {
+      // Is Track Changes on in the document (the daemon keeps it with the
+      // state of the document at this refresh).
+      track_changes_on: trackChangesOn,
+      // Does the XML of any paragraph hold a field (a citation, a reference
+      // list, a hyperlink)? The daemon needs it when the reviewed text,
+      // which shows the fields, could not be read (field-text.js fieldsUnread).
+      has_fields: oox.some((x) => xmlHasField(x.value)),
       paragraphs: paragraphs.items.map((p, i) => ({
         index: i,
         id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
@@ -2189,6 +2225,23 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
       }),
     };
   });
+}
+
+// Has the document no unsaved changes: Word.Document.saved, "true indicates
+// that the document hasn't changed since it was saved" (WordApi 1.1,
+// https://learn.microsoft.com/en-us/javascript/api/word/word.document#word-word-document-saved-member;
+// the manifest asks for WordApi 1.4). null when Word does not say: the
+// daemon then keeps "not known" and never takes it for saved.
+export async function documentSaved() {
+  try {
+    return await Word.run(async (context) => {
+      context.document.load("saved");
+      await context.sync();
+      return typeof context.document.saved === "boolean" ? context.document.saved : null;
+    });
+  } catch {
+    return null;
+  }
 }
 
 // Paragraphs under the current selection, for "Propose changes".

@@ -50,6 +50,12 @@ import {
   SUBMISSION_STATE_LABELS,
   submissionCount,
   submissionGoLabel,
+  UNDO_TOOK_MORE_TEXT,
+  joinLabel,
+  linkedFilesText,
+  partOfText,
+  editedInText,
+  changesElsewhere,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
@@ -118,6 +124,9 @@ export function initReviewPane({
   // (tools-pane.js job): its job_done comes as a tools_event, which that
   // pane waits for. The submission checklist is such a job.
   toolsJob = null,
+  // () => called after a refresh in a supplementary file wrote what the
+  // letter cites from it (taskpane.js: the Response tab reads it again).
+  onPartRefreshed = () => {},
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -149,9 +158,19 @@ export function initReviewPane({
     openRef: null, // the comment whose card is open (one at a time)
     pasteOpen: false, // the paste box is shown although a review is split
     results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
+    notices: new Map(), // ref -> a sentence for the author that outlives the result of the turn
     cards: new Map(), // ref -> the elements of its card, as of the last render
-    submission: null, // { rows, doc, at } of the last "Check now" of this connection
+    submission: null, // { rows, doc, unsaved, at } of the last "Check now" of this connection
+    linked: null, // { part_of, parts, note } of the last load (null: a daemon from before links)
+    linkCandidates: [], // manuscripts in the folder this file could join
   };
+  // The manuscript this file belongs to, when it is a supplementary file. What
+  // the manuscript owns (comment list, requests, rules) is then shown and not
+  // changed here; changes are proposed here for this file as in a manuscript.
+  const partOf = () => state.linked?.part_of ?? null;
+  // The changes of a comment in the other files of the revision, as the last
+  // load gave them: where its requests stand there.
+  const elsewhere = (ref) => changesElsewhere(state.linked, ref);
 
   function el(tag, props = {}, ...kids) {
     const n = document.createElement(tag);
@@ -522,6 +541,7 @@ export function initReviewPane({
       working: state.turn?.ref === c.ref ? state.turn : null,
       now,
       noChange: state.results.get(c.ref)?.noChange === true,
+      elsewhere: elsewhere(c.ref),
     });
   // Open or close the card of a row; one card is open at a time. A card opened
   // by the author is scrolled to the top of the list area, under the bar that
@@ -590,7 +610,7 @@ export function initReviewPane({
           // L5: "Done" needs a second try while something is left open:
           // a requirement no change answers, a change not decided in Word,
           // or a ledger rule in violation.
-          const left = doneBlockers(c, state.revision?.ledger);
+          const left = doneBlockers(c, state.revision?.ledger, elsewhere(c.ref));
           if (status.value === "done" && left.length && state.confirmDone !== c.ref) {
             state.confirmDone = c.ref;
             throw new Error(
@@ -606,6 +626,9 @@ export function initReviewPane({
         class: "btn-primary btn-small",
         text: "Propose changes",
       });
+      // In a supplementary file the requests are shown and not edited; the
+      // turn is proposed here as in a manuscript, for this file.
+      const main = partOf();
       proposeButtons.push(propose);
       propose.disabled = isTurnInFlight() || queue.running;
       // The turn is taken on the click, before the selection and refresh()
@@ -668,7 +691,7 @@ export function initReviewPane({
       );
       // What the reviewer asks: one line per request with where it stands. The
       // box to change the list opens from Edit.
-      const rows = requirementStates(c);
+      const rows = requirementStates(c, elsewhere(c.ref));
       const editing = state.reqEdit.has(c.ref);
       const edit = el("button", {
         type: "button",
@@ -685,7 +708,12 @@ export function initReviewPane({
       const requestList = el(
         "div",
         { class: "review-req-list" },
-        el("div", { class: "review-questions-head" }, "What the reviewer asks ", edit),
+        el(
+          "div",
+          { class: "review-questions-head" },
+          "What the reviewer asks ",
+          main ? el("span", { class: "review-part-note", text: `(${editedInText(main)})` }) : edit,
+        ),
         ...(rows.length
           ? rows.map((r) =>
               el(
@@ -746,20 +774,29 @@ export function initReviewPane({
               : null,
           )
         : null;
+      // What the author has to look at by hand (an undo that took more
+      // than the edit). It stays until the next turn of this comment.
+      const notice = state.notices.has(c.ref)
+        ? el("div", {
+            class: "review-card-result review-card-notice form-error",
+            text: state.notices.get(c.ref),
+          })
+        : null;
       const body = el(
         "div",
         { class: "review-comment-body" },
         progressEl,
         result,
+        notice,
         el("div", { class: "review-card-actions" }, status, propose),
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
         requestList,
         // A request that is answered in another file, or a figure change:
         // the comparison and the decision are on the figures page.
-        hasFigureWork(c) ? figuresLink(c.ref) : null,
-        reqs,
-        saveReqs,
+        !main && hasFigureWork(c) ? figuresLink(c.ref) : null,
+        main ? null : reqs,
+        main ? null : saveReqs,
       );
       const card = el("div", { class: "review-comment", "data-ref": c.ref }, head, body);
       const advanced = el(
@@ -879,16 +916,127 @@ export function initReviewPane({
           el("strong", { text: item.kind === "forbid" ? "Forbidden wording" : "Instruction" }),
           el("span", { text: ` ${item.text}${how ? ` (${how})` : ""}. ${statusText}. ` }),
           check,
-          edit,
-          remove,
+          partOf() ? null : edit,
+          partOf() ? null : remove,
         ),
       );
+    }
+    // In a supplementary file the rules are those of the manuscript: they
+    // are shown and checked here, and added or changed there.
+    const main = partOf();
+    $("review-ledger-note").textContent = main ? `These rules are ${editedInText(main)}.` : "";
+    $("review-ledger-note").hidden = !main;
+    for (const id of [
+      "review-ledger-form",
+      "review-ledger-advanced",
+      "ledger-import",
+      "ledger-suggest-review",
+      "ledger-candidates",
+    ]) {
+      $(id).hidden = !!main;
     }
     const rules = state.revision?.ledger ?? [];
     $("review-ledger-count").textContent = rules.length ? `(${rules.length})` : "";
     $("review-ledger-add").textContent = state.editingLedger
       ? `Save ${state.editingLedger}`
       : "Add";
+  }
+
+  // The link between a manuscript and its supplementary files. A manuscript:
+  // one line that names them. A supplementary file: the line that says where
+  // its list comes from, with the way out. A file with no review of its own:
+  // the box to join the revision of a manuscript (nothing joins by itself).
+  async function joinRevision(main) {
+    // The name the response letter gives this file; none typed: its file name.
+    const label = $("review-link-label")?.value.trim() ?? "";
+    const r = await ask("review_link_join", { main, ...(label ? { label } : {}) });
+    state.linked = r.linked ?? null;
+    state.linkCandidates = [];
+    $("review-link-path").value = "";
+    if ($("review-link-label")) $("review-link-label").value = "";
+    say(`Joined the revision of ${partOf()?.name ?? "the manuscript"}.`);
+  }
+  function renderLink() {
+    const main = partOf();
+    const parts = state.linked?.parts ?? [];
+    const line = $("review-linked");
+    line.replaceChildren();
+    if (main) {
+      const leave = el("button", {
+        type: "button",
+        class: "btn-link review-link-leave",
+        text: "Leave this revision",
+      });
+      leave.addEventListener(
+        "click",
+        guard(async () => {
+          await ask("review_link_leave");
+          await load();
+          say(`This file left the revision of ${main.name}.`);
+        }),
+      );
+      line.append(el("div", { class: "review-linked-text", text: partOfText(main) }));
+      if (state.linked.note)
+        line.append(el("div", { class: "form-error", text: state.linked.note }));
+      // What the response letter calls this file, set here at any time.
+      const name = el("input", {
+        type: "text",
+        id: "review-part-label",
+        maxlength: "80",
+        "aria-label": "Name of this file in the response letter",
+      });
+      name.value = main.label ?? "";
+      const saveName = el("button", {
+        type: "button",
+        class: "btn-secondary btn-small",
+        text: "Save name",
+      });
+      saveName.addEventListener(
+        "click",
+        guard(async () => {
+          const r = await ask("review_link_label", { label: name.value });
+          state.linked = r.linked ?? state.linked;
+          say(`The response letter calls this file ${partOf()?.label}.`);
+        }),
+      );
+      line.append(
+        el(
+          "div",
+          { class: "review-part-label" },
+          el("label", { for: "review-part-label", text: "Name in the response letter" }),
+          el("div", { class: "review-link-typed" }, name, saveName),
+        ),
+      );
+      line.append(leave);
+    } else if (parts.length) {
+      line.append(el("div", { class: "review-linked-text", text: linkedFilesText(parts) }));
+    }
+    line.hidden = !main && parts.length === 0;
+    // Offered to a file with no review of its own, and to one whose
+    // comments are all in the list of a manuscript of its folder (a
+    // supplementary file that left its revision and kept its changes).
+    const own = (state.revision?.comments ?? []).length;
+    const offer = own === 0 ? state.draft.length === 0 : state.linkCandidates.length > 0;
+    $("review-link-box").hidden = !state.linked || !!main || parts.length > 0 || !offer;
+    // With no manuscript to offer, the box is the last thing on the tab.
+    $("review-link-box").setAttribute(
+      "class",
+      `review-fold review-link${state.linkCandidates.length ? "" : " review-link-last"}`,
+    );
+    $("review-link-candidates").replaceChildren(
+      ...state.linkCandidates.map((c) => {
+        const b = el("button", {
+          type: "button",
+          class: "btn-primary btn-small review-link-candidate",
+          text: joinLabel(c),
+        });
+        b.addEventListener(
+          "click",
+          guard(() => joinRevision(c.doc)),
+        );
+        return b;
+      }),
+    );
   }
 
   // P15: candidate rules from the review text, one checkbox each.
@@ -913,7 +1061,7 @@ export function initReviewPane({
 
   // L7: everything that waits for the author in one box.
   function renderDecisions() {
-    const d = pendingDecisions(state.revision);
+    const d = pendingDecisions(state.revision, state.linked);
     const box = $("review-decisions");
     // A request waits for the author only once a turn has run for its comment;
     // before that it waits for the tool. Those items stay in the list (hidden)
@@ -1090,7 +1238,11 @@ export function initReviewPane({
   function renderSections() {
     const comments = state.revision?.comments ?? [];
     const hasReview = comments.length > 0 || state.draft.length > 0;
-    $("review-start").hidden = hasReview;
+    // In a supplementary file the review is pasted, split and changed in
+    // the manuscript.
+    const part = !!partOf();
+    $("review-start").hidden = hasReview || part;
+    $("review-paste-section").hidden = part;
     const collapsed = hasReview && !state.pasteOpen;
     $("review-paste-box").hidden = collapsed;
     $("review-paste-summary").hidden = !hasReview;
@@ -1107,13 +1259,22 @@ export function initReviewPane({
     $("review-propose-all").hidden = comments.length === 0;
     $("review-more").hidden = comments.length === 0;
     $("review-submit-box").hidden = comments.length === 0;
+    // The submission check counts the answers of the letter: it runs in the
+    // manuscript. The comment cleanup under it is each file's own.
+    $("review-submit-check").hidden = part;
+    $("review-submit-rows").hidden = part;
+    $("review-submit-help").textContent = part
+      ? `The submission check runs in ${partOf().name}.`
+      : "Checks this file and the files made from it. Nothing is changed.";
     const notDone = comments.filter((c) => c.status !== "done").length;
     // Once a check has run the header counts its rows, not the comments.
-    $("review-submit-count").textContent = state.submission
-      ? submissionCount(state.submission.rows)
-      : notDone
-        ? `(${notDone} not done)`
-        : "";
+    $("review-submit-count").textContent = part
+      ? ""
+      : state.submission
+        ? submissionCount(state.submission.rows)
+        : notDone
+          ? `(${notDone} not done)`
+          : "";
     renderSubmission();
   }
 
@@ -1155,7 +1316,11 @@ export function initReviewPane({
       ...rows,
       el("div", {
         class: "review-submit-asof",
-        text: `${check.doc ? `${check.doc}, c` : "C"}hecked at ${check.at}. Press Check now again after a change.`,
+        text: `${check.doc ? `${check.doc}, c` : "C"}hecked at ${check.at}. ${
+          check.unsaved
+            ? "This document has changes that are not saved: save it, then press Check now again."
+            : "Press Check now again after a change."
+        }`,
       }),
     );
   }
@@ -1164,6 +1329,7 @@ export function initReviewPane({
     // The cards are built anew: the author stays where they were.
     const keep = root.scrollTop;
     renderSections();
+    renderLink();
     renderDraft();
     renderComments();
     renderSummary();
@@ -1172,7 +1338,9 @@ export function initReviewPane({
     renderCandidates();
     renderDecisions();
     renderExternal();
-    $("review-figures-all").replaceChildren(figuresLink());
+    // The figures page records under the manuscript, not under one of its
+    // supplementary files (daemon/figure-http.mjs).
+    $("review-figures-all").replaceChildren(...(partOf() ? [] : [figuresLink()]));
     showProgress();
     $("review-file").textContent = state.path ? `Review file: ${state.path}` : "";
     if (root.scrollTop !== keep) root.scrollTop = keep;
@@ -1203,7 +1371,10 @@ export function initReviewPane({
     const withModel = ran ? ` with ${ran}` : "";
     const blockedText = `${blocked} edit${blocked === 1 ? " was" : "s were"} blocked (see the blocked list of the comment)`;
     // Requests the turn left without a change, a question or a note.
-    const open = openRequestsText((state.revision?.comments ?? []).find((x) => x.ref === ref));
+    const open = openRequestsText(
+      (state.revision?.comments ?? []).find((x) => x.ref === ref),
+      elsewhere(ref),
+    );
     const line =
       n > 0
         ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
@@ -1214,6 +1385,7 @@ export function initReviewPane({
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
     state.results.delete(ref);
+    state.notices.delete(ref);
     // The card shows the work from the click on, not from the answer of the daemon.
     startProgress(ref);
     try {
@@ -1334,15 +1506,54 @@ export function initReviewPane({
   async function load() {
     const r = await ask("review_load");
     state.path = r.path;
+    state.linked = r.linked ?? null;
+    // A file with no link: the manuscripts in its folder it could join.
+    // One that holds comments is offered only a manuscript whose list has
+    // them all (it was its supplementary file). Asked only of a daemon that
+    // knows links.
+    state.linkCandidates = [];
+    const free = r.linked && !r.linked.part_of && r.linked.parts.length === 0;
+    if (free) {
+      try {
+        const found = (await ask("review_link_candidates")).candidates ?? [];
+        const own = (state.revision?.comments ?? []).length;
+        state.linkCandidates = own === 0 ? found : found.filter((c) => c.covers === true);
+      } catch {
+        /* the folder could not be read: the path field is still there */
+      }
+    }
+    $("review-link-box").open = state.linkCandidates.length > 0;
   }
 
+  // Word.Document.saved as the pane sends it: true, false, or null when
+  // Word did not say (tools-word.js documentSaved).
+  const documentSaved = async () => (word.documentSaved ? await word.documentSaved() : null);
   const refresh = () => refreshWith(say);
   // report(text, bad): where the counts go. The message line for a refresh
   // the author or a turn asked for, the small line for an automatic one.
   // Returns the invariant report (review-view.js invariantReport).
   async function refreshWith(report) {
+    // Has Word unsaved changes of the document (null: it did not say). The
+    // daemon keeps it with the state of the document at this refresh.
+    const saved = await documentSaved();
     const snapshot = await word.collectReviewSnapshot();
-    const r = await ask("review_refresh", { snapshot });
+    const r = await ask("review_refresh", { snapshot, saved });
+    // A supplementary file: the citations of its accepted changes (section
+    // and quote) go into its own review file after every refresh, from the
+    // same snapshot. The response letter of the manuscript reads them from
+    // there; it never reads this document itself. A failure is told and
+    // does not undo the refresh: the manuscript then says that the record
+    // of this file is incomplete.
+    let notCited = "";
+    if (partOf()) {
+      try {
+        const headings = (await word.collectHeadings?.()) ?? [];
+        await ask("response_state", { snapshot, headings });
+        onPartRefreshed();
+      } catch (e) {
+        notCited = ` What the letter cites from this file was not brought up to date (${e.message}); press Refresh status again.`;
+      }
+    }
     // Word refuses Comment.resolved in a document in compatibility mode
     // (GeneralException on every comment). The refresh itself has succeeded,
     // so its counts are still shown and the refusal is added to them.
@@ -1361,8 +1572,9 @@ export function initReviewPane({
       : "";
     // One sentence on what to do next; the full counts are under Details.
     report(
-      countsSentence(c, inv, { outside: r.external?.length ?? 0, unresolved: unresolved.length }),
-      !inv.ok,
+      countsSentence(c, inv, { outside: r.external?.length ?? 0, unresolved: unresolved.length }) +
+        notCited,
+      !inv.ok || !!notCited,
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
         invariantText(inv) +
@@ -1485,6 +1697,10 @@ export function initReviewPane({
       // Comments a running turn or an open edit still uses are not removed.
       if (r.warnings?.length) say(r.warnings.join(" "));
     }),
+  );
+  $("review-link-join").addEventListener(
+    "click",
+    guard(() => joinRevision($("review-link-path").value)),
   );
   $("review-refresh").addEventListener(
     "click",
@@ -1637,12 +1853,17 @@ export function initReviewPane({
         const snapshot = await word.collectReviewSnapshot();
         const headings = (await word.collectHeadings?.()) ?? [];
         const format = (await word.readFormatSnapshot?.().catch(() => null)) ?? null;
+        // Has Word unsaved changes of the document (null: it did not say).
+        // The rows about copies made from the saved file depend on it.
+        const saved = await documentSaved();
         say("Checking...");
-        const r = await toolsJob("submission_check", { snapshot, headings, format });
+        const r = await toolsJob("submission_check", { snapshot, headings, format, saved });
         if (!r?.ok) throw new Error(r?.error || "The check failed.");
         state.submission = {
           rows: r.rows ?? [],
           doc: r.doc_name ?? null,
+          // As the daemon took it (a daemon from before the flag: not said).
+          unsaved: r.saved === false,
           at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         };
         say("");
@@ -1863,6 +2084,16 @@ export function initReviewPane({
               );
             }
           });
+      } else if (msg.event === "undo_took_more") {
+        // An edit of this comment was taken back, and Word took an earlier
+        // pending change of the same paragraph with it. The refresh reads
+        // that change from the document again (it is no longer pending
+        // there); the card of the comment says what to look at.
+        state.notices.set(msg.ref, UNDO_TOOK_MORE_TEXT);
+        load()
+          .then(refresh)
+          .catch((e) => say(e.message, true))
+          .finally(render);
       } else if (msg.event === "stale_target") {
         // A tracked edit was refused: its paragraph is no longer as the
         // daemon has it. A refresh gives the daemon the document as it is.
@@ -1875,7 +2106,10 @@ export function initReviewPane({
         msg.event === "edit_blocked" ||
         msg.event === "comment_noted" ||
         // A figure change was recorded or decided on the figures page.
-        msg.event === "figures_changed"
+        msg.event === "figures_changed" ||
+        // The link to a manuscript or a supplementary file changed, or the
+        // manuscript changed what this supplementary file copies.
+        msg.event === "linked_changed"
       ) {
         load()
           .catch((e) => say(e.message, true))

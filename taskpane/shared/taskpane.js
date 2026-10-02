@@ -31,6 +31,7 @@ import {
   toolTrackedEdit,
   PANE_CAPS,
   collectReviewSnapshot,
+  documentSaved,
   selectionParagraphs,
   selectCommentById,
   selectParagraphByIndex,
@@ -938,6 +939,8 @@ async function handleServerMessage(msg) {
       // A decision on the figures page also changes which requests the
       // Response tab counts as answered.
       if (msg.event === "figures_changed") responsePane?.onEvent(msg);
+      // The link of this file to a manuscript changed: the tab is another one.
+      if (msg.event === "linked_changed") responsePane?.onEvent(msg);
       break;
 
     case "response_event":
@@ -1378,9 +1381,14 @@ Office.onReady((info) => {
           if (turn.endIf(id)) setAgentStatus("idle", "Ready");
         };
       },
+      // A supplementary file was refreshed: its Response tab shows which of
+      // its changes the letter cites, and reads that again.
+      onPartRefreshed: () => responsePane?.onEvent({ event: "linked_changed" }),
       word: {
         collectReviewSnapshot,
-        // Read for the submission checklist, as the Tools tab reads them.
+        documentSaved,
+        // Read for the submission checklist, as the Tools tab reads them, and
+        // in a supplementary file for what the letter cites from it.
         collectHeadings,
         readFormatSnapshot,
         selectionParagraphs,

@@ -1480,6 +1480,9 @@ body {
 .review-comment-state {
   grid-column: 2;
   grid-row: 2;
+  /* It may name a file ("1 change to review in SI.docx"): a long name wraps. */
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 12px;
   color: var(--fg-muted);
 }
@@ -1579,11 +1582,14 @@ body {
   min-width: 0;
 }
 .review-req-state {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--fg-muted);
 }
 .review-req-open,
 .review-req-needs_author,
-.review-req-figure_waiting {
+.review-req-figure_waiting,
+.review-req-waiting_elsewhere {
   color: color-mix(in srgb, var(--status-warn) 55%, var(--fg));
   font-weight: 600;
 }
@@ -1674,4 +1680,78 @@ body {
 .response-proposal-note {
   display: block;
   font-size: 0.9em;
+}
+
+/* A manuscript and its supplementary files (review-pane.js renderLink). */
+.review-linked {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+/* The tab is a column (.setup-content): the join box without a candidate
+   goes after everything else. */
+.review-link-last {
+  order: 1;
+}
+.review-link-candidates {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin: 4px 0;
+}
+.review-link-candidate {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.review-link-typed {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 2px;
+}
+.review-link-typed input {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+/* A supplementary file: the name the letter gives it, and on its Response
+   tab the changes the letter cites. */
+.review-part-label {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.review-part-label label {
+  display: block;
+  color: var(--fg-muted);
+}
+.response-part-cited {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.response-part-head {
+  color: var(--fg-muted);
+}
+.response-part-todo {
+  color: var(--status-err);
+}
+.review-part-note,
+.response-part-note {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+/* The Response tab without its one sentence for a supplementary file: laid
+   out as the tab itself (.setup-content). */
+.response-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.response-main[hidden] {
+  display: none;
 }

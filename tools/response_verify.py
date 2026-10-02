@@ -8,7 +8,10 @@ Standard library only.
   --docx        the letter as written (tools/response_docx.py)
   --model       the paragraph model it was written from
   --manuscript  JSON list of strings: the manuscript paragraphs in the accepted
-                view, in document order
+                view, in document order. For a revision with supplementary
+                Word files, their paragraphs follow those of the manuscript in
+                the same list: a quote of a supplementary file is looked for
+                there like any other
 
 A figure line (kind "figure": an adopted figure change, with the name of the
 submitted file) is checked like any other paragraph, on count, text and
@@ -128,6 +131,7 @@ _MODEL = {"paragraphs": [
     {"kind": "location", "text": "[Removed from 1. Introduction]", "color": "0070C0", "removed": True},
     {"kind": "figure", "text": "[Revised Figure 2, file fig2_v2.pdf]", "color": "0070C0"}]}
 _MANUSCRIPT = ["2. Methods", "Flasks were shaken. The temperature was held at 30 °C. Samples were drawn."]
+_SUPPLEMENT = ["Supplementary Methods", "Cultures were incubated at 30 °C. They were shaken."]
 
 
 def _read(model):
@@ -161,6 +165,16 @@ def selftest():
         m["paragraphs"][7]["text"] = "[Revised Figure 2, file fig2_v3.pdf]"
         return m
 
+    def with_part():
+        m = copy.deepcopy(_MODEL)
+        m["paragraphs"][4]["text"] = "Manuscript [Revised in 2. Methods, line 9]"
+        m["paragraphs"][6]["text"] = "Manuscript [Removed from 1. Introduction]"
+        m["paragraphs"][7:7] = [
+            {"kind": "location", "text": "Supplementary Information [Revised in Supplementary Methods]",
+             "color": "0070C0"},
+            {"kind": "quote", "text": "Cultures were incubated at 30 °C.", "color": "0070C0"}]
+        return m
+
     cases = [
         ("good letter", [], _read(_MODEL), _MODEL, _MANUSCRIPT),
         ("a run in another colour", ["colour"], _read(recoloured()), _MODEL, _MANUSCRIPT),
@@ -172,6 +186,13 @@ def selftest():
         # A figure line cites a file, not a sentence: the good letter ends with
         # one and no quote, and passes. Its words are checked like any other.
         ("a figure line that names another file", ["text"], _read(refiled()), _MODEL, _MANUSCRIPT),
+        # A revision with a supplementary file: every location line names its
+        # file, and the paragraphs of that file follow those of the manuscript
+        # in the one list the quotes are looked for in.
+        ("a quote of a supplementary file, in the list", [], _read(with_part()), with_part(),
+         _MANUSCRIPT + _SUPPLEMENT),
+        ("a quote of a supplementary file, its paragraphs not handed in", ["quote_in_manuscript"],
+         _read(with_part()), with_part(), _MANUSCRIPT),
     ]
     out = []
     for name, want, read, model, manuscript in cases:

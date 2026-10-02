@@ -7,6 +7,10 @@
 // Environment: PLAYWRIGHT_CORE (path of a playwright-core package),
 // E2E_CDP_PORT (the --remote-debugging-port given to Word),
 // E2E_PANE_ORIGIN (default http://127.0.0.1:47834).
+// E2E_PANE_DOC (optional): the file name, without its ending, of the document
+// whose pane is driven ("SI" for SI.docx). One Word can hold several
+// documents, each with a pane of its own; they are pages of the same
+// debugging endpoint. Without it the first pane page is taken, as before.
 // E2E_SHOT (optional, the run's --screenshots): the path of a PNG. The pane
 // is photographed when the step is over (also when it failed), and while it
 // runs after 4 s and after 20 s (<name>-wait1.png, <name>-wait2.png) with the
@@ -24,11 +28,36 @@ const PW = process.env.PLAYWRIGHT_CORE;
 const PORT = process.env.E2E_CDP_PORT || "9333";
 const ORIGIN = process.env.E2E_PANE_ORIGIN || "http://127.0.0.1:47834";
 const TURN_TIMEOUT = Number(process.env.E2E_TURN_TIMEOUT_MS || 20 * 60_000);
+const PANE_DOC = process.env.E2E_PANE_DOC || "";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // The daemon keeps a model list that failed for 60 s (daemon/model-list.mjs
 // fallbackTtlMs); asking again sooner gets the same fallback.
 const MODELS_RETRY_AFTER_MS = 61_000;
+
+// The document of a pane page: what Office names as the document of the
+// add-in, and the line of the Review tab that names its review file (there
+// once the pane has loaded it). Either may be empty while the pane starts.
+const paneDoc = (p) =>
+  p
+    .evaluate(() => {
+      let url = "";
+      try {
+        url = String(Office.context.document.url ?? "");
+      } catch {
+        url = "";
+      }
+      return { url, file: document.getElementById("review-file")?.textContent ?? "" };
+    })
+    .catch(() => ({ url: "", file: "" }));
+// Is that the pane of the document <stem>.docx (or .doc)? Pure.
+function isPaneOf(doc, stem) {
+  const name = String(stem).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (
+    new RegExp(`(^|[\\\\/])${name}\\.docx?$`, "i").test(String(doc?.url ?? "").trim()) ||
+    new RegExp(`[\\\\/]${name}\\.revision\\.json$`, "i").test(String(doc?.file ?? "").trim())
+  );
+}
 
 async function connect(timeoutMs = 120_000) {
   const { chromium } = require(PW);
@@ -37,13 +66,27 @@ async function connect(timeoutMs = 120_000) {
   while (Date.now() < end) {
     try {
       const browser = await chromium.connectOverCDP(`http://127.0.0.1:${PORT}`);
-      const page = browser
+      const pages = browser
         .contexts()
         .flatMap((c) => c.pages())
-        .find((p) => p.url().startsWith(ORIGIN + "/"));
+        .filter((p) => p.url().startsWith(ORIGIN + "/"));
+      let page = PANE_DOC ? null : pages[0];
+      const seen = [];
+      for (const p of PANE_DOC ? pages : []) {
+        const doc = await paneDoc(p);
+        seen.push(doc.url || doc.file || "(a pane that names no document yet)");
+        if (isPaneOf(doc, PANE_DOC)) {
+          page = p;
+          break;
+        }
+      }
       if (page) return { browser, page };
       await browser.close();
-      last = new Error("no pane page yet");
+      last = new Error(
+        PANE_DOC
+          ? `no pane page of ${PANE_DOC}.docx yet (pane pages: ${seen.join(" | ") || "none"})`
+          : "no pane page yet",
+      );
     } catch (e) {
       last = e;
     }
@@ -101,6 +144,15 @@ async function view(page) {
       file: t(document.getElementById("review-file")),
       comments: q(".review-comment").map((c) => ({
         ref: t(c.querySelector(".review-comment-head strong")),
+        // Where the comment stands, as its row says it, and each request
+        // with its state (also where it stands in another file of the revision).
+        state: t(c.querySelector(".review-comment-state")),
+        requests: q(".review-req", c).map((r) => ({
+          id: r.getAttribute("data-req-id"),
+          state: r.getAttribute("data-state"),
+          text: t(r.querySelector(".review-req-state")),
+        })),
+        can_propose: q("button", c).some((b) => t(b) === "Propose changes"),
         // What the reviewer asks, one row per request: the id and the text of each,
         // as the old line "Requirements: q1 text; q2 text" said them.
         reqs_line: (() => {
@@ -118,6 +170,23 @@ async function view(page) {
         })),
         blocked: q(".review-blocked", c).map(t),
       })),
+      // The link between a manuscript and its supplementary files: the line
+      // that names it, and the box that offers a revision to join.
+      linked: (() => {
+        const n = document.getElementById("review-linked");
+        return n && n.hidden === false ? t(n) : "";
+      })(),
+      link_box: {
+        shown: document.getElementById("review-link-box")?.hidden === false,
+        candidates: q("#review-link-candidates button").map(t),
+      },
+      ledger_note: (() => {
+        const n = document.getElementById("review-ledger-note");
+        return n && n.hidden === false ? t(n) : "";
+      })(),
+      ledger_edit_buttons: q("#review-ledger .review-ledger-item button")
+        .map(t)
+        .filter((x) => x === "Edit" || x === "Remove").length,
       decisions: q("#review-decisions > div").map(t),
       // What each waiting item is about, from its attributes (its sentence is plain words).
       decisions_raw: q("#review-decisions > div").map((d) => ({
@@ -692,6 +761,167 @@ const steps = {
     await page.click("#review-refresh");
     await waitMessage(page, 120_000);
     return view(page);
+  },
+
+  // ---- stage parts: a manuscript and its supplementary file ----
+
+  // The supplementary file joins the revision of a.main (a file name) by the
+  // button of that candidate. The wait ends when the line that names the
+  // manuscript shows, or when the message line shows an error.
+  async "link-join"(page, a) {
+    await clearMessage(page);
+    await openFold(page, "review-link-box");
+    await page
+      .locator("#review-link-candidates button", { hasText: `Join the revision of ${a.main},` })
+      .first()
+      .click({ timeout: 30_000 });
+    await page.waitForFunction(
+      () => {
+        const m = document.getElementById("review-message");
+        const failed = (m?.textContent.trim() ?? "") !== "" && m.classList.contains("form-error");
+        return failed || document.getElementById("review-linked")?.hidden === false;
+      },
+      null,
+      { timeout: 60_000, polling: 250 },
+    );
+    return view(page);
+  },
+
+  // The name the response letter gives a supplementary file, set in its pane
+  // after the join: the field in the line of the manuscript, "Save name".
+  async "link-label"(page, a) {
+    await clearMessage(page);
+    await page.fill("#review-part-label", a.label, { timeout: 30_000 });
+    await page.click("#review-linked .review-part-label button", { timeout: 30_000 });
+    await waitMessage(page, 60_000, "^The response letter calls this file ");
+    return view(page);
+  },
+
+  // "Leave this revision" in the supplementary file.
+  async "link-leave"(page) {
+    await clearMessage(page);
+    await page.click("#review-linked .review-link-leave", { timeout: 30_000 });
+    await waitMessage(page, 60_000, "left the revision of");
+    // The candidates of the join box are asked for after the message.
+    await sleep(2000);
+    return view(page);
+  },
+
+  // Nothing is pressed: the step waits until the row of a.ref says a.until
+  // (a RegExp source), as it does when the daemon tells this pane that the
+  // other file of the revision changed. matched: false when it never did.
+  async "wait-state"(page, a) {
+    const matched = await page
+      .waitForFunction(
+        ([ref, source]) => {
+          const c = [...document.querySelectorAll(".review-comment")].find(
+            (x) => x.querySelector(".review-comment-head strong")?.textContent.trim() === ref,
+          );
+          const label = c?.querySelector(".review-comment-state")?.textContent ?? "";
+          return !!c && new RegExp(source).test(label);
+        },
+        [a.ref, a.until],
+        { timeout: a.timeout_ms ?? 60_000, polling: 250 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+    return { matched, ...(await view(page)) };
+  },
+
+  // The same for the line that names the linked files.
+  async "wait-linked"(page, a) {
+    const matched = await page
+      .waitForFunction(
+        (source) => {
+          const n = document.getElementById("review-linked");
+          return !!n && n.hidden === false && new RegExp(source).test(n.textContent ?? "");
+        },
+        a.until,
+        { timeout: a.timeout_ms ?? 60_000, polling: 250 },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+    return { matched, ...(await view(page)) };
+  },
+
+  // The review is split again and saved WITHOUT the comment a.drop (and
+  // without the rows that are no reviewer comment). Whatever comes of it is
+  // returned: the wait ends when the message line shows an error (the save
+  // was refused) or when the cards are those of the shorter list (it went
+  // through).
+  async "save-without"(page, a) {
+    await showPasteBox(page);
+    await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
+    await clearMessage(page);
+    await page.click("#review-split");
+    await waitMessage(page, 10 * 60_000, "^Split into ");
+    const keep = /^R\d+\.\d+$/;
+    const draftRefs = () =>
+      page.$$eval(".review-draft-row .review-ref", (ns) => ns.map((n) => n.value));
+    const removed = [];
+    for (;;) {
+      const refs = await draftRefs();
+      const i = refs.findIndex((r) => !keep.test(r) || r === a.drop);
+      if (i < 0) break;
+      removed.push(refs[i]);
+      await page
+        .locator(".review-draft-row")
+        .nth(i)
+        .locator("button", { hasText: "Remove" })
+        .click();
+    }
+    for (const [ref, lines] of Object.entries(a.requirements || {})) {
+      const i = (await draftRefs()).indexOf(ref);
+      if (i < 0) continue;
+      await page
+        .locator(".review-draft-row")
+        .nth(i)
+        .locator("textarea.review-reqs")
+        .fill(lines.join("\n"));
+    }
+    const kept = await draftRefs();
+    await clearMessage(page);
+    await page.click("#review-save");
+    await page.waitForFunction(
+      (n) => {
+        const m = document.getElementById("review-message");
+        const failed = (m?.textContent.trim() ?? "") !== "" && m.classList.contains("form-error");
+        return (
+          failed ||
+          (document.querySelectorAll(".review-comment").length === n &&
+            document.querySelectorAll(".review-draft-row").length === 0)
+        );
+      },
+      kept.length,
+      { timeout: 120_000, polling: 250 },
+    );
+    return { removed, kept, ...(await view(page)) };
+  },
+
+  // What Word.Document.saved reads in this pane now. saved: as the pane
+  // sends it with a status refresh (tools-word.js documentSaved: true, false
+  // or null). raw: the property as Office.js gave it, error: why it gave
+  // none. Read only.
+  async "doc-saved"(page) {
+    return page.evaluate(async (origin) => {
+      const m = await import(`${origin}/shared/tools-word.js`);
+      let raw = null;
+      let error = null;
+      try {
+        raw = await Word.run(async (context) => {
+          context.document.load("saved");
+          await context.sync();
+          return context.document.saved;
+        });
+      } catch (e) {
+        error = String(e?.message ?? e);
+      }
+      return { saved: await m.documentSaved(), raw, raw_type: typeof raw, error };
+    }, ORIGIN);
   },
 
   // "Check revised paragraphs": a status refresh, then the check of the
@@ -1343,7 +1573,7 @@ const steps = {
 
 // Loaded by a test, the steps are only handed over; run as a program, one
 // step is done.
-module.exports = { steps, MODELS_RETRY_AFTER_MS };
+module.exports = { steps, MODELS_RETRY_AFTER_MS, isPaneOf };
 if (require.main === module) {
   (async () => {
     const [step, argsFile] = process.argv.slice(2);

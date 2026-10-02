@@ -48,6 +48,11 @@ export const LETTER_DEFAULTS = {
   // the figure and the name of the file in figures/submission/.
   figure_line: "[Revised {figure}, file {file}]",
   figure_new_line: "[New {figure}, file {file}]",
+  // A revision with supplementary Word files: every location line names its
+  // file, {line} being the line as above. main_label: the manuscript itself.
+  // A supplementary file is named by the label of its link.
+  file_line: "{file} {line}",
+  main_label: "Manuscript",
   line_one: "line {a}",
   line_range: "lines {a}-{b}",
   section_level: null,

@@ -2,7 +2,7 @@
 // Python renderer: what it records, what it refuses, and where it writes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFigureService, figureFindings, SOURCES_FILE } from "../daemon/figure-service.mjs";
@@ -268,6 +268,34 @@ test("a figures or submission folder that leads out of the manuscript folder is 
       w.service.state(w.doc),
       /The figures folder must be inside the manuscript folder/,
     );
+  } finally {
+    await w.cleanup();
+    await rm(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test("a figures folder that is a link out of the manuscript folder: refused, and nothing is made outside", async () => {
+  const w = await world();
+  const elsewhere = await mkdtemp(join(tmpdir(), "figure-elsewhere-"));
+  try {
+    // The figure files live elsewhere and `figures` is a link to that place.
+    for (const name of ["fig2_before.svg", "fig2_after.svg"])
+      await writeFile(join(elsewhere, name), await readFile(w.fig(name)));
+    await rm(join(w.dir, "figures"), { recursive: true });
+    await symlink(elsewhere, join(w.dir, "figures"));
+    const outside = await listing(elsewhere);
+    // The files are only read, so the change is recorded; its pictures are
+    // not made, and the refusal comes before a folder is created.
+    const { id, problems } = await w.service.propose(w.doc, w.input());
+    assert.match(problems.join(" "), /leads outside the manuscript folder/);
+    assert.deepEqual(await readdir(elsewhere), outside, "no .renders folder outside");
+    await assert.rejects(
+      w.service.adopt(w.doc, { ref: "R1.1", id }),
+      /leads outside the manuscript folder/,
+    );
+    assert.deepEqual(await readdir(elsewhere), outside, "no submission folder outside");
+    assert.deepEqual(await listing(elsewhere), outside);
+    assert.equal((await w.figure(id)).state, "proposed");
   } finally {
     await w.cleanup();
     await rm(elsewhere, { recursive: true, force: true });
