@@ -9,10 +9,7 @@ test("a Windows document folder and the WSL workspace folder of it are one place
   const url = "D:\\papers\\revision\\run-1\\review_manuscript.docx";
   const dir = docDirFromActiveUrl(url);
   assert.equal(dir, "D:/papers/revision/run-1");
-  assert.equal(
-    isInOrUnder(dir, "/mnt/d/papers/revision/run-1"),
-    true,
-  );
+  assert.equal(isInOrUnder(dir, "/mnt/d/papers/revision/run-1"), true);
   assert.equal(isInOrUnder(dir, "/mnt/d/papers/revision"), true);
   assert.equal(isInOrUnder(dir, "/mnt/d/papers"), true);
   assert.equal(isInOrUnder(dir, "/mnt/d"), true);
