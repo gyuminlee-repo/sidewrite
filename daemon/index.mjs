@@ -54,6 +54,8 @@ import {
 } from "./query-options.mjs";
 import { stat } from "node:fs/promises";
 import { healthBody } from "./health.mjs";
+import { createFigureService } from "./figure-service.mjs";
+import { createFigureHttp } from "./figure-http.mjs";
 
 const STARTED_AT = Date.now();
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -159,6 +161,22 @@ function sendError(req, res, status, headline, requestedPath) {
   }
 }
 
+// The figures page (http://127.0.0.1:<port>/figures/) and its API: a
+// reviewer request answered by a figure file made outside Word. It may name
+// only documents of connected Word panes.
+// (The bridge is made further down: a request that comes before it finds no
+// connected pane.)
+let figureBridge = null;
+const figureHttp = createFigureHttp({
+  origin: HTTP_ORIGIN,
+  token: BRIDGE_TOKEN,
+  listPanes: () => figureBridge?.listPanes() ?? [],
+  service: createFigureService(),
+  pageDir: join(taskpaneDir, "figures"),
+  // A decision on the page reaches the open Word pane of that manuscript.
+  sendEvent: (key, obj) => figureBridge?.sendToTaskpane(obj, key),
+});
+
 const http = createServer(async (req, res) => {
   // Restrictive CORS: only the taskpane's same origin (HTTP_ORIGIN) gets the
   // Access-Control-Allow-Origin header. Other origins (malicious web pages
@@ -200,6 +218,8 @@ const http = createServer(async (req, res) => {
       res.end(BRIDGE_TOKEN);
       return;
     }
+
+    if (await figureHttp(req, res)) return;
 
     const relPath = urlPath === "/" ? "/index.html" : urlPath;
     const fsPath = join(taskpaneDir, relPath);
@@ -993,6 +1013,7 @@ const bridge = createBridge({
     },
   },
 });
+figureBridge = bridge;
 
 // ---------------------------------------------------------------------------
 // Office-bridge MCP server (in-process; forwards tool calls to the taskpane).

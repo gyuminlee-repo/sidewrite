@@ -45,6 +45,8 @@ import {
   candidateRule,
   candidateLabel,
   queueRefs,
+  figuresUrl,
+  hasFigureWork,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
@@ -66,6 +68,23 @@ const TURN_WAIT_MS = 30 * 60_000;
 // sendRequest waits as long by default); the request says so (wait_ms).
 const PROPOSE_WAIT_MS = 10_000;
 const PROVIDER_WAIT = "Waiting for the daemon to confirm the stored provider choice...";
+const FIGURES_LABEL = "Figures and other files";
+
+// Opens an address in the browser of the computer from inside an Office task
+// pane (Office.context.ui.openBrowserWindow, requirement set
+// OpenBrowserWindowApi 1.1: Word on Windows, Mac and iPad, not on the web).
+// true: Office took it. false: no Office here or no such API; the link is
+// then followed as a normal link.
+export function openInBrowser(url, office = globalThis.Office) {
+  try {
+    if (!office?.context?.requirements?.isSetSupported?.("OpenBrowserWindowApi", "1.1"))
+      return false;
+    office.context.ui.openBrowserWindow(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function initReviewPane({
   sendRequest,
@@ -83,6 +102,11 @@ export function initReviewPane({
   // () => the text of the last answer of the model in the chat, or null. It is
   // the reason a turn gives when it proposes no change.
   lastReply = () => null,
+  // () => the document as this pane named it to the daemon (hello
+  // active_doc), or null. The figures page finds the manuscript by it.
+  docUrl = () => null,
+  // () => where the daemon serves this pane, and with it the figures page.
+  daemonOrigin = () => globalThis.location?.origin ?? "",
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -126,6 +150,29 @@ export function initReviewPane({
     }
     for (const k of kids) if (k) n.append(k);
     return n;
+  }
+  // The way to the figures page of this manuscript, at the comment `ref` when
+  // one is given: a link that Office opens in the browser where it can and
+  // that is a normal link elsewhere, with its address under it to copy when
+  // nothing opens.
+  function figuresLink(ref = null) {
+    const url = figuresUrl(daemonOrigin(), docUrl(), ref);
+    const a = el("a", {
+      class: "btn-secondary btn-small review-figures-open",
+      href: url,
+      target: "_blank",
+      rel: "noopener",
+      text: FIGURES_LABEL,
+    });
+    a.addEventListener("click", (ev) => {
+      if (openInBrowser(url)) ev?.preventDefault?.();
+    });
+    return el(
+      "div",
+      { class: "review-figures", ...(ref ? { "data-figures-ref": ref } : {}) },
+      a,
+      el("div", { class: "review-figures-address", text: url }),
+    );
   }
   // The message line as it was last written, for a line put in front of it.
   let said = { text: "", bad: false };
@@ -696,6 +743,9 @@ export function initReviewPane({
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
         requestList,
+        // A request that is answered in another file, or a figure change:
+        // the comparison and the decision are on the figures page.
+        hasFigureWork(c) ? figuresLink(c.ref) : null,
         reqs,
         saveReqs,
       );
@@ -1061,6 +1111,7 @@ export function initReviewPane({
     renderCandidates();
     renderDecisions();
     renderExternal();
+    $("review-figures-all").replaceChildren(figuresLink());
     showProgress();
     $("review-file").textContent = state.path ? `Review file: ${state.path}` : "";
     if (root.scrollTop !== keep) root.scrollTop = keep;
@@ -1734,7 +1785,9 @@ export function initReviewPane({
       } else if (
         msg.event === "change_recorded" ||
         msg.event === "edit_blocked" ||
-        msg.event === "comment_noted"
+        msg.event === "comment_noted" ||
+        // A figure change was recorded or decided on the figures page.
+        msg.event === "figures_changed"
       ) {
         load()
           .catch((e) => say(e.message, true))

@@ -4,13 +4,28 @@
 //
 //   { paragraphs: [{ kind, text, color, ref, reviewer, removed? }] }
 //   kind: reviewer_head | section_head | comment_head | comment | response |
-//         gloss | declined | location | quote
+//         gloss | declined | location | quote | figure
 //   color: RRGGBB or null (the reviewer's own words carry no colour)
 //
 // Only the `response` and `gloss` text is prose a person or the model wrote.
-// Headings, location lines, quotes and line ranges are computed.
+// Headings, location lines, quotes, line ranges and figure lines are computed.
 
 import { locationLine, renderFrame } from "./response-lines.mjs";
+import { adoptedFigures } from "./response-quotes.mjs";
+
+// The line of an adopted figure change: its label and the name of the copy
+// in the submission folder. What changed in the figure is said by the answer
+// prose, not here.
+export function figureLine(f, L) {
+  const file = String(f.adopted?.path ?? "")
+    .split(/[\\/]/)
+    .pop();
+  const values = { figure: f.figure, file };
+  return String(f.kind === "new" ? L.figure_new_line : L.figure_line).replace(
+    /\{(figure|file)\}/g,
+    (m, key) => values[key],
+  );
+}
 
 const linesOf = (s) =>
   String(s ?? "")
@@ -106,12 +121,14 @@ export function buildLetterModel(rev, profile, { gloss = false } = {}) {
     for (const t of answerProse(c)) add("response", t, body);
     const translation = gloss ? glossLine(c, L) : "";
     if (translation) add("gloss", translation, profile.colors.response_kr ?? null);
-    if (c.declined && !citations.length) add("declined", L.declined_line, body);
+    const figures = adoptedFigures(c);
+    if (c.declined && !citations.length && !figures.length) add("declined", L.declined_line, body);
     for (const cit of citations) {
       const removed = cit.kind === "removed";
       add("location", locationLine(cit, L), revised, { removed });
       if (!removed) add("quote", cit.quote, revised);
     }
+    for (const f of figures) add("figure", figureLine(f, L), revised);
   }
   return { paragraphs };
 }

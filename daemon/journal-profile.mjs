@@ -44,6 +44,10 @@ export const LETTER_DEFAULTS = {
   location_line_no_section: "[Revised, {lines}]",
   removed_line_no_section: "[Removed]",
   declined_line: "[No change made]",
+  // The line of an adopted figure change (the figures page): the label of
+  // the figure and the name of the file in figures/submission/.
+  figure_line: "[Revised {figure}, file {file}]",
+  figure_new_line: "[New {figure}, file {file}]",
   line_one: "line {a}",
   line_range: "lines {a}-{b}",
   section_level: null,

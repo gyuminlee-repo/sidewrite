@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Sidewrite figures and other files</title>
+    <link rel="stylesheet" href="/figures/figures.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="top-title">
+        <h1>Figures and other files</h1>
+        <p class="sub">
+          Sidewrite. Record a figure, table or other file that was changed outside the Word file,
+          under the reviewer comment it answers.
+        </p>
+      </div>
+      <div class="top-pick">
+        <label for="manuscript">Manuscript</label>
+        <select id="manuscript"></select>
+        <button id="reload" type="button">Reload</button>
+      </div>
+    </header>
+    <main>
+      <div id="notice" class="notice" hidden></div>
+      <div id="link-note" class="notice" hidden></div>
+      <div id="empty" class="empty" hidden>
+        <h2>No manuscript is open</h2>
+        <p>Open the manuscript in Word with the Sidewrite pane, then reload.</p>
+      </div>
+      <div id="comments"></div>
+    </main>
+    <script src="/figures/figures.js"></script>
+  </body>
+</html>

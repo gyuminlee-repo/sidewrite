@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "manuscript": "paper.docx",
+  "updated_at": "2026-01-02T00:00:00.000Z",
+  "comments": [
+    {
+      "ref": "R1.1",
+      "reviewer": 1,
+      "text": "Please state the unit, and add the control to Figure 2.",
+      "requirements": [
+        {
+          "id": "q1",
+          "text": "state the unit"
+        },
+        {
+          "id": "q2",
+          "text": "add the control to Figure 2"
+        }
+      ],
+      "status": "in_progress",
+      "changes": [
+        {
+          "id": "R1.1-1",
+          "word_comment_id": "c7",
+          "paragraph_index": 1,
+          "paragraph_id": "P1",
+          "kind": "replace",
+          "find": "30 degrees",
+          "text": "30 °C",
+          "before": "It was held at 30 degrees.",
+          "after": "It was held at 30 °C.",
+          "rationale": {
+            "what": "Unit.",
+            "why": "Asked.",
+            "addresses": "unit",
+            "requirement_ids": ["q1"]
+          },
+          "override_of": [],
+          "lost_facts": [],
+          "unsourced_terms": [],
+          "from_review": [],
+          "narrowed_from": null,
+          "rewrite_id": null,
+          "context": {
+            "left": "held at ",
+            "right": "."
+          },
+          "duplicate_before": false,
+          "comment_missing": null,
+          "comment_cleaned_at": null,
+          "created_at": "2026-01-01T00:00:00.000Z",
+          "state": "accepted",
+          "checked_at": null
+        }
+      ],
+      "blocked": [],
+      "requirement_seq": 2,
+      "blocked_seq": 0,
+      "questions": [],
+      "named_terms": [],
+      "same_term_at": [],
+      "requirements_outside": [
+        {
+          "id": "q2",
+          "why": "The figure is a picture file.",
+          "at": "2026-01-01T00:00:00.000Z"
+        }
+      ],
+      "response": {
+        "text": "We now give the unit.",
+        "gloss": "",
+        "source": "author",
+        "drafted_at": "2026-01-01T01:00:00.000Z",
+        "previous": null,
+        "citations": [],
+        "stale": [],
+        "stale_at": {},
+        "declined_requirements": []
+      },
+      "declined": null
+    },
+    {
+      "ref": "R1.2",
+      "reviewer": 1,
+      "text": "Shorten the abstract.",
+      "requirements": [],
+      "status": "pending",
+      "changes": [],
+      "blocked": [],
+      "requirement_seq": 0,
+      "blocked_seq": 0,
+      "questions": [],
+      "named_terms": [],
+      "same_term_at": [],
+      "requirements_outside": [],
+      "response": null,
+      "declined": null
+    }
+  ],
+  "ledger": [
+    {
+      "id": "L1",
+      "kind": "forbid",
+      "text": "No exclamation marks.",
+      "scope": "manuscript",
+      "check": {
+        "type": "regex",
+        "pattern": "!",
+        "flags": "",
+        "expect": "absent"
+      },
+      "source": null,
+      "status": "unchecked",
+      "violation_count": 0,
+      "checked_at": null,
+      "violations": [],
+      "unsure": [],
+      "checked_hashes": null
+    }
+  ],
+  "ledger_seq": 1,
+  "snapshot": null,
+  "external": [],
+  "consistency": null,
+  "journal_profile": null,
+  "profile_overrides": {},
+  "response_render": null,
+  "response_export": null
+}
