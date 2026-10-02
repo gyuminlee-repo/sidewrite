@@ -20,6 +20,10 @@
 // /bridge-token, which another site cannot read. `doc` must be the document
 // of a Word pane that is connected now. A render is found by the ids of a
 // recorded figure change: no request names a path to read back.
+//
+// After a request that changed something, the Word panes of that manuscript
+// are told ({ type: "review_event", event: "figures_changed", ref }), so the
+// Review and Response tabs show the new state without a press on Refresh.
 
 import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -69,15 +73,17 @@ function readBody(req) {
 }
 
 // origin: the address of this HTTP server ("http://127.0.0.1:47834").
-// token: the bridge token. listPanes: () => [{ host, activeDoc }] of the
+// token: the bridge token. listPanes: () => [{ key, host, activeDoc }] of the
 // connected panes (bridge.listPanes). service: createFigureService().
-// pageDir: the folder of the page files.
+// pageDir: the folder of the page files. sendEvent: (key, message) => sends
+// a message to the pane `key` (bridge.sendToTaskpane).
 export function createFigureHttp({
   origin,
   token,
   listPanes,
   service,
   pageDir,
+  sendEvent = () => {},
   env = process.env,
   log = console.log,
 }) {
@@ -85,15 +91,29 @@ export function createFigureHttp({
   const host = new URL(origin).host;
 
   // Documents of connected Word panes that the daemon can open, once each:
-  // [{ doc, path }]. doc: the name the pane gave (what a request sends back).
+  // [{ doc, path, keys }]. doc: the name the pane gave (what a request sends
+  // back). keys: the panes that have it open.
   function manuscripts() {
     const seen = new Map();
     for (const p of listPanes()) {
       if (p.host !== "word" || typeof p.activeDoc !== "string") continue;
       const path = localDocPath(p.activeDoc, env);
-      if (path && !seen.has(p.activeDoc)) seen.set(p.activeDoc, path);
+      if (!path) continue;
+      if (!seen.has(p.activeDoc)) seen.set(p.activeDoc, { doc: p.activeDoc, path, keys: [] });
+      seen.get(p.activeDoc).keys.push(p.key);
     }
-    return [...seen].map(([doc, path]) => ({ doc, path }));
+    return [...seen.values()];
+  }
+  // The panes of a manuscript learn that its figure changes are not as they
+  // were. A pane that is gone by now is nothing to report to the page.
+  function tellPanes(doc, ref) {
+    for (const key of manuscripts().find((m) => m.doc === doc)?.keys ?? []) {
+      try {
+        sendEvent(key, { type: "review_event", event: "figures_changed", ref: ref ?? null });
+      } catch (e) {
+        log(`[figures] no figures_changed for a pane: ${e?.message ?? e}`);
+      }
+    }
   }
   function openDoc(doc) {
     const hit = manuscripts().find((m) => m.doc === doc);
@@ -140,7 +160,9 @@ export function createFigureHttp({
     } else if (req.method === "POST" && POSTS.has(name)) {
       const body = await readBody(req);
       const doc = openDoc(body.doc);
-      return json(res, 200, { ok: true, ...(await service[name](doc, body)) });
+      const out = await service[name](doc, body);
+      tellPanes(body.doc, typeof body.ref === "string" ? body.ref : null);
+      return json(res, 200, { ok: true, ...out });
     }
     return json(res, 404, { ok: false, error: "No such request." });
   }

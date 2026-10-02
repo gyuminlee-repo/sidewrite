@@ -21,6 +21,7 @@ import {
   exportMessage,
 } from "../taskpane/shared/response-view.js";
 import { locationLine } from "../daemon/response-lines.mjs";
+import { checkResponses } from "../daemon/response-check.mjs";
 import { withDefaults } from "../daemon/journal-profile.mjs";
 
 const P = withDefaults({}).response_letter;
@@ -248,13 +249,66 @@ const COMMENT = {
 
 test("openRequirements", () => {
   assert.deepEqual(openRequirements(COMMENT), [
-    { id: "q2", text: "b", pending: true },
-    { id: "q3", text: "c", pending: false },
+    { id: "q2", text: "b", pending: true, figure: false },
+    { id: "q3", text: "c", pending: false, figure: false },
   ]);
   assert.deepEqual(openRequirements({ ...COMMENT, declined: { reason: "x" } }), []);
   assert.deepEqual(openRequirements({ requirements: [{ id: "q1", text: "a" }] }), [
-    { id: "q1", text: "a", pending: false },
+    { id: "q1", text: "a", pending: false, figure: false },
   ]);
+});
+
+// The card of the Response tab and the check of the daemon count the same
+// requests as answered: an adopted figure change answers, a proposed or a
+// rejected one does not.
+test("openRequirements: an adopted figure change answers its requests; a proposed or rejected one does not", () => {
+  const figure = (state, ids) => ({ id: `R1.1-f${ids[0]}`, state, requirement_ids: ids });
+  const comment = {
+    ref: "R1.1",
+    reviewer: 1,
+    text: "t",
+    requirements: [
+      { id: "q1", text: "a" },
+      { id: "q2", text: "b" },
+      { id: "q3", text: "c" },
+      { id: "q4", text: "d" },
+    ],
+    changes: [],
+    figure_changes: [
+      figure("adopted", ["q1"]),
+      figure("proposed", ["q2"]),
+      figure("rejected", ["q3"]),
+    ],
+    response: { text: "We changed the figure." },
+  };
+  const open = openRequirements(comment);
+  assert.deepEqual(open, [
+    { id: "q2", text: "b", pending: false, figure: true },
+    { id: "q3", text: "c", pending: false, figure: false },
+    { id: "q4", text: "d", pending: false, figure: false },
+  ]);
+  // The daemon fails the same three and no other.
+  const failed = checkResponses({
+    revision: { comments: [comment] },
+    snapshot: { paragraphs: [] },
+    profile: withDefaults({}),
+  })
+    .filter((r) => r.id === "requirements")
+    .map((r) => r.detail.split(" ")[0]);
+  assert.deepEqual(
+    failed,
+    open.map((q) => q.id),
+  );
+  // Reopened after it was adopted: the request is open again.
+  const reopened = {
+    ...comment,
+    figure_changes: [figure("proposed", ["q1"])],
+  };
+  assert.equal(openRequirements(reopened)[0].id, "q1");
+  assert.equal(openRequirements(reopened)[0].figure, true);
+  // A file from before the figure lane has no figure_changes.
+  const { figure_changes, ...old } = comment;
+  assert.equal(openRequirements(old).length, 4);
 });
 
 test("undecidedChanges and undecidedText: what still waits for a decision in Word", () => {

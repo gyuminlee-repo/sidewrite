@@ -173,6 +173,8 @@ const figureHttp = createFigureHttp({
   listPanes: () => figureBridge?.listPanes() ?? [],
   service: createFigureService(),
   pageDir: join(taskpaneDir, "figures"),
+  // A decision on the page reaches the open Word pane of that manuscript.
+  sendEvent: (key, obj) => figureBridge?.sendToTaskpane(obj, key),
 });
 
 const http = createServer(async (req, res) => {

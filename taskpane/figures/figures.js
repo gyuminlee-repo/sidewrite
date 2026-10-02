@@ -1,4 +1,5 @@
-// The figures page: figure changes under reviewer comments.
+// The figures page: figures and other files that were changed outside the
+// Word file, under the reviewer comments they answer.
 // Talks to /figures/api/* (daemon/figure-http.mjs) over plain HTTP with the
 // bridge token in a header. No WebSocket: a second connection for the same
 // document would take the place of the Word pane.
@@ -12,11 +13,19 @@
   let state = null;
   let files = { folder: "figures", files: [] };
 
+  // A link from the Word pane names the manuscript and the comment:
+  // /figures/?doc=<the document as its pane names it>&ref=<comment>.
+  const link = new URLSearchParams(location.search);
+  let wanted = link.get("doc"); // the manuscript of the link, until it is shown
+  let goTo = link.get("ref"); // the comment to scroll to, once
+  let marked = null; // the comment of the link, shown with a mark
+
   // What the page remembers between two drawings of the list.
   const modeOf = new Map(); // figure id -> "side" | "overlay" | "difference"
   const zoomOf = new Map(); // figure id -> zoom the reader set
   const pictures = new Map(); // "<id>:<side>:<hash>" -> Promise<{ url, width, height } | { error }>
-  const forms = new Map(); // comment ref -> the open "Add figure change" form
+  const forms = new Map(); // comment ref -> the open form of a new change
+  const cards = new Map(); // comment ref -> its card, as of the last drawing
 
   const $ = (id) => document.getElementById(id);
 
@@ -58,6 +67,11 @@
 
   const baseName = (p) => String(p).split(/[\\/]/).pop();
   const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  // "XLSX file", from the name of a file.
+  function typeText(path) {
+    const m = /\.([A-Za-z0-9]+)$/.exec(baseName(path));
+    return m ? `${m[1].toUpperCase()} file` : "No file type in the name";
+  }
   function sizeText(bytes) {
     if (bytes < 1024) return `${bytes} bytes`;
     if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -75,6 +89,12 @@
     box.className = bad ? "notice bad" : "notice";
   }
 
+  function linkNote(text) {
+    const box = $("link-note");
+    box.hidden = !text;
+    box.textContent = text;
+  }
+
   // ---- loading ---------------------------------------------------------------
 
   async function loadManuscripts() {
@@ -84,7 +104,17 @@
     pick.replaceChildren(
       ...manuscripts.map((m, i) => el("option", { value: String(i) }, baseName(m.path))),
     );
-    const at = manuscripts.findIndex((m) => m.doc === doc);
+    const at = manuscripts.findIndex((m) => m.doc === (wanted ?? doc));
+    // The manuscript of the link is not open in a pane: said plainly. Its
+    // comment is not looked for in another manuscript; a reload looks for
+    // the manuscript again.
+    linkNote(
+      wanted && at < 0
+        ? `The manuscript of this link is not open in a Word pane: ${baseName(wanted)}. Open it in Word with the Sidewrite pane, then press Reload.` +
+            (manuscripts.length ? ` This page shows ${baseName(manuscripts[0].path)}.` : "")
+        : "",
+    );
+    if (at >= 0) wanted = null;
     doc = manuscripts.length ? manuscripts[Math.max(at, 0)].doc : null;
     pick.value = String(Math.max(at, 0));
     pick.disabled = manuscripts.length < 2;
@@ -114,6 +144,21 @@
       notice(e.message, true);
     }
     draw();
+    showLinked();
+  }
+
+  // The comment the link names is scrolled to once and keeps its mark.
+  function showLinked() {
+    if (!goTo || !state || wanted) return;
+    const ref = goTo;
+    goTo = null;
+    if (!state.comments.some((c) => c.ref === ref)) {
+      linkNote(`The comment of this link is not in this manuscript: ${ref}.`);
+      return;
+    }
+    marked = ref;
+    draw();
+    cards.get(ref)?.scrollIntoView({ block: "start" });
   }
 
   // One request that changes something, then the list again.
@@ -163,6 +208,13 @@
   const SIDE_LABEL = { before: "Old file", after: "New file" };
 
   function compare(c, f) {
+    // A table, a data file: recorded, adopted and cited without a picture.
+    if (!f.preview)
+      return el(
+        "div",
+        { class: "compare" },
+        el("div", { class: "no-picture" }, "No preview for this file type."),
+      );
     const sides = f.before ? ["before", "after"] : ["after"];
     const two = sides.length === 2;
     const body = el("div", {}, el("div", { class: "no-picture" }, "Loading the pictures..."));
@@ -308,9 +360,7 @@
     };
     const row = (label, fn) => el("tr", {}, el("th", {}, label), ...sides.map((s) => cell(s, fn)));
     const mm = (pt) => Math.round((pt / 72) * 25.4);
-    return el(
-      "table",
-      { class: "facts" },
+    const head = [
       el("tr", {}, el("th", {}, ""), ...sides.map((s) => el("th", {}, SIDE_LABEL[s]))),
       el(
         "tr",
@@ -321,6 +371,24 @@
           return el("td", {}, `${baseName(file.path)} (${sizeText(file.bytes)})`);
         }),
       ),
+    ];
+    // Without a picture nothing was read in the file: its name says the type.
+    if (!f.preview)
+      return el(
+        "table",
+        { class: "facts" },
+        ...head,
+        el(
+          "tr",
+          {},
+          el("th", {}, "File type"),
+          ...sides.map((s) => el("td", {}, typeText((f[s].view ?? f[s].source).path))),
+        ),
+      );
+    return el(
+      "table",
+      { class: "facts" },
+      ...head,
       row("File type", (x) => x.type),
       row("Page size", (x) =>
         x.width_pt == null
@@ -391,7 +459,7 @@
             el(
               "div",
               { class: "hint" },
-              "This comment has no listed requests. List them on the Review tab in Word to tick what the figure answers.",
+              "This comment has no listed requests. List them on the Review tab in Word to tick what the figure or file answers.",
             ),
           ],
       value: () => boxes.filter((b) => b[0].checked).map((b) => b[0].value),
@@ -429,7 +497,7 @@
     return el(
       "div",
       { class: "form" },
-      el("div", { class: "row" }, el("label", {}, "Figure label"), label),
+      el("div", { class: "row" }, el("label", {}, "Figure or file"), label),
       el(
         "div",
         { class: "row" },
@@ -460,7 +528,7 @@
       el(
         "div",
         { class: "figure-head" },
-        el("h3", {}, f.figure, f.kind === "new" ? " (new figure)" : " (revised figure)"),
+        el("h3", {}, f.figure, f.kind === "new" ? " (new)" : " (revised)"),
         el("span", { class: `badge ${f.state}` }, stateText[f.state]),
       ),
       f.summary ? el("p", {}, f.summary) : null,
@@ -521,7 +589,7 @@
     return card;
   }
 
-  // ---- the form "Add figure change" --------------------------------------------
+  // ---- the form "Add a figure or file change" -----------------------------------
 
   const OTHER = "::other";
   function filePicker() {
@@ -560,9 +628,9 @@
         el("input", { type: "radio", name: `kind-${c.ref}`, value, checked }),
         text,
       );
-    const revised = kind("revised", "A figure that was revised", true);
-    const fresh = kind("new", "A new figure", false);
-    const label = el("input", { type: "text", placeholder: "Figure 2" });
+    const revised = kind("revised", "A figure or file that was revised", true);
+    const fresh = kind("new", "A new figure or file", false);
+    const label = el("input", { type: "text", placeholder: "Figure 2, Table S3" });
     const checks = requestChecks(
       c,
       c.requirements.filter((q) => q.outside).map((q) => q.id),
@@ -639,14 +707,19 @@
           }
         },
       },
-      "Record the figure change",
+      "Record the change",
     );
     return el(
       "div",
       { class: "form" },
-      el("h3", {}, "Add figure change"),
+      el("h3", {}, "Add a figure or file change"),
       el("div", { class: "row" }, revised, fresh),
-      el("div", { class: "row" }, el("label", {}, "Figure label in the manuscript"), label),
+      el(
+        "div",
+        { class: "row" },
+        el("label", {}, "Figure or file, as the manuscript names it"),
+        label,
+      ),
       el(
         "div",
         { class: "row" },
@@ -668,8 +741,8 @@
         "div",
         { class: "hint row" },
         files.files.length
-          ? `The lists show the figure files in the folder "${files.folder}" next to the manuscript. Neither file is changed.`
-          : `No figure files were found in the folder "${files.folder}" next to the manuscript. Put the figure files there and reload, or paste a path.`,
+          ? `The lists show the files in the folder "${files.folder}" next to the manuscript. Neither file is changed.`
+          : `No files were found in the folder "${files.folder}" next to the manuscript. Put the files there and reload, or paste a path.`,
       ),
       el("div", { class: "row" }, el("label", {}, "What changed, in one sentence"), summary),
       el(
@@ -702,9 +775,12 @@
       c.figures.filter((f) => f.state === "proposed").flatMap((f) => f.requirement_ids),
     );
     const outside = c.requirements.some((q) => q.outside);
-    return el(
+    const card = el(
       "section",
-      { class: outside ? "comment outside" : "comment", "data-ref": c.ref },
+      {
+        class: `comment${outside ? " outside" : ""}${c.ref === marked ? " linked" : ""}`,
+        "data-ref": c.ref,
+      },
       el("h2", {}, commentTitle(c), c.section ? ` (${c.section})` : ""),
       el("p", { class: "comment-text" }, c.text),
       c.requirements.length
@@ -718,9 +794,13 @@
                 q.text,
                 q.outside ? el("span", { class: "badge outside" }, "Outside the Word file") : null,
                 adopted.has(q.id)
-                  ? el("span", { class: "badge adopted" }, "Answered by an adopted figure")
+                  ? el("span", { class: "badge adopted" }, "Answered by an adopted figure or file")
                   : proposed.has(q.id)
-                    ? el("span", { class: "badge proposed" }, "Figure waits for a decision")
+                    ? el(
+                        "span",
+                        { class: "badge proposed" },
+                        "A figure or file waits for a decision",
+                      )
                     : null,
                 q.outside && q.why ? el("span", { class: "why" }, q.why) : null,
               ),
@@ -739,13 +819,16 @@
               draw();
             },
           },
-          "Add figure change",
+          "Add a figure or file change",
         ),
     );
+    cards.set(c.ref, card);
+    return card;
   }
 
   function draw() {
     const list = $("comments");
+    cards.clear();
     $("empty").hidden = !!doc;
     if (!state) {
       list.replaceChildren();
@@ -771,14 +854,15 @@
       (c) => c.requirements.some((q) => q.outside) || c.figures.length,
     );
     const rest = state.comments.filter((c) => !first.includes(c));
+    // (replaceChildren writes the word "null" for a null: none is passed.)
     list.replaceChildren(
-      first.length
-        ? el("div", { class: "group" }, "Requests outside the Word file, and figure changes")
-        : null,
+      ...(first.length
+        ? [el("div", { class: "group" }, "Requests outside the Word file, figures and other files")]
+        : []),
       ...first.map(commentCard),
-      rest.length
-        ? el("div", { class: "group" }, first.length ? "Other comments" : "Comments")
-        : null,
+      ...(rest.length
+        ? [el("div", { class: "group" }, first.length ? "Other comments" : "Comments")]
+        : []),
       ...rest.map(commentCard),
     );
   }
@@ -787,6 +871,8 @@
   $("manuscript").addEventListener("change", (e) => {
     doc = manuscripts[Number(e.target.value)]?.doc ?? null;
     forms.clear();
+    wanted = goTo = marked = null;
+    linkNote("");
     reload({ list: false });
   });
 

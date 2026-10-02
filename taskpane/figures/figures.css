@@ -141,6 +141,12 @@ main {
 .comment.outside {
   border-left: 4px solid var(--accent);
 }
+/* The comment a link from the Word pane names. */
+.comment.linked {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  scroll-margin-top: 12px;
+}
 .comment h2 {
   margin: 0 0 6px;
   font-size: 16px;

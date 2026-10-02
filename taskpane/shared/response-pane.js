@@ -311,8 +311,8 @@ export function initResponsePane({
       ),
     );
 
-    // The requests no accepted change answers: each is cited, or declined
-    // with a reason the letter prints.
+    // The requests no accepted change and no adopted figure change answers:
+    // each is cited, or declined with a reason the letter prints.
     const declined = c.response?.declined_requirements ?? [];
     const saveDeclined = (list) =>
       ask("response_save", { ref: c.ref, declined_requirements: list });
@@ -323,7 +323,13 @@ export function initResponsePane({
           "div",
           { class: "response-req" },
           el("span", {
-            text: `${q.id} ${q.text}: no accepted change${q.pending ? " (a change is pending in Word)" : ""}`,
+            text: `${q.id} ${q.text}: no accepted change${
+              q.pending
+                ? " (a change is pending in Word)"
+                : q.figure
+                  ? " (a figure or file waits for your decision on the figures page)"
+                  : ""
+            }`,
           }),
           reasonInput(key, "response-req-reason"),
           action("Decline", async () => {
@@ -590,6 +596,13 @@ export function initResponsePane({
   return {
     onEvent(msg) {
       if (msg.event === "job_done") jobDone(msg);
+      // A figure change was recorded or decided on the figures page
+      // (taskpane.js passes the review_event on): which requests are
+      // answered is read again, and the last check is about the state before.
+      else if (msg.event === "figures_changed")
+        load()
+          .then(changed, (e) => say(e.message, true))
+          .finally(render);
     },
     // A new connection (welcome). The waits of the old one end with an error
     // (a job_done of the old connection never comes), so no progress line

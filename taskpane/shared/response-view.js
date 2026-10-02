@@ -147,19 +147,29 @@ export function overridesFromForm({ lang, rationaleLang, gloss, glossLang }) {
 
 const CITED = new Set(["accepted", "user_edited"]);
 
-// Requests of a comment that no change in the manuscript answers and that
-// are not declined. pending: a change for it still waits in Word.
+// Requests of a comment that are not answered and not declined. Answered:
+// named by an accepted change in the manuscript or by an adopted figure
+// change (the rule of daemon/response-check.mjs `requirements`).
+// pending: a change for it still waits in Word. figure: a figure change for
+// it still waits for a decision on the figures page.
 export function openRequirements(comment) {
   if (comment?.declined) return [];
   const changes = comment?.changes ?? [];
   const idsOf = (pred) =>
     new Set(changes.filter(pred).flatMap((ch) => ch.rationale?.requirement_ids ?? []));
-  const answered = idsOf((ch) => CITED.has(ch.state));
+  const figureIds = (state) =>
+    new Set(
+      (comment?.figure_changes ?? [])
+        .filter((f) => f.state === state)
+        .flatMap((f) => f.requirement_ids ?? []),
+    );
+  const answered = new Set([...idsOf((ch) => CITED.has(ch.state)), ...figureIds("adopted")]);
   const pending = idsOf((ch) => ch.state === "pending");
+  const figure = figureIds("proposed");
   const declined = new Set((comment?.response?.declined_requirements ?? []).map((d) => d.id));
   return (comment?.requirements ?? [])
     .filter((q) => !answered.has(q.id) && !declined.has(q.id))
-    .map((q) => ({ id: q.id, text: q.text, pending: pending.has(q.id) }));
+    .map((q) => ({ id: q.id, text: q.text, pending: pending.has(q.id), figure: figure.has(q.id) }));
 }
 
 // Changes of a comment that are neither accepted nor rejected yet: still

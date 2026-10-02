@@ -140,6 +140,124 @@ test("the card line, the Done question and the waiting list name each state", ()
   );
 });
 
+// A request answered by a figure file, not by the text (the figures page).
+const figure = (state, ids, id = "R1.1-f1") => ({ id, state, requirement_ids: ids });
+
+test("requirementStates: an adopted figure change answers, a proposed one waits, a rejected one counts for nothing", () => {
+  const outside = REQS.slice(0, 3).map((r) => ({ id: r.id, why: "A picture file.", at: "t" }));
+  const comment = {
+    ref: "R1.1",
+    requirements: REQS.slice(0, 3),
+    requirements_outside: outside,
+    figure_changes: [
+      figure("adopted", ["q1"], "R1.1-f1"),
+      figure("proposed", ["q2"], "R1.1-f2"),
+      figure("rejected", ["q3"], "R1.1-f3"),
+    ],
+  };
+  const states = view.requirementStates(comment);
+  assert.deepEqual(
+    states.map((r) => [r.id, r.state]),
+    [
+      ["q1", "figure_changed"],
+      ["q2", "figure_waiting"],
+      ["q3", "outside_this_file"],
+    ],
+  );
+  assert.deepEqual(states.map(view.requestStateText), [
+    "Changed in a figure or other file",
+    "A figure or file waits for your decision",
+    "In another file: A picture file.",
+  ]);
+  // Only the request that is still "in another file" carries the reason.
+  assert.deepEqual(
+    states.map((r) => "why" in r),
+    [false, false, true],
+  );
+  // Without the note of the turn a rejected figure change leaves it open.
+  assert.equal(view.requirementStates({ ...comment, requirements_outside: [] })[2].state, "open");
+  // Order when several hold: a change in Word, an adopted figure, a question
+  // without an answer, a figure that waits.
+  const one = (extra) =>
+    view.requirementStates({ requirements: REQS.slice(0, 1), ...extra })[0].state;
+  assert.equal(
+    one({ changes: [change(["q1"])], figure_changes: [figure("adopted", ["q1"])] }),
+    "changed",
+  );
+  assert.equal(
+    one({ questions: [question("q1")], figure_changes: [figure("adopted", ["q1"])] }),
+    "figure_changed",
+  );
+  assert.equal(
+    one({ questions: [question("q1")], figure_changes: [figure("proposed", ["q1"])] }),
+    "needs_author",
+  );
+  assert.equal(
+    one({
+      figure_changes: [figure("proposed", ["q1"], "R1.1-f1"), figure("adopted", ["q1"], "R1.1-f2")],
+    }),
+    "figure_changed",
+  );
+});
+
+test("a figure change that waits is told on the row, in the waiting list and at Done; an adopted one is decided", () => {
+  const base = {
+    ref: "R1.1",
+    status: "in_progress",
+    requirements: REQS.slice(0, 1),
+    requirements_outside: [{ id: "q1", why: "A picture file.", at: "t" }],
+    changes: [],
+    blocked: [],
+  };
+  const waiting = { ...base, figure_changes: [figure("proposed", ["q1"])] };
+  assert.deepEqual(view.commentState(waiting), {
+    kind: "to_review",
+    label: "1 figure or file waits for your decision",
+    attention: true,
+  });
+  assert.equal(
+    view.commentState({
+      ...base,
+      figure_changes: [figure("proposed", ["q1"], "R1.1-f1"), figure("proposed", [], "R1.1-f2")],
+    }).label,
+    "2 figures or files wait for your decision",
+  );
+  assert.deepEqual(view.doneBlockers(waiting, []), [
+    "1 figure or file waits for your decision on the figures page",
+  ]);
+  assert.deepEqual(
+    view
+      .pendingDecisions({ comments: [waiting], ledger: [] })
+      .requirements.map((x) => [x.kind, x.id, x.text]),
+    [
+      [
+        "request_figure",
+        "q1",
+        "R1.1: a figure or file for \u201cstate the unit\u201d waits for your decision on the figures page.",
+      ],
+    ],
+  );
+  assert.equal(view.openRequestsText(waiting), "");
+
+  const adopted = { ...base, figure_changes: [figure("adopted", ["q1"])] };
+  assert.deepEqual(view.commentState(adopted), {
+    kind: "decided",
+    label: "All changes decided",
+    attention: false,
+  });
+  assert.deepEqual(view.doneBlockers(adopted, []), []);
+  assert.equal(view.pendingDecisions({ comments: [adopted], ledger: [] }).total, 0);
+
+  // Rejected: as before the figure lane, the request belongs to another file.
+  const rejected = { ...base, figure_changes: [figure("rejected", ["q1"])] };
+  assert.equal(view.commentState(rejected).label, "Belongs to another file");
+  // A change that waits in Word is named first.
+  assert.equal(
+    view.commentState({ ...waiting, changes: [change(["q1"])] }).label,
+    "1 change to review in Word",
+  );
+});
+
 test("store: a request noted as outside this file; one note per request; a comment-list save keeps it", () => {
   let rev = replaceComments(emptyRevision(), [
     { ref: "R1.1", reviewer: 1, text: "t", requirements: ["state the unit", "add the raw data"] },

@@ -934,6 +934,9 @@ async function handleServerMessage(msg) {
 
     case "review_event":
       reviewPane?.onEvent(msg);
+      // A decision on the figures page also changes which requests the
+      // Response tab counts as answered.
+      if (msg.event === "figures_changed") responsePane?.onEvent(msg);
       break;
 
     case "response_event":
@@ -1347,6 +1350,9 @@ Office.onReady((info) => {
     reviewPane = initReviewPane({
       sendRequest,
       usedLabel,
+      // For the link to the figures page of this manuscript.
+      docUrl: () => activeDocUrl,
+      daemonOrigin: () => window.location.origin,
       isTurnInFlight: () => turn.inFlight,
       providersReady: () => providersPane?.whenRestored() ?? null,
       // The Stop button of the chat, for the Stop of a comment card.
