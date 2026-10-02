@@ -5,6 +5,9 @@
 
 import { formatRationaleComment } from "../../daemon/review-tools.mjs";
 import { normalizeParaText, placedRuns } from "../../daemon/revision-classify.mjs";
+import { rewriteSegments } from "../../daemon/word-diff.mjs";
+import { paragraphHash } from "../../daemon/doc-diff.mjs";
+import { narrowEdit } from "../../daemon/edit-facts.mjs";
 
 // The author's handling of the proposed changes in the acceptance procedure:
 // R1.1 accepted, R1.2 rejected, R1.3 first change accepted then one inserted
@@ -1091,6 +1094,285 @@ const written = (r, rows) => ({
   got: r.message_error ? r.message : (rows ?? []).join(" | "),
 });
 
+// ---- the cite stage: tracked edits next to reference-manager fields ----
+// The document is tests/fixtures/citation_manuscript.docx
+// (make_citation_fixture.py); what is judged is what
+// tools/citation_fields_check.py finds in the files Word saved. Whether a
+// tool applied an edit or refused it is recorded and never expected, with
+// one exception: a paragraph with fields must not be rewritten as a whole.
+
+// The comments of tests/fixtures/cite_review.txt. R1.1 to R1.3 get a model
+// turn each; the edits of the run itself are put on file under R1.4.
+export const CITE_REFS = ["R1.1", "R1.2", "R1.3", "R1.4"];
+export const CITE_TURN_REFS = ["R1.1", "R1.2", "R1.3"];
+export const CITE_SEED_REF = "R1.4";
+
+// One case of make_citation_fixture.py CASES as the edit the daemon stores
+// for a blocked edit (FORBID_GUARD_EDIT has the same form).
+export const citeEdit = (c, ref = CITE_SEED_REF) => ({
+  comment_ref: ref,
+  find: c.find,
+  replace: c.replace,
+  rationale: {
+    what: `Acceptance run: ${c.what}.`,
+    why: "Written by the acceptance run to see what a tracked edit does to a field; no model wrote it.",
+    addresses: "the wording of the Introduction and the Methods",
+  },
+});
+
+// The code of a refusal, from its message: the pane shows the message of a
+// refused edit (review-pane.js override), not its code. The texts are those
+// of review-tools.mjs applyTrackedEdit and tools-word.js toolTrackedEdit.
+const REFUSAL_TEXTS = [
+  [/is not rewritten as a whole/, "ParagraphNotPlain"],
+  [/" not found$/, "NotFound"],
+  [/^Paragraph not found: /, "HintNotFound"],
+  [/" occurs \d+ times; /, "Ambiguous"],
+  [
+    /find (is not in the paragraph text|occurs more than once in the paragraph)/,
+    "AmbiguousInParagraph",
+  ],
+  [
+    /could not be told from the last status refresh|changed in Word after it was last read|changed since it was read|was not checked before the edit/,
+    "StaleTarget",
+  ],
+  [/puts a number into the manuscript/, "NumberNeedsAuthor"],
+  [/forbidden rule\(s\) .+ cannot be checked/, "ForbidRuleBroken"],
+  [/matches forbidden rule\(s\)/, "ForbidBlocked"],
+  [/task pane is older than the daemon/, "TaskPaneOutdated"],
+  [/could not be written to the review file first/, "AttemptNotRecorded"],
+  [/Word did not answer|task pane did not answer/, "OutcomeUnknown"],
+];
+export const refusalCode = (message) =>
+  REFUSAL_TEXTS.find(([re]) => re.test(String(message ?? "")))?.[1] ?? "Refused";
+
+const revisionCount = (word) => (word?.ok === true ? (word.revisions ?? []).length : null);
+
+// What became of one edit the run put on file and sent with "Allow
+// exception" (pane step apply-seeded).
+//   step      the answer of the pane step
+//   log       the daemon log written since the step began
+//   before    revision.json with the item on file, revision: after the step
+//   word, wordBefore   word-com.ps1 state after and before
+//   seedId    the id of the item
+// answer: "applied" (the daemon recorded a change, or logged the approved
+// exception), "refused" (the pane showed the refusal; code and message say
+// which) or "unknown" (the step gave no answer that can be read).
+export function citeOutcome({ step, log, before, revision, word, wordBefore, seedId, ref }) {
+  const of = (rev) => (rev?.comments ?? []).find((c) => c.ref === ref)?.changes ?? [];
+  const had = new Set(of(before).map((ch) => ch.id));
+  const changes = of(revision)
+    .filter((ch) => !had.has(ch.id))
+    .map((ch) => ({
+      id: ch.id,
+      kind: ch.kind,
+      find: ch.find,
+      text: ch.text,
+      narrowed: !!ch.narrowed_from,
+      paragraph_index: ch.paragraph_index ?? null,
+      word_comment_id: ch.word_comment_id ?? null,
+      comment_missing: ch.comment_missing ?? null,
+    }));
+  const approved = String(log ?? "").includes(`[review] override ${seedId} approved`);
+  const n = [revisionCount(wordBefore), revisionCount(word)];
+  const lines = String(log ?? "")
+    .split("\n")
+    .filter((l) => l.startsWith("[review] "));
+  const base = { changes, word_revisions: n, log: lines };
+  if (changes.length || approved) return { answer: "applied", code: null, message: null, ...base };
+  if (step?.ok !== false && step?.message_error === true) {
+    return {
+      answer: "refused",
+      code: refusalCode(step.message),
+      message: step.message,
+      // A refusal must leave the document as it was.
+      word_unchanged: n[0] !== null && n[0] === n[1],
+      ...base,
+    };
+  }
+  return { answer: "unknown", code: null, message: step?.error ?? step?.message ?? null, ...base };
+}
+
+// One line about what the checker found: the counts, then the first field
+// that is wrong with the start of its paragraph, its kind and its markers.
+export function fieldsLine(check) {
+  if (!check || typeof check !== "object" || !check.after) {
+    return `no checker result (${check?.error ?? "the checker did not run"})`;
+  }
+  const s = check.after.by_state ?? {};
+  const counts =
+    `fields ${check.before.fields} -> ${check.after.fields}` +
+    ` (live ${s.live ?? 0}, in deletions ${s.deleted ?? 0}, in insertions ${s.inserted ?? 0}, split ${s.split ?? 0})`;
+  if (check.ok) return counts;
+  const f = check.split?.[0] ?? check.missing?.[0] ?? check.added?.[0] ?? null;
+  const u = check.unbalanced?.[0];
+  const first = f
+    ? ` first: ${f.kind} in "${f.text}" ${f.layout}`
+    : u
+      ? ` first: ${u.what} in ${u.story} p${u.paragraph}`
+      : "";
+  return `${counts}; FAILED ${check.failures.join(", ")};${first}`;
+}
+
+// The row of one edit of the run: the answer of the tool is recorded, the
+// fields are judged. A refusal that changed the document fails too.
+export function citeCaseRow({ name, what, outcome, check }) {
+  const tool =
+    outcome.answer === "applied"
+      ? `applied (${outcome.changes.map((c) => `${c.kind}${c.narrowed ? ", narrowed" : ""}`).join("; ") || "exception approved"})`
+      : outcome.answer === "refused"
+        ? `refused ${outcome.code}${outcome.word_unchanged ? "" : ", but the tracked changes of the document differ"}`
+        : `no readable answer (${outcome.message ?? "-"})`;
+  const pass =
+    check?.ok === true &&
+    outcome.answer !== "unknown" &&
+    (outcome.answer !== "refused" || outcome.word_unchanged === true);
+  return {
+    step: `cite: ${name} (${what})`,
+    result: pass ? "PASS" : "FAIL",
+    got: `tool: ${tool} | ${fieldsLine(check)}`,
+  };
+}
+
+// The call the daemon makes first for a paragraph rewritten as a whole
+// (review-tools.mjs applyTrackedRewrite): the paragraph as the pane reads it
+// and the new text are cut into the edits that differ (rewriteSegments), the
+// last of them is sent first, with the rationale comment and plain_only, and
+// with the hash of the paragraph it was cut from.
+//   paragraphs  the pane's snapshot (index, id, text, reviewed_text)
+//   rewrite     make_citation_fixture.py REWRITE
+// Returns { args, paragraph, before, after, parts } or { error }.
+export function citeRewriteCall(paragraphs, rewrite, ref = CITE_SEED_REF) {
+  const read = (p) => normalizeParaText(p.reviewed_text ?? p.text);
+  const hits = (paragraphs ?? []).filter((p) => read(p).includes(rewrite.paragraph_has));
+  if (hits.length !== 1)
+    return { error: `${hits.length} paragraphs hold "${rewrite.paragraph_has}"` };
+  const p = hits[0];
+  const before = read(p);
+  let after = before;
+  for (const [from, to] of rewrite.changes) {
+    if (after.split(from).length !== 2) return { error: `"${from}" is not in the paragraph once` };
+    after = after.replace(from, to);
+  }
+  const cut = rewriteSegments(before, after);
+  if (cut.error || !cut.segments.length) return { error: cut.error ?? "nothing differs" };
+  const part = cut.segments[cut.segments.length - 1];
+  const narrow = narrowEdit(part.find, part.replace);
+  const id = p.id ?? `p${p.index}`;
+  return {
+    paragraph: { index: p.index, id: p.id ?? null },
+    before,
+    after,
+    parts: cut.segments.length,
+    args: {
+      find: part.find,
+      replace: part.replace,
+      paragraph_hint: id,
+      ...(narrow ? { narrow } : {}),
+      comment_text: formatRationaleComment(ref, {
+        what: "Acceptance run: a paragraph with citation fields written anew.",
+        why: "Sent by the acceptance run to see whether the rewrite is refused; no model wrote it.",
+        addresses: "the wording of the Introduction and the Methods",
+      }),
+      plain_only: true,
+      expected_before_hash: paragraphHash(before),
+      expected_paragraph: { index: p.index, id: p.id ?? null },
+    },
+  };
+}
+
+// The rewrite of a paragraph with fields: it must be refused as
+// ParagraphNotPlain with no tracked change added, and the fields must hold.
+export function citeRewriteRow({ what, call, step, word, wordBefore, check }) {
+  const r = step?.result ?? null;
+  const n = [revisionCount(wordBefore), revisionCount(word)];
+  const answer = call?.error
+    ? `not sent (${call.error})`
+    : step?.ok === false
+      ? `no answer (${step.error})`
+      : step?.threw
+        ? `the tool threw: ${step.threw}`
+        : r?.ok === false && r.applied !== true
+          ? `refused ${r.code ?? refusalCode(r.message)}`
+          : `applied (${JSON.stringify({ ok: r?.ok, code: r?.code ?? null, narrowed: r?.narrowed ?? null })})`;
+  const refused = r?.ok === false && r.code === "ParagraphNotPlain" && r.applied !== true;
+  const unchanged = n[0] !== null && n[0] === n[1];
+  return {
+    step: `cite: rewrite (${what})`,
+    result: refused && unchanged && check?.ok === true ? "PASS" : "FAIL",
+    expect: "refused ParagraphNotPlain, no tracked change added, the fields whole",
+    got: `tool: ${answer}; tracked changes ${n[0]} -> ${n[1]} | ${fieldsLine(check)}`,
+  };
+}
+
+// Word's own list of fields of a document (marked-diff-word.ps1 Shape):
+// "code U+001F result" per field, in document order.
+const wordFields = (job) =>
+  (job?.shape?.codes ?? []).flatMap((s) => String(s).split("\u001e").filter(Boolean));
+
+// The saved document with every change accepted and with every change
+// rejected (two copies written by Word, marked-diff-word.ps1 save_as).
+//   tracked, accepted, rejected   the checker's results, each against the
+//       document as Word saved it before any edit (accepted: run with
+//       --expect-removed <the fields that lay whole in a deletion>)
+//   jobs   by id (baseline, tracked, accept, reject): what Word answered
+// pass: Word opened every file as it is and left no revision; after
+// reject-all the fields are those of the original; after accept-all they are
+// the original without exactly the fields that lay in deletions, each of
+// the others whole and live; and Word itself lists the same field codes
+// and results after reject-all as in the original.
+export function citeAcceptEvidence({ tracked, accepted, rejected, jobs = {} }) {
+  const ids = (list) => (list ?? []).map((f) => f.id).sort();
+  const deleted = (tracked?.after?.list ?? []).filter((f) => f.state === "deleted");
+  const opened = ["baseline", "tracked", "accept", "reject"].map((id) => jobs[id]);
+  const original = wordFields(jobs.baseline);
+  const checks = {
+    word_opened_all: opened.every((j) => j?.ok === true),
+    no_revision_left: jobs.accept?.revisions_left === 0 && jobs.reject?.revisions_left === 0,
+    rejected_equals_original:
+      rejected?.ok === true && !rejected.missing?.length && !rejected.added?.length,
+    rejected_all_live: (rejected?.after?.list ?? []).every((f) => f.state === "live"),
+    accepted_whole: accepted?.ok === true,
+    accepted_all_live: (accepted?.after?.list ?? []).every((f) => f.state === "live"),
+    accepted_lacks_only_the_deleted:
+      !!accepted?.missing && JSON.stringify(ids(accepted.missing)) === JSON.stringify(ids(deleted)),
+    word_lists_the_original_after_reject:
+      original.length > 0 && JSON.stringify(wordFields(jobs.reject)) === JSON.stringify(original),
+  };
+  return {
+    pass: Object.values(checks).every(Boolean),
+    checks,
+    deleted_fields: deleted.map((f) => f.kind),
+    removed_by_accept: (accepted?.missing ?? []).map((f) => ({ kind: f.kind, text: f.text })),
+    word_field_counts: {
+      original: original.length,
+      rejected: wordFields(jobs.reject).length,
+      accepted: wordFields(jobs.accept).length,
+    },
+    job_errors: opened.filter((j) => j && j.error).map((j) => `${j.id}: ${j.error}`),
+    // Word changed the file while opening it (a field updated, a repair): told, not judged.
+    changed_on_open: opened.filter((j) => j?.dirty_on_open === true).map((j) => j.id),
+  };
+}
+
+// The reference-manager plugins of the Word of the run (word-com.ps1
+// addins), by name. Reported, never judged.
+export function pluginsEvidence(addins) {
+  const names = [
+    ...(addins?.com_addins ?? []).map((a) => `${a.prog_id} ${a.description}`),
+    ...(addins?.templates ?? []).map((a) => `${a.name}`),
+  ];
+  const has = (re) => names.filter((n) => re.test(n));
+  return {
+    read: addins?.ok === true,
+    zotero: has(/zotero/i),
+    endnote: has(/endnote|cwyw/i),
+    com_addins: (addins?.com_addins ?? []).length,
+    templates: (addins?.templates ?? []).length,
+    errors: addins?.errors ?? (addins?.error ? [addins.error] : []),
+  };
+}
+
 export const JUDGES = {
   "open-review": (r, ctx) => ({
     pass: r.file === `Review file: ${ctx.revisionPath}`,
@@ -1116,6 +1398,23 @@ export const JUDGES = {
         ),
       expect: "cards R1.1-R1.5; R1.3 Requirements: q1 ...; q2 ...",
       got: `${refs} | ${r13}`,
+    };
+  },
+  // The cite stage: the four comments of tests/fixtures/cite_review.txt.
+  "cite-split": (r) => ({
+    pass:
+      /^Split into /.test(r.message) &&
+      CITE_REFS.every((ref) => r.draft_refs.includes(ref)) &&
+      r.draft_refs.filter((x) => /^R\d+\.\d+$/.test(x)).length === CITE_REFS.length,
+    expect: `Split into n comments, ${CITE_REFS.join(", ")} among them`,
+    got: `${r.message} refs=${r.draft_refs.join(",")}`,
+  }),
+  "cite-draft": (r) => {
+    const refs = r.comments.map((c) => c.ref).join(",");
+    return {
+      pass: refs === CITE_REFS.join(","),
+      expect: `cards ${CITE_REFS.join(",")}`,
+      got: refs,
     };
   },
   "ledger-add": (r) => ({

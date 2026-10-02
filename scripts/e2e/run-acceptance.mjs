@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Review acceptance run without hands: daemon, a separate Word process with
 // a CDP port on its add-in pane, the Review tab steps, the author's Word
-// steps over COM, the feature_list verify commands, cleanup. Four flows:
-// stage 2 (main), stage 2.5 (mainS25), stage 3 (mainS3) and stage 4 (mainS4,
-// the Tools tab), chosen by --stage or --features.
+// steps over COM, the feature_list verify commands, cleanup. Five flows:
+// stage 2 (main), stage 2.5 (mainS25), stage 3 (mainS3), stage 4 (mainS4,
+// the Tools tab) and stage cite (mainCite, reference-manager fields), chosen
+// by --stage or --features.
 // Runs from WSL; Word, its pane and COM are on Windows. See README.md.
 
 import { spawn, execFileSync } from "node:child_process";
@@ -21,6 +22,14 @@ import {
   anonymizeEvidence,
   badgesMatch,
   buildComPlan,
+  CITE_SEED_REF,
+  CITE_TURN_REFS,
+  citeAcceptEvidence,
+  citeCaseRow,
+  citeEdit,
+  citeOutcome,
+  citeRewriteCall,
+  citeRewriteRow,
   cleanupDecision,
   cleanupEvidence,
   countEvidence,
@@ -29,6 +38,7 @@ import {
   exitDecision,
   featureIds,
   exportEvidence,
+  fieldsLine,
   focusEvidence,
   formatEvidence,
   guidelineEvidence,
@@ -50,6 +60,7 @@ import {
   ollamaSplitEvidence,
   openCheckEvidence,
   openEvidence,
+  pluginsEvidence,
   proposalEvidence,
   proposeAllEvidence,
   providersEvidence,
@@ -68,6 +79,7 @@ import {
   table,
 } from "./judge.mjs";
 import { pauseResident } from "./resident-unit.mjs";
+import { refusalsFromLog, rewritesFromLog } from "./replay-lib.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
@@ -95,7 +107,8 @@ const { values: opt } = parseArgs({
     guideline: { type: "string", default: path.join(REPO, "tests/fixtures/fake_guideline.txt") },
     baseline: { type: "string", default: path.join(REPO, "tests/fixtures/aux_manuscript_v1.docx") },
     "translate-lang": { type: "string", default: "German" },
-    review: { type: "string", default: path.join(REPO, "tests/fixtures/fake_review.txt") },
+    // Default: tests/fixtures/fake_review.txt; stage cite: cite_review.txt.
+    review: { type: "string" },
     ledger: { type: "string", default: path.join(REPO, "tests/fixtures/review_ledger.json") },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
     // Default /tmp/daemon-<stage>-e2e.log.
@@ -164,18 +177,28 @@ if (!opt["playwright-core"])
 let STAGE;
 try {
   STAGE = (opt.stage ?? stageOf(opt.features ?? defaultFeatures("s2"))).toLowerCase();
-  if (!/^s\d+$/.test(STAGE)) throw new Error(`--stage takes s2, s25, s3 or s4, not ${opt.stage}`);
-  opt.features ??= defaultFeatures(STAGE);
-  featureIds(opt.features);
+  // Stage cite has no feature list: its rows and markers are its result.
+  if (STAGE !== "cite") {
+    if (!/^s\d+$/.test(STAGE))
+      throw new Error(`--stage takes s2, s25, s3, s4 or cite, not ${opt.stage}`);
+    opt.features ??= defaultFeatures(STAGE);
+    featureIds(opt.features);
+  }
 } catch (e) {
   die(e.message);
 }
-if (!["s2", "s25", "s3", "s4"].includes(STAGE))
-  die(`there is no flow for stage ${STAGE} (s2, s25, s3, s4)`);
+if (!["s2", "s25", "s3", "s4", "cite"].includes(STAGE))
+  die(`there is no flow for stage ${STAGE} (s2, s25, s3, s4, cite)`);
 opt.fixture ??= path.join(
   REPO,
   "tests/fixtures",
-  STAGE === "s4" ? "aux_manuscript.docx" : "review_manuscript.docx",
+  { s4: "aux_manuscript.docx", cite: "citation_manuscript.docx" }[STAGE] ??
+    "review_manuscript.docx",
+);
+opt.review ??= path.join(
+  REPO,
+  "tests/fixtures",
+  STAGE === "cite" ? "cite_review.txt" : "fake_review.txt",
 );
 let AFTER_CLEANUP = [];
 try {
@@ -204,6 +227,9 @@ const KNOB_LOG = LOG.replace(/\.log$/, "") + "-knob.log";
 const MODE14_LOG = LOG.replace(/\.log$/, "") + "-mode14.log";
 const MODE14_DIR = path.join(RUN, "mode14");
 const DOC14 = path.join(MODE14_DIR, "review_manuscript.docx");
+// Stage cite: the copies of the document Word saved, and the two Word wrote
+// with every change accepted and rejected.
+const CITE_DIR = path.join(RUN, "cite");
 const SPECIAL_DIR = path.join(RUN, "special");
 const DOC_SPECIAL = path.join(SPECIAL_DIR, "tracked_special.docx");
 const winPath = (p) => execFileSync("wslpath", ["-w", p], { encoding: "utf8" }).trim();
@@ -545,6 +571,10 @@ async function setup() {
   fs.mkdirSync(TOOLS, { recursive: true });
   for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1", "word-shot.ps1"])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
+  // Stage cite: a Word of its own for accept-all and reject-all.
+  if (STAGE === "cite")
+    for (const f of ["word-own.ps1", "marked-diff-word.ps1"])
+      fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   // The installed daemon holds both ports: it makes way for the run.
   resident = pauseResident();
   if (resident.paused)
@@ -1334,6 +1364,377 @@ async function mainS4() {
   );
 }
 
+// ---- stage cite ------------------------------------------------------------
+// Do tracked edits leave the fields of Zotero and EndNote whole? The document
+// is the fake manuscript of make_citation_fixture.py. What a tool answers
+// (applied, refused and why) is recorded; what is judged is what
+// tools/citation_fields_check.py finds in the files Word saved: after every
+// edit of the run, after every model turn, and at the end with the changes
+// tracked, all accepted and all rejected.
+
+const firstLine = (e) => String(e?.message ?? e).split("\n")[0];
+const citeRow = (row) => {
+  rows.push(row);
+  console.log(`${row.result}  ${row.step}  ${String(row.got ?? "").slice(0, 400)}`);
+  save();
+};
+
+// The checker on two files. Its lines (the paragraph, the kind of the field
+// and its markers before and after) go to the screen, its result into
+// result.json under cite.checks[name].
+function fieldsCheck(name, before, after, extra = []) {
+  let exit = 0;
+  let out = "";
+  try {
+    out = execFileSync(
+      "python3",
+      [
+        path.join(REPO, "tools/citation_fields_check.py"),
+        ...["--before", before, "--after", after, "--detail", ...extra],
+      ],
+      { encoding: "utf8", maxBuffer: 64 << 20 },
+    );
+  } catch (e) {
+    exit = e.status ?? 1;
+    out = String(e.stdout ?? "");
+  }
+  const lines = out.trim().split("\n").filter(Boolean);
+  let result;
+  try {
+    result = JSON.parse(lines.pop());
+  } catch (e) {
+    result = { ok: false, failures: ["no-result"], error: firstLine(e) };
+  }
+  for (const l of lines) console.log(`      ${name}: ${l}`);
+  record.cite.checks[name] = { before, after, exit, lines, result };
+  save();
+  return result;
+}
+
+// The document as Word holds it now: saved in place, then copied to
+// cite/<name>.docx. null when it could not be saved.
+function citeSave(name) {
+  let saved;
+  try {
+    saved = com("save", ["-AllowDir", winPath(RUN)]);
+  } catch (e) {
+    saved = { ok: false, error: firstLine(e) };
+  }
+  record.cite.saves[name] = saved;
+  if (!saved.ok) return null;
+  const copy = path.join(CITE_DIR, `${name}.docx`);
+  fs.copyFileSync(DOC, copy);
+  return copy;
+}
+
+// One edit of the run, through the guarded write of the daemon as
+// forbidGuard() sends one: the edit is put on file as a blocked item of
+// R1.4 (the store's own addBlocked, while no request runs) that names a rule
+// the ledger does not have, and "Allow exception" sends it to
+// applyTrackedEdit. No rule refuses it, so it goes to Word as an edit of a
+// turn does. prev: the last saved copy; returns the copy saved after it.
+async function citeCase(c, prev) {
+  const ref = CITE_SEED_REF;
+  const entry = { name: c.name, what: c.what, find: c.find, replace: c.replace };
+  let outcome;
+  try {
+    // A refresh first: what is left to write is written before the run
+    // writes the file itself.
+    note("refresh", pane("refresh"), { label: `refresh (before ${c.name})`, judge: "none" });
+    const seeded = addBlocked(await loadRevision(REVISION, winPath(DOC)), ref, {
+      args: citeEdit(c),
+      blocked_by: [FORBID_GUARD_SEED_RULE],
+    });
+    await saveRevision(REVISION, seeded.revision);
+    const seedId = seeded.blocked.id;
+    const shown = pane("refresh");
+    const onCard = (shown.comments ?? [])
+      .find((x) => x.ref === ref)
+      ?.blocked.some((b) => b.startsWith(`Blocked by ${FORBID_GUARD_SEED_RULE}:`));
+    const wordBefore = com("state");
+    const at = readLog(daemonLog).length;
+    const step = onCard
+      ? pane("apply-seeded", { ref, blocked_by: FORBID_GUARD_SEED_RULE })
+      : { ok: false, error: `the item is not on the card of ${ref} after the refresh` };
+    outcome = citeOutcome({
+      step,
+      log: readLog(daemonLog).slice(at),
+      before: seeded.revision,
+      revision: JSON.parse(fs.readFileSync(REVISION, "utf8")),
+      word: com("state"),
+      wordBefore,
+      seedId,
+      ref,
+    });
+    // A refused item is back on file: the run takes its own item off.
+    const cleaned = dropBlocked(await loadRevision(REVISION, winPath(DOC)), ref, seedId);
+    if (cleaned) await saveRevision(REVISION, cleaned);
+    Object.assign(entry, { seed: seedId, step });
+  } catch (e) {
+    entry.error = String(e?.stack ?? e);
+    outcome = {
+      answer: "unknown",
+      message: firstLine(e),
+      changes: [],
+      word_revisions: [null, null],
+      log: [],
+    };
+  }
+  const copy = citeSave(`case-${c.name}`);
+  const check = copy ? fieldsCheck(`case-${c.name}`, prev, copy) : null;
+  record.cite.cases.push({ ...entry, outcome, check_ok: check?.ok ?? null });
+  citeRow(citeCaseRow({ name: c.name, what: c.what, outcome, check }));
+  return copy ?? prev;
+}
+
+// office_tracked_rewrite on a paragraph with fields. No step of the pane
+// reaches that tool without a model, so the call it makes first is built
+// here with the daemon's own functions (citeRewriteCall) and handed to the
+// pane's office_tracked_edit, which is where a paragraph that is not plain
+// text is refused. The daemon's half of the rewrite runs only when a model
+// turn below chooses the tool.
+function citeRewrite(rw, prev) {
+  let call = null;
+  let step = null;
+  let wordBefore = null;
+  let word = null;
+  try {
+    note("refresh", pane("refresh"), { label: "refresh (before the rewrite)", judge: "none" });
+    const snap = pane("snapshot");
+    call = snap.ok === false ? { error: snap.error } : citeRewriteCall(snap.paragraphs, rw);
+    wordBefore = com("state");
+    if (!call.error) step = pane("tracked-edit-direct", { args: call.args });
+    word = com("state");
+  } catch (e) {
+    call = { ...(call ?? {}), error: firstLine(e) };
+  }
+  const copy = citeSave("case-rewrite");
+  const check = copy ? fieldsCheck("case-rewrite", prev, copy) : null;
+  record.cite.rewrite = { call, step, check_ok: check?.ok ?? null };
+  citeRow(citeRewriteRow({ what: rw.what, call, step, word, wordBefore, check }));
+  return copy ?? prev;
+}
+
+async function mainCite() {
+  fs.mkdirSync(CITE_DIR, { recursive: true });
+  record.cite = { checks: {}, saves: {}, cases: [], turns: [] };
+  const spec = JSON.parse(
+    execFileSync("python3", [path.join(HERE, "make_citation_fixture.py"), "--cases"], {
+      encoding: "utf8",
+    }),
+  );
+
+  note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+  if (opt.provider) {
+    note("select-provider", pane("select-provider", { role: "turn", id: opt.provider }), {
+      label: `select-provider turn=${opt.provider}`,
+      ctx: { id: opt.provider },
+    });
+    pane("open-review");
+  }
+
+  // The plugins of this Word, read only. Nothing is started or refreshed.
+  let addins;
+  try {
+    addins = com("addins");
+  } catch (e) {
+    addins = { ok: false, error: firstLine(e) };
+  }
+  const plugins = pluginsEvidence(addins);
+  record.cite.plugins = { ...plugins, raw: addins };
+  citeRow({
+    step: "cite: the Zotero and EndNote plugins of this Word (not judged)",
+    result: "NOTE",
+    got: plugins.read
+      ? `Zotero: ${plugins.zotero.join("; ") || "not found"} | EndNote: ${plugins.endnote.join("; ") || "not found"} | ${plugins.com_addins} COM add-in(s), ${plugins.templates} template(s)`
+      : `could not be read (${plugins.errors.join("; ")})`,
+  });
+
+  // The document in Word's own form before any edit: every later file is
+  // compared with this one, so what Word itself changes when it saves the
+  // fixture is not taken for the work of a tool.
+  const baseline = citeSave("baseline");
+  if (!baseline) throw new Error("the document could not be saved before the edits");
+  const own = fieldsCheck("word-save", opt.fixture, baseline);
+  citeRow({
+    step: "cite: Word's own save keeps the fields of the fixture (not judged)",
+    result: own.ok ? "PASS" : "NOTE",
+    got: fieldsLine(own),
+  });
+
+  note("split", pane("split", { review_file: winPath(opt.review) }), { judge: "cite-split" });
+  note("edit-draft", pane("edit-draft"), { judge: "cite-draft" });
+
+  // a. The edits of the run, one at a time, each saved and checked.
+  let prev = baseline;
+  for (const c of spec.cases) prev = await citeCase(c, prev);
+  prev = citeRewrite(spec.rewrite, prev);
+
+  // b. One model turn per comment.
+  note("refresh", pane("refresh"), { label: "refresh (before the turns)", judge: "none" });
+  for (const ref of CITE_TURN_REFS) {
+    const at = readLog(daemonLog).length;
+    await propose(ref);
+    const log = readLog(daemonLog).slice(at);
+    const turn = {
+      ref,
+      changes: (log.match(/^\[review\] change recorded /gm) ?? []).length,
+      rewrites: rewritesFromLog(log, ref),
+      refused: refusalsFromLog(log, ref),
+      stale: (log.match(/^\[review\] stale target /gm) ?? []).length,
+    };
+    const copy = citeSave(`turn-${ref}`);
+    const check = copy ? fieldsCheck(`turn-${ref}`, prev, copy) : null;
+    record.cite.turns.push({ ...turn, check_ok: check?.ok ?? null });
+    citeRow({
+      step: `cite: fields after the turn of ${ref}`,
+      result: check?.ok === true ? "PASS" : "FAIL",
+      got: `turn: ${turn.changes} change(s), rewrites ${JSON.stringify(turn.rewrites)}, refused ${JSON.stringify(turn.refused)}, stale ${turn.stale} | ${fieldsLine(check)}`,
+    });
+    if (copy) prev = copy;
+  }
+
+  // c. The saved document with its changes tracked, against the baseline.
+  note("refresh", pane("refresh"), { label: "refresh before the save" });
+  const trackedCopy = citeSave("tracked");
+  const tracked = trackedCopy ? fieldsCheck("tracked", baseline, trackedCopy) : null;
+  marker("cite-tracked", { pass: tracked?.ok === true, check: tracked });
+  citeRow({
+    step: "cite: saved with the changes tracked, every field whole",
+    result: tracked?.ok === true ? "PASS" : "FAIL",
+    got: fieldsLine(tracked),
+  });
+  const changed = tracked?.text_changed ?? [];
+  citeRow({
+    step: "cite: citations whose text differs from what their field records (not judged)",
+    result: "NOTE",
+    got: changed.length
+      ? changed.map((f) => `${f.kind} "${f.recorded}" -> "${f.accepted}"`).join("; ")
+      : "none",
+  });
+}
+
+// The saved document of stage cite in a Word of its own (word-own.ps1, the
+// Word judge of the marked copies): opened as it is, once with
+// Revisions.AcceptAll() and once with Revisions.RejectAll(), each result
+// written as a file, and the checker run on both. After the Word of the main
+// run is gone and the daemon is stopped, so the pane of these copies reaches
+// no daemon.
+function citeJudge() {
+  const baseline = path.join(CITE_DIR, "baseline.docx");
+  const tracked = path.join(CITE_DIR, "tracked.docx");
+  const accepted = path.join(CITE_DIR, "accepted.docx");
+  const rejected = path.join(CITE_DIR, "rejected.docx");
+  const anchor = path.join(CITE_DIR, "anchor.docx");
+  const jobsFile = path.join(CITE_DIR, "jobs.json");
+  const outFile = path.join(CITE_DIR, "word.json");
+  const pidFile = path.join(CITE_DIR, "word-pid.json");
+  for (const f of [accepted, rejected, outFile, pidFile]) fs.rmSync(f, { force: true });
+  fs.copyFileSync(opt.fixture, anchor);
+  fs.writeFileSync(
+    jobsFile,
+    JSON.stringify([
+      { id: "baseline", path: winPath(baseline), action: "none" },
+      { id: "tracked", path: winPath(tracked), action: "none" },
+      { id: "accept", path: winPath(tracked), action: "accept", save_as: winPath(accepted) },
+      { id: "reject", path: winPath(tracked), action: "reject", save_as: winPath(rejected) },
+    ]),
+  );
+  const readJson = (f) =>
+    fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8").replace(/^﻿/, "")) : null;
+  let done = null;
+  try {
+    done = powershell(
+      "marked-diff-word.ps1",
+      [
+        ...["-Jobs", winPath(jobsFile), "-Out", winPath(outFile), "-Anchor", winPath(anchor)],
+        ...["-AllowDir", winPath(RUN), "-PidFile", winPath(pidFile)],
+      ],
+      15 * 60_000,
+    );
+  } catch (e) {
+    record.cite.word_error = firstLine(e);
+  }
+  if (done && !done.ok) record.cite.word_error = done.error;
+  // Its Word: stopped by force only when its quit ran and the process stayed.
+  const pid = done?.pid ?? readJson(pidFile)?.pid;
+  if (pid) {
+    record.word.launch_cite = { pid };
+    record.cleanup.quit_cite = done?.quit ?? null;
+    let alive = true;
+    try {
+      alive = wordPids().includes(pid);
+    } catch (e) {
+      // Not known: taken as alive, so cleanupDecision does not call it gone.
+      record.cleanup.cite_pids_error = firstLine(e);
+    }
+    const d = cleanupDecision({
+      pid,
+      preexisting: record.word.preexisting ?? [],
+      quit: done?.quit,
+      runDir: winPath(RUN),
+      alive,
+    });
+    if (d.action === "kill") {
+      try {
+        execFileSync("powershell.exe", [
+          "-NoProfile",
+          "-Command",
+          `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+        ]);
+        (record.cleanup.stopped_pids ??= []).push(pid);
+      } catch (e) {
+        // cleanup() reports a Word of the run that is still there.
+        record.cleanup.cite_stop_error = firstLine(e);
+      }
+    }
+    if (d.action === "leave") {
+      (record.cleanup.left_running ??= []).push({ pid, reason: d.reason });
+      console.error(`run-acceptance: ${d.reason}`);
+    }
+    if (d.fail) rows.push({ step: `cleanup: Word ${pid}`, result: "FAIL", got: d.reason });
+  }
+
+  const jobs = Object.fromEntries((readJson(outFile)?.jobs ?? []).map((j) => [j.id, j]));
+  const trackedCheck = record.cite.checks.tracked?.result ?? null;
+  const inDeletions = (trackedCheck?.after?.list ?? []).filter((f) => f.state === "deleted");
+  const rej = fs.existsSync(rejected) ? fieldsCheck("rejected", baseline, rejected) : null;
+  const acc = fs.existsSync(accepted)
+    ? fieldsCheck("accepted", baseline, accepted, ["--expect-removed", String(inDeletions.length)])
+    : null;
+  const e = citeAcceptEvidence({ tracked: trackedCheck, accepted: acc, rejected: rej, jobs });
+  marker("cite-accept-reject", { ...e, word_error: record.cite.word_error ?? null });
+  record.cite.accept_reject = e;
+  const k = e.checks;
+  citeRow({
+    step: "cite: Word opens the saved file as it is, accepts and rejects every change",
+    result: k.word_opened_all && k.no_revision_left ? "PASS" : "FAIL",
+    got:
+      [record.cite.word_error, ...e.job_errors].filter(Boolean).join("; ") ||
+      `revisions left: accept ${jobs.accept?.revisions_left}, reject ${jobs.reject?.revisions_left}; changed on open: ${e.changed_on_open.join(",") || "none"}`,
+  });
+  citeRow({
+    step: "cite: after reject-all the fields are the original ones",
+    result: k.rejected_equals_original && k.rejected_all_live ? "PASS" : "FAIL",
+    got: fieldsLine(rej),
+  });
+  citeRow({
+    step: "cite: after accept-all only the fields that lay in deletions are gone, the others whole",
+    result:
+      k.accepted_whole && k.accepted_all_live && k.accepted_lacks_only_the_deleted
+        ? "PASS"
+        : "FAIL",
+    got: `in deletions: ${e.deleted_fields.join(", ") || "none"}; gone after accept: ${
+      e.removed_by_accept.map((f) => `${f.kind} in "${f.text}"`).join("; ") || "none"
+    } | ${fieldsLine(acc)}`,
+  });
+  citeRow({
+    step: "cite: Word lists the original fields (code and result) after reject-all",
+    result: k.word_lists_the_original_after_reject ? "PASS" : "FAIL",
+    got: `fields Word lists: original ${e.word_field_counts.original}, after reject-all ${e.word_field_counts.rejected}, after accept-all ${e.word_field_counts.accepted}`,
+  });
+}
+
 // Close the Word this run started (pid, with `doc` open in it). It is stopped
 // by force only when quit ran and the process stayed (cleanupDecision); a
 // refused quit leaves Word and its documents alone and fails the run.
@@ -1504,11 +1905,30 @@ async function cleanup() {
     quitWord(record.word.launch_special?.pid, DOC_SPECIAL, "quit_special");
   }
   await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
+  // Stage cite: accept-all and reject-all on the saved document, once the
+  // main Word is gone and no daemon listens.
+  if (STAGE === "cite" && record.cite?.checks.tracked) {
+    try {
+      if (record.cleanup.left_running?.length || wordPids().includes(pid))
+        throw new Error("the Word of the main run is still up");
+      citeJudge();
+    } catch (e) {
+      record.cite.judge_error = String(e?.stack ?? e);
+      rows.push({
+        step: "cite: accept-all and reject-all in Word",
+        result: "FAIL",
+        got: firstLine(e),
+      });
+    }
+  }
   try {
     const left = wordPids();
-    const own = [pid, record.word.launch_mode14?.pid, record.word.launch_special?.pid].filter(
-      Boolean,
-    );
+    const own = [
+      pid,
+      record.word.launch_mode14?.pid,
+      record.word.launch_special?.pid,
+      record.word.launch_cite?.pid,
+    ].filter(Boolean);
     record.cleanup.word_after = left;
     record.cleanup.preexisting_alive = (record.word.preexisting ?? []).every((p) =>
       left.includes(p),
@@ -1522,7 +1942,7 @@ async function cleanup() {
 let failed = null;
 try {
   await setup();
-  await { s2: main, s25: mainS25, s3: mainS3, s4: mainS4 }[STAGE]();
+  await { s2: main, s25: mainS25, s3: mainS3, s4: mainS4, cite: mainCite }[STAGE]();
 } catch (e) {
   failed = e;
   record.error = String(e?.stack ?? e);
@@ -1548,6 +1968,8 @@ isolationCheck();
 // Before the mode-14 check starts a daemon with a log of its own.
 const mainLogs = runLogs();
 function verify(ids) {
+  // Stage cite has no feature list and no feature range.
+  if (STAGE === "cite") return;
   try {
     runFeatures(ids);
   } catch (e) {
