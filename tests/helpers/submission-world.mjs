@@ -142,7 +142,9 @@ export async function world({ seed = commentsOf(), revision = {}, tools = {} } =
       };
       handlers[type]({ type, request_id: "q1", ...payload }, reply, "k", "word");
     });
-  const withDoc = (snapshot = ACCEPTED) => ({ snapshot, headings: HEADINGS });
+  // saved: Word said the document has no unsaved changes (response requests
+  // do not read it).
+  const withDoc = (snapshot = ACCEPTED) => ({ snapshot, headings: HEADINGS, saved: true });
   return {
     dir,
     doc,

@@ -25,6 +25,8 @@ export const liveOf = ({ paragraph = {}, comments = [], format = null } = {}) =>
   },
   headings: [{ index: 0, level: 1, text: SECTION }],
   format,
+  // Word said the document has no unsaved changes.
+  saved: true,
 });
 
 // The record of the paper in the state where every row is ready. mutate

@@ -12,10 +12,12 @@
 //   revision  the record, brought up to date with `live.snapshot` in memory
 //             (response-service.mjs refreshed)
 //   profile   with defaults filled (journal-profile.mjs effectiveProfile)
-//   live      { snapshot, headings, format } as the pane read them: the
-//             snapshot of collectReviewSnapshot (paragraphs with w_ins and
+//   live      { snapshot, headings, format, saved } as the pane read them:
+//             the snapshot of collectReviewSnapshot (paragraphs with w_ins and
 //             w_del, comments), the usable headings, the format read of
-//             readFormatSnapshot (null when it could not be read)
+//             readFormatSnapshot (null when it could not be read), and
+//             whether Word said the document has no unsaved changes
+//             (Word.Document.saved: true, false, anything else: not known)
 //   files     { <path as the record holds it>: sha256 | null } for the paths
 //             of submissionPaths(revision): the file as it is on the disk
 //             now, null when it is not there. A path that was not handed in
@@ -290,6 +292,12 @@ function letterRow({ revision, profile, files }) {
     return notReady(
       `Export the letter again: ${name} was written before the tool recorded what it said, so it cannot be compared with the answers as they are now.`,
     );
+  // Ready needs a record that says no check failed: anything but the integer
+  // 0 (no number, a text, a fraction) is not that.
+  if (!Number.isInteger(x.fail) || x.fail < 0)
+    return notReady(
+      `Export the letter again: ${name} has no usable record of how its checks ended.`,
+    );
   if (x.fail > 0)
     return notReady(
       `${name} was exported while ${n(x.fail, "check")} failed. Fix ${x.fail === 1 ? "it" : "them"} in the Response tab, then export the letter again.`,
@@ -343,18 +351,28 @@ function copyRow(id, what, artifact, files, go) {
   };
 }
 
-function copyRows({ revision, profile, files }) {
+// What the rows about a file made from the saved manuscript say when the
+// open document has changes that are not saved: the copy was made from the
+// file on the disk, and the hashes below compare that file, so they would
+// read "made from the manuscript as it is saved now" for a copy that is old.
+export const UNSAVED_TEXT =
+  "This document has changes that are not saved. Save it, then press Check now again.";
+export const UNSAVED_UNKNOWN = "Whether the document has unsaved changes could not be checked.";
+
+function copyRows({ revision, profile, files, live }) {
   const wanted = profile.submission?.anonymized_copy;
+  // saved: false, the row is not ready whatever the hashes say. Not known
+  // (Word gave no boolean): the row as the hashes give it, and it says so.
+  const row = (id, what, artifact, go) =>
+    live.saved === false
+      ? { id, state: NOT_READY, text: UNSAVED_TEXT, go: null }
+      : ((r) => (live.saved === true ? r : { ...r, text: `${r.text} ${UNSAVED_UNKNOWN}` }))(
+          copyRow(id, what, artifact, files, go),
+        );
   return [
-    copyRow("marked_copy", "marked copy", revision.artifacts?.marked, files, TO_MARKED),
+    row("marked_copy", "marked copy", revision.artifacts?.marked, TO_MARKED),
     wanted === true
-      ? copyRow(
-          "anonymized_copy",
-          "anonymized copy",
-          revision.artifacts?.anonymized,
-          files,
-          TO_ANONYMIZE,
-        )
+      ? row("anonymized_copy", "anonymized copy", revision.artifacts?.anonymized, TO_ANONYMIZE)
       : {
           id: "anonymized_copy",
           state: NOT_APPLICABLE,

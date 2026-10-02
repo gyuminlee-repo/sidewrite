@@ -445,18 +445,21 @@ export function createAuxService({
         const abs = isAbsolute(path) ? path : join(dirname(d.doc), ...path.split("/"));
         files[path] = await sha256File(abs).catch(() => null);
       }
+      // Whether Word said the document has no unsaved changes; a pane that
+      // sends nothing, or anything but a boolean: not known.
+      const saved = typeof msg.saved === "boolean" ? msg.saved : null;
       const rows = submissionRows({
         revision,
         profile,
-        live: { snapshot, headings, format: isObj(msg.format) ? msg.format : null },
+        live: { snapshot, headings, format: isObj(msg.format) ? msg.format : null, saved },
         files,
         file: basename(d.doc),
       });
       const count = (state) => rows.filter((r) => r.state === state).length;
       log(
-        `[tools] submission_check rows=${rows.length} ready=${count("ready")} not_ready=${count("not_ready")} not_applicable=${count("not_applicable")}`,
+        `[tools] submission_check rows=${rows.length} ready=${count("ready")} not_ready=${count("not_ready")} not_applicable=${count("not_applicable")} saved=${saved}`,
       );
-      return { rows, doc_name: basename(d.doc) };
+      return { rows, doc_name: basename(d.doc), saved };
     },
 
     // Which saved file the copies are made from, and the profile in force.
