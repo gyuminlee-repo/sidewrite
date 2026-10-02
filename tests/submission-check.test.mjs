@@ -57,7 +57,7 @@ test("every row is about the open file, and a row carries a state, one sentence 
   for (const r of all) {
     assert.equal(r.file, FILE);
     assert.ok([READY, NOT_READY, NOT_APPLICABLE].includes(r.state), r.id);
-    assert.ok(r.text.length > 10 && !r.text.includes("—"), r.id);
+    assert.ok(r.text.length > 10 && !r.text.includes(String.fromCharCode(0x2014)), r.id);
     // A row that is not ready says where it is fixed.
     if (r.state === NOT_READY) assert.ok(r.go, `${r.id} has no way to its fix`);
   }
@@ -142,7 +142,14 @@ test("row 4: a comment of the tool is not ready and leads to the cleanup button;
   assert.equal(r.state, NOT_READY);
   assert.equal(
     r.text,
-    "1 comment of the tool is still in this file. Remove them before you make the marked copy.",
+    "1 comment of the tool is still in this file. Remove it before you make the marked copy.",
+  );
+  const two = liveOf({
+    comments: [docComment("1", "[R1.1] a / b / c"), docComment("3", "[E.2] a / b / c")],
+  });
+  assert.equal(
+    rowOf(rows({ live: two }), "tool_comments").text,
+    "2 comments of the tool are still in this file. Remove them before you make the marked copy.",
   );
   assert.deepEqual(r.go, { tab: "review", target: "review-clean-tool" });
 

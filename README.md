@@ -386,6 +386,25 @@ The Tools tab never writes to the open document. A copy is a new file next to th
 - **Marked copy.** Choose an earlier version of the manuscript and a mode (tracked changes or colours). The button runs `tools/build_marked_diff.py` with the options of the script, so both write the same file, `<manuscript>_marked.docx`. What the tool refuses is shown as the tool wrote it, with the paragraph number. Needs the Python package lxml.
 - **Anonymized copy.** Writes `<manuscript>_anonymized.docx` without author marks and file metadata and shows the report of `scripts/verify-anonymized.py`. A copy that fails the check is renamed to `.INCOMPLETE.docx`.
 
+### Before submission (Review tab, Word)
+
+"Check now" in the "Before submission" section lists what is left to do for the open file. It changes nothing. Every row is computed from the record of the paper, the hashes of the files and the document as it is at that moment, so a letter or a copy that went stale after a later decision shows as not ready. Each row that is not ready has a button to the place where it is fixed.
+
+| Row                                                    | Read from                                                                                                                            |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Every comment has an answer that passes the checks     | The document now. Rules a model checks run in the Response tab only; the row says how many there are                                 |
+| No request is open                                     | The record, brought up to date with the document: requests without an accepted change or adopted file, questions to you not answered |
+| No tracked change is waiting                           | The document now                                                                                                                     |
+| The tool's comments are removed                        | The document now                                                                                                                     |
+| The file is clean                                      | The document now: no tracked change and no comment of anyone                                                                         |
+| Format and count checks                                | The document now. Not needed without a format rule in the profile and a count rule in the ledger                                     |
+| The letter (.docx) says what the answers say now       | The hash of the letter model recorded at the export against the model built now, and the hash of the file                            |
+| The marked copy matches the saved manuscript           | The hashes recorded when the copy was made against the copy and the saved manuscript on the disk                                     |
+| The anonymized copy, when the journal asks for one     | The same, when the profile has `submission.anonymized_copy: true`. Not needed for `false` or no value                                |
+| Adopted figures and files are in the submission folder | The hash recorded at the adoption against the copy on the disk. A change that is still proposed makes the row not ready              |
+
+Removing the tool's comments and saving changes the manuscript file, so a marked copy made before that reads as stale. Do the cleanup first, save, then make the copy. A copy or a letter made before these hashes were recorded reads "make it again" once. The checklist makes no package and writes no cover letter.
+
 Modules that exist in `daemon/` but are not connected to the task pane: DeepL translation, LanguageTool, the Crossref reference check, CSL styles, the consent switches for outside services, unit domain packs, the `[F.n]` and `[G.n]` comment families and the automatic format fix.
 
 **Requirements.** Python 3 on the machine the daemon runs on. Writing, reading and verifying the letter use the standard library only. Line numbers also need PyMuPDF (`pip install pymupdf`); without it the line numbers cannot be read, the line check fails, and the letter is written only with "Export anyway", without line numbers.

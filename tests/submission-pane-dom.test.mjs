@@ -136,6 +136,8 @@ async function setup({
     },
     onTurnStarted() {},
     isTurnInFlight: () => false,
+    docUrl: () => "C:\\papers\\paper.docx",
+    daemonOrigin: () => "https://localhost:3000",
     goTo: (tab, target) => went.push([tab, target]),
     toolsJob: async (type, payload) => {
       jobs.push({ type, payload });
@@ -242,6 +244,27 @@ test("formatting Word cannot give is sent as null: the other rows are still aske
   await t.$("review-submit-check").click();
   assert.equal(t.jobs[0].payload.format, null);
   assert.equal(t.rows().length, ROWS.length);
+});
+
+test("a row about figures carries the link to the figures page of this manuscript, at its comment", async () => {
+  const figures = {
+    id: "figures",
+    file: "paper.docx",
+    state: "not_ready",
+    text: "Figure 2 is not decided yet (adopt or reject it).",
+    go: { figures: true, ref: "R1.2" },
+  };
+  const t = await setup({ result: { ok: true, rows: [figures] } });
+  await t.$("review-submit-check").click();
+  const links = findAll(t.$("review-submit-rows"), (n) => n.tagName === "A");
+  assert.equal(links.length, 1);
+  assert.equal(links[0].textContent, "Figures and other files");
+  const url = new URL(links[0].attributes.href);
+  assert.equal(url.origin + url.pathname, "https://localhost:3000/figures/");
+  assert.equal(url.searchParams.get("doc"), "C:\\papers\\paper.docx");
+  assert.equal(url.searchParams.get("ref"), "R1.2");
+  assert.equal(t.rows()[0].button, null);
+  assert.equal(t.$("review-submit-count").textContent, "(1 not ready)");
 });
 
 test("view helpers: the header count, the state labels and the button labels", () => {

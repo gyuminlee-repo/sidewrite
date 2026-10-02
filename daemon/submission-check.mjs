@@ -26,6 +26,8 @@
 //   go        where the row is fixed, or null:
 //             { tab, target }   a tab of the pane and the id of an element
 //             { paragraph }     a paragraph of the document, by index
+//             { figures, ref }  the figures page of this manuscript, at the
+//                               comment `ref` (null: the whole page)
 //
 // The rows:
 //   answers          every comment has an answer that passes the pure checks
@@ -51,9 +53,14 @@
 //   anonymized_copy  the same for the anonymized copy, when the profile asks
 //                    for one (submission.anonymized_copy: true); false or
 //                    null: not applicable
+//   figures          every adopted figure or file is in the submission folder
+//                    with the hash it was adopted with, and none is still
+//                    waiting for a decision; not applicable when no figure
+//                    or file change is adopted or proposed
 
 import { checkResponses } from "./response-check.mjs";
 import { buildLetterModel, letterModelSha } from "./response-model.mjs";
+import { adoptedFigures } from "./response-quotes.mjs";
 import { inScope } from "./ledger-check.mjs";
 import { findFormatIssues, formatRulesOn } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
@@ -100,6 +107,7 @@ export function submissionPaths(revision) {
       revision?.response_export?.path,
       revision?.artifacts?.marked?.path,
       revision?.artifacts?.anonymized?.path,
+      ...(revision?.comments ?? []).flatMap((c) => adoptedFigures(c).map((f) => f.adopted?.path)),
     ].filter(Boolean),
   );
 }
@@ -197,7 +205,7 @@ function documentRows({ live }) {
       ? {
           id: "tool_comments",
           state: NOT_READY,
-          text: `${n(tool, "comment")} of the tool ${tool === 1 ? "is" : "are"} still in this file. Remove them before you make the marked copy.`,
+          text: `${n(tool, "comment")} of the tool ${tool === 1 ? "is" : "are"} still in this file. Remove ${tool === 1 ? "it" : "them"} before you make the marked copy.`,
           go: TO_CLEAN_TOOL,
         }
       : { id: "tool_comments", state: READY, text: "The tool's comments are removed.", go: null },
@@ -359,6 +367,61 @@ function copyRows({ revision, profile, files }) {
   ];
 }
 
+// Row 10: the figures and other files the letter names. An adopted one is the
+// copy in the submission folder, with the hash it was adopted with; a
+// proposed one is a change nobody decided on yet.
+function figuresRow({ revision, files }) {
+  const id = "figures";
+  const problems = [];
+  let first = null; // the comment of the first problem: the page opens there
+  let adopted = 0;
+  let proposed = 0;
+  for (const c of revision.comments ?? []) {
+    const add = (text) => {
+      problems.push(text);
+      first ??= c.ref;
+    };
+    for (const f of c.figure_changes ?? []) {
+      if (f.state === "proposed") {
+        proposed += 1;
+        add(`${f.figure} is not decided yet (adopt or reject it)`);
+        continue;
+      }
+      if (f.state !== "adopted") continue;
+      adopted += 1;
+      const name = nameOf(f.adopted?.path);
+      const onDisk = f.adopted?.path ? (files[f.adopted.path] ?? null) : null;
+      if (onDisk === null)
+        add(`the copy of ${f.figure} is missing from the submission folder: ${name}`);
+      else if (onDisk !== f.adopted.sha256)
+        add(`the copy of ${f.figure} was changed after it was adopted: ${name}`);
+    }
+  }
+  if (!adopted && !proposed)
+    return {
+      id,
+      state: NOT_APPLICABLE,
+      text: "No figure or file change is on record for this paper.",
+      go: null,
+    };
+  if (problems.length) {
+    const shown = problems.slice(0, 3).join("; ");
+    const more = problems.length > 3 ? `; and ${problems.length - 3} more` : "";
+    return {
+      id,
+      state: NOT_READY,
+      text: `${shown[0].toUpperCase()}${shown.slice(1)}${more}. Settle ${problems.length === 1 ? "it" : "them"} on the figures page; a copy that is missing or changed is adopted again there.`,
+      go: { figures: true, ref: first },
+    };
+  }
+  return {
+    id,
+    state: READY,
+    text: `${n(adopted, "adopted figure or file", "adopted figures or files")} ${adopted === 1 ? "is" : "are"} in the submission folder, unchanged.`,
+    go: null,
+  };
+}
+
 export function submissionRows({ revision, profile, live, files = {}, file = null }) {
   const input = { revision, profile, live, files };
   return [
@@ -367,5 +430,6 @@ export function submissionRows({ revision, profile, live, files = {}, file = nul
     formatRow(input),
     letterRow(input),
     ...copyRows(input),
+    figuresRow(input),
   ].map((row) => ({ ...row, file }));
 }

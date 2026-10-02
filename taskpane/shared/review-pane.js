@@ -1127,7 +1127,9 @@ export function initReviewPane({
     const rows = check.rows.map((row) => {
       const label = submissionGoLabel(row.go);
       let go = null;
-      if (label) {
+      // The figures page is outside the pane: the link the comment cards use.
+      if (row.go?.figures) go = figuresLink(row.go.ref ?? null);
+      else if (label) {
         go = el("button", { type: "button", class: "btn-link review-submit-go", text: label });
         go.addEventListener(
           "click",
