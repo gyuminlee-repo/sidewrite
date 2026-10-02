@@ -124,6 +124,8 @@ async function view(page) {
         kind: d.getAttribute("data-kind"),
         ref: d.getAttribute("data-ref"),
         req: d.getAttribute("data-req"),
+        // The author sees an item only when it is not hidden.
+        shown: !d.hidden,
       })),
       consistency: q("#review-consistency .review-violation").map(t),
       external: q("#review-external .review-external-item .review-violation").map(t),

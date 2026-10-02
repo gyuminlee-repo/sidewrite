@@ -374,7 +374,7 @@ export function countsSentence(c, inv, { outside = 0, unresolved = 0 } = {}) {
   let line;
   if (!inv.ok) {
     line =
-      "The changes on record and the comments in Word do not match. Press Refresh status again; Details says which.";
+      "The changes on record and the comments in Word do not match. Open Details to see which, then check those comments in Word.";
   } else if (c.pending > 0) {
     line = `${n(c.pending, "change is", "changes are")} waiting for your decision in Word.`;
   } else if (inv.changes > 0) {

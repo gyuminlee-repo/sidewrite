@@ -1394,6 +1394,7 @@ body {
 }
 /* One comment: a row, and below it its card when it is open. */
 .review-comment {
+  scroll-margin-top: 64px; /* under the bar that stays at the top */
   display: block;
   margin: 0;
   padding: 0;

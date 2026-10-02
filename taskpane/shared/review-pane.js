@@ -1039,9 +1039,11 @@ export function initReviewPane({
       ? "Hide review text"
       : "Show review text";
     $("review-paste-toggle").setAttribute("aria-expanded", state.pasteOpen ? "true" : "false");
-    $("review-comments-section").hidden = comments.length === 0;
-    $("review-ledger-box").hidden =
-      comments.length === 0 && (state.revision?.ledger ?? []).length === 0;
+    // Refresh status stays reachable while nothing is loaded (no daemon), so a
+    // press says why; once a review is loaded and empty there is nothing to list.
+    $("review-comments-section").hidden = comments.length === 0 && !!state.revision;
+    $("review-propose-all").hidden = comments.length === 0;
+    $("review-more").hidden = comments.length === 0;
     $("review-submit-box").hidden = comments.length === 0;
     const notDone = comments.filter((c) => c.status !== "done").length;
     $("review-submit-count").textContent = notDone ? `(${notDone} not done)` : "";

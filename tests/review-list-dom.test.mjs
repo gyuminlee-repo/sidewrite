@@ -178,7 +178,6 @@ test("no review yet: the three steps show and everything with nothing to show is
     "review-waiting-box",
     "review-comments-section",
     "review-external-box",
-    "review-ledger-box",
     "review-submit-box",
   ]) {
     assert.equal(t.$(id).hidden, true, `${id} is hidden`);
@@ -378,4 +377,22 @@ test("Delete ALL comments is the last thing of its section, under a warning", as
     box.slice(box.indexOf("review-delete-all")),
     /^[\s\S]*?<\/button>\s*<\/div>\s*<\/details>\s*$/,
   );
+});
+
+test("with no daemon answer Refresh status is still there to press; Propose all and More are not", async () => {
+  globalThis.document = fakeDocument();
+  const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+  const pane = initReviewPane({
+    sendRequest: async () => ({ ok: false, error: "no daemon" }),
+    word: {},
+    onTurnStarted: () => () => {},
+    isTurnInFlight: () => false,
+  });
+  await pane.reload();
+  const $ = (id) => document.getElementById(id);
+  assert.equal($("review-comments-section").hidden, false);
+  assert.equal($("review-propose-all").hidden, true);
+  assert.equal($("review-more").hidden, true);
+  assert.equal($("review-message").textContent, "no daemon");
+  assert.equal($("review-start").hidden, false);
 });

@@ -1134,6 +1134,9 @@ export const JUDGES = {
       { ref: "R1.3", req: "q1" },
       { ref: "R1.3", req: "q2" },
     ];
+    // The list holds an open request of a comment nobody has worked on yet, hidden:
+    // a request waits for the author only once a turn ran for its comment (item 13).
+    // At this step no turn has run, so both rows are in the list and not shown.
     const waiting = (r.decisions_raw ?? []).filter((d) => d.kind === "request_open");
     return {
       pass:
@@ -1142,7 +1145,7 @@ export const JUDGES = {
         n("L3") === 0 &&
         want.every((w) => waiting.some((d) => d.ref === w.ref && d.req === w.req)),
       expect: "violations L1 2, L2 1, L3 0; waiting: R1.3 q1, R1.3 q2",
-      got: `L1 ${n("L1")}, L2 ${n("L2")}, L3 ${n("L3")}; ${r.decisions.join(" | ")}`,
+      got: `L1 ${n("L1")}, L2 ${n("L2")}, L3 ${n("L3")}; waiting rows ${waiting.map((d) => `${d.ref} ${d.req}${d.shown === false ? " (hidden)" : ""}`).join(", ")}`,
     };
   },
   preview: (r) => ({
