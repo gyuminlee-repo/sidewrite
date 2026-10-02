@@ -27,6 +27,9 @@ const CHECKER = here("../tools/citation_fields_check.py");
 const python = (args) => execFileSync("python3", args, { encoding: "utf8", maxBuffer: 64 << 20 });
 const SPEC = JSON.parse(python([BUILDER, "--cases"]));
 const TEXTS = JSON.parse(python([BUILDER, "--dump", FIXTURE]));
+// The same paragraphs with their fields as Word's getReviewedText showed
+// them in the run of 2026-10-02 (U+0013 instruction U+0014 result U+0015).
+const REVIEWED = JSON.parse(python([BUILDER, "--dump-reviewed", FIXTURE]));
 const REVIEW = readFileSync(here("./fixtures/cite_review.txt"), "utf8");
 
 // The checker on two files: its exit code, its lines, its JSON line.
@@ -150,14 +153,15 @@ test("the review of the stage splits into its four comments without a model", ()
 });
 
 // The review service with the document of the fixture and a Word that
-// answers `word(name, args)`.
-async function service(word) {
+// answers `word(name, args)`. reviewed: what the pane read as the
+// reviewed text of each paragraph; caps: what the pane said it can do.
+async function service(word, { reviewed = TEXTS, caps = ["target_hash", "tracked_rewrite"] } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "cite-stage-"));
   const doc = join(dir, "paper.docx");
   const lines = [];
   const calls = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "tracked_rewrite"] }),
+    getContext: () => ({ activeDoc: doc, caps }),
     callTool: async (name, args) => {
       calls.push([name, args]);
       return word(name, args);
@@ -184,7 +188,7 @@ async function service(word) {
         index,
         id: null,
         text,
-        reviewed_text: text,
+        reviewed_text: reviewed[index],
         w_ins: 0,
         w_del: 0,
       })),
@@ -256,6 +260,102 @@ test("each edit of the run passes the guards of the daemon and reaches Word with
     assert.equal(spans.narrow.find, "slow growth (Belloc, 2020) in narrow");
     const straddles = t.calls.find(([, a]) => a.find === SPEC.cases[2].find)[1];
     assert.equal(straddles.narrow, undefined);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("with the fields shown as Word shows them, every case of the run gets the answer it expects", async () => {
+  assert.equal(REVIEWED.length, TEXTS.length);
+  assert.equal(REVIEWED.filter((t) => t.includes("\u0013")).length, 12);
+  const t = await service(
+    (_name, args) => ({
+      ok: true,
+      word_comment_id: 9,
+      paragraph_index: TEXTS.findIndex((x) => x.includes(args.find)),
+      before: TEXTS.find((x) => x.includes(args.find)),
+      after: "a",
+      narrowed: !!args.narrow,
+      target_checked: true,
+    }),
+    { reviewed: REVIEWED, caps: ["target_hash", "tracked_rewrite", "field_guard"] },
+  );
+  const why = {
+    spans: "replace-across",
+    straddles: "partial",
+    "cite-text-zotero": "inside",
+    "cite-text-endnote": "inside",
+    "cite-text-replace": "inside",
+  };
+  try {
+    for (const c of SPEC.cases) {
+      const seeded = addBlocked(await loadRevision(t.file, t.doc), J.CITE_SEED_REF, {
+        args: J.citeEdit(c),
+        blocked_by: [J.FORBID_GUARD_SEED_RULE],
+      });
+      await saveRevision(t.file, seeded.revision);
+      const at = t.lines.length;
+      const sent = t.calls.length;
+      const r = await t.ask("review_override", {
+        ref: J.CITE_SEED_REF,
+        blocked_id: seeded.blocked.id,
+      });
+      const refusedByField = c.expect === "refused";
+      assert.equal(r.applied, !refusedByField, `${c.name}: ${r.result?.message}`);
+      assert.equal(t.calls.length, sent + (refusedByField ? 0 : 1), c.name);
+      const outcome = J.citeOutcome({
+        step: refusedByField
+          ? { ok: true, message: r.result.message, message_error: true, row_gone: false }
+          : { ok: true, message: "", message_error: false, row_gone: true },
+        log: t.lines.slice(at).join("\n"),
+        before: seeded.revision,
+        revision: JSON.parse(await readFile(t.file, "utf8")),
+        word: refusedByField ? WORD0 : WORD1,
+        wordBefore: WORD0,
+        seedId: seeded.blocked.id,
+        ref: J.CITE_SEED_REF,
+      });
+      if (refusedByField) {
+        assert.deepEqual(
+          [outcome.answer, outcome.code, outcome.word_unchanged],
+          ["refused", "FieldNotEditable", true],
+          c.name,
+        );
+        assert.match(
+          outcome.log.join("\n"),
+          new RegExp(`field edit refused R1\\.4 why=${why[c.name]} by=daemon paragraph=\\d+$`),
+          c.name,
+        );
+        // The row of the run: the expectation is met, and it says why.
+        const row = J.citeCaseRow({ ...c, outcome, check: CHECKS.same.result });
+        assert.equal(row.result, "PASS", c.name);
+        assert.match(
+          row.got,
+          new RegExp(`refused FieldNotEditable \\[why=${why[c.name]} by=daemon`),
+        );
+        const cleaned = dropBlocked(
+          await loadRevision(t.file, t.doc),
+          J.CITE_SEED_REF,
+          seeded.blocked.id,
+        );
+        if (cleaned) await saveRevision(t.file, cleaned);
+      } else {
+        assert.equal(outcome.answer, "applied", c.name);
+        const [, args] = t.calls[sent];
+        assert.equal(args.find, c.find);
+        assert.equal(
+          typeof args.expected_before_hash,
+          "string",
+          `${c.name}: the paragraph was told`,
+        );
+      }
+    }
+    // The two sentences with a citation went to Word as one deletion each.
+    const sentences = t.calls.filter(([, a]) => a.replace === "").map(([, a]) => a.find);
+    assert.deepEqual(
+      sentences,
+      SPEC.cases.filter((c) => c.expect === "removed").map((c) => c.find),
+    );
   } finally {
     await t.cleanup();
   }

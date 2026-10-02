@@ -40,6 +40,8 @@ Usage: python3 scripts/e2e/make_citation_fixture.py [output.docx]
            stage edits, as JSON; standard library only)
        python3 scripts/e2e/make_citation_fixture.py --dump x.docx   (paragraph
            texts as JSON, for tests; standard library only)
+       python3 scripts/e2e/make_citation_fixture.py --dump-reviewed x.docx   (the
+           same with the fields as Word's getReviewedText shows them)
 
 Writing the fixture needs python-docx (a development tool; the fixture is
 committed as tests/fixtures/citation_manuscript.docx).
@@ -493,8 +495,37 @@ def dump(path):
     return ["".join(t.text or "" for t in p.iter(ns + "t")) for p in root.iter(ns + "p")]
 
 
+def dump_reviewed(path):
+    """The text of every body paragraph as Range.getReviewedText gave it in the
+    cite run of 2026-10-02: a field as U+0013 instruction U+0014 result U+0015
+    (a field over several paragraphs with its U+0015 in the last one), a
+    hyperlink as U+0013 HYPERLINK "url" U+0014 text U+0015. The U+0001 Word
+    puts at the end of some instructions is left out. For tests."""
+    from xml.etree import ElementTree as ET
+
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    mark = {"begin": "\x13", "separate": "\x14", "end": "\x15"}
+
+    def walk(el):
+        tag = el.tag
+        if tag == ns + "fldChar":
+            return mark[el.get(ns + "fldCharType")]
+        if tag in (ns + "t", ns + "instrText"):
+            return el.text or ""
+        inner = "".join(walk(child) for child in el)
+        if tag == ns + "hyperlink":
+            return f'\x13HYPERLINK "{LINK}"\x14{inner}\x15'
+        return inner
+
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("word/document.xml"))
+    return [walk(p) for p in root.iter(ns + "p")]
+
+
 if __name__ == "__main__":
-    if "--cases" in sys.argv:
+    if "--dump-reviewed" in sys.argv:
+        print(json.dumps(dump_reviewed(sys.argv[sys.argv.index("--dump-reviewed") + 1])))
+    elif "--cases" in sys.argv:
         print(json.dumps({"cases": CASES, "rewrite": REWRITE}))
     elif "--dump" in sys.argv:
         print(json.dumps(dump(sys.argv[sys.argv.index("--dump") + 1])))
