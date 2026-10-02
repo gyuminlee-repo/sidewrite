@@ -187,8 +187,8 @@ test("the line of a turn names the document, the session, the id asked for, and 
     );
     // The first turn of a loop that resumed the stored session.
     assert.equal(
-      turnSessionLine({ doc: "paper.docx", sessionId: "bbb", asked: "bbb" }),
-      "[agent] turn doc=paper.docx session=bbb asked=bbb (resumed)",
+      turnSessionLine({ doc: "/mnt/d/my run/paper.docx", sessionId: "bbb", asked: "bbb" }),
+      "[agent] turn doc=/mnt/d/my run/paper.docx session=bbb asked=bbb (resumed)",
     );
     // The SDK answered with another id than the one asked for: the line
     // still says whose transcript was asked for.

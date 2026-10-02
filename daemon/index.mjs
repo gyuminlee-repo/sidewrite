@@ -389,10 +389,6 @@ function sessionFor(key) {
 // leaves a revision changes its hint from then on.
 const paneDoc = (key) => localDocPath(bridge.getContext(key)?.activeDoc, process.env);
 const resumeDocFor = (key) => sessionDocKey(paneDoc(key));
-const docNameOf = (key) => {
-  const doc = paneDoc(key);
-  return doc ? doc.split(/[\\/]/).pop() : null;
-};
 
 // This pane's workspace: its live session's cwd, else the last cwd we
 // recorded for it, else the launch default.
@@ -1607,7 +1603,7 @@ function handleAgentMessage(msg, session) {
         if (session && msg.session_id) {
           console.log(
             turnSessionLine({
-              doc: docNameOf(session.key),
+              doc: paneDoc(session.key),
               sessionId: msg.session_id,
               asked: session.resumeAsked,
               known: session.inited ? session.sessionId : null,

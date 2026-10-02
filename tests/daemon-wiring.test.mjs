@@ -343,6 +343,6 @@ test("the resume hint is looked up and saved by the document of the pane when it
   assert.match(code.slice(line - 40, line), /console\.log\(\s*$/);
   assert.match(
     code.slice(line, line + 260),
-    /doc: docNameOf\(session\.key\),\s*sessionId: msg\.session_id,\s*asked: session\.resumeAsked,\s*known: session\.inited \? session\.sessionId : null,/,
+    /doc: paneDoc\(session\.key\),\s*sessionId: msg\.session_id,\s*asked: session\.resumeAsked,\s*known: session\.inited \? session\.sessionId : null,/,
   );
 });

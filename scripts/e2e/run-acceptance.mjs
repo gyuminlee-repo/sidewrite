@@ -59,7 +59,7 @@ import {
   modelsEvidence,
   norm,
   ollamaSplitEvidence,
-  onlyOwnNames,
+  foreignLogLines,
   PARTS_SEED_RULE,
   partsBeforeJoin,
   partsBoth,
@@ -2420,11 +2420,11 @@ function isolationCheck() {
   // Stage parts: the daemon writes the link between the two files of the
   // run with their bare names ("link join SI.docx -> paper.docx").
   const bare = STAGE === "parts" ? [path.basename(DOC), path.basename(SI_DOC)] : [];
-  const foreign = [LOG, KNOB_LOG]
-    .flatMap((f) => readLog(f).split("\n"))
-    .filter((l) => /\.docx\b/i.test(l) && !own.some((p) => l.includes(p)))
-    .filter((l) => !onlyOwnNames(l, bare))
-    .filter((l) => !/^\[bridge\] hello received|^\[diag\] hello /.test(l));
+  const foreign = foreignLogLines(
+    [LOG, KNOB_LOG].flatMap((f) => readLog(f).split("\n")),
+    own,
+    bare,
+  );
   record.isolation = { foreign_lines: foreign.slice(0, 20), count: foreign.length };
   rows.push({
     step: "no tool call on other documents",

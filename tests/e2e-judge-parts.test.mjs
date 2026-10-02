@@ -14,6 +14,7 @@ import {
   PARTS_SEED_RULE,
   docStem,
   forbidBlockEvidence,
+  foreignLogLines,
   onlyOwnNames,
   partsBeforeJoin,
   partsBoth,
@@ -656,11 +657,13 @@ test("the sessions the panes ran on are read from the daemon log, and two panes 
   const S = "9f8e7d6c-0000-4000-8000-000000000000";
   const lines = (...rows) => rows.join("\n");
   // Each pane on a session of its own, the manuscript's second turn in its loop.
+  // The daemon names the document by its path (a folder name may hold a
+  // space); the row tells the two files apart by their names.
   const good = lines(
-    `[agent] turn doc=paper.docx session=${P} asked=- (started)`,
-    "[daemon] Starting session for /mnt/d/run (new session)",
-    `[agent] turn doc=SI.docx session=${S} asked=- (started)`,
-    `[agent] turn doc=paper.docx session=${P} asked=- (continued)`,
+    `[agent] turn doc=/mnt/d/my run/paper.docx session=${P} asked=- (started)`,
+    "[daemon] Starting session for /mnt/d/my run (new session)",
+    `[agent] turn doc=/mnt/d/my run/SI.docx session=${S} asked=- (started)`,
+    `[agent] turn doc=/mnt/d/my run/paper.docx session=${P} asked=- (continued)`,
   );
   const s = partsSessions(good, NAMES);
   assert.deepEqual(s.rows[1], { doc: "SI.docx", session: S, asked: null, how: "started" });
@@ -707,6 +710,34 @@ test("the sessions the panes ran on are read from the daemon log, and two panes 
   const none = partsSessions("", NAMES);
   assert.equal(none.pass, false);
   assert.match(none.got, /no turn line in the log/);
+});
+
+test("a turn on a document of the run is the run's own, a turn on any other document is foreign", () => {
+  const own = ["D:\\run\\e2e-1", "/mnt/d/run/e2e-1"];
+  const turn = (doc) => `[agent] turn doc=${doc} session=9e202b73 asked=- (started)`;
+  const mine = [
+    "[bridge] hello received; host: word; active doc: D:\\run\\e2e-1\\paper.docx",
+    turn("/mnt/d/run/e2e-1/paper.docx"),
+    turn("/mnt/d/run/e2e-1/cite/anchor.docx"),
+    "[review] refresh changes=4",
+    turn("-"),
+  ];
+  assert.deepEqual(foreignLogLines(mine, own), []);
+  // Another Word's pane said hello: that alone is not a tool call.
+  const hello = "[bridge] hello received; host: word; active doc: D:\\thesis\\paper.docx";
+  assert.deepEqual(foreignLogLines([...mine, hello], own), []);
+  // A turn on a document of another folder, of the same file name or not,
+  // and one the log names without a folder.
+  for (const other of ["/mnt/d/thesis/paper.docx", "/mnt/d/thesis/other.docx", "paper.docx"])
+    assert.deepEqual(foreignLogLines([...mine, turn(other)], own), [turn(other)], other);
+  // Stage parts: the link lines name the two files without a folder.
+  const link = "[review] link join SI.docx -> paper.docx comments=4";
+  assert.deepEqual(foreignLogLines([link], own, ["paper.docx", "SI.docx"]), []);
+  assert.deepEqual(foreignLogLines([link], own), [link]);
+  assert.deepEqual(
+    foreignLogLines(["[tool] office_find D:\\other\\paper.docx"], own, ["paper.docx", "SI.docx"]),
+    ["[tool] office_find D:\\other\\paper.docx"],
+  );
 });
 
 test("a log line that names only the files of the run by their bare names is the run's own", () => {

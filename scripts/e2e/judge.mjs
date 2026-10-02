@@ -1908,8 +1908,10 @@ export function partsSavedLine(points) {
 
 // Which Agent SDK session each pane's turns ran on, from the line the daemon
 // prints for every turn (daemon/sessions.mjs turnSessionLine, no debug flag):
-//   [agent] turn doc=<file> session=<id> asked=<id or -> (started|resumed|continued)
-// The two panes must not share a session: no id a turn of one document ran
+//   [agent] turn doc=<path> session=<id> asked=<id or -> (started|resumed|continued)
+// The line names the document by its path; the documents of the run are told
+// apart by their file names here (the isolation check, foreignLogLines, is
+// what reads the folder). The two panes must not share a session: no id a turn of one document ran
 // on, or was asked to resume, may be an id of the other document (asked is
 // read too, should the SDK give a resumed session a new id). A file of a
 // revision with parts has a resume hint of its own (sessions.mjs), so with
@@ -1920,7 +1922,12 @@ export function partsSessions(log, names) {
     ...String(log ?? "").matchAll(
       /^\[agent\] turn doc=(.*) session=(\S+) asked=(\S+) \((started|resumed|continued)\)$/gm,
     ),
-  ].map((m) => ({ doc: m[1], session: m[2], asked: m[3] === "-" ? null : m[3], how: m[4] }));
+  ].map((m) => ({
+    doc: m[1].split(/[\\/]/).pop(),
+    session: m[2],
+    asked: m[3] === "-" ? null : m[3],
+    how: m[4],
+  }));
   const idsOf = (doc) =>
     new Set(rows.filter((r) => r.doc === doc).flatMap((r) => [r.session, r.asked].filter(Boolean)));
   const ran = (doc) => [...new Set(rows.filter((r) => r.doc === doc).map((r) => r.session))];
@@ -1976,6 +1983,19 @@ export function partsSessions(log, names) {
 export function onlyOwnNames(line, names) {
   const tokens = String(line ?? "").match(/[^\s"'()=]+\.docx\b/gi) ?? [];
   return tokens.length > 0 && tokens.every((t) => names.includes(t));
+}
+
+// The lines of the daemon log that name a document outside the run. own:
+// the run folder as the log may write it (Windows and WSL path); names: the
+// bare file names of the run (stage parts only, [] elsewhere). The hello of
+// another Word's pane is not a tool call and is left out. A turn line
+// ("[agent] turn doc=<path> ...") names its document by path, so one of
+// another folder is foreign whatever its file name is.
+export function foreignLogLines(lines, own, names = []) {
+  return (lines ?? [])
+    .filter((l) => /\.docx\b/i.test(l) && !own.some((p) => l.includes(p)))
+    .filter((l) => !onlyOwnNames(l, names))
+    .filter((l) => !/^\[bridge\] hello received|^\[diag\] hello /.test(l));
 }
 
 export const JUDGES = {

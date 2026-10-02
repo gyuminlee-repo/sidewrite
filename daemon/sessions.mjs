@@ -130,7 +130,9 @@ export async function saveSessionId(host, cwd, sessionId, doc = null) {
 //   continued  a later turn of the same loop
 // asked is printed as well: should the SDK give a resumed session a new id,
 // the line still says whose transcript the turn continued.
-// doc: the file name of the document, or null. asked: the id the loop was
+// doc: the document as the path the daemon opens it by (two files of one
+// name in two folders are two documents, with a hint each), or null. asked:
+// the id the loop was
 // started with (null: none). known: the id the loop already had from an
 // earlier init (null: this is its first).
 export function turnSessionLine({ doc = null, sessionId, asked = null, known = null }) {
