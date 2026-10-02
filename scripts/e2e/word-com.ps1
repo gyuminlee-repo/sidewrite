@@ -20,6 +20,11 @@
 #   open-check      -Other <path>: open another document read-only in the same
 #                   Word, without repair, and leave it open; its paragraph count
 #   close-other     -Other <path>: close that document without saving
+#   save            -AllowDir <dir>: save the document in place, with its
+#                   tracked changes and comments, also when Word holds it
+#                   unchanged; refused when it is not under AllowDir
+#   addins          the COM add-ins and the global templates of this Word,
+#                   read only (nothing is loaded, started or changed)
 #   quit            -AllowDir <dir> -ExpectPid <n>: close without saving when
 #                   every open document is under AllowDir; else refused =
 #                   "foreign_documents" and nothing is closed
@@ -223,6 +228,32 @@ switch ($Action) {
       if ((Norm $x.FullName) -eq (Norm $Other)) { $x.Close($false); $closed = $true; break }
     }
     Out ([ordered]@{ ok = $closed; closed = $closed; path = $Other })
+  }
+  "save" {
+    $full = [string]$d.FullName
+    $allow = (Norm $AllowDir).TrimEnd("\") + "\"
+    if (-not $AllowDir -or -not (Norm $full).StartsWith($allow, [System.StringComparison]::OrdinalIgnoreCase)) {
+      Out ([ordered]@{ ok = $false; saved = $false; error = "the document is not in the run folder"; path = $full })
+      break
+    }
+    # Marked as changed first: Word then writes the file in its own form even
+    # when nothing was done to it since it was opened.
+    $d.Saved = $false
+    $d.Save()
+    Out ([ordered]@{ ok = $true; saved = [bool]$d.Saved; path = $full; revisions = $d.Revisions.Count; comments = $d.Comments.Count; fields = $d.Fields.Count })
+  }
+  "addins" {
+    $app = $d.Application
+    $com = @()
+    $templates = @()
+    $errors = @()
+    try {
+      foreach ($a in $app.COMAddIns) { $com += [ordered]@{ prog_id = [string]$a.ProgId; description = [string]$a.Description; connected = [bool]$a.Connect } }
+    } catch { $errors += "COMAddIns: " + $_.Exception.Message }
+    try {
+      foreach ($a in $app.AddIns) { $templates += [ordered]@{ name = [string]$a.Name; installed = [bool]$a.Installed; path = [string]$a.Path } }
+    } catch { $errors += "AddIns: " + $_.Exception.Message }
+    Out ([ordered]@{ ok = $true; com_addins = @($com); templates = @($templates); errors = @($errors) })
   }
   "quit" {
     $app = $d.Application

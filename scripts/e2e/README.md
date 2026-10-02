@@ -5,7 +5,9 @@ daemon, a separate Word process, the task pane clicks, the author's Word
 steps, and the feature_list verify commands. It has four flows: stage 2
 (`S2-18..S2-34`, the default), stage 2.5 (`--stage s25`, `S25-30..S25-41`),
 stage 3 (`--stage s3`, `S3-30..S3-41`, the response letter) and stage 4
-(`--stage s4`, `S4-30..S4-33,S4-37,S4-38`, the Tools tab).
+(`--stage s4`, `S4-30..S4-33,S4-37,S4-38`, the Tools tab). A fifth flow,
+`--stage cite`, has no feature list: it asks whether tracked edits leave the
+fields of Zotero and EndNote whole (section "Stage cite" below).
 
 Stage 4 opens the fake manuscript `tests/fixtures/aux_manuscript.docx`
 (`make_aux_fixture.py`, every sentence invented) with the journal profile
@@ -210,6 +212,193 @@ A step that only reads or computes again (`open-response`, `response-locate`,
 `result.json`); a step that writes or asks a model is not. The flow has no
 fixed wait: every Response step waits for the message its own action ends
 with.
+
+## Stage cite
+
+```sh
+node scripts/e2e/run-acceptance.mjs --stage cite \
+  --base-dir <folder on a Windows drive, as a WSL path> \
+  --playwright-core 'D:\path\to\node_modules\playwright-core'
+```
+
+Do the two edit tools leave reference-manager fields whole? The document is
+`tests/fixtures/citation_manuscript.docx` (`make_citation_fixture.py`, every
+sentence and reference invented): eleven Zotero citations
+(`ADDIN ZOTERO_ITEM CSL_CITATION {json}`, some instructions split over
+several runs, two with several items, one before a full stop, one next to
+italic and superscript runs), the Zotero bibliography (`ADDIN ZOTERO_BIBL`,
+one field over six paragraphs), `ZOTERO_PREF_1` and `_2` in
+`docProps/custom.xml`, two EndNote citations (`ADDIN EN.CITE`, one with the
+record in the instruction, one with it in `w:fldData` and the nested
+`ADDIN EN.CITE.DATA` field), the EndNote list (`ADDIN EN.REFLIST`), the
+`EN.*` document variables, and as controls a `REF` field and a hyperlink.
+The head of the script says where each shape comes from and which parts are
+not confirmed from a source. The EndNote shapes are among those: they were
+written from secondary sources and were not compared with a document a real
+EndNote wrote, and no EndNote plugin is installed on the machine the stage
+ran on (2026-10-02; the row of the plugins says what the Word of a run has).
+The review is `tests/fixtures/cite_review.txt` (four invented comments). No
+feature list, no ledger, no `--conditional`.
+
+The rule the tools are held to: an edit either leaves every field exactly as
+it was, or removes a field as a whole (begin through end inside the tracked
+deletion, so accepting removes the field and rejecting restores it). Nothing
+in between. What is judged is `tools/citation_fields_check.py` on the files
+Word saved, and for the edits of the run itself also the answer of the tool
+(the column `expect` of `CASES`). The answers of a model turn are recorded
+and not expected.
+
+```sh
+python3 tools/citation_fields_check.py --before A.docx --after B.docx [--expect-removed N] [--fld-data judge|note] [--detail]
+```
+
+It reads both files without Word: every field of every story (complex
+fields with `w:instrText` and, inside a tracked deletion, `w:delInstrText`;
+`w:fldSimple`; `w:hyperlink`). B passes when every story is balanced (no
+`end` or `separate` without a `begin`, no `begin` left open), no field is
+split by a tracked change (its markers and its instruction lie all outside a
+change, all in deletions, or all in insertions), no field is hollowed, no
+result of a field differs from the result the same field has in A, the
+instructions are those of A as a multiset of exact texts, the `w:fldData`
+are those of A, and the `ZOTERO_*` properties and the `EN.*` document
+variables are the same. With `--expect-removed N`, B lacks exactly N
+instructions of A and has no other.
+
+A field is hollowed when it is still there (its markers are not all inside
+tracked deletions) and nothing of its result is left once the changes are
+accepted, although it had text: the result lies whole in a tracked deletion,
+or, after accept-all, the field has no result run at all. That is what three
+separate deletions of "the words before the citation", "the visible text of
+the citation" and "the full stop after it" leave (the first real run,
+2026-10-02): the citation looks deleted, the field stays, and the plugin
+writes the text again at its next refresh and keeps the reference in the
+bibliography. By the counts, the instructions and the balance such a file is
+whole, so it has a failure of its own, `hollowed`. A field whose markers and
+result all lie inside tracked deletions is deleted as a whole (`in
+deletions`) and passes. A result that is partly deleted, or has other words
+than in A, fails as `result-changed`: the text of a field is written by the
+reference manager, and a tool that edits it leaves a citation that no longer
+says what its instruction records. Both are read for complex fields only,
+not for `w:fldSimple` and `w:hyperlink`.
+
+`--fld-data note` prints a difference of `w:fldData` as a `NOTE` line and
+does not fail on it. The run passes it when Word's own save of the untouched
+fixture already changed `w:fldData` (the first row of the stage): Word
+writes the invented EndNote data of the fixture anew on every save, with
+another value each time, so the difference says nothing about a tool. When
+the first row finds `w:fldData` kept, it is judged in every later row.
+For each failure it prints one line with the story and paragraph, the first
+40 characters of the paragraph, the kind of the field and its markers before
+and after, for example
+
+```
+FAIL split-field | word/document.xml p3 "Shaken flasks remain the usual first ves" | kind=ZOTERO_ITEM | before: begin@- instr@- separate@- result@- end@- | after: begin@del instr@del separate@- result@- end@-
+```
+
+(`@-` outside a tracked change, `@del` in a deletion, `@ins` in an
+insertion), for a hollowed or changed result also `| result: "before" ->
+"after"`, then one JSON line. Exit code 0 only when everything holds. A
+live citation whose visible text is no longer the text its instruction
+records (`plainCitation`, `DisplayText`) is listed under `text_changed` and
+does not fail on that alone: A is not looked at for it, so a citation the
+author had changed by hand is listed and passes, while one that differs
+from A fails as `result-changed`. Nor does a field under `flattened` fail: it lies whole in a tracked
+deletion while its visible text stands again in the same paragraph as plain
+inserted text, which is what Word makes of an edit whose range held the
+field. Nothing is half, but once that change is accepted the citation is
+plain text and the plugin no longer knows it. With `--detail` (the run uses
+it) the JSON line also lists every field with its state and the markers of
+every paragraph that holds one.
+
+The steps, each row of the table of the run:
+
+| Row                                                                                                                                                           | What is done                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Judged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cite: the Zotero and EndNote plugins of this Word`                                                                                                           | `word-com.ps1 addins`: the COM add-ins and global templates of the Word of the run, read only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | no (`NOTE`); `cite.plugins` in `result.json`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `cite: Word's own save keeps the fields of the fixture`                                                                                                       | `word-com.ps1 save` before any edit, the file copied to `cite/baseline.docx`, the checker on the fixture against it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | no (`NOTE` when it differs): every later file is compared with this baseline, so what Word itself changes in the fixture is not taken for the work of a tool. When `w:fldData` differs here, the row says so and every later check runs with `--fld-data note` (`cite.fld_data` in `result.json`)                                                                                                                                                                                                                                                                                                                                                |
+| `cite: next-to`, `spans`, `straddles`, `cite-text-zotero`, `cite-text-endnote`, `cite-text-replace`, `delete-sentence`, `delete-sentence-zotero`, `formatted` | one tracked edit each (`CASES` in `make_citation_fixture.py`), saved to `cite/case-<name>.docx`. Expected `applied`: a phrase next to a Zotero citation; a phrase next to a field in the paragraph with italic and superscript runs. Expected `refused`: a replacement whose find holds the whole visible text of a citation; a find that ends inside it; the visible text of a Zotero citation alone, deleted; the same for the EndNote citation of the first real run; the visible text of a citation replaced by other text. Expected `removed`: a whole sentence with an EndNote citation, and one with a Zotero citation, each deleted as ONE edit | the checker on the copy before the edit against the copy after it (no split field, no hollowed field, no changed result; the row gives the count of each), and the answer of the tool: `applied` with no field newly in a deletion; `refused FieldNotEditable` with Word unchanged; `applied` with exactly one field newly whole in a deletion. The row reads `tool: <answer> [why=<reason> by=<daemon or pane> ...] \| expected <...>: met or NOT MET (fields newly in deletions: n) \| fields ...`, and the message of a refusal is printed under it. Also fails: no readable answer, or a refusal after which Word has another tracked change |
+| `cite: rewrite`                                                                                                                                               | the first part of a whole-paragraph rewrite of a paragraph with two citations, sent with `plain_only`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | the one expected answer: refused `ParagraphNotPlain`, no tracked change added, the checker passes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `propose R1.1`, `R1.2`, `R1.3` and `cite: fields after the turn of ...`                                                                                       | one model turn per comment (reword a sentence that cites; delete a sentence that cites; rewrite a paragraph with three citations), each saved to `cite/turn-<ref>.docx`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | the turn ran; the checker on the copy before the turn against the copy after it. The row tells the changes recorded, the rewrites tried (`stopped=ParagraphNotPlain`) and the refusals of the turn, from the daemon log                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `cite: saved with the changes tracked, every field whole`                                                                                                     | `cite/tracked.docx` against the baseline                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | the checker; marker `ok/cite-tracked`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `cite: citations whose text differs from what their field records`                                                                                            | the `text_changed` list of that check                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | no (`NOTE`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `cite: citations an edit replaced by plain text`                                                                                                              | the `flattened` list of that check; the row of the edit or turn that did it says so as well                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | no (`NOTE`): the fields are whole, and the citation is lost once the change is accepted                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `cite: Word opens the saved file as it is, accepts and rejects`                                                                                               | after the Word of the run is closed and the daemon stopped: `marked-diff-word.ps1` in a Word of its own opens `cite/tracked.docx` read-only without a repair, runs `Revisions.AcceptAll()` and `RejectAll()` and writes `cite/accepted.docx` and `cite/rejected.docx` (`save_as` of a job)                                                                                                                                                                                                                                                                                                                                                              | every file opened, no revision left                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `cite: after reject-all the fields are the original ones`                                                                                                     | the checker, baseline against `rejected.docx`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | equal, every field live                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `cite: after accept-all only the fields that lay in deletions`                                                                                                | the checker, baseline against `accepted.docx` with `--expect-removed <fields that lay whole in a deletion of tracked.docx>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | passes, every field live, and the instructions that are gone are exactly those of the deleted fields. The row names them: a citation an edit replaced by plain text is whole by this rule and is listed here                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `cite: Word lists the original fields after reject-all`                                                                                                       | Word's own `Field.Code` and `Field.Result` of every paragraph, baseline against reject-all                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | equal; marker `ok/cite-accept-reject` holds all of the last four rows                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+How the edits of the run reach the tools. A phrase edit goes the way of the
+forbid guard of stage 2: it is put on file as a blocked edit of R1.4 (the
+store's own `addBlocked`) that names a rule the ledger does not have, and the
+pane step `apply-seeded` presses "Allow exception", so the daemon sends it
+through `applyTrackedEdit` to `office_tracked_edit` as it sends an edit of a
+turn. The rationale comment of such an edit ends in the note of an approved
+exception. `office_tracked_rewrite` has no such way in without a model: the
+call it makes first is built with the daemon's own functions
+(`citeRewriteCall` in `judge.mjs`: `rewriteSegments`, `narrowEdit`,
+`paragraphHash`) and handed to the pane's `toolTrackedEdit` by the step
+`tracked-edit-direct`, which is where a paragraph that is not plain text is
+refused. The daemon's half of a rewrite runs only when a model turn chooses
+the tool; the row of that turn shows it.
+
+What the stage does not do: it starts no Zotero and no EndNote, presses no
+Refresh of a plugin and reads no library. So it cannot tell whether a plugin
+still updates the document afterwards; it tells whether the fields the
+plugin reads are still there, whole and unchanged. Each failing check prints
+the checker's lines under its row, and `result.json` keeps them under
+`cite.checks.<name>` with the full result. A field one edit left split or
+hollowed is still so in every later copy while the change is pending, so
+the rows after it fail as well: the paragraph named in the line tells which
+edit it was. An edit that is expected to go in has a paragraph of its own.
+The edits that must be refused share one with a later edit (the two in the
+baffles paragraph with the turn of R1.3, `cite-text-endnote` with the turn
+of R1.2, `delete-sentence-zotero` with the turn of R1.1): when one of them
+goes in against the expectation, its own row fails first.
+`--screenshots` works as in the other stages.
+
+How the tools keep the rule (`taskpane/shared/field-text.js`, used by the
+daemon and the task pane alike). Before Word is called the daemon places the
+edit in the paragraph as the last status refresh gave it, which shows a field
+as U+0013 instruction U+0014 result U+0015: a range inside the text of a
+field, across its edge, or a replacement over a field is refused as
+`FieldNotEditable` (log line `[review] field edit refused <ref> why=<inside,
+partial or replace-across> by=daemon paragraph=<n>`). The task pane does the
+same on its own reviewed text. A deletion that holds a field whole with
+words on both sides goes to Word as `Range.delete()` on the range the search
+found. After every edit in a paragraph with fields the pane reads the fields
+again from the paragraph XML and compares them with those read before; a
+field that is hollowed, split, changed or gone makes it reject the tracked
+changes on the range of the edit and refuse (`why=after-edit by=pane
+found=<what> undone=1`). When Word cannot take the edit back the tool
+answers `FieldEditNotUndone`, the change stays on record without a comment
+and the model is told to leave it to the author.
+
+What that assumes of Word, and what a row shows when it does not hold. None
+of the Word side could be run when the tool was written; the first two lines
+were seen in the run of 2026-10-02.
+
+| Assumed                                                                                                                                                              | The row when it is wrong                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Range.getReviewedText` shows a field as U+0013 instruction U+0014 result U+0015 (seen)                                                                              | the cases expected `refused` are not refused beforehand: their rows read `why=after-edit by=pane` (taken back) and not `why=inside by=daemon`, or `applied` with `hollowed 1`                                                                     |
+| a search finds a sentence across a field (seen: the pane answered with its paragraph), and the range it finds runs from before the begin marker to after the end one | `delete-sentence`: `refused NotFound`, or `refused FieldNotEditable [why=after-edit by=pane ... found=split undone=1]` with `NOT MET`, the fields unchanged                                                                                       |
+| `Range.delete()` with change tracking on puts the whole range, field markers included, into a tracked deletion                                                       | the same row: `why=after-edit` with `found=split`, `hollowed` or `count_a->b`, `NOT MET`                                                                                                                                                          |
+| `Paragraph.getOoxml()` shows the tracked deletions and the field markers of the paragraph as the saved file does                                                     | a good deletion is taken back (`found=count_a->b`, `NOT MET`), or a hollowed field is not seen: `applied`, and the checker fails the row with `hollowed`                                                                                          |
+| `Range.getTrackedChanges().rejectAll()` on the range of the edit takes back that edit and nothing else (WordApi 1.6)                                                 | `applied (delete, no comment: FieldEditNotUndone)`, the daemon log has `[review] field edit not undone`, and the checker names the field                                                                                                          |
+| `Office.context.requirements.isSetSupported("WordApi", "1.6")` is true in this Word (the paragraph ids of the run are the 1.6 ones)                                  | `delete-sentence`: `refused FieldNotEditable [why=no-undo by=pane ...]`, `NOT MET`, nothing changed                                                                                                                                               |
+| after such a deletion the reviewed text of the paragraph no longer shows the field                                                                                   | the next edit in that paragraph is refused once as `StaleTarget` and the pane refreshes: the turn of R1.1 (the paragraph of `delete-sentence-zotero`) reads `stale 1` or more, and the refresh may list the paragraph as changed outside the tool |
+| the tracked-deleted sentence can still be found for the rationale comment                                                                                            | `applied (delete, no comment: CommentAnchorMissing)`: the change is recorded, its comment is missing                                                                                                                                              |
+
+Not covered: a paragraph inside a field that runs over several paragraphs (a
+bibliography) is refused by the daemon, which sees the whole document; the
+task pane alone sees it only in the first and the last paragraph of the
+field. `w:fldSimple` and `w:hyperlink` are guarded through the reviewed text
+and are not read by the check after the edit. A Word without WordApi 1.4
+gives no reviewed text and no field list; there the edit goes in as before.
+
+The Word side of the stage (`word-com.ps1 save` and `addins`, `save_as` of
+`marked-diff-word.ps1`, the pane steps `apply-seeded` and
+`tracked-edit-direct`) had not run in Word when it was written; its judges
+were tested with inputs written by hand (`tests/e2e-judge-cite.test.mjs`).
 
 `--provider <id>` (stage 2 flow) chooses the provider of the review turns
 in the pane's Providers section right after the Review tab opened (step

@@ -166,6 +166,22 @@ test("without a profile every rule is in the prompt, numbered from 1", () => {
   assert.equal(text.match(/^\d+\. /gm).length, REVIEW_RULES.length);
 });
 
+test("the rule about citations and other fields is appended, in the prompt with and without the pack", () => {
+  // Appended: the rules a pack names by index stay where they are.
+  assert.equal(REVIEW_RULES.length, 16);
+  assert.match(REVIEW_RULES[1], /^Make only the changes this comment asks for/);
+  assert.match(REVIEW_RULES[3], /^Base every change and every rationale/);
+  const rule = REVIEW_RULES[15];
+  assert.match(rule, /^Citations and other fields .* are not edited/);
+  assert.match(rule, /keep each one where it is and change only the words around it/);
+  assert.match(rule, /delete its whole sentence in ONE office_tracked_edit/);
+  assert.match(rule, /never the citation text on its own/);
+  for (const profile of [undefined, { policy_packs: { review_scope: false } }]) {
+    const { text } = buildReviewPrompt({ comment, ledger, profile });
+    assert.match(text, new RegExp(`\\n${profile ? 13 : 16}\\. Citations and other fields`));
+  }
+});
+
 test("a profile that switches the review_scope pack off drops rules 2 to 4 and renumbers", () => {
   const profile = { policy_packs: { review_scope: false } };
   assert.deepEqual(rulesFor(profile), [REVIEW_RULES[0], ...REVIEW_RULES.slice(4)]);

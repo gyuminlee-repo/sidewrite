@@ -21,6 +21,14 @@ import { changeContext, normalizeParaText } from "./revision-classify.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
 import { newNumbers } from "./number-guard.mjs";
 import { rewriteSegments } from "./word-diff.mjs";
+import {
+  fieldRefusal,
+  fieldVerdict,
+  fieldView,
+  fieldViews,
+  hasFieldMarks,
+  spliceShown,
+} from "../taskpane/shared/field-text.js";
 
 export const REVIEW_WRITE_TOOL = "office_tracked_edit";
 // The ways a review turn changes the document: one tracked edit, or a
@@ -35,6 +43,10 @@ export const REWRITE_CAP = "tracked_rewrite";
 // edit (taskpane/shared/tools-word.js PANE_CAPS): it compares the paragraph
 // with expected_before_hash before it edits.
 export const TARGET_HASH_CAP = "target_hash";
+// What a task pane must name to be sent a deletion that takes a field with
+// it (a whole sentence with its citation): it checks the fields of the
+// paragraph after the edit and takes the edit back when one is not whole.
+export const FIELD_CAP = "field_guard";
 
 // Read-only Word tools stay available in a review turn.
 export const REVIEW_READ_TOOLS = new Set([
@@ -100,6 +112,7 @@ export const TRACKED_EDIT_DESCRIPTION =
   "Review turns only. Apply ONE tracked change (replace, delete, or pure insertion) and attach its rationale comment. " +
   'Replace/delete: give `find` and `replace` ("" deletes). Insertion: give `find` (anchor) and `insert_after`. ' +
   "`find` must occur exactly once in the document; if it occurs more than once, pass `paragraph_hint` (a paragraph ID from office_find). " +
+  "A citation or another field is never edited: an edit inside its text, across its edge, or a replacement over it is refused (FieldNotEditable). To remove a citation, delete its whole sentence in ONE edit. " +
   "Returns ok:false with blocked_by when the new text, alone or together with the words next to it, matches the forbid list of the author; then rephrase, do not retry the same text.";
 
 export const trackedEditShape = {
@@ -284,7 +297,8 @@ function fail(message, extra = {}) {
 //         onNotApplied({ref, attempt_id}), onBlocked({ref, args, blocked_by}),
 //         onOutcomeUnknown({id, ref, record, attempt, attempt_id}),
 //         onRecordFailed({ref, attempt_id, change}), onStaleTarget({ref}),
-//         paneChecksTarget() -> boolean, holdRef(ref) -> release, log }
+//         paneChecksTarget() -> boolean, paneCan(cap) -> boolean,
+//         holdRef(ref) -> release, log }
 // onAttempt: called before Word, with the edit and the form it would have in
 // the document; it writes them to the review file and returns the id of
 // that attempt (end(): the call is over). When it throws, Word is not
@@ -353,6 +367,41 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
   // The paragraph Word will edit, when it can be told from here (editTarget).
   const current = currentTexts(ctx.paragraphs, ctx.recent_changes);
   const target = editTarget(current, ctx.paragraph_ids, args.find, args.paragraph_hint).index;
+  // The paragraphs as they are shown: the status refresh gives a field with
+  // its instruction (field-text.js), `find` is text as Word shows it.
+  const views = fieldViews(current);
+  const shown = views.map((v) => v.text);
+  const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
+  // Fields. An edit leaves every field as it was or removes one as a whole:
+  // a range inside the text of a field, across its edge, or a replacement
+  // over one is refused here, before anything else is judged and before
+  // Word is called. A deletion that holds a field whole (a sentence with
+  // its citation) goes on, to a task pane that checks the paragraph after
+  // the edit. The parts of a rewrite are not judged here: the task pane
+  // refuses the paragraph as a whole (ParagraphNotPlain).
+  if (!part && target !== null) {
+    const v = fieldVerdict(
+      views[target],
+      args.find,
+      hasReplace ? { replace: args.replace } : { insert_after: args.insert_after },
+      narrow,
+    );
+    const reason = !v.ok
+      ? v.reason
+      : v.remove && deps.paneCan && !deps.paneCan(FIELD_CAP, at)
+        ? "pane-outdated"
+        : null;
+    if (reason) {
+      deps.log?.(
+        `[review] field edit refused ${turn.ref} why=${reason} by=daemon paragraph=${target}`,
+      );
+      return fail(fieldRefusal(reason), {
+        code: "FieldNotEditable",
+        reason,
+        paragraph_index: target,
+      });
+    }
+  }
   // Forbid list: the new text on its own, and the paragraph as it will read
   // after the edit (a forbidden phrase formed with the words next to it).
   // Without a known target every occurrence of `find` is tried.
@@ -395,7 +444,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
       { code: "NumberNeedsAuthor", numbers },
     );
   }
-  const around = forbidHitsAfterEdit(ledger, target === null ? current : [current[target]], {
+  const around = forbidHitsAfterEdit(ledger, target === null ? shown : [shown[target]], {
     find: args.find,
     text: newText,
     kind,
@@ -426,7 +475,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     : kind === "insert"
       ? []
       : lostFacts(args.find, args.replace, {
-          sentenceStart: startsSentence(args.find, target === null ? texts : [current[target]]),
+          sentenceStart: startsSentence(args.find, target === null ? texts : [shown[target]]),
         });
   const unsourced = part
     ? part.unsourced
@@ -450,7 +499,6 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
               .filter((t) => !factPresent(t, own) && factPresent(t, ctx.comment_text ?? "")),
           ),
         ];
-  const narrow = hasReplace ? narrowEdit(args.find, args.replace) : null;
 
   const commentText =
     part?.comment_text ?? formatRationaleComment(turn.ref, rationale, { lost, fromReview });
@@ -463,7 +511,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     tool_call_id: id,
     unknown_at: new Date().toISOString(),
     comment_text: commentText,
-    change: unknownAttempt(current, target, ctx.paragraph_ids, {
+    change: unknownAttempt(shown, target, ctx.paragraph_ids, {
       kind,
       find: args.find,
       text: newText,
@@ -524,6 +572,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
     if (r.ok === false && !commentMissing) {
       await notApplied();
+      // The task pane refused the edit for a field (before the edit, or
+      // after it, when Word did not keep a field whole and the edit was
+      // taken back). The log says which; the model gets the pane's message.
+      if (r.code === "FieldNotEditable") {
+        deps.log?.(
+          `[review] field edit refused ${turn.ref} why=${r.reason ?? "?"} by=pane paragraph=${r.paragraph_index ?? "?"}` +
+            `${r.detail ? ` found=${String(r.detail).replace(/\s+/g, "_")}` : ""}${r.undone ? " undone=1" : ""}`,
+        );
+      }
       if (r.code !== "StaleTarget") return r;
       // The task pane found the paragraph not as it was judged here and
       // changed nothing. The judgement (forbid list, lost facts) was made
@@ -544,7 +601,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     const out = await recordApplied(deps, turn.ref, r, {
       at,
       attemptId,
-      texts: current,
+      texts: shown,
       kind,
       newText,
       narrow,
@@ -873,13 +930,16 @@ export async function applyTrackedRewrite(deps, args, turn) {
 // or null per paragraph, in a document with p<N> index ids).
 // Returns { index, code }: code is null with an index, else the error Word
 // answers with (NotFound, Ambiguous, HintNotFound) and index is null.
+// A paragraph with a field is searched as Word shows it, without the
+// instruction of the field (shownText): Word's search finds a sentence
+// across its citation, and so does this.
 export function editTarget(texts, ids, find, hint) {
   const none = (code) => ({ index: null, code });
   const f = String(find ?? "")
     .replace(/\u0005/g, "")
     .replace(/\s+/g, " ");
   if (!f.trim()) return none("NotFound");
-  const counts = (texts ?? []).map((t) => String(t ?? "").split(f).length - 1);
+  const counts = (texts ?? []).map((t) => shownText(t).split(f).length - 1);
   const total = counts.reduce((a, b) => a + b, 0);
   let index;
   let hits = total;
@@ -899,10 +959,18 @@ export function editTarget(texts, ids, find, hint) {
   return { index, code: null };
 }
 
+// A paragraph as Word shows it: one with a field (the status refresh gives
+// it with the instruction of the field, field-text.js) without the
+// instruction and the marks; any other as it is.
+const shownText = (t) => (hasFieldMarks(t) ? fieldView(t).text : String(t ?? ""));
+
 // The paragraphs as they read now: the texts of the last status refresh with
 // the changes recorded since then put in (a narrowed change by the find and
 // replace the model asked for). A change whose find is not exactly once in
-// the texts is left out.
+// the texts is left out. In a paragraph with a field the find is looked for
+// in the text as it is shown, and a deletion that held a field whole takes
+// the field out with its instruction, as the task pane reads the paragraph
+// after it.
 export function currentTexts(texts, changes) {
   const out = (texts ?? []).map(normalizeParaText);
   for (const ch of changes ?? []) {
@@ -912,10 +980,20 @@ export function currentTexts(texts, changes) {
     if (!f.trim()) continue;
     // The paragraph Word reported for the change; without one, the only
     // paragraph that holds its find.
-    const at = out.flatMap((t, k) => (t.includes(f) ? [k] : []));
+    const at = out.flatMap((t, k) => (shownText(t).includes(f) ? [k] : []));
     const k = at.includes(ch.paragraph_index) ? ch.paragraph_index : at.length === 1 ? at[0] : null;
     if (k === null) continue;
     const t = out[k];
+    if (hasFieldMarks(t)) {
+      const next = spliceShown(
+        t,
+        f,
+        ch.narrowed_from?.text ?? ch.text ?? "",
+        !ch.narrowed_from && ch.kind === "insert",
+      );
+      if (next !== null) out[k] = next;
+      continue;
+    }
     const i = t.indexOf(f);
     if (t.indexOf(f, i + 1) !== -1) continue;
     const cut = !ch.narrowed_from && ch.kind === "insert" ? i + f.length : i;
@@ -1075,6 +1153,15 @@ async function recordApplied(
   if (lost.length) deps.log?.(`[review] lost facts ${id}: ${lost.join("; ")}`);
   if (unsourced.length) deps.log?.(`[review] unsourced ${id}: ${unsourced.join("; ")}`);
   if (commentMissing) deps.log?.(`[review] comment missing ${id} code=${commentMissing}`);
+  // The task pane found a field of the paragraph not whole after the edit
+  // and could not take the edit back (tools-word.js). The change is on
+  // record, so the author sees it; the model is told to leave it alone.
+  const fieldBroken = commentMissing === "FieldEditNotUndone";
+  if (fieldBroken) {
+    deps.log?.(
+      `[review] field edit not undone ${id} paragraph=${change.paragraph_index} found=${String(r.detail ?? "?").replace(/\s+/g, "_")}`,
+    );
+  }
   // What Word answered when the comment step failed (tools-word.js
   // afterEditApplied): logged only. Without it nothing says why a change has
   // no rationale comment. One line per failed try, no text of the manuscript.
@@ -1099,11 +1186,15 @@ async function recordApplied(
           `The task pane applied this change but did not compare the paragraph with the one the edit was checked against (it is older than the daemon). Tell the author to reload the task pane and to look at change ${id}.`,
         ]
       : []),
-    ...(commentMissing
+    ...(fieldBroken
       ? [
-          `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,
+          `The change is in the document, but it did not leave a citation or another field of its paragraph whole (${r.detail ?? "field changed"}) and Word could not take it back. Do not repeat it and do not try to repair it with another edit; tell the author to reject change ${id} in Word. It has no rationale comment.`,
         ]
-      : []),
+      : commentMissing
+        ? [
+            `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,
+          ]
+        : []),
     ...(unsourced.length
       ? [
           `Not in the manuscript or the comment: ${unsourced.join(", ")}. Name them in your answer so the author can check where they come from.`,
