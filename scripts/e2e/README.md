@@ -478,11 +478,13 @@ node scripts/e2e/run-acceptance.mjs --stage parts \
 ```
 
 A manuscript and its supplementary Word file in one revision (README
-"Supplementary Word documents", steps A1 and A2): the link, the copied
+"Supplementary Word documents", steps A1 to A3): the link, the copied
 comment list, a turn in each file, the forbid guard in the supplementary
 file, where a request stands in the other file, a turn in both panes at the
-same time, and leaving. Both documents are open in the Word of the run, each
-with its pane, on one daemon.
+same time, the response letter of the manuscript with a change of the
+supplementary file (accepted, then changed behind Sidewrite's back, then
+rejected), and leaving. Both documents are open in the Word of the run, each
+with its pane, on one daemon; rows k to m close and reopen `SI.docx`.
 
 The files are invented (`make_parts_fixture.py`, `--spec` prints what the
 stage reads): `paper.docx` (`tests/fixtures/parts_paper.docx`), `SI.docx`
@@ -490,12 +492,12 @@ stage reads): `paper.docx` (`tests/fixtures/parts_paper.docx`), `SI.docx`
 `parts_review.txt` of four comments and the ledger `parts_ledger.json` with
 one forbidden word, "novel" (rule L1).
 
-| Comment | Asks for a change              | The stage uses it for |
-| ------- | ------------------------------ | --------------------- |
-| R1.1    | only in the supplementary file | c, d, e, f, h         |
-| R1.2    | in both files                  | g                     |
-| R1.3    | only in the manuscript         | (context)             |
-| R1.4    | in a figure file               | (context)             |
+| Comment | Asks for a change              | The stage uses it for  |
+| ------- | ------------------------------ | ---------------------- |
+| R1.1    | only in the supplementary file | c, d, e, f, h, k, l, m |
+| R1.2    | in both files                  | g                      |
+| R1.3    | only in the manuscript         | (context)              |
+| R1.4    | in a figure file               | (context)              |
 
 No feature list, no `--conditional`. `--supplement`, `--fixture`, `--review`
 and `--ledger` replace the files; `--provider` chooses the provider of the
@@ -521,6 +523,53 @@ line printed when the row was judged and `result.json` have it whole.
 | h   | in the pane of `paper.docx` the review is split again and saved without R1.1 (`save-without`)                                                                                   | `partsKeep`: the message line shows "Comment R1.1 has recorded change(s) in SI.docx; keep it" as an error; the comment list in `paper.revision.json` is as it was                                                                                                                                                                             |
 | i   | `SI.docx` is saved through Word (`word-com.ps1 save`), then its pane refreshes                                                                                                  | not judged, see below                                                                                                                                                                                                                                                                                                                         |
 | j   | "Leave this revision" in the pane of `SI.docx`                                                                                                                                  | `partsLeft`: the join box is shown again with the manuscript as a candidate, `part_of` and `parts` are gone, every change `SI.revision.json` held is still in it                                                                                                                                                                              |
+
+Rows k, l and m run between row i and row j (the leave stays last). Each is
+one judged row; a step that throws fails its row with `the step threw: ...`
+and the stage goes on. `ok/parts-k.evidence.json` and the two others hold
+what every step answered.
+
+- **k, the letter counts and cites the accepted change** (`partsCited`). In
+  the pane of `SI.docx` the file is named "Supplementary Information"
+  (`link-label`). `SI.docx` is saved and copied to `parts/SI.pending.docx`
+  (the file with the change still tracked, for row l). The changes of R1.1
+  are accepted through Word (`word-com.ps1 apply` with
+  `parts/accept-plan.json`, the accept step of stage 3 limited to one
+  comment, `partsPlan`), the file is saved, its pane refreshes, and the file
+  is closed without saving (`close-other`). In the pane of `paper.docx`:
+  Response tab, R1.2 to R1.4 declined with a reason, Draft for R1.1 (a
+  model), Run checks, and, only when no check fails, Export. Judged: the
+  link carries the name; Word applied every op; the review file of `SI.docx`
+  has every change of R1.1 accepted, `doc_state.saved` true with the time
+  and size the file has after the close, and citations for R1.1 without line
+  numbers; the card of R1.1 has an answer and a location line that starts
+  with "Supplementary Information ["; no `FAIL R1.1 ...` and no
+  `FAIL part_state` row; the message "Exported..."; the letter model
+  (`paper.response.model.json`) has a `location` paragraph of R1.1 that
+  starts with "Supplementary Information [Revised in " and a `quote`
+  paragraph right under it whose text is a quote the review file of
+  `paper.docx` records for `SI.docx`; the daemon logged
+  `[response] export path=... verify=ok` (the verifier ran on the paragraphs
+  of both files).
+- **l, a file changed without a refresh is not trusted** (`partsGuard`).
+  Word cannot reject a change it has accepted, so `parts/SI.pending.docx` is
+  copied over the closed `SI.docx`, the file is opened again (`open-edit`),
+  the changes of R1.1 are rejected through Word (`parts/reject-plan.json`),
+  the file is saved and closed. Its pane is not driven. In the pane of
+  `paper.docx` the Response tab is refreshed (the button then reads "Export
+  letter (.docx)") and Export is pressed once. Judged: every Word step
+  answered ok; the file on disk has another time or size than
+  `doc_state.file`; the button did not offer to force; exactly one row
+  `FAIL part_state: ... SI.docx ... Open it, save, press Refresh.`; the
+  message "Not exported: ...", the letter files of the run folder and
+  `response_export` as they were; the daemon logged
+  `[response] export held fail=n`.
+- **m, refreshed again** (`partsReopened`). `SI.docx` is opened, its pane
+  refreshes. In the pane of `paper.docx`: Response tab, Run checks. Judged:
+  every change of R1.1 is `rejected` in the review file of `SI.docx`, whose
+  `doc_state` is saved and of the file on disk; no `FAIL part_state` row; a
+  row `FAIL R1.1 requirements: ...` and the request shown open on the card;
+  a stale line on the card of R1.1.
 
 One row is told and not judged (`NOTE`):
 
@@ -548,34 +597,47 @@ as well: should the SDK give a resumed session a new id, the row still fails.
 What the stage assumes about Word and Office.js, and what the log shows when
 an assumption does not hold:
 
-| Assumption                                                                                                                                                       | When it is wrong                                                                                                                                                                         |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Documents.Open` over COM opens a second document writable in the Word of the run                                                                                | the row "SI.docx opened in the Word of the run" fails with Word's error, or with `read_only=true`, and the stage stops there                                                             |
-| `word-com.ps1` finds that document by its full path afterwards (`BindToMoniker`), as it finds the first one                                                      | the rows that read `SI.docx` in Word (d, e, g, the NOTE of i) fail and print the binding error of PowerShell where the count of tracked changes would be                                 |
-| a document opened that way shows its task pane by itself (the `Office.AutoShowTaskpaneWithDocument` part `embed_taskpane.py` writes), as the first document does | "SI.docx: open-review" fails after 120 s with `pane not reachable on port 9333: no pane page of SI.docx yet (pane pages: ...)`; the list names the documents of the panes that are there |
-| the panes of two documents of one Word are pages of the same WebView2 debugging endpoint                                                                         | the same message, with only the manuscript in the list                                                                                                                                   |
-| a pane page can be told by `Office.context.document.url` (it ends in the file name), or once it has loaded by its "Review file:" line                            | the same message with `(a pane that names no document yet)` for a page whose `Office.context.document.url` is empty and whose Review tab has not loaded                                  |
-| a pane whose document is not the window in front still runs: it answers the daemon and applies tracked edits                                                     | rows d, e or g fail: the step of the pane in the back ends with `turn ... still running`, or the log has `outcome unknown` lines (row g names them)                                      |
-| two driver processes can be connected to the endpoint at once                                                                                                    | row g: "both propose steps ended without an error" fails with the error of the second connection                                                                                         |
-| the two turns of row g overlap (each takes far longer than the second click)                                                                                     | row g: "the two turns ran at the same time" fails with the positions of the log lines; the other checks of the row still say whether each change landed in its own files                 |
-| the turn of the manuscript notes the request of R1.1 as another file's (a model decides it)                                                                      | row c fails with what the turn did instead: `outside [...], questions n, changes n`                                                                                                      |
-| the turn of the supplementary file names the request in `rationale.requirement_ids` (a model does)                                                               | row f: "a pending change of R1.1 names a request" fails with the ids of each change                                                                                                      |
-| the CLI sends a `system/init` message at the start of every turn, as it did in the runs so far (the line of a turn is printed from it)                           | row g2: "a turn ran on a session" fails for a document with `no turn`, although its rows c, d or g passed                                                                                |
-| `Word.Document.saved` (WordApi 1.1) can be read in the pane                                                                                                      | the NOTE of row i shows `Document.saved=null` with Office's error; the pane then sends `null` and `doc_state.saved` is `null`                                                            |
-| a file Word holds open can be read for its time and size from WSL                                                                                                | the NOTE of row i shows `file not read`, and `doc_state.file` is `null`                                                                                                                  |
+| Assumption                                                                                                                                                                       | When it is wrong                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Documents.Open` over COM opens a second document writable in the Word of the run                                                                                                | the row "SI.docx opened in the Word of the run" fails with Word's error, or with `read_only=true`, and the stage stops there                                                                                                                                                                                                                                                                                                                                                 |
+| `word-com.ps1` finds that document by its full path afterwards (`BindToMoniker`), as it finds the first one                                                                      | the rows that read `SI.docx` in Word (d, e, g, the NOTE of i) fail and print the binding error of PowerShell where the count of tracked changes would be                                                                                                                                                                                                                                                                                                                     |
+| a document opened that way shows its task pane by itself (the `Office.AutoShowTaskpaneWithDocument` part `embed_taskpane.py` writes), as the first document does                 | "SI.docx: open-review" fails after 120 s with `pane not reachable on port 9333: no pane page of SI.docx yet (pane pages: ...)`; the list names the documents of the panes that are there                                                                                                                                                                                                                                                                                     |
+| the panes of two documents of one Word are pages of the same WebView2 debugging endpoint                                                                                         | the same message, with only the manuscript in the list                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| a pane page can be told by `Office.context.document.url` (it ends in the file name), or once it has loaded by its "Review file:" line                                            | the same message with `(a pane that names no document yet)` for a page whose `Office.context.document.url` is empty and whose Review tab has not loaded                                                                                                                                                                                                                                                                                                                      |
+| a pane whose document is not the window in front still runs: it answers the daemon and applies tracked edits                                                                     | rows d, e or g fail: the step of the pane in the back ends with `turn ... still running`, or the log has `outcome unknown` lines (row g names them)                                                                                                                                                                                                                                                                                                                          |
+| two driver processes can be connected to the endpoint at once                                                                                                                    | row g: "both propose steps ended without an error" fails with the error of the second connection                                                                                                                                                                                                                                                                                                                                                                             |
+| the two turns of row g overlap (each takes far longer than the second click)                                                                                                     | row g: "the two turns ran at the same time" fails with the positions of the log lines; the other checks of the row still say whether each change landed in its own files                                                                                                                                                                                                                                                                                                     |
+| the turn of the manuscript notes the request of R1.1 as another file's (a model decides it)                                                                                      | row c fails with what the turn did instead: `outside [...], questions n, changes n`                                                                                                                                                                                                                                                                                                                                                                                          |
+| the turn of the supplementary file names the request in `rationale.requirement_ids` (a model does)                                                                               | row f: "a pending change of R1.1 names a request" fails with the ids of each change                                                                                                                                                                                                                                                                                                                                                                                          |
+| the CLI sends a `system/init` message at the start of every turn, as it did in the runs so far (the line of a turn is printed from it)                                           | row g2: "a turn ran on a session" fails for a document with `no turn`, although its rows c, d or g passed                                                                                                                                                                                                                                                                                                                                                                    |
+| `Word.Document.saved` (WordApi 1.1) can be read in the pane                                                                                                                      | the NOTE of row i shows `Document.saved=null` with Office's error; the pane then sends `null` and `doc_state.saved` is `null`                                                                                                                                                                                                                                                                                                                                                |
+| a file Word holds open can be read for its time and size from WSL                                                                                                                | the NOTE of row i shows `file not read`, and `doc_state.file` is `null`                                                                                                                                                                                                                                                                                                                                                                                                      |
+| k: `Word.Document.saved` is true in the pane right after a save through COM (the NOTE of row i shows what it is)                                                                 | row k: "the refresh was taken on a saved document" fails with `saved false` or `saved null`, and its check row is `FAIL part_state: SI.docx had changes that were not saved ...`                                                                                                                                                                                                                                                                                             |
+| k: closing a saved document without saving leaves the time and the size of its file as they were                                                                                 | row k: the same check fails with the two times and sizes                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| k: a file Word holds open can be copied from WSL right after a save (as stage cite copies its document)                                                                          | row l: "reopened as it was before the accept" fails with `put back: ENOENT ...`; row k itself is not affected                                                                                                                                                                                                                                                                                                                                                                |
+| k: Word keeps the rationale comment of a change when the change is accepted, so the accept step finds each change by its comment                                                 | row k: "the change(s) of R1.1 accepted" fails with `ERR rationale comment not found` or `ERR no revision at the comment` per change                                                                                                                                                                                                                                                                                                                                          |
+| k: the turn of row d named the request in `rationale.requirement_ids` (the assumption of row f) and the draft of the answer passes the checks of the profile (a model writes it) | row k: "no failing check for R1.1" fails and prints the rows, for example `FAIL R1.1 requirements: q1 is neither cited nor declined` or `FAIL R1.1 rule_opening: ...`                                                                                                                                                                                                                                                                                                        |
+| k: the model file of the letter is `paper.response.model.json` next to the letter                                                                                                | row k: "a location line of R1.1 names Supplementary Information" fails with `[]` although the export passed                                                                                                                                                                                                                                                                                                                                                                  |
+| l: a closed `SI.docx` can be overwritten from WSL, and `Documents.Open` opens it again in the Word of the run with its pane                                                      | row l: the first check fails and names the step: `put back: EBUSY ...` (Word still held the file: the close of row k failed), `open: <Word's error>`                                                                                                                                                                                                                                                                                                                         |
+| l: the pane of `SI.docx`, which loads by itself when the file is opened, does not run a status refresh between the save and the close (it refreshes when it gets the focus)      | a refresh before the save does no harm: row l passes and its line ends with "the pane of SI.docx refreshed by itself before the save", the check row may then be the "had changes that were not saved" one. A refresh after the save makes the record current: "on disk is no longer the file its review file records" fails with "(the pane of SI.docx refreshed by itself: doc_state.at ... -> ...)", and the part_state check fails with the rows that were shown instead |
+| l: the Response tab offers "Export letter (.docx)" after "Refresh from the manuscript", whatever the last check said                                                             | row l: "the export button did not offer to force" fails with the label found; the export of the row was then a forced one and the other checks of the row say what it did                                                                                                                                                                                                                                                                                                    |
+| m: a document opened from disk and not edited has `Word.Document.saved` true                                                                                                     | row m: "the refresh was taken on a saved document" and "no failing check for the state of SI.docx" fail, the latter with the `FAIL part_state` row                                                                                                                                                                                                                                                                                                                           |
+| l, m: the pane page of a closed document goes away, so the driver finds the pane of the reopened `SI.docx` and not a dead one                                                    | row m: "opened again and refreshed" fails with the driver's error for the refresh (`pane not reachable ...` or a timeout)                                                                                                                                                                                                                                                                                                                                                    |
+| l: nothing is asked of `SI.docx` through `word-com.ps1` while it is closed (`BindToMoniker` would load a closed file)                                                            | by construction; `tests/e2e-judge-parts.test.mjs` reads the runner for it                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Pane steps of the stage (all take the pane of the document named by the
 environment variable `E2E_PANE_DOC`, which the runner sets to `paper` or
 `SI`):
 
-| Step           | Args                                  | Does and returns                                                                                                      |
-| -------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `link-join`    | `main` (file name)                    | presses "Join the revision of `main`, ..."; the view once the line of the manuscript shows, or with the error message |
-| `link-leave`   |                                       | presses "Leave this revision"; the view after "This file left the revision of ..."                                    |
-| `wait-state`   | `ref`, `until` (RegExp), `timeout_ms` | presses nothing; `matched` is true once the row of `ref` says `until`; the view                                       |
-| `wait-linked`  | `until` (RegExp), `timeout_ms`        | presses nothing; `matched` is true once the line of linked files says `until`; the view                               |
-| `save-without` | `review_file`, `drop`, `requirements` | splits the review again, removes the row `drop`, Save; the view after the refusal or after the save                   |
-| `doc-saved`    |                                       | `saved` (as the pane sends it), `raw` and `raw_type` (the property as Office.js gave it), `error`                     |
+| Step           | Args                                  | Does and returns                                                                                                               |
+| -------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `link-join`    | `main` (file name)                    | presses "Join the revision of `main`, ..."; the view once the line of the manuscript shows, or with the error message          |
+| `link-leave`   |                                       | presses "Leave this revision"; the view after "This file left the revision of ..."                                             |
+| `link-label`   | `label`                               | types the name in "Name in the response letter", presses "Save name"; the view after "The response letter calls this file ..." |
+| `wait-state`   | `ref`, `until` (RegExp), `timeout_ms` | presses nothing; `matched` is true once the row of `ref` says `until`; the view                                                |
+| `wait-linked`  | `until` (RegExp), `timeout_ms`        | presses nothing; `matched` is true once the line of linked files says `until`; the view                                        |
+| `save-without` | `review_file`, `drop`, `requirements` | splits the review again, removes the row `drop`, Save; the view after the refusal or after the save                            |
+| `doc-saved`    |                                       | `saved` (as the pane sends it), `raw` and `raw_type` (the property as Office.js gave it), `error`                              |
 
 The view of every Review step now also has, per comment, `state` (the line
 of its row), `requests` (`id`, `state`, `text`) and `can_propose`, and for
@@ -584,7 +646,8 @@ the tab `linked` (the line that names the manuscript or the linked files),
 
 The Word side of the stage (`word-com.ps1 open-edit`, the choice of a pane
 by its document, two driver processes at once, the six pane steps above)
-had not run in Word when it was written. Its judges were tested with inputs
+had not run in Word when it was written, and neither had rows k to m with
+their step `link-label`. Its judges were tested with inputs
 written by hand (`tests/e2e-judge-parts.test.mjs`), the choice of the pane
 with document names written by hand (the same file), and the wait conditions
 and reads of the new steps on an empty page (`tests/e2e-pane-driver.test.mjs`).
