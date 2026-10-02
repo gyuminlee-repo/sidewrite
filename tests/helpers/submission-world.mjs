@@ -92,6 +92,17 @@ function fakePy(tools = {}) {
     }
     if (name === "response_verify.py")
       return { ok: true, code: 0, json: { ok: true, checked: {}, failures: [] } };
+    // The copies: each is written from the saved manuscript as it is then.
+    if (name === "build_marked_diff.py") {
+      await writeFile(arg("--out"), `marked copy of: ${await readFile(arg("--clean"), "utf8")}`);
+      return { ok: true, code: 0, json: { written: true, checks: 3, failures: 0 } };
+    }
+    if (name === "anonymize_docx.py") {
+      await writeFile(arg("--out"), `anonymized copy of: ${await readFile(arg("--in"), "utf8")}`);
+      return { ok: true, code: 0, json: { changed: {} } };
+    }
+    if (name === "verify-anonymized.py")
+      return { ok: true, code: 0, json: { total: 0, not_cleared: [], categories: {} } };
     throw new Error(`unexpected tool ${name}`);
   };
 }

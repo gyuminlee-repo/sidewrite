@@ -41,6 +41,9 @@
 //
 // Nothing here writes to the open document. A copy (marked, anonymized) is a
 // new file next to the manuscript, made from the file as it was last saved.
+// A copy that was made and passed its check is put on record with its hash
+// and the hash of the manuscript it was made from (revision.artifacts); the
+// submission checklist compares both with the disk.
 //
 // Handler rules (as in response-service.mjs): the document of a pane is read
 // once per request (at(key)); a failure is an error reply, never a silent
@@ -49,8 +52,9 @@
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
+  setArtifact,
   localDocPath,
   revisionPathFor,
   decisionsPathFor,
@@ -72,7 +76,7 @@ import { findFormatIssues, formatRulesOn } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
 import { refreshed, usableHeadings, writingJob } from "./response-service.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
-import { submissionPaths, submissionRows } from "./submission-check.mjs";
+import { MANUSCRIPT, submissionPaths, submissionRows } from "./submission-check.mjs";
 import { sha256File } from "./figure-service.mjs";
 
 // The Tools tab names the format rules that are on (format-check.mjs).
@@ -154,6 +158,43 @@ export function createAuxService({
       env,
       settingsDefault: langDefault?.() ?? null,
     });
+
+  // The saved manuscript as it is on the disk, before a copy is made from it
+  // (null: it cannot be read; the tool will say so itself).
+  const sourceHash = (d) => sha256File(d.doc).catch(() => null);
+  // Puts a copy that was made and passed its check on record
+  // (revision.artifacts), for the submission checklist: the copy as it is
+  // now and the manuscript it was made from. Recorded only when the
+  // manuscript on the disk is still the file it was before the tool ran;
+  // otherwise the record of that copy is taken away, and the checklist asks
+  // for the copy again. A record that cannot be written does not fail the
+  // copy: the file is there and the pane names it. A manuscript without a
+  // review file gets none for this: a copy made from the Tools tab alone
+  // leaves nothing else next to the manuscript.
+  async function recordCopy(d, kind, path, sourceBefore, extra = {}) {
+    if (!existsSync(d.path)) return;
+    try {
+      const sha256 = await sha256File(path);
+      const source = await sourceHash(d);
+      const same = !!source && source === sourceBefore;
+      const docDir = dirname(d.doc);
+      const rel = relative(docDir, path);
+      const inside = rel && !rel.startsWith("..") && !isAbsolute(rel);
+      const artifact = same
+        ? {
+            path: inside ? rel.split(sep).join("/") : path,
+            sha256,
+            at: new Date().toISOString(),
+            source_sha256: source,
+            ...extra,
+          }
+        : null;
+      await update(d, (rev) => setArtifact(rev, kind, artifact));
+      log(`[tools] ${kind} copy recorded=${same}`);
+    } catch (e) {
+      log(`[tools] ${kind} copy not recorded: ${e?.message ?? e}`);
+    }
+  }
 
   // The model of one job, or an error the pane shows.
   async function modelFor(key, what, options) {
@@ -303,6 +344,7 @@ export function createAuxService({
       if (!base64) throw new Error("Choose the earlier version (.docx) first.");
       if (base64.length > MAX_BASE64) throw new Error("The earlier version is too large to read.");
       const { profile } = await profileOf(d, await load(d));
+      const source = await sourceHash(d);
       const dir = await mkdtemp(join(tmpdir(), "marked-"));
       try {
         // A name of our own: the file name of the pane is not used as a path.
@@ -319,6 +361,7 @@ export function createAuxService({
         });
         log(`[tools] marked_build mode=${msg.mode} ok=${r.ok} path=${r.path ?? "-"}`);
         if (!r.ok) throw new Error(r.error);
+        await recordCopy(d, "marked", r.path, source, { mode: msg.mode });
         return {
           path: r.path,
           name: basename(r.path),
@@ -336,9 +379,13 @@ export function createAuxService({
     // report and the name it was set aside under come with the error.
     async anonymize(_msg, key) {
       const d = at(key);
+      const source = await sourceHash(d);
       const r = await runAnonymize({ src: d.doc, runPy, exists });
       log(`[tools] anonymize ok=${r.ok} total=${r.report?.total ?? "-"} path=${r.path ?? "-"}`);
       if (!r.ok && !r.report) throw new Error(r.error);
+      // Only a copy the verifier passed is put on record: one that was set
+      // aside as INCOMPLETE is not a copy to submit.
+      if (r.ok) await recordCopy(d, "anonymized", r.path, source);
       return { ...r, name: r.path ? basename(r.path) : null };
     },
 
@@ -390,7 +437,7 @@ export function createAuxService({
       // The files the record names, as they are on the disk now: a path of
       // the record is absolute, or relative to the manuscript folder with
       // "/" (as the figure files are stored). null: not there or not readable.
-      const files = {};
+      const files = { [MANUSCRIPT]: await sourceHash(d) };
       for (const path of submissionPaths(revision)) {
         const abs = isAbsolute(path) ? path : join(dirname(d.doc), ...path.split("/"));
         files[path] = await sha256File(abs).catch(() => null);

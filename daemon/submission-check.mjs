@@ -19,7 +19,8 @@
 //   files     { <path as the record holds it>: sha256 | null } for the paths
 //             of submissionPaths(revision): the file as it is on the disk
 //             now, null when it is not there. A path that was not handed in
-//             counts as not there.
+//             counts as not there. The saved manuscript itself is under the
+//             key MANUSCRIPT.
 //   file      the name of the open manuscript; every row is about that file
 //
 //   go        where the row is fixed, or null:
@@ -41,6 +42,15 @@
 //                    built now must hash the same. A later accept or reject,
 //                    an edited answer, a profile change or new line numbers
 //                    all change the model.
+//   marked_copy      a marked copy is on record (revision.artifacts.marked),
+//                    it is still the file that was made, and the saved
+//                    manuscript is still the file it was made from. Removing
+//                    the tool's comments and saving changes the manuscript,
+//                    so the cleanup rows stand before this one and the row
+//                    says to make the copy after the cleanup.
+//   anonymized_copy  the same for the anonymized copy, when the profile asks
+//                    for one (submission.anonymized_copy: true); false or
+//                    null: not applicable
 
 import { checkResponses } from "./response-check.mjs";
 import { buildLetterModel, letterModelSha } from "./response-model.mjs";
@@ -70,6 +80,11 @@ const TO_CLEAN_TOOL = { tab: "review", target: "review-clean-tool" };
 const TO_DELETE_ALL = { tab: "review", target: "review-delete-all" };
 const TO_TOOLS_CHECK = { tab: "tools", target: "tools-check" };
 const TO_EXPORT = { tab: "response", target: "response-export" };
+const TO_MARKED = { tab: "tools", target: "tools-marked-build" };
+const TO_ANONYMIZE = { tab: "tools", target: "tools-anonymize" };
+
+// The key of the saved manuscript in `files` (no path of a record reads so).
+export const MANUSCRIPT = ":manuscript";
 
 // The last part of a path, whichever separator it was written with.
 const nameOf = (path) =>
@@ -80,7 +95,13 @@ const nameOf = (path) =>
 // The files whose hashes the rows compare, as the record names them. The
 // service hashes each one and hands the result in as `files`.
 export function submissionPaths(revision) {
-  return uniq([revision?.response_export?.path].filter(Boolean));
+  return uniq(
+    [
+      revision?.response_export?.path,
+      revision?.artifacts?.marked?.path,
+      revision?.artifacts?.anonymized?.path,
+    ].filter(Boolean),
+  );
 }
 
 // Rows 1 and 2: the pure checks of the response letter. The `requirements`
@@ -286,9 +307,65 @@ function letterRow({ revision, profile, files }) {
   };
 }
 
+// Rows 8 and 9: a copy made from the saved manuscript, against its record.
+// what: "marked copy" or "anonymized copy". No record (never made, made by
+// an earlier version, or dropped by an earlier daemon) is not ready: make it.
+function copyRow(id, what, artifact, files, go) {
+  const notReady = (text) => ({ id, state: NOT_READY, text, go });
+  if (!artifact?.path || !artifact.sha256 || !artifact.source_sha256)
+    return notReady(
+      `No ${what} is on record for this file. Finish the cleanup above and save the manuscript first (removing comments changes the saved file), then make the copy.`,
+    );
+  const name = nameOf(artifact.path);
+  const onDisk = files[artifact.path] ?? null;
+  if (onDisk === null) return notReady(`The ${what} is gone: ${name}. Make it again.`);
+  if (onDisk !== artifact.sha256)
+    return notReady(
+      `${name} was changed after it was made, so it is no longer the ${what} the tool wrote. Make it again.`,
+    );
+  if ((files[MANUSCRIPT] ?? null) !== artifact.source_sha256)
+    return notReady(
+      `The manuscript was saved again after ${name} was made (removing the tool's comments counts too). Finish the cleanup above, save, then make the ${what} again.`,
+    );
+  return {
+    id,
+    state: READY,
+    text: `The ${what} was made from the manuscript as it is saved now: ${name}.`,
+    go: null,
+  };
+}
+
+function copyRows({ revision, profile, files }) {
+  const wanted = profile.submission?.anonymized_copy;
+  return [
+    copyRow("marked_copy", "marked copy", revision.artifacts?.marked, files, TO_MARKED),
+    wanted === true
+      ? copyRow(
+          "anonymized_copy",
+          "anonymized copy",
+          revision.artifacts?.anonymized,
+          files,
+          TO_ANONYMIZE,
+        )
+      : {
+          id: "anonymized_copy",
+          state: NOT_APPLICABLE,
+          text:
+            wanted === false
+              ? "The journal profile asks for no anonymized copy."
+              : "The journal profile does not say that an anonymized copy is needed.",
+          go: null,
+        },
+  ];
+}
+
 export function submissionRows({ revision, profile, live, files = {}, file = null }) {
   const input = { revision, profile, live, files };
-  return [...answerRows(input), ...documentRows(input), formatRow(input), letterRow(input)].map(
-    (row) => ({ ...row, file }),
-  );
+  return [
+    ...answerRows(input),
+    ...documentRows(input),
+    formatRow(input),
+    letterRow(input),
+    ...copyRows(input),
+  ].map((row) => ({ ...row, file }));
 }
