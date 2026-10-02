@@ -31,6 +31,11 @@ import {
   inFlightEdit,
   reviewerOfRef,
   progressText,
+  clockText,
+  commentState,
+  firstLine,
+  summaryText,
+  reviewLine,
   reviewTextFromFile,
   REVIEW_FILE_MAX_BYTES,
   ledgerImportFromJson,
@@ -69,6 +74,11 @@ export function initReviewPane({
   // (role) => what the last request of that kind of work really ran on
   // ("Claude · Opus 5.5"), or null when the pane does not know (taskpane.js).
   usedLabel = () => null,
+  // () => stops the running turn (the Stop button of the chat).
+  stopTurn = () => {},
+  // () => the text of the last answer of the model in the chat, or null. It is
+  // the reason a turn gives when it proposes no change.
+  lastReply = () => null,
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -95,6 +105,10 @@ export function initReviewPane({
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
     reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
+    openRef: null, // the comment whose card is open (one at a time)
+    pasteOpen: false, // the paste box is shown although a review is split
+    results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
+    cards: new Map(), // ref -> the elements of its card, as of the last render
   };
 
   function el(tag, props = {}, ...kids) {
@@ -420,10 +434,66 @@ export function initReviewPane({
     return $("review-use-selection").checked ? await word.selectionParagraphs() : [];
   }
 
+  // ---- the list: a row for each comment, its card when it is open ----------------
+  const stateOf = (c, now = Date.now()) =>
+    commentState(c, {
+      working: state.turn?.ref === c.ref ? state.turn : null,
+      now,
+      noChange: state.results.get(c.ref)?.noChange === true,
+    });
+  // Open or close the card of a row; one card is open at a time. A card opened
+  // by the author is scrolled to the top of the list area, under the bar that
+  // stays at the top of the tab.
+  function paintOpen(ref, els) {
+    const open = state.openRef === ref;
+    els.body.hidden = !open;
+    els.head.setAttribute("aria-expanded", open ? "true" : "false");
+    els.card.classList.toggle("open", open);
+  }
+  function openCard(ref, { toggle = true, scroll = true } = {}) {
+    state.openRef = toggle && state.openRef === ref ? null : ref;
+    for (const [r, els] of state.cards) paintOpen(r, els);
+    const els = state.cards.get(state.openRef);
+    if (scroll && els) {
+      const top = $("review-top");
+      els.card.style?.setProperty?.("scroll-margin-top", `${(top?.offsetHeight ?? 0) + 4}px`);
+      els.card.scrollIntoView?.({ block: "start" });
+    }
+  }
+  // The words of a row, and the work indicator inside its card.
+  function paintCard(c, els, now = Date.now()) {
+    const st = stateOf(c, now);
+    els.stateEl.textContent = st.label;
+    els.stateEl.setAttribute("class", `review-comment-state review-state-${st.kind}`);
+    const working = state.turn?.ref === c.ref ? state.turn : null;
+    els.progressEl.hidden = !working;
+    if (working) {
+      els.clockEl.textContent = `Working on this comment: ${clockText(working.startedAt, now)}`;
+    }
+    return st;
+  }
+  function paintCards() {
+    const now = Date.now();
+    for (const c of state.revision?.comments ?? []) {
+      const els = state.cards.get(c.ref);
+      if (els) paintCard(c, els, now);
+    }
+  }
+  function renderSummary() {
+    const comments = state.revision?.comments ?? [];
+    const box = $("review-summary");
+    box.textContent = summaryText(
+      comments,
+      comments.map((c) => stateOf(c)),
+    );
+    box.hidden = comments.length === 0;
+  }
+
   function renderComments() {
     const box = $("review-comments");
     box.replaceChildren();
     proposeButtons = [];
+    state.cards.clear();
     for (const c of state.revision?.comments ?? []) {
       const status = el("select", { class: "setting-select" });
       for (const [v, label] of Object.entries(STATUS_LABELS)) {
@@ -512,27 +582,60 @@ export function initReviewPane({
         }),
       );
       const reqLine = requirementsLine(c);
-      const card = el(
+      const stateEl = el("span", { class: "review-comment-state" });
+      const head = el(
+        "button",
+        { type: "button", class: "review-comment-head", "aria-expanded": "false" },
+        el("strong", { text: c.ref }),
+        el("span", { class: "review-comment-snippet", text: firstLine(c.text) }),
+        stateEl,
+      );
+      head.addEventListener("click", () => openCard(c.ref));
+      // The work of this comment, inside its card: the clock and a way to stop.
+      const clockEl = el("span", { class: "review-card-clock" });
+      const stop = el("button", {
+        type: "button",
+        class: "btn-secondary btn-small",
+        text: "Stop",
+      });
+      stop.addEventListener("click", () => stopTurn());
+      const progressEl = el("div", { class: "review-card-progress", role: "timer" }, clockEl, stop);
+      progressEl.hidden = true;
+      // What the last turn of this comment came to.
+      const res = state.results.get(c.ref);
+      const result = res
+        ? el(
+            "div",
+            { class: `review-card-result${res.bad ? " form-error" : ""}` },
+            el("div", { text: res.text }),
+            res.reason
+              ? el(
+                  "details",
+                  { class: "review-card-reason" },
+                  el("summary", { text: "Why no change" }),
+                  el("div", { text: res.reason }),
+                )
+              : null,
+          )
+        : null;
+      const body = el(
         "div",
-        { class: "review-comment" },
-        el(
-          "div",
-          { class: "review-comment-head" },
-          el("strong", { text: c.ref }),
-          status,
-          propose,
-          preview,
-        ),
+        { class: "review-comment-body" },
+        progressEl,
+        result,
+        el("div", { class: "review-card-actions" }, status, propose, preview),
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
         reqs,
         saveReqs,
         el("div", { class: "review-reqs-line", text: reqLine }),
       );
+      const card = el("div", { class: "review-comment", "data-ref": c.ref }, head, body);
+      state.cards.set(c.ref, { card, head, body, stateEl, progressEl, clockEl });
       // What the model asked instead of guessing (office_ask_author). An
       // answer goes into the prompt of the next turn.
       if ((c.questions ?? []).length) {
-        card.append(
+        body.append(
           el("div", { class: "review-questions-head", text: "Questions for the author" }),
         );
         for (const q of c.questions) {
@@ -558,7 +661,7 @@ export function initReviewPane({
               state.answerDrafts.delete(draftKey);
             }),
           );
-          card.append(
+          body.append(
             el("div", {
               class: "review-question",
               text: `${q.id}${q.requirement_id ? ` (${q.requirement_id})` : ""}: ${q.question}`,
@@ -569,14 +672,17 @@ export function initReviewPane({
           );
         }
       }
-      for (const ch of c.changes) card.append(changeRow(ch));
+      for (const ch of c.changes) body.append(changeRow(ch));
       // Terms the changes took out that other paragraphs still hold (residue.js).
       for (const line of stillPresentLines(c, state.revision?.snapshot)) {
-        card.append(el("div", { class: "review-residue", text: line }));
+        body.append(el("div", { class: "review-residue", text: line }));
       }
-      for (const b of c.blocked) if (!inFlightEdit(b)) card.append(blockedRow(c.ref, b));
+      for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));
       box.append(card);
     }
+    if (state.openRef && !state.cards.has(state.openRef)) state.openRef = null;
+    for (const [ref, els] of state.cards) paintOpen(ref, els);
+    paintCards();
   }
 
   function renderLedger() {
@@ -627,6 +733,8 @@ export function initReviewPane({
         ),
       );
     }
+    const rules = state.revision?.ledger ?? [];
+    $("review-ledger-count").textContent = rules.length ? `(${rules.length})` : "";
     $("review-ledger-add").textContent = state.editingLedger
       ? `Save ${state.editingLedger}`
       : "Add";
@@ -656,19 +764,44 @@ export function initReviewPane({
   function renderDecisions() {
     const d = pendingDecisions(state.revision);
     const box = $("review-decisions");
-    box.replaceChildren(
-      el("div", { text: d.total ? `Waiting for you: ${d.total}` : "Nothing waits for you." }),
-    );
-    for (const x of [...d.blocked, ...d.ledger, ...d.requirements]) {
-      box.append(el("div", { class: "review-decision", text: x.text }));
+    // A request waits for the author only once a turn has run for its comment;
+    // before that it waits for the tool. Those items stay in the list (hidden)
+    // and are not counted.
+    const turnRan = (ref) => {
+      const c = (state.revision?.comments ?? []).find((x) => x.ref === ref);
+      return (
+        !!c &&
+        (c.changes.length > 0 ||
+          (c.questions ?? []).length > 0 ||
+          (c.blocked ?? []).length > 0 ||
+          (c.requirements_outside ?? []).length > 0 ||
+          state.results.has(ref))
+      );
+    };
+    const items = [
+      ...d.blocked.map((x) => ({ x, shown: true })),
+      ...d.ledger.map((x) => ({ x, shown: true })),
+      ...d.requirements.map((x) => ({ x, shown: turnRan(x.ref) })),
+    ];
+    const total = items.filter((i) => i.shown).length;
+    box.replaceChildren(el("div", { text: `Waiting for you: ${total}` }));
+    for (const { x, shown } of items) {
+      const row = el("div", { class: "review-decision", text: x.text });
+      row.hidden = !shown;
+      box.append(row);
     }
+    $("review-waiting-count").textContent = total ? `(${total})` : "";
+    $("review-waiting-box").hidden = total === 0;
   }
 
   // L4: changes made outside the tool since the last refresh.
   function renderExternal() {
     const box = $("review-external");
     box.replaceChildren();
-    for (const x of state.revision?.external ?? []) {
+    const outside = state.revision?.external ?? [];
+    $("review-external-count").textContent = outside.length ? `(${outside.length})` : "";
+    $("review-external-box").hidden = outside.length === 0;
+    for (const x of outside) {
       const where = x.paragraph_index ?? x.old_index;
       const label =
         `${x.id} ${x.kind} paragraph ${where}` +
@@ -704,6 +837,7 @@ export function initReviewPane({
   // place in a "Propose all" run goes in front ("Propose all: 2/5 R1.2.").
   function showProgress() {
     const bar = $("review-progress");
+    paintCards();
     bar.hidden = !state.turn && !state.queueNote;
     if (bar.hidden) return;
     bar.textContent = [
@@ -764,9 +898,37 @@ export function initReviewPane({
     }
   }
 
+  // What has nothing to show is hidden; the paste box shrinks to one line once
+  // the review is split.
+  function renderSections() {
+    const comments = state.revision?.comments ?? [];
+    const hasReview = comments.length > 0 || state.draft.length > 0;
+    $("review-start").hidden = hasReview;
+    const collapsed = hasReview && !state.pasteOpen;
+    $("review-paste-box").hidden = collapsed;
+    $("review-paste-summary").hidden = !hasReview;
+    $("review-paste-summary-text").textContent = comments.length
+      ? reviewLine(comments)
+      : `Review split into ${state.draft.length} comment${state.draft.length === 1 ? "" : "s"}, not saved yet`;
+    $("review-paste-toggle").textContent = state.pasteOpen
+      ? "Hide review text"
+      : "Show review text";
+    $("review-paste-toggle").setAttribute("aria-expanded", state.pasteOpen ? "true" : "false");
+    $("review-comments-section").hidden = comments.length === 0;
+    $("review-ledger-box").hidden =
+      comments.length === 0 && (state.revision?.ledger ?? []).length === 0;
+    $("review-submit-box").hidden = comments.length === 0;
+    const notDone = comments.filter((c) => c.status !== "done").length;
+    $("review-submit-count").textContent = notDone ? `(${notDone} not done)` : "";
+  }
+
   function render() {
+    // The cards are built anew: the author stays where they were.
+    const keep = root.scrollTop;
+    renderSections();
     renderDraft();
     renderComments();
+    renderSummary();
     renderConsistency();
     renderLedger();
     renderCandidates();
@@ -774,6 +936,7 @@ export function initReviewPane({
     renderExternal();
     showProgress();
     $("review-file").textContent = state.path ? `Review file: ${state.path}` : "";
+    if (root.scrollTop !== keep) root.scrollTop = keep;
   }
 
   // ---- actions --------------------------------------------------------------
@@ -787,9 +950,9 @@ export function initReviewPane({
     const c = (state.revision?.comments ?? []).find((x) => x.ref === ref);
     return { changes: (c?.changes ?? []).length, blocked: (c?.blocked ?? []).length };
   }
-  // What came of the turn of `ref`, for the message line: how many changes
-  // it put on record and what it ran on. null for a turn this pane did not
-  // start (another connection).
+  // What came of the turn of `ref`, for its card: how many changes it put on
+  // record and what it ran on. null for a turn this pane did not start
+  // (another connection).
   function proposedLine(ref) {
     const before = state.turnStart.get(ref);
     state.turnStart.delete(ref);
@@ -805,12 +968,15 @@ export function initReviewPane({
     const line =
       n > 0
         ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
-        : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is in the Chat tab"}.`;
-    return open ? `${line} ${open}` : line;
+        : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is below"}.`;
+    return { text: open ? `${line} ${open}` : line, noChange: n <= 0 };
   }
   // extra: more fields of the request (rewrite_paragraph for a rewrite turn).
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
+    state.results.delete(ref);
+    // The card shows the work from the click on, not from the answer of the daemon.
+    startProgress(ref);
     try {
       const paragraphs = useSelection ? await promptParagraphs() : [];
       // A fresh snapshot first: outside changes are caught before the turn
@@ -825,10 +991,15 @@ export function initReviewPane({
         { ref, paragraphs, wait_ms: PROPOSE_WAIT_MS, ...extra },
         PROPOSE_WAIT_MS,
       );
-      if (state.turnsDone === done && isTurnInFlight()) startProgress(ref, r.started_at);
-      else if (state.turnsDone !== done) state.reviewTurnOpen = false; // its turn_done came first
+      if (state.turnsDone === done && isTurnInFlight()) {
+        if (r.started_at && state.turn?.ref === ref) state.turn.startedAt = r.started_at;
+      } else if (state.turnsDone !== done)
+        state.reviewTurnOpen = false; // its turn_done came first
+      else if (state.turn?.ref === ref) stopProgress(); // no turn came of it
     } catch (e) {
       state.reviewTurnOpen = false;
+      if (state.turn?.ref === ref) stopProgress();
+      state.results.set(ref, { text: e.message, bad: true });
       release?.();
       throw e;
     }
@@ -989,6 +1160,10 @@ export function initReviewPane({
 
   // P15: the review text from a .txt or .md file instead of a paste. The
   // file is read in the pane (File.text()); the daemon is not involved.
+  $("review-paste-toggle").addEventListener("click", () => {
+    state.pasteOpen = !state.pasteOpen;
+    render();
+  });
   $("review-load-file").addEventListener("click", () => $("review-file-input").click());
   $("review-file-input").addEventListener(
     "change",
@@ -1290,6 +1465,7 @@ export function initReviewPane({
         const unchecked = (what) => {
           const error = `The turn for ${msg.ref} ran and its record is saved, but ${what}`;
           say(error, true);
+          state.results.set(msg.ref, { text: error, bad: true });
           return { ok: false, unchecked: true, error };
         };
         const failed =
@@ -1302,11 +1478,18 @@ export function initReviewPane({
             (inv) => {
               if (failed) {
                 state.turnStart.delete(msg.ref);
+                state.results.set(msg.ref, { text: failed.error, bad: true });
                 return failed;
               }
-              // What came of the turn, in front of the status the refresh wrote.
+              // What came of the turn goes into its card.
               const line = proposedLine(msg.ref);
-              if (line) say(`${line} ${said.text}`, said.bad);
+              if (line) {
+                state.results.set(msg.ref, {
+                  text: line.text,
+                  noChange: line.noChange,
+                  ...(line.noChange ? { reason: lastReply() } : {}),
+                });
+              }
               if (inv.ok) return { ok: true };
               // Only changes Word applied without their rationale comment:
               // said as that, not as a mismatch.
@@ -1326,6 +1509,7 @@ export function initReviewPane({
             (e) => {
               if (failed) {
                 say(e.message, true);
+                state.results.set(msg.ref, { text: failed.error, bad: true });
                 return failed;
               }
               return unchecked(

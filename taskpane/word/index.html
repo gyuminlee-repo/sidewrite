@@ -26,7 +26,7 @@
     <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
     <link rel="stylesheet" href="/shared/styles.css" />
   </head>
-  <body data-active-tab="chat" data-host="word">
+  <body data-active-tab="review" data-host="word">
     <header class="topbar">
       <span class="status" id="connection-status" title="Connection to the Sidewrite daemon"
         >Connecting…</span
@@ -39,10 +39,10 @@
     </header>
 
     <nav class="tabs">
-      <button class="tab" data-tab="chat" aria-current="page">Chat</button>
-      <button class="tab" data-tab="review">Review</button>
+      <button class="tab" data-tab="review" aria-current="page">Review</button>
       <button class="tab" data-tab="response">Response</button>
       <button class="tab" data-tab="tools">Tools</button>
+      <button class="tab" data-tab="chat">Chat</button>
       <button class="tab" data-tab="library">Presets</button>
       <button class="tab" data-tab="setup">Setup</button>
     </nav>
@@ -56,7 +56,7 @@
     ></button>
 
     <!-- Chat tab content -->
-    <section class="tab-content" data-tab="chat">
+    <section class="tab-content" data-tab="chat" hidden>
       <main id="messages" class="messages"></main>
 
       <div class="selection-chip" id="selection-chip" hidden>
@@ -103,33 +103,66 @@
     </section>
 
     <!-- Review tab content (C1 review response, C3 instruction ledger) -->
-    <section class="tab-content" data-tab="review" hidden>
+    <section class="tab-content" data-tab="review">
       <div class="setup-content" id="review-root">
-        <div id="review-message" hidden></div>
-        <small id="review-file"></small>
-        <div><small id="review-auto"></small></div>
-        <div id="review-progress" class="review-progress" hidden></div>
-
-        <div class="setup-section">
-          <h3>Waiting for you</h3>
-          <div id="review-decisions" class="review-decisions"></div>
+        <!-- Stays at the top while the tab scrolls: how many comments need you,
+             the running work, the last message. -->
+        <div class="review-top" id="review-top">
+          <div id="review-summary" class="review-summary" hidden></div>
+          <div id="review-progress" class="review-progress" hidden></div>
+          <button type="button" class="btn-secondary btn-small" id="review-propose-stop" hidden>
+            Stop after this one
+          </button>
+          <div id="review-message" hidden></div>
         </div>
 
-        <div class="setup-section">
-          <h3>1. Reviewer comments</h3>
-          <textarea id="review-input" rows="6" placeholder="Paste the full review here"></textarea>
-          <input
-            type="file"
-            id="review-file-input"
-            accept=".txt,.md,text/plain,text/markdown"
-            hidden
-          />
-          <button type="button" class="btn-secondary btn-small" id="review-load-file">
-            Load review from file
-          </button>
-          <button type="button" class="btn-primary btn-small" id="review-split">
-            Split into comments
-          </button>
+        <!-- Shown until a review has been pasted and split. -->
+        <div class="review-start" id="review-start">
+          <h3>Answer the reviewers in three steps</h3>
+          <ol>
+            <li>Paste the review below and split it into comments.</li>
+            <li>For each comment, ask for changes. They arrive as tracked changes in Word.</li>
+            <li>
+              Accept or reject the changes in Word, then draft the replies on the Response tab.
+            </li>
+          </ol>
+        </div>
+
+        <details class="review-fold" id="review-waiting-box" hidden>
+          <summary>Waiting for you <span id="review-waiting-count"></span></summary>
+          <div id="review-decisions" class="review-decisions"></div>
+        </details>
+
+        <div class="setup-section" id="review-paste-section">
+          <h3 id="review-paste-title">Reviewer comments</h3>
+          <div class="review-paste-summary" id="review-paste-summary" hidden>
+            <span id="review-paste-summary-text"></span>
+            <button type="button" class="btn-link" id="review-paste-toggle" aria-expanded="false">
+              Show review text
+            </button>
+          </div>
+          <div id="review-paste-box">
+            <textarea
+              id="review-input"
+              class="review-input"
+              rows="10"
+              placeholder="Paste the full review here"
+            ></textarea>
+            <input
+              type="file"
+              id="review-file-input"
+              accept=".txt,.md,text/plain,text/markdown"
+              hidden
+            />
+            <div class="review-buttons">
+              <button type="button" class="btn-primary btn-small" id="review-split">
+                Split into comments
+              </button>
+              <button type="button" class="btn-secondary btn-small" id="review-load-file">
+                Load review from file
+              </button>
+            </div>
+          </div>
           <div id="review-draft"></div>
           <div id="review-draft-actions" hidden>
             <button type="button" class="btn-primary btn-small" id="review-save">
@@ -138,33 +171,44 @@
           </div>
         </div>
 
-        <div class="setup-section">
-          <h3>2. Comments and changes</h3>
-          <label class="setting-row">
-            <input type="checkbox" id="review-use-selection" />
-            <div class="setting-text">Send the selected paragraphs with "Propose changes"</div>
-          </label>
-          <button type="button" class="btn-secondary btn-small" id="review-refresh">
-            Refresh status
-          </button>
-          <button type="button" class="btn-primary btn-small" id="review-propose-all">
-            Propose all
-          </button>
-          <button type="button" class="btn-secondary btn-small" id="review-propose-stop" hidden>
-            Stop after this one
-          </button>
-          <button type="button" class="btn-secondary btn-small" id="review-check-paragraphs">
-            Check revised paragraphs
-          </button>
-          <div id="review-consistency"></div>
-          <div id="review-comments"></div>
+        <div class="setup-section" id="review-comments-section" hidden>
+          <h3>Comments</h3>
+          <div class="review-buttons">
+            <button type="button" class="btn-primary btn-small" id="review-propose-all">
+              Propose all
+            </button>
+            <button type="button" class="btn-secondary btn-small" id="review-refresh">
+              Refresh status
+            </button>
+          </div>
+          <details class="review-more" id="review-more">
+            <summary>More</summary>
+            <label class="setting-row">
+              <input type="checkbox" id="review-use-selection" />
+              <div class="setting-text">Send the selected paragraphs with "Propose changes"</div>
+            </label>
+            <button type="button" class="btn-secondary btn-small" id="review-check-paragraphs">
+              Check revised paragraphs
+            </button>
+            <div id="review-consistency"></div>
+          </details>
+          <div id="review-comments" class="review-comments"></div>
           <pre id="review-preview" class="review-preview" hidden></pre>
-          <h4>Changes made outside the tool</h4>
-          <div id="review-external"></div>
         </div>
 
-        <div class="setup-section">
-          <h3>3. Instruction ledger</h3>
+        <details class="review-fold" id="review-external-box" hidden>
+          <summary>
+            Changes made outside the tool
+            <span id="review-external-count" class="review-count"></span>
+          </summary>
+          <div id="review-external"></div>
+        </details>
+
+        <details class="review-fold" id="review-ledger-box" hidden>
+          <summary>
+            Instructions and forbidden wording
+            <span id="review-ledger-count" class="review-count"></span>
+          </summary>
           <div class="review-ledger-form">
             <select id="ledger-kind" class="setting-select">
               <option value="instruction">Instruction</option>
@@ -196,22 +240,24 @@
             whole document (a term defined at its first use) is not checked by it.
           </p>
           <div id="review-ledger"></div>
-          <button type="button" class="btn-secondary btn-small" id="review-check-all">
-            Check all (changed paragraphs)
-          </button>
-          <button type="button" class="btn-secondary btn-small" id="review-check-full">
-            Full check
-          </button>
-          <button type="button" class="btn-secondary btn-small" id="ledger-export">
-            Export ledger
-          </button>
-          <input type="file" id="ledger-file-input" accept=".json,application/json" hidden />
-          <button type="button" class="btn-secondary btn-small" id="ledger-import">
-            Import ledger
-          </button>
-          <button type="button" class="btn-secondary btn-small" id="ledger-suggest-review">
-            Suggest rules from the review
-          </button>
+          <div class="review-buttons">
+            <button type="button" class="btn-secondary btn-small" id="review-check-all">
+              Check all (changed paragraphs)
+            </button>
+            <button type="button" class="btn-secondary btn-small" id="review-check-full">
+              Full check
+            </button>
+            <button type="button" class="btn-secondary btn-small" id="ledger-export">
+              Export ledger
+            </button>
+            <input type="file" id="ledger-file-input" accept=".json,application/json" hidden />
+            <button type="button" class="btn-secondary btn-small" id="ledger-import">
+              Import ledger
+            </button>
+            <button type="button" class="btn-secondary btn-small" id="ledger-suggest-review">
+              Suggest rules from the review
+            </button>
+          </div>
           <div id="ledger-candidates"></div>
           <div id="ledger-candidates-actions" hidden>
             <button type="button" class="btn-primary btn-small" id="ledger-candidates-add">
@@ -222,17 +268,32 @@
             </button>
           </div>
           <div id="review-violations"></div>
-        </div>
+        </details>
 
-        <div class="setup-section">
-          <h3>4. Before submission</h3>
+        <details class="review-fold" id="review-submit-box" hidden>
+          <summary>
+            Before submission <span id="review-submit-count" class="review-count"></span>
+          </summary>
           <button type="button" class="btn-secondary btn-small" id="review-clean-tool">
             Remove tool comments ([R...] only)
           </button>
-          <button type="button" class="btn-secondary btn-small" id="review-delete-all">
-            Delete ALL comments...
-          </button>
-        </div>
+          <!-- Last in its section, behind a warning: it is not an everyday button. -->
+          <div class="review-danger">
+            <p>
+              <strong>Deletes every comment in the document</strong>, yours and the reviewers'
+              included. A backup file is written first.
+            </p>
+            <button type="button" class="btn-secondary btn-small" id="review-delete-all">
+              Delete ALL comments...
+            </button>
+          </div>
+        </details>
+
+        <details class="review-fold" id="review-advanced">
+          <summary>Advanced</summary>
+          <small id="review-file"></small>
+          <div><small id="review-auto"></small></div>
+        </details>
       </div>
     </section>
 
@@ -392,40 +453,6 @@
     <!-- Setup tab content -->
     <section class="tab-content" data-tab="setup" hidden>
       <div class="setup-content">
-        <div class="setup-section">
-          <h3>Workspace</h3>
-          <p class="setup-help">
-            The folder Claude works in — follows the open document automatically. Claude can already
-            read <em>anything inside it</em> on demand; this just sets which
-            <code>CLAUDE.md</code> and chat history apply. Override with
-            <strong>Change workspace</strong>; it holds until you open a doc elsewhere.
-          </p>
-          <div class="current-workspace" id="workspace-cwd" title="">Loading…</div>
-          <button type="button" class="btn-primary btn-small" id="add-workspace">
-            Change workspace
-          </button>
-          <div class="form-error" id="workspace-error" hidden></div>
-        </div>
-
-        <div class="setup-section">
-          <h3>Context files</h3>
-          <p class="setup-help">
-            Point Claude at material <strong>outside</strong> the workspace folder — notes, prior
-            drafts, a vendor's specs, anywhere on disk. (Files <em>inside</em> the workspace it can
-            already read on its own.) Saved to <code>CLAUDE.md</code>; read on demand.
-          </p>
-          <div class="references-list" id="context-list">
-            <div class="references-loading">Loading…</div>
-          </div>
-          <div class="path-row">
-            <button type="button" class="btn-primary btn-small add-context-folder">
-              + Add folder
-            </button>
-            <button type="button" class="btn-primary btn-small add-context-file">+ Add file</button>
-          </div>
-          <div class="form-error" id="context-error" hidden></div>
-        </div>
-
         <div class="setup-section" id="providers-root">
           <h3>Providers</h3>
           <p class="setup-help">
@@ -471,6 +498,41 @@
           <button type="button" class="btn-secondary btn-small" id="providers-recheck">
             Check again
           </button>
+        </div>
+
+        <div class="setup-section">
+          <h3>Workspace</h3>
+          <p class="setup-help">
+            The folder Claude works in — follows the open document automatically. Claude can already
+            read <em>anything inside it</em> on demand; this just sets which
+            <code>CLAUDE.md</code> and chat history apply. Override with
+            <strong>Change workspace</strong>; it holds until you open a doc elsewhere.
+          </p>
+          <div class="form-error" id="workspace-mismatch" hidden></div>
+          <div class="current-workspace" id="workspace-cwd" title="">Loading…</div>
+          <button type="button" class="btn-primary btn-small" id="add-workspace">
+            Change workspace
+          </button>
+          <div class="form-error" id="workspace-error" hidden></div>
+        </div>
+
+        <div class="setup-section">
+          <h3>Context files</h3>
+          <p class="setup-help">
+            Point Claude at material <strong>outside</strong> the workspace folder — notes, prior
+            drafts, a vendor's specs, anywhere on disk. (Files <em>inside</em> the workspace it can
+            already read on its own.) Saved to <code>CLAUDE.md</code>; read on demand.
+          </p>
+          <div class="references-list" id="context-list">
+            <div class="references-loading">Loading…</div>
+          </div>
+          <div class="path-row">
+            <button type="button" class="btn-primary btn-small add-context-folder">
+              + Add folder
+            </button>
+            <button type="button" class="btn-primary btn-small add-context-file">+ Add file</button>
+          </div>
+          <div class="form-error" id="context-error" hidden></div>
         </div>
 
         <div class="setup-section">

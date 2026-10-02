@@ -1161,6 +1161,17 @@ test("ledger suggestions: a checklist from the review text; Add selected imports
 
 // P15 "Propose all": one review turn per open comment, the next one only
 // after the turn_done of the one before.
+// The text of an element and of everything under it (the fake keeps text per element).
+const textOf = (n) => [n.textContent, ...n.children.map(textOf)].join("");
+// What the card of comment `ref` says about its last turn.
+const resultOf = (t, ref) => {
+  const card = findAll(t.$("review-comments"), (n) => n.attributes?.["data-ref"] === ref)[0];
+  const r = card
+    ? findAll(card, (n) => String(n.attributes?.class ?? "").startsWith("review-card-result"))[0]
+    : null;
+  return r ? textOf(r) : "";
+};
+
 async function proposeAllSetup({ providersReady, usedLabel } = {}) {
   const { createTurnState } = await import("../taskpane/shared/turn-state.js");
   globalThis.document = fakeDocument();
@@ -2225,10 +2236,11 @@ test("a single Propose changes ends with a line: how many changes, for which com
     t.endTurn("R1.1");
     await t.wait();
     await t.wait();
-    assert.match(
-      t.$("review-message").textContent,
-      /^No change was proposed for R1\.1 with Claude · Opus 5\.5: the reason is in the Chat tab\. Accepted 0, /,
+    assert.equal(
+      resultOf(t, "R1.1"),
+      "No change was proposed for R1.1 with Claude · Opus 5.5: the reason is below.",
     );
+    assert.match(t.$("review-message").textContent, /^Accepted 0, /);
     // Two changes on record after the turn, each with its comment in Word.
     await buttons()[0].click();
     await t.wait();
@@ -2260,10 +2272,8 @@ test("a single Propose changes ends with a line: how many changes, for which com
     t.endTurn("R1.1");
     await t.wait();
     await t.wait();
-    assert.match(
-      t.$("review-message").textContent,
-      /^Proposed 2 changes for R1\.1 with Claude · Opus 5\.5\. Accepted 0, /,
-    );
+    assert.equal(resultOf(t, "R1.1"), "Proposed 2 changes for R1.1 with Claude · Opus 5.5.");
+    assert.match(t.$("review-message").textContent, /^Accepted 0, /);
     // An edit the forbid list blocked is said, also when nothing else came.
     await buttons()[0].click();
     await t.wait();
@@ -2276,9 +2286,9 @@ test("a single Propose changes ends with a line: how many changes, for which com
     t.endTurn("R1.1");
     await t.wait();
     await t.wait();
-    assert.match(
-      t.$("review-message").textContent,
-      /^No change was proposed for R1\.1 with Claude · Opus 5\.5: 1 edit was blocked \(see the blocked list of the comment\)\. Accepted 0, /,
+    assert.equal(
+      resultOf(t, "R1.1"),
+      "No change was proposed for R1.1 with Claude · Opus 5.5: 1 edit was blocked (see the blocked list of the comment).",
     );
     // A turn that failed gets no such line.
     await buttons()[0].click();
@@ -2286,7 +2296,8 @@ test("a single Propose changes ends with a line: how many changes, for which com
     t.endTurn("R1.1", "Claude usage limit reached.");
     await t.wait();
     await t.wait();
-    assert.equal(/Proposed|No change was proposed/.test(t.$("review-message").textContent), false);
+    assert.equal(/Proposed|No change was proposed/.test(resultOf(t, "R1.1")), false);
+    assert.match(resultOf(t, "R1.1"), /usage limit reached/);
   } finally {
     await t.pane.reload();
   }
@@ -2403,9 +2414,9 @@ test("after a turn the line names the requests still open; the card shows the st
     t.endTurn("R1.1");
     await t.wait();
     await t.wait();
-    assert.match(
-      t.$("review-message").textContent,
-      /^Proposed 1 change for R1\.1 with Claude · Opus 5\.5\. 2 requests of R1\.1 are still open \(q2, q3\)\. Accepted 0, /,
+    assert.equal(
+      resultOf(t, "R1.1"),
+      "Proposed 1 change for R1.1 with Claude · Opus 5.5. 2 requests of R1.1 are still open (q2, q3).",
     );
     assert.equal(
       lines()[0],

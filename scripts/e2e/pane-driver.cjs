@@ -193,6 +193,33 @@ function card(page, ref) {
   });
 }
 
+// The Review tab folds things away; a user opens them before using what is in
+// them, so the steps do the same. The sections are <details>: pressing the
+// summary opens one.
+const openFold = (page, id) =>
+  page.evaluate((i) => {
+    const d = document.getElementById(i);
+    if (d && !d.open) d.querySelector("summary")?.click();
+  }, id);
+// A comment is a row; its card (buttons, requirements, changes) opens when the
+// row is pressed. One card is open at a time.
+const openCard = (page, ref) =>
+  page.evaluate((wanted) => {
+    const c = [...document.querySelectorAll(".review-comment")].find(
+      (x) => x.querySelector(".review-comment-head strong")?.textContent.trim() === wanted,
+    );
+    const body = c?.querySelector(".review-comment-body");
+    if (body?.hidden) c.querySelector(".review-comment-head")?.click();
+  }, ref);
+// The paste box shrinks to one line once the review is split; the author
+// shows it again before pasting another review.
+const showPasteBox = (page) =>
+  page.evaluate(() => {
+    if (document.getElementById("review-paste-box")?.hidden) {
+      document.getElementById("review-paste-toggle")?.click();
+    }
+  });
+
 const turnBusy = (page) =>
   page.evaluate(() => {
     const p = document.getElementById("review-progress");
@@ -336,9 +363,13 @@ function paneState(page) {
 // scrolling: inside the window and inside every element it scrolls in?
 function progressInView(page) {
   return page.evaluate(() => {
-    const el = document.getElementById("review-progress");
+    // The work of a comment shows inside its card, the work of a run in the
+    // bar at the top of the tab: either one in view is what the user needs.
+    const shown = (e) => !!e && !e.hidden && !e.closest("[hidden]");
+    const card = [...document.querySelectorAll(".review-card-progress")].find(shown);
+    const el = card ?? document.getElementById("review-progress");
     const r = el?.getBoundingClientRect?.();
-    if (!r || el.hidden || r.height === 0) return false;
+    if (!r || !shown(el) || r.height === 0) return false;
     let top = 0;
     let bottom = window.innerHeight ?? 0;
     for (let p = el.parentElement; p; p = p.parentElement) {
@@ -485,6 +516,7 @@ const steps = {
   // a.review_file fills the paste box first; without it the text already
   // there is split (stage 2.5 loads it with load-review-file).
   async split(page, a) {
+    await showPasteBox(page);
     if (a.review_file) await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
     await clearMessage(page);
     await page.click("#review-split");
@@ -537,6 +569,7 @@ const steps = {
 
   async "ledger-add"(page, a) {
     const items = JSON.parse(fs.readFileSync(a.ledger_file, "utf8")).items;
+    await openFold(page, "review-ledger-box");
     for (const it of items) {
       const before = await page.$$eval("#review-ledger .review-ledger-item", (ns) => ns.length);
       await page.selectOption("#ledger-kind", it.kind);
@@ -560,6 +593,7 @@ const steps = {
   },
 
   async "check-all"(page) {
+    await openFold(page, "review-ledger-box");
     await clearMessage(page);
     await page.click("#review-check-all");
     // Done when no ledger item waits for its first check, or an error shows.
@@ -575,6 +609,7 @@ const steps = {
   },
 
   async preview(page, a) {
+    await openCard(page, a.ref);
     await card(page, a.ref).locator("button", { hasText: "Preview prompt" }).click();
     await page.waitForFunction(
       () => document.getElementById("review-preview")?.hidden === false,
@@ -589,6 +624,7 @@ const steps = {
   // Propose changes on one comment and wait until the turn is over.
   async propose(page, a) {
     if (await turnBusy(page)) throw new Error("a turn is already running");
+    await openCard(page, a.ref);
     const btn = card(page, a.ref).locator("button", { hasText: "Propose changes" });
     await btn.click();
     await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
@@ -626,6 +662,7 @@ const steps = {
   // "Check revised paragraphs": a status refresh, then the check of the
   // paragraphs that hold two or more changes (one model request or more).
   async "check-paragraphs"(page) {
+    await openFold(page, "review-more");
     await clearMessage(page);
     await page.click("#review-check-paragraphs");
     await waitMessage(
@@ -641,6 +678,7 @@ const steps = {
   // paragraph anew; waits as `propose` does until the turn is over.
   async "rewrite-paragraph"(page, a = {}) {
     if (await turnBusy(page)) throw new Error("a turn is already running");
+    await openFold(page, "review-more");
     const btn = page
       .locator("#review-consistency button", { hasText: "Rewrite this paragraph" })
       .nth(a.nth ?? 0);
@@ -666,6 +704,7 @@ const steps = {
     const row = () =>
       card(page, a.ref).locator(".review-blocked", { hasText: `Blocked by ${a.blocked_by}:` });
     await clearMessage(page);
+    await openCard(page, a.ref);
     await row().locator("button", { hasText: "Allow exception" }).click();
     await row().locator("button", { hasText: "Apply despite" }).click();
     // An error ends the wait (the refusal is one); an edit that went in
@@ -675,6 +714,7 @@ const steps = {
   },
 
   async "clean-tool"(page) {
+    await openFold(page, "review-submit-box");
     await clearMessage(page);
     await page.click("#review-clean-tool");
     await waitMessage(page, 120_000);
@@ -684,6 +724,7 @@ const steps = {
   // First press shows the counts on the button; second press deletes.
   async "delete-all"(page) {
     const btn = "#review-delete-all";
+    await openFold(page, "review-submit-box");
     await clearMessage(page);
     await page.click(btn);
     await page.waitForFunction(
@@ -741,6 +782,7 @@ const steps = {
   // (a.after_ms after it began, default 8 s) and wait until the pane is free.
   async "propose-stop"(page, a) {
     if (await turnBusy(page)) throw new Error("a turn is already running");
+    await openCard(page, a.ref);
     await card(page, a.ref).locator("button", { hasText: "Propose changes" }).click();
     await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
       timeout: 30_000,
@@ -750,7 +792,8 @@ const steps = {
     if (!(await turnBusy(page))) {
       return { stopped: false, reason: "the turn ended before Stop", ...(await view(page)) };
     }
-    await page.click("#stop-agent");
+    // The Stop button of the card of the comment (it presses the Stop of the chat).
+    await card(page, a.ref).locator(".review-card-progress button").click();
     while (await turnBusy(page)) {
       if (Date.now() - started > 120_000) throw new Error("the turn did not end after Stop");
       await sleep(500);
@@ -827,6 +870,7 @@ const steps = {
   },
 
   async "export-ledger"(page) {
+    await openFold(page, "review-ledger-box");
     await clearMessage(page);
     await page.click("#ledger-export");
     await waitMessage(page, 60_000);
@@ -835,6 +879,7 @@ const steps = {
 
   // a.path: a ledger JSON file (Windows path).
   async "import-ledger"(page, a) {
+    await openFold(page, "review-ledger-box");
     await clearMessage(page);
     await page.setInputFiles("#ledger-file-input", a.path);
     await waitMessage(page, 60_000);
@@ -846,6 +891,8 @@ const steps = {
   // one of them, and no other is. Without a.pick the pane's own ticks stay.
   // The ticked ones are added unless a.add is false.
   async "suggest-ledger"(page, a) {
+    await showPasteBox(page);
+    await openFold(page, "review-ledger-box");
     if (a.review_file) await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
     await clearMessage(page);
     await page.click("#ledger-suggest-review");

@@ -739,11 +739,100 @@ export function pendingDecisions(revision) {
   };
 }
 
-// L9. "R1.3 running 1:05. 2 of 3 comments not done."
-export function progressText({ ref, startedAt, now = Date.now(), comments = [] }) {
+// ---- The list of comments: one compact row each --------------------------------
+
+// m:ss from a start time to `now` (ms, or an ISO string for the start).
+export function clockText(startedAt, now = Date.now()) {
   const t0 = typeof startedAt === "string" ? Date.parse(startedAt) : startedAt;
   const s = Math.max(0, Math.floor((now - t0) / 1000));
-  const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// The first line of a comment, cut at `max` characters on a word end.
+export function firstLine(text, max = 100) {
+  const line =
+    String(text ?? "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find(Boolean) ?? "";
+  if (line.length <= max) return line;
+  const cut = line.slice(0, max);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), max >> 1))}...`;
+}
+
+// Where a comment stands, in words, from what the pane already knows (the
+// review file, plus what it holds in memory for this session). Nothing is
+// stored for it.
+//   working       a turn of this comment runs now (working: { startedAt })
+//   done          the comment is marked done
+//   needs_answer  a question to the author has no answer, or an edit is
+//                 blocked and waits for a decision
+//   to_review     changes wait for the author's decision in Word
+//   no_change     the last turn of this session proposed nothing (noChange),
+//                 or every request belongs to another file
+//   decided       changes exist and none waits
+//   not_started   none of the above
+// attention: the author has something to do here.
+export function commentState(comment, { working = null, now = Date.now(), noChange = false } = {}) {
+  if (working) {
+    return {
+      kind: "working",
+      label: `Working ${clockText(working.startedAt, now)}`,
+      attention: false,
+    };
+  }
+  if (comment?.status === "done") return { kind: "done", label: "Done", attention: false };
+  const asked = (comment?.questions ?? []).filter((q) => !q.answer).length;
+  const blocked = (comment?.blocked ?? []).filter((b) => !inFlightEdit(b)).length;
+  if (asked) return { kind: "needs_answer", label: "Needs your answer", attention: true };
+  if (blocked) return { kind: "needs_answer", label: "Needs your decision", attention: true };
+  const changes = comment?.changes ?? [];
+  const waiting = changes.filter((ch) => ch.state === "pending" || ch.state === "unlocated").length;
+  if (waiting) {
+    return {
+      kind: "to_review",
+      label: `${waiting} change${waiting === 1 ? "" : "s"} to review in Word`,
+      attention: true,
+    };
+  }
+  if (changes.length) return { kind: "decided", label: "All changes decided", attention: false };
+  if (noChange) return { kind: "no_change", label: "No change proposed", attention: true };
+  const reqs = requirementStates(comment);
+  if (reqs.length && reqs.every((r) => r.state === "outside_this_file")) {
+    return { kind: "no_change", label: "Belongs to another file", attention: false };
+  }
+  return { kind: "not_started", label: "Not started", attention: false };
+}
+
+// "20 comments, 2 done. 3 need you." The header of the list.
+export function summaryText(comments, states) {
+  const n = comments.length;
+  if (!n) return "";
+  const need = states.filter((s) => s.attention).length;
+  const done = states.filter((s) => s.kind === "done").length;
+  return (
+    `${n} comment${n === 1 ? "" : "s"}` +
+    (done ? `, ${done} done` : "") +
+    `. ${need ? `${need} ${need === 1 ? "needs" : "need"} you.` : "None needs you right now."}`
+  );
+}
+
+// "Review: 5 comments from 1 reviewer", the line the paste box shrinks to.
+export function reviewLine(comments) {
+  const n = comments.length;
+  const refs = comments.map((c) => reviewerOfRef(c.ref));
+  const reviewers = new Set(refs.filter((r) => r > 0)).size;
+  const editor = refs.includes(0);
+  const from = [
+    reviewers ? `${reviewers} reviewer${reviewers === 1 ? "" : "s"}` : "",
+    editor ? "the editor" : "",
+  ].filter(Boolean);
+  return `Review: ${n} comment${n === 1 ? "" : "s"}${from.length ? ` from ${from.join(" and ")}` : ""}`;
+}
+
+// L9. "R1.3 running 1:05. 2 of 3 comments not done."
+export function progressText({ ref, startedAt, now = Date.now(), comments = [] }) {
+  const clock = clockText(startedAt, now);
   const open = comments.filter((c) => c.status !== "done").length;
   return `${ref} running ${clock}. ${open} of ${comments.length} comments not done.`;
 }
