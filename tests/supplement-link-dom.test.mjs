@@ -314,7 +314,21 @@ test("the manuscript's pane: one line names the linked files, and everything els
 test("a manuscript with a review and no link shows neither the line nor the box", async () => {
   const t = await setup({ revision: REVISION, linked: FREE, candidates: CANDIDATES });
   assert.deepEqual([t.$("review-linked").hidden, t.$("review-link-box").hidden], [true, true]);
-  assert.equal(t.sent("review_link_candidates").length, 0);
+  assert.equal(t.$("review-link-candidates").children.length, 0);
+});
+
+test("a file that left its revision with changes of its own is offered the manuscript whose list holds its comments", async () => {
+  const t = await setup({
+    revision: { ...REVISION, comments: REVISION.comments.slice(0, 1) },
+    linked: FREE,
+    candidates: [{ ...CANDIDATES[0], covers: true }, CANDIDATES[1]],
+  });
+  assert.deepEqual([t.$("review-link-box").hidden, t.$("review-link-box").open], [false, true]);
+  assert.deepEqual(
+    t.$("review-link-candidates").children.map((b) => b.textContent),
+    ["Join the revision of paper.docx, 23 comments"],
+  );
+  assert.equal(t.$("review-comments").children.length, 1, "its own comment is still shown");
 });
 
 test("a daemon from before links: no box, and no request it does not know", async () => {

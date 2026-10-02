@@ -656,6 +656,47 @@ test("author answers are shared read-only: a turn in either file gets what was a
   }
 });
 
+test("a supplement that left with changes of its own is offered its manuscript again, and can join it", async () => {
+  const w = await world();
+  try {
+    await w.edit("SI.docx", (rev) => addChange(rev, "R1.2", CHANGE).revision);
+    const covers = async (key) =>
+      (await w.ask(key, "review_link_candidates")).candidates.map((c) => [c.name, c.covers]);
+    // A second paper in the folder, with a review of its own.
+    await w.ask("other.docx", "review_save_comments", {
+      comments: [{ ref: "R1.2", reviewer: 1, text: "Another paper, another comment." }],
+    });
+    assert.equal((await w.ask("SI.docx", "review_link_leave")).ok, true);
+    const left = await w.file("SI.docx");
+    assert.deepEqual(
+      left.comments.map((c) => [c.ref, c.changes.length]),
+      [["R1.2", 1]],
+      "the comment with its change stays",
+    );
+    assert.deepEqual(await covers("SI.docx"), [
+      ["other.docx", false],
+      ["paper.docx", true],
+    ]);
+    // The other paper holds comments no manuscript of the folder lists, and
+    // a file with no comment is covered by nothing.
+    // (The file that left is a review file with comments like any other.)
+    assert.deepEqual(await covers("other.docx"), [
+      ["SI.docx", false],
+      ["paper.docx", false],
+    ]);
+    assert.deepEqual(
+      (await covers("empty.docx")).map((c) => c[1]),
+      [false, false, false],
+    );
+    const again = await w.ask("SI.docx", "review_link_join", { main: w.docOf("paper.docx") });
+    assert.equal(again.ok, true, again.error);
+    assert.equal(again.revision.comments.length, 3);
+    assert.equal(again.revision.comments.find((c) => c.ref === "R1.2").changes.length, 1);
+  } finally {
+    await w.cleanup();
+  }
+});
+
 // ---- the figures page -------------------------------------------------------------
 
 test("the figures page takes no new record under a supplementary file: it says where the record goes", async () => {

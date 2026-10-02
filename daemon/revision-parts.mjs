@@ -77,15 +77,24 @@ async function siblings(doc) {
 
 // Manuscripts in the folder of `doc` whose revision it could join: review
 // files that hold comments and are no supplement themselves.
-export async function linkCandidates(doc) {
+// covers: every comment `own` (the review file of `doc`) holds is in the list
+// of that manuscript, with the same text. It is how a supplement that left
+// its revision with changes of its own is told from a manuscript with a
+// review of its own: the pane offers the first a way back.
+export async function linkCandidates(doc, own = null) {
+  const mine = own?.comments ?? [];
   return (await siblings(doc))
     .filter((s) => s.revision.comments.length > 0 && !s.revision.part_of)
-    .map((s) => ({
-      doc: s.doc,
-      name: basename(s.doc),
-      comments: s.revision.comments.length,
-      updated_at: s.revision.updated_at,
-    }));
+    .map((s) => {
+      const listed = new Map(s.revision.comments.map((c) => [c.ref, c.text]));
+      return {
+        doc: s.doc,
+        name: basename(s.doc),
+        comments: s.revision.comments.length,
+        updated_at: s.revision.updated_at,
+        covers: mine.length > 0 && mine.every((c) => listed.get(c.ref) === c.text),
+      };
+    });
 }
 
 // The link a supplement lost (an earlier daemon saved its file without

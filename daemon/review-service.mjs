@@ -976,7 +976,13 @@ export function createReviewService({
     // Manuscripts in the folder of this document whose revision it could join.
     async review_link_candidates(msg, key) {
       const d = at(key);
-      return { candidates: await linkCandidates(resolve(d.doc)) };
+      let own = null;
+      try {
+        own = await load(d);
+      } catch {
+        own = null; // no readable file of its own: it holds nothing
+      }
+      return { candidates: await linkCandidates(resolve(d.doc), own) };
     },
     // This document becomes a supplement in the revision of msg.main (the
     // path of that manuscript or of its review file). msg.label: what the

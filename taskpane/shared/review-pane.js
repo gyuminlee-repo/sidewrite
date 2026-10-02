@@ -966,8 +966,12 @@ export function initReviewPane({
       line.append(el("div", { class: "review-linked-text", text: linkedFilesText(parts) }));
     }
     line.hidden = !main && parts.length === 0;
-    const empty = (state.revision?.comments ?? []).length === 0 && state.draft.length === 0;
-    $("review-link-box").hidden = !state.linked || !!main || parts.length > 0 || !empty;
+    // Offered to a file with no review of its own, and to one whose
+    // comments are all in the list of a manuscript of its folder (a
+    // supplementary file that left its revision and kept its changes).
+    const own = (state.revision?.comments ?? []).length;
+    const offer = own === 0 ? state.draft.length === 0 : state.linkCandidates.length > 0;
+    $("review-link-box").hidden = !state.linked || !!main || parts.length > 0 || !offer;
     // With no manuscript to offer, the box is the last thing on the tab.
     $("review-link-box").setAttribute(
       "class",
@@ -1452,13 +1456,17 @@ export function initReviewPane({
     const r = await ask("review_load");
     state.path = r.path;
     state.linked = r.linked ?? null;
-    // A file with no review of its own and no link: the manuscripts in its
-    // folder it could join. Asked only of a daemon that knows links.
+    // A file with no link: the manuscripts in its folder it could join.
+    // One that holds comments is offered only a manuscript whose list has
+    // them all (it was its supplementary file). Asked only of a daemon that
+    // knows links.
     state.linkCandidates = [];
     const free = r.linked && !r.linked.part_of && r.linked.parts.length === 0;
-    if (free && (state.revision?.comments ?? []).length === 0) {
+    if (free) {
       try {
-        state.linkCandidates = (await ask("review_link_candidates")).candidates ?? [];
+        const found = (await ask("review_link_candidates")).candidates ?? [];
+        const own = (state.revision?.comments ?? []).length;
+        state.linkCandidates = own === 0 ? found : found.filter((c) => c.covers === true);
       } catch {
         /* the folder could not be read: the path field is still there */
       }
