@@ -650,22 +650,63 @@ test("i: the line of Document.saved and the file on disk says what was read at e
   );
 });
 
-test("the sessions the panes started on are read from the daemon log", () => {
-  const log = [
-    "[diag] message → ensure loop key=word D:\\run\\paper.docx cwd=/mnt/d/run resume=(new)",
+test("the sessions the panes ran on are read from the daemon log, and two panes on one session fail the row", () => {
+  const NAMES = { paper: "paper.docx", si: "SI.docx" };
+  const P = "1a2b3c4d-0000-4000-8000-000000000000";
+  const S = "9f8e7d6c-0000-4000-8000-000000000000";
+  const lines = (...rows) => rows.join("\n");
+  // Each pane on a session of its own, the manuscript's second turn in its loop.
+  const good = lines(
+    `[agent] turn doc=paper.docx session=${P} asked=- (started)`,
     "[daemon] Starting session for /mnt/d/run (new session)",
-    "[diag] message → ensure loop key=word D:\\run\\SI.docx cwd=/mnt/d/run resume=1a2b3c4d-0000-4000-8000-000000000000",
-  ].join("\n");
-  const s = partsSessions(log);
-  assert.deepEqual(s.rows, [
-    { doc: "paper.docx", resume: "(new)" },
-    { doc: "SI.docx", resume: "1a2b3c4d-0000-4000-8000-000000000000" },
-  ]);
-  assert.equal(s.shared, true);
-  assert.equal(s.line, "paper.docx: new session; SI.docx: resumed 1a2b3c4d");
-  const fresh = partsSessions(log.replace(/resume=1a2b\S+/, "resume=(new)"));
-  assert.equal(fresh.shared, false);
-  assert.match(partsSessions("").line, /no session start in the log/);
+    `[agent] turn doc=SI.docx session=${S} asked=- (started)`,
+    `[agent] turn doc=paper.docx session=${P} asked=- (continued)`,
+  );
+  const s = partsSessions(good, NAMES);
+  assert.deepEqual(s.rows[1], { doc: "SI.docx", session: S, asked: null, how: "started" });
+  assert.equal(s.rows.length, 3);
+  assert.equal(s.pass, true, s.got);
+  assert.equal(s.got, "paper.docx: started 1a2b3c4d; SI.docx: started 9f8e7d6c");
+  // The pane of the supplement resumed the session of the manuscript.
+  const shared = partsSessions(
+    lines(
+      `[agent] turn doc=paper.docx session=${P} asked=- (started)`,
+      `[agent] turn doc=SI.docx session=${P} asked=${P} (resumed)`,
+    ),
+    NAMES,
+  );
+  assert.equal(shared.pass, false);
+  assert.equal(shared.checks["the two panes share no session"], false);
+  assert.match(
+    shared.got,
+    /1a2b3c4d in both: paper\.docx: started 1a2b3c4d; SI\.docx: resumed 1a2b3c4d/,
+  );
+  // The same, when the SDK gave the resumed session a new id.
+  const forked = partsSessions(
+    lines(
+      `[agent] turn doc=paper.docx session=${P} asked=- (started)`,
+      `[agent] turn doc=SI.docx session=${S} asked=${P} (started)`,
+    ),
+    NAMES,
+  );
+  assert.equal(forked.pass, false);
+  assert.match(forked.got, /SI\.docx: started 9f8e7d6c \(asked 1a2b3c4d\)/);
+  // Each pane resumed its own earlier session: fine.
+  const own = partsSessions(
+    lines(
+      `[agent] turn doc=paper.docx session=${P} asked=${P} (resumed)`,
+      `[agent] turn doc=SI.docx session=${S} asked=${S} (resumed)`,
+    ),
+    NAMES,
+  );
+  assert.equal(own.pass, true, own.got);
+  // A pane without a turn line, and a log without any (an older daemon).
+  const one = partsSessions(`[agent] turn doc=paper.docx session=${P} asked=- (started)`, NAMES);
+  assert.equal(one.pass, false);
+  assert.equal(one.checks["SI.docx: a turn ran on a session"], false);
+  const none = partsSessions("", NAMES);
+  assert.equal(none.pass, false);
+  assert.match(none.got, /no turn line in the log/);
 });
 
 test("a log line that names only the files of the run by their bare names is the run's own", () => {

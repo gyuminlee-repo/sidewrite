@@ -14,7 +14,9 @@ import {
   toLocalPath,
 } from "./workspace.mjs";
 import { randomUUID } from "node:crypto";
-import { getSessionId, saveSessionId, touchFolder } from "./sessions.mjs";
+import { getSessionId, saveSessionId, touchFolder, turnSessionLine } from "./sessions.mjs";
+import { sessionDocKey } from "./revision-parts.mjs";
+import { localDocPath } from "./revision-store.mjs";
 import { readTranscript } from "./transcript.mjs";
 import { diag } from "./diag.mjs";
 import { getContextEntries, setContextEntries } from "./context.mjs";
@@ -322,10 +324,11 @@ function pickPathFromMain({ include_files, default_path, title, button_label }) 
 // paneKey identifies one open document (host + doc path), so two Word
 // docs (or two workbooks) open at once each get their own independent
 // loop/session/queue/workspace. The host is still carried for the tool
-// family + per-host behavior. SDK-transcript resume is still keyed by
-// (host, cwd) — two documents in the same folder share a resume hint;
-// that's a deliberate, documented simplification, far better than the
-// ping-pong of sharing a pane.
+// family + per-host behavior. SDK-transcript resume is keyed by
+// (host, cwd): two documents in the same folder share a resume hint.
+// The files of one revision (a manuscript and its supplementary documents)
+// do not: each of them has a hint of its own (resumeDocFor, sessions.mjs),
+// so the pane of a supplement never resumes the session of its manuscript.
 const sessions = new Map();
 const workspaceByKey = new Map();
 // Panes whose workspace the user set explicitly (Change workspace). Their
@@ -379,6 +382,18 @@ function sessionFor(key) {
   return sessions.get(key) ?? null;
 }
 
+// The document of a pane as a local path (null: none the daemon can open),
+// and the key of its own resume hint when it is a file of a revision with
+// parts (revision-parts.mjs sessionDocKey; null: the hint of the folder).
+// Read when the hint is looked up or saved, so a document that joins or
+// leaves a revision changes its hint from then on.
+const paneDoc = (key) => localDocPath(bridge.getContext(key)?.activeDoc, process.env);
+const resumeDocFor = (key) => sessionDocKey(paneDoc(key));
+const docNameOf = (key) => {
+  const doc = paneDoc(key);
+  return doc ? doc.split(/[\\/]/).pop() : null;
+};
+
 // This pane's workspace: its live session's cwd, else the last cwd we
 // recorded for it, else the launch default.
 function cwdForKey(key) {
@@ -393,7 +408,7 @@ async function resolveReplaySessionId(key, host, cwd) {
   if (live?.sessionId) return live.sessionId;
   if (!host || !cwd) return null;
   try {
-    return (await getSessionId(host, cwd)) ?? null;
+    return (await getSessionId(host, cwd, await resumeDocFor(key))) ?? null;
   } catch {
     return null;
   }
@@ -595,7 +610,7 @@ async function ensureLoopForMessage(key, host, { idle = true } = {}) {
   }
   let resumeId = null;
   try {
-    resumeId = await getSessionId(host, cwd);
+    resumeId = await getSessionId(host, cwd, await resumeDocFor(key));
   } catch {
     /* fresh session if lookup fails */
   }
@@ -1349,6 +1364,10 @@ async function startSessionForFolder(
     key,
     cwd,
     sessionId: resumeSessionId,
+    // The id this loop was asked to resume, and whether an init has come
+    // (for the line of each turn, sessions.mjs turnSessionLine).
+    resumeAsked: resumeSessionId,
+    inited: false,
     abortController,
     settled: false,
     host,
@@ -1531,7 +1550,7 @@ async function switchFolder(rawCwd, key, host = null) {
   // Switch ONLY the requesting pane to the target folder; resume that
   // (host, cwd)'s prior conversation if one is on record. Every other
   // pane stays in its own workspace, untouched.
-  const resumeId = host ? await getSessionId(host, cwd) : null;
+  const resumeId = host ? await getSessionId(host, cwd, await resumeDocFor(key)) : null;
   await startSessionForFolder(cwd, resumeId, { key, host });
   return cwd;
 }
@@ -1583,13 +1602,27 @@ function handleAgentMessage(msg, session) {
           },
           session?.key,
         );
+        // One line per turn, without a debug flag: which document ran on
+        // which SDK session, and whether the session was started or resumed.
+        if (session && msg.session_id) {
+          console.log(
+            turnSessionLine({
+              doc: docNameOf(session.key),
+              sessionId: msg.session_id,
+              asked: session.resumeAsked,
+              known: session.inited ? session.sessionId : null,
+            }),
+          );
+          session.inited = true;
+        }
         // Record this session_id for THIS (host, cwd) so the next time
-        // this pane connects (or you switch back) it resumes here.
+        // this pane connects (or you switch back) it resumes here. A file
+        // of a revision with parts records it under its own path.
         if (session && msg.session_id && msg.session_id !== session.sessionId) {
           session.sessionId = msg.session_id;
-          saveSessionId(session.host, session.cwd, msg.session_id).catch((err) =>
-            console.warn("[daemon] Could not save session id:", err.message),
-          );
+          resumeDocFor(session.key)
+            .then((doc) => saveSessionId(session.host, session.cwd, msg.session_id, doc))
+            .catch((err) => console.warn("[daemon] Could not save session id:", err.message));
         }
       } else if (msg.subtype === "compact_boundary") {
         // The history was summarized: the manuscript an earlier turn gave

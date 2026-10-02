@@ -323,3 +323,25 @@ test("the figures route is asked before the static files and may name only docum
   // The path is matched in figure-http.mjs: index.mjs has no route of its own.
   assert.equal(/figures/.test(code.replace(/"figures"\),/, "")), false);
 });
+
+test("the resume hint is looked up and saved by the document of the pane when it is a file of a revision with parts", () => {
+  // Every lookup of a hint and its save go through the key of the document.
+  const lookups = code.match(/getSessionId\(([^)]*)\)/g) ?? [];
+  assert.equal(lookups.length, 3);
+  for (const l of lookups) assert.match(l, /await resumeDocFor\(key\)/, l);
+  assert.match(
+    code,
+    /resumeDocFor\(session\.key\)\s*\.then\(\(doc\) => saveSessionId\(session\.host, session\.cwd, msg\.session_id, doc\)\)/,
+  );
+  assert.equal((code.match(/saveSessionId\(/g) ?? []).length, 1);
+  assert.match(code, /const resumeDocFor = \(key\) => sessionDocKey\(paneDoc\(key\)\);/);
+  // One line per turn, printed with console.log (no debug flag), from the init.
+  const at = code.indexOf('if (msg.subtype === "init") {');
+  const line = code.indexOf("turnSessionLine({", at);
+  assert.ok(at > 0 && line > at);
+  assert.match(code.slice(line - 40, line), /console\.log\(\s*$/);
+  assert.match(
+    code.slice(line, line + 260),
+    /doc: docNameOf\(session\.key\),\s*sessionId: msg\.session_id,\s*asked: session\.resumeAsked,\s*known: session\.inited \? session\.sessionId : null,/,
+  );
+});

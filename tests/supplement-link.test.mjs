@@ -855,3 +855,35 @@ test("a supplement in a folder below the manuscript: relative one way, absolute 
     await w.cleanup();
   }
 });
+
+// ---- the session hint of the files of a revision (daemon/sessions.mjs) ----------
+
+test("a manuscript with a supplement and the supplement each get a session hint of their own; any other document keeps the folder's", async () => {
+  const { sessionDocKey } = await import("../daemon/revision-parts.mjs");
+  const { emptyRevision, saveRevision, revisionPathFor } =
+    await import("../daemon/revision-store.mjs");
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "session-key-"));
+  try {
+    const doc = (name) => join(dir, name);
+    const at = "2026-03-01T10:00:00.000Z";
+    const put = (name, extra) =>
+      saveRevision(revisionPathFor(doc(name)), { ...emptyRevision(doc(name)), ...extra });
+    await put("paper.docx", { parts: [{ doc: "SI.docx", label: "", joined_at: at }] });
+    await put("SI.docx", { part_of: { manuscript: "paper.docx", label: "", joined_at: at } });
+    await put("other.docx", {});
+    await put("left.docx", { parts: [] });
+    await writeFile(revisionPathFor(doc("broken.docx")), "{ not json");
+    assert.equal(await sessionDocKey(doc("paper.docx")), doc("paper.docx"));
+    assert.equal(await sessionDocKey(doc("SI.docx")), doc("SI.docx"));
+    // A review of its own and no link; a manuscript whose supplement left;
+    // no review file; a review file that cannot be read; no document.
+    for (const name of ["other.docx", "left.docx", "none.docx", "broken.docx"])
+      assert.equal(await sessionDocKey(doc(name)), null, name);
+    assert.equal(await sessionDocKey(null), null);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

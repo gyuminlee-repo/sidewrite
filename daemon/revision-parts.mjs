@@ -170,6 +170,23 @@ export function partChangeRefs(parts) {
   return refs;
 }
 
+// The key of the session hint of a document (sessions.mjs): its path when it
+// is a file of a revision with parts (a supplement, or a manuscript that has
+// one), null for any other document, which keeps the hint of its folder.
+// A document without a review file, or with one that cannot be read, is
+// such another document.
+export async function sessionDocKey(doc) {
+  if (!doc) return null;
+  try {
+    const path = revisionPathFor(doc);
+    if (!(await exists(path))) return null;
+    const rev = await loadRevision(path, doc);
+    return rev.part_of || rev.parts?.length ? resolve(doc) : null;
+  } catch {
+    return null;
+  }
+}
+
 // The link of a document as a reply tells it to the pane (never saved):
 //   part_of: { doc, name, label } of its manuscript, or null
 //   parts: [{ doc, name, label }] of its supplements

@@ -2017,11 +2017,11 @@ async function mainParts() {
         names,
       }),
     );
-    const sessions = partsSessions(readLog(daemonLog));
-    record.parts.sessions = sessions;
-    partsNote(
-      "the Agent SDK session each pane's turns started on",
-      `${sessions.line}${sessions.shared ? " | a pane RESUMED a session: with both files in one folder that is the other pane's (design risk 3)" : ""}`,
+    // The whole log: rows c and d ran a turn in each pane before this one.
+    partsRow(
+      "g2",
+      "the turns of the two panes ran on different Agent SDK sessions",
+      partsSessions(readLog(daemonLog), names),
     );
   }
 

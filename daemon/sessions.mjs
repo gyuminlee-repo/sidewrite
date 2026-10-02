@@ -11,6 +11,15 @@
 // The folder list itself (for the workspace switcher UI) stays
 // cwd-deduped and host-agnostic — you pick a folder, not a folder+host.
 //
+// Two documents in one folder share that hint. For the files of one revision
+// (a manuscript and its supplementary documents, revision-parts.mjs) that is
+// wrong: the pane of the supplement would resume the session of the
+// manuscript, the text of the manuscript would be in its turn, and two turns
+// could write to one transcript. Such a document has a hint of its own, by
+// its path (`docs`). It never reads the hint of the folder: that one may be
+// the session of the other file. A document that is in no such revision
+// keeps the hint of the folder, so every hint stored before is still read.
+//
 // Stored at ~/.claude/office-addins/sessions.json (version 2):
 //
 //   {
@@ -19,10 +28,13 @@
 //       "/Users/x/Proj": {
 //         "last_used": "2026-05-16T…Z",
 //         "display_name": "Proj",
-//         "sessions": { "word": "uuid…", "excel": "uuid…" }
+//         "sessions": { "word": "uuid…", "excel": "uuid…" },
+//         "docs": { "/Users/x/Proj/SI.docx": { "word": "uuid…" } }
 //       }
 //     }
 //   }
+//
+// `docs` is optional: a file without it is read and written as before.
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -84,23 +96,51 @@ function ensureFolder(state, cwd) {
 }
 
 // The resumable session_id for this host in this folder, or null.
-export async function getSessionId(host, cwd) {
+// doc: the path of a document that has a hint of its own (a file of a
+// revision with parts); only that hint is read then, never the folder's.
+export async function getSessionId(host, cwd, doc = null) {
   const h = normalizeHost(host);
   if (!h) return null;
   const state = await readState();
-  return state.folders[cwd]?.sessions?.[h] ?? null;
+  const f = state.folders[cwd];
+  if (doc) return f?.docs?.[doc]?.[h] ?? null;
+  return f?.sessions?.[h] ?? null;
 }
 
-// Record the session_id for (host, cwd) and bump last_used.
-export async function saveSessionId(host, cwd, sessionId) {
+// Record the session_id for (host, cwd), or for (host, doc) when the document
+// has a hint of its own, and bump last_used.
+export async function saveSessionId(host, cwd, sessionId, doc = null) {
   const h = normalizeHost(host);
   if (!h) return;
   const state = await readState();
   const f = ensureFolder(state, cwd);
-  f.sessions[h] = sessionId;
+  if (doc) {
+    if (typeof f.docs !== "object" || f.docs === null) f.docs = {};
+    f.docs[doc] = { ...f.docs[doc], [h]: sessionId };
+  } else f.sessions[h] = sessionId;
   f.last_used = new Date().toISOString();
   f.display_name = basename(cwd);
   await writeState(state);
+}
+
+// One line of the daemon log per turn: the document of the pane and the SDK
+// session the turn runs on. The CLI sends an init at the start of every turn.
+//   started    a session nobody asked to resume (or not the one asked for)
+//   resumed    the session the stored hint named, at the first turn of a loop
+//   continued  a later turn of the same loop
+// asked is printed as well: should the SDK give a resumed session a new id,
+// the line still says whose transcript the turn continued.
+// doc: the file name of the document, or null. asked: the id the loop was
+// started with (null: none). known: the id the loop already had from an
+// earlier init (null: this is its first).
+export function turnSessionLine({ doc = null, sessionId, asked = null, known = null }) {
+  const how =
+    known && known === sessionId
+      ? "continued"
+      : asked && asked === sessionId
+        ? "resumed"
+        : "started";
+  return `[agent] turn doc=${doc || "-"} session=${sessionId} asked=${asked || "-"} (${how})`;
 }
 
 // Touch a folder's bookkeeping (last_used / display_name) without changing

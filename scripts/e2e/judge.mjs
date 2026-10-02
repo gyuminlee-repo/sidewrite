@@ -1128,6 +1128,7 @@ export const citeEdit = (c, ref = CITE_SEED_REF) => ({
 // of review-tools.mjs applyTrackedEdit and tools-word.js toolTrackedEdit.
 const REFUSAL_TEXTS = [
   [/is not rewritten as a whole/, "ParagraphNotPlain"],
+  [/could not read this paragraph as Word shows it/, "FieldsUnread"],
   [/would change the text of a citation or another field/, "FieldNotEditable"],
   [/" not found$/, "NotFound"],
   [/^Paragraph not found: /, "HintNotFound"],
@@ -1905,29 +1906,67 @@ export function partsSavedLine(points) {
     .join(" | ");
 }
 
-// Not judged: which Agent SDK session each pane's turns started on, from the
-// daemon's "[diag] message → ensure loop key=... cwd=... resume=..." lines
-// (CC_OFFICE_DEBUG=1). resume is a session id or "(new)". shared: a pane
-// resumed a session, which with two documents in one folder is the session
-// the other pane saved (daemon/sessions.mjs keys the hint by host and folder).
-export function partsSessions(log) {
+// Which Agent SDK session each pane's turns ran on, from the line the daemon
+// prints for every turn (daemon/sessions.mjs turnSessionLine, no debug flag):
+//   [agent] turn doc=<file> session=<id> asked=<id or -> (started|resumed|continued)
+// The two panes must not share a session: no id a turn of one document ran
+// on, or was asked to resume, may be an id of the other document (asked is
+// read too, should the SDK give a resumed session a new id). A file of a
+// revision with parts has a resume hint of its own (sessions.mjs), so with
+// both files in one folder each pane starts or resumes its own.
+// names: { paper, si }, the file names of the run.
+export function partsSessions(log, names) {
   const rows = [
     ...String(log ?? "").matchAll(
-      /^\[diag\] message → ensure loop key=(.*) cwd=.* resume=(\S+)$/gm,
+      /^\[agent\] turn doc=(.*) session=(\S+) asked=(\S+) \((started|resumed|continued)\)$/gm,
     ),
-  ].map((m) => ({ doc: baseName(m[1]), resume: m[2] }));
-  const resumed = rows.filter((r) => r.resume !== "(new)");
+  ].map((m) => ({ doc: m[1], session: m[2], asked: m[3] === "-" ? null : m[3], how: m[4] }));
+  const idsOf = (doc) =>
+    new Set(rows.filter((r) => r.doc === doc).flatMap((r) => [r.session, r.asked].filter(Boolean)));
+  const ran = (doc) => [...new Set(rows.filter((r) => r.doc === doc).map((r) => r.session))];
+  const paper = idsOf(names.paper);
+  const si = idsOf(names.si);
+  const shared = [...paper].filter((id) => si.has(id));
+  const short = (id) => String(id).slice(0, 8);
+  const told = (doc) =>
+    `${doc}: ${
+      rows
+        .filter((r) => r.doc === doc && r.how !== "continued")
+        .map(
+          (r) =>
+            `${r.how} ${short(r.session)}${r.asked && r.asked !== r.session ? ` (asked ${short(r.asked)})` : ""}`,
+        )
+        .join(", ") || "no turn"
+    }`;
+  const line = rows.length
+    ? `${told(names.paper)}; ${told(names.si)}`
+    : "no turn line in the log (a daemon from before the line?)";
   return {
     rows,
-    shared: resumed.length > 0,
-    line: rows.length
-      ? rows
-          .map(
-            (r) =>
-              `${r.doc}: ${r.resume === "(new)" ? "new session" : `resumed ${r.resume.slice(0, 8)}`}`,
-          )
-          .join("; ")
-      : "no session start in the log (is CC_OFFICE_DEBUG=1 set for the daemon?)",
+    line,
+    ...partsVerdict(
+      [
+        {
+          name: `${names.paper}: a turn ran on a session`,
+          ok: ran(names.paper).length > 0,
+          expect: "at least one [agent] turn line",
+          found: line,
+        },
+        {
+          name: `${names.si}: a turn ran on a session`,
+          ok: ran(names.si).length > 0,
+          expect: "at least one [agent] turn line",
+          found: line,
+        },
+        {
+          name: "the two panes share no session",
+          ok: shared.length === 0,
+          expect: "no session id in common, run on or asked for",
+          found: `${shared.map(short).join(", ")} in both: ${line}`,
+        },
+      ],
+      line,
+    ),
   };
 }
 
