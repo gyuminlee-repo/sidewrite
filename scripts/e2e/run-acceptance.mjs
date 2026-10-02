@@ -339,7 +339,8 @@ function wordWindowShot(name) {
   } catch (e) {
     got = { ok: false, error: String(e?.message ?? e).split("\n")[0] };
   }
-  record.word_window_shot = { file: name, ...got };
+  // A picture whose pane came out black is not kept (word-shot.ps1).
+  record.word_window_shot = { file: got.ok ? name : null, ...got };
   save();
 }
 

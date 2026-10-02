@@ -10,7 +10,11 @@
 // E2E_SHOT (optional, the run's --screenshots): the path of a PNG. The pane
 // is photographed when the step is over (also when it failed), and while it
 // runs after 4 s and after 20 s (<name>-wait1.png, <name>-wait2.png) with the
-// texts that tell the user what is going on (`waiting` in the answer).
+// texts that tell the user what is going on (`waiting` in the answer). Each
+// picture is two files: <name>.png, what the user sees (the window of the
+// pane as it is scrolled), and <name>-full.png, the whole tab (the pane
+// scrolls inside an element, so a full-page picture alone shows no more than
+// the window).
 // Element ids come from taskpane/word/index.html and the class names from
 // taskpane/shared/review-pane.js, response-pane.js and tools-pane.js.
 
@@ -325,6 +329,105 @@ function paneState(page) {
       input_disabled: document.getElementById("input")?.disabled ?? null,
     };
   });
+}
+
+// ---- pictures (E2E_SHOT) ----------------------------------------------------
+// Is the progress line of the Review tab where the user sees it without
+// scrolling: inside the window and inside every element it scrolls in?
+function progressInView(page) {
+  return page.evaluate(() => {
+    const el = document.getElementById("review-progress");
+    const r = el?.getBoundingClientRect?.();
+    if (!r || el.hidden || r.height === 0) return false;
+    let top = 0;
+    let bottom = window.innerHeight ?? 0;
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      const b = p.getBoundingClientRect();
+      top = Math.max(top, b.top);
+      bottom = Math.min(bottom, b.bottom);
+    }
+    return r.top >= top && r.bottom <= bottom;
+  });
+}
+function viewportOf(page) {
+  return page.evaluate(() => ({
+    width: window.innerWidth ?? null,
+    height: window.innerHeight ?? null,
+    device_pixel_ratio: window.devicePixelRatio ?? null,
+  }));
+}
+// Where a user who follows the step looks when it is over: the card of the
+// comment the step was for, else the message line of the tab that is shown.
+// Scrolled into view before the picture; "card", "message" or null.
+function lookAt(page, ref) {
+  return page.evaluate((wanted) => {
+    const card = wanted
+      ? [...document.querySelectorAll(".review-comment")].find(
+          (c) => c.querySelector(".review-comment-head strong")?.textContent.trim() === wanted,
+        )
+      : null;
+    const line = document.querySelector(
+      '.tab-content:not([hidden]) [id$="-message"]:not([hidden])',
+    );
+    const target = card ?? (line?.textContent.trim() ? line : null);
+    target?.scrollIntoView?.({ block: card ? "start" : "nearest" });
+    return card ? "card" : target ? "message" : null;
+  }, ref ?? null);
+}
+// The whole tab in one picture. The elements the pane scrolls in, and what
+// holds them, are let grow to their content for the moment of the picture;
+// then every style and every scroll position is put back as it was.
+async function fullShot(page, file) {
+  await page.evaluate(() => {
+    if (!document.documentElement) return;
+    const scrollers = [...document.querySelectorAll("body *")].filter((e) => {
+      if (["TEXTAREA", "INPUT", "SELECT"].includes(e.tagName)) return false;
+      if (e.clientHeight === 0 || e.scrollHeight <= e.clientHeight + 1) return false;
+      const o = window.getComputedStyle?.(e).overflowY;
+      return o === "auto" || o === "scroll";
+    });
+    const grown = new Set();
+    for (const s of scrollers) for (let p = s; p; p = p.parentElement) grown.add(p);
+    window.__shotUndo = [...grown].map((e) => ({
+      e,
+      style: e.getAttribute("style"),
+      top: e.scrollTop,
+    }));
+    for (const e of grown) {
+      for (const [k, v] of [
+        ["height", "auto"],
+        ["max-height", "none"],
+        ["overflow", "visible"],
+        ["flex-shrink", "0"],
+        ["flex-basis", "auto"],
+      ])
+        e.style.setProperty(k, v, "important");
+    }
+    // No scroll bar of the page itself: it would take width from the tab.
+    if (grown.size)
+      document.documentElement.style.setProperty("scrollbar-width", "none", "important");
+  });
+  try {
+    await page.screenshot({ path: file, fullPage: true });
+  } finally {
+    await page.evaluate(() => {
+      const undo = window.__shotUndo ?? [];
+      for (const u of undo) {
+        if (u.style === null) u.e.removeAttribute("style");
+        else u.e.setAttribute("style", u.style);
+      }
+      // Scroll positions last: they hold only once the heights are back.
+      for (const u of undo) u.e.scrollTop = u.top;
+      delete window.__shotUndo;
+    });
+  }
+}
+// One picture, both files. Returns { shot, shot_full } (the paths).
+async function takeShot(page, file) {
+  await page.screenshot({ path: file });
+  const full = file.replace(/\.png$/, "-full.png");
+  await fullShot(page, full);
+  return { shot: file, shot_full: full };
 }
 
 const steps = {
@@ -1117,14 +1220,24 @@ if (require.main === module) {
     const shot = process.env.E2E_SHOT;
     const waiting = [];
     const timers = [];
+    // While the step runs nothing is scrolled: the picture is what the user
+    // was left with after the click. One picture at a time (the whole-tab
+    // picture changes the layout for a moment and puts it back).
+    let pictures = Promise.resolve();
     const during = (n, ms) =>
       timers.push(
         setTimeout(() => {
           const file = shot.replace(/\.png$/, `-wait${n}.png`);
-          paneState(page)
-            .then((state) => waiting.push({ after_ms: ms, shot: file, ...state }))
-            .then(() => page.screenshot({ path: file, fullPage: true }))
-            .catch((e) => waiting.push({ after_ms: ms, error: String(e?.message ?? e) }));
+          const row = { after_ms: ms };
+          waiting.push(row);
+          pictures = pictures
+            .then(() => paneState(page))
+            .then((state) => Object.assign(row, state))
+            .then(() => progressInView(page))
+            .then((seen) => (row.progress_in_view = seen))
+            .then(() => takeShot(page, file))
+            .then((files) => Object.assign(row, files))
+            .catch((e) => (row.error = String(e?.message ?? e)));
         }, ms),
       );
     if (shot) {
@@ -1134,11 +1247,14 @@ if (require.main === module) {
     const after = async () => {
       for (const t of timers) clearTimeout(t);
       if (!shot) return {};
-      const error = await page
-        .screenshot({ path: shot, fullPage: true })
-        .then(() => null)
-        .catch((e) => String(e?.message ?? e));
-      return { shot: error ? null : shot, shot_error: error, waiting };
+      await pictures;
+      const taken = { shot: null, shot_full: null, shot_error: null, look_at: null };
+      await (async () => {
+        taken.viewport = await viewportOf(page);
+        taken.look_at = await lookAt(page, a.ref);
+        Object.assign(taken, await takeShot(page, shot));
+      })().catch((e) => (taken.shot_error = String(e?.message ?? e)));
+      return { ...taken, waiting };
     };
     try {
       let out;

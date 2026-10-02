@@ -34,11 +34,16 @@ test("a row of timings.json: how long, what the pane said meanwhile, and whether
       message: "Proposed 1 change for R1.2.",
       progress_samples: ["Review R1.2: reading the paragraphs..."],
       shot: "D:\\run\\shots\\09-propose-R1.2.png",
+      shot_full: "D:\\run\\shots\\09-propose-R1.2-full.png",
       shot_error: null,
+      look_at: "card",
+      viewport: { width: 648, height: 851, device_pixel_ratio: 1.5 },
       waiting: [
         {
           after_ms: 4000,
+          progress_in_view: false,
           shot: "D:\\run\\shots\\09-propose-R1.2-wait1.png",
+          shot_full: "D:\\run\\shots\\09-propose-R1.2-wait1-full.png",
           message: "",
           progress: "Review R1.2: 3 s",
           agent_status: "Working",
@@ -57,11 +62,16 @@ test("a row of timings.json: how long, what the pane said meanwhile, and whether
     seconds: 48.3,
     turn_seconds: 44,
     shot: "09-propose-R1.2.png",
+    shot_full: "09-propose-R1.2-full.png",
     shot_error: null,
+    look_at: "card",
+    viewport: { width: 648, height: 851, device_pixel_ratio: 1.5 },
     waiting: [
       {
         after_ms: 4000,
+        progress_in_view: false,
         shot: "09-propose-R1.2-wait1.png",
+        shot_full: "09-propose-R1.2-wait1-full.png",
         message: "",
         progress: "Review R1.2: 3 s",
         agent_status: "Working",
@@ -112,7 +122,30 @@ test("the driver has the steps of a screenshot run and takes the pictures only w
   // A step that failed is photographed too, and still ends as a failure.
   const tail = driver.slice(driver.indexOf("if (require.main === module)"));
   assert.ok(tail.indexOf("const taken = await after();") < tail.indexOf("process.exitCode = 1;"));
+  // Two files a picture: the window as it is (never a full-page picture of
+  // it: the pane scrolls inside an element, so that would be the window
+  // again), and the whole tab with the layout grown and put back.
   assert.equal((driver.match(/page\s*\.screenshot\(/g) ?? []).length, 2);
+  assert.match(driver, /await page\.screenshot\(\{ path: file \}\);/);
+  const full = driver.slice(
+    driver.indexOf("async function fullShot("),
+    driver.indexOf("async function takeShot("),
+  );
+  assert.match(
+    full,
+    /try \{\s*await page\.screenshot\(\{ path: file, fullPage: true \}\);\s*\} finally \{/,
+  );
+  assert.match(full, /u\.e\.removeAttribute\("style"\)/);
+  assert.match(full, /u\.e\.scrollTop = u\.top/);
+  assert.match(full, /delete window\.__shotUndo/);
+  // One picture at a time, and the pictures of the wait are over before the last one.
+  assert.match(tail, /pictures = pictures\s*\.then\(/);
+  assert.ok(tail.indexOf("await pictures;") < tail.indexOf("await takeShot(page, shot)"));
+  // During the wait nothing is scrolled; after the step what it was for is.
+  const wait = tail.slice(tail.indexOf("const during ="), tail.indexOf("const after ="));
+  assert.doesNotMatch(wait, /lookAt\(/);
+  assert.match(wait, /row\.progress_in_view = seen/);
+  assert.ok(tail.indexOf("await lookAt(page, a.ref)") < tail.indexOf("await takeShot(page, shot)"));
 });
 
 test("the runner: nothing of it happens without --screenshots, and nothing of it is judged", () => {
@@ -157,6 +190,12 @@ test("word-shot.ps1 only reads the window of the process it is given", () => {
   assert.doesNotMatch(ps, /[^\x00-\x7f]/);
   assert.match(ps, /\$proc\.ProcessName -ne "WINWORD"/);
   assert.match(ps, /PrintWindow\(\$handle, \$hdc, 2\)/);
+  // The real size of the window is read (a scaled display gave the top left
+  // corner only), and a picture with a large black area is not written.
+  assert.ok(ps.indexOf("SetProcessDPIAware()") < ps.indexOf("GetWindowRect($handle"));
+  assert.match(ps, /\$dropped = \(-not \$drawn\) -or \(\$share -gt \$MaxBlackShare\)/);
+  assert.match(ps, /if \(-not \$dropped\) \{ \$bitmap\.Save\(/);
+  assert.equal((ps.match(/\.Save\(/g) ?? []).length, 1);
   // Nothing that moves, shows, focuses, closes or types into a window, and
   // no picture of the screen (another window could be in it).
   for (const call of [

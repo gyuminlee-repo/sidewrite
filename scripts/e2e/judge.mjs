@@ -193,8 +193,13 @@ export const MODEL_STEPS = new Set([
 // One row of shots/timings.json. seconds: from the start of the step's
 // process to its answer (about 2 s of it are the driver connecting to the
 // pane); turn_seconds: what the step measured itself from the click to the
-// end of the turn; waiting: what the pane said 4 s and 20 s into the wait;
-// progress: the progress lines a propose step saw.
+// end of the turn; waiting: what the pane said 4 s and 20 s into the wait,
+// and whether its progress line was in view where the click left the user
+// (progress_in_view); progress: the progress lines a propose step saw.
+// shot: what the user sees; shot_full: the whole tab; look_at: what was
+// scrolled into view for the picture after the step (card, message, null);
+// viewport: the size of the pane's window in CSS pixels and its pixel ratio.
+const base = (p) => String(p).split(/[\\/]/).pop();
 export function stepTiming({ n, step, args = {}, shot, seconds, result }) {
   const bare = step.replace(/^(?:mode14|special)-/, "");
   return {
@@ -206,11 +211,15 @@ export function stepTiming({ n, step, args = {}, shot, seconds, result }) {
     ok: result?.ok !== false,
     seconds,
     turn_seconds: result?.seconds ?? null,
-    shot: result?.shot === null ? null : shot,
+    shot: result?.shot ? shot : null,
+    shot_full: result?.shot_full ? base(result.shot_full) : null,
     shot_error: result?.shot_error ?? null,
+    look_at: result?.look_at ?? null,
+    viewport: result?.viewport ?? null,
     waiting: (result?.waiting ?? []).map((w) => ({
       ...w,
-      ...(w.shot ? { shot: String(w.shot).split(/[\\/]/).pop() } : {}),
+      ...(w.shot ? { shot: base(w.shot) } : {}),
+      ...(w.shot_full ? { shot_full: base(w.shot_full) } : {}),
     })),
     progress: result?.progress_samples ?? [],
     message: result?.message ?? result?.error ?? null,
