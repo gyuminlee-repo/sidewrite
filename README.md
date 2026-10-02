@@ -1,19 +1,19 @@
-# Draftspect
+# Sidewrite
 
 > Add-ins for Word and Excel — **Powered by Claude.**
 
-[![CI](https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code/actions/workflows/ci.yml/badge.svg)](https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code/actions/workflows/ci.yml)
+[![CI](https://github.com/gyuminlee-repo/sidewrite/actions/workflows/ci.yml/badge.svg)](https://github.com/gyuminlee-repo/sidewrite/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Open Word or Excel, click a button, and chat with **your own local Claude Code** — the same agent you already use in the terminal — now able to read and edit the active document, leave comments, and write cells and formulas. By default a session loads only the workspace's own `CLAUDE.md` and `.claude/settings.json`; your user-level MCP servers, subagents, skills, hooks, and `~/.claude/CLAUDE.md` are opt-in (see [Configuration](#configuration)).
 
 **The point of difference: local context.** Point Claude at any folders or files on your machine — a notes folder, prior drafts, a vendor's spec PDF, last quarter's data export, a code repo — and they become background it reads on demand while it works in your document. It's your real Claude Code, and your own user-level configuration can be switched on too.
 
-## How Draftspect differs from the official Claude for Word and Excel add-in
+## How Sidewrite differs from the official Claude for Word and Excel add-in
 
-Anthropic ships a first-party **Claude for Word and Excel** add-in (Office store / Microsoft Marketplace). It's polished, zero-setup, and first-party-supported. Draftspect is a different tool with a different tradeoff — heavier to set up, but it's _your_ local Claude Code with reach beyond Office:
+Anthropic ships a first-party **Claude for Word and Excel** add-in (Office store / Microsoft Marketplace). It's polished, zero-setup, and first-party-supported. Sidewrite is a different tool with a different tradeoff — heavier to set up, but it's _your_ local Claude Code with reach beyond Office:
 
-|                          | Official Claude for Word/Excel                                                                                                                       | **Draftspect**                                                                                                                                                                                                                                                                    |
+|                          | Official Claude for Word/Excel                                                                                                                       | **Sidewrite**                                                                                                                                                                                                                                                                     |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Context it can use**   | The Office documents you have **open**; you can attach other open Excel/PowerPoint files; plus connectors & Skills configured in your Claude account | Anything on your machine — point it at **arbitrary local folders/files** (a notes dir, prior drafts, a spec, a repo). Read on demand via `Read`/`Glob`/`Grep`/`Bash`, whether or not it's an Office file or open                                                                  |
 | **Whose Claude**         | A standalone Claude experience                                                                                                                       | **Your local Claude Code**: the workspace's `CLAUDE.md` and `.claude/settings.json` apply by default; your user-level MCP servers, subagents, hooks, skills, slash commands, and `~/.claude/CLAUDE.md` can be switched on ([Configuration](#configuration))                       |
@@ -22,9 +22,9 @@ Anthropic ships a first-party **Claude for Word and Excel** add-in (Office store
 | **How usage is charged** | Counts against your Claude subscription's normal interactive usage                                                                                   | Programmatic usage. From **2026-06-15** it draws from your plan's dedicated monthly programmatic credit (Pro $20 / Max 5× $100 / Max 20× $200); past that, API-rate extra usage if you've enabled it, else paused until reset. Pick a cheaper model in the composer to stretch it |
 | **Setup & support**      | Zero-setup, first-party-supported                                                                                                                    | Install Claude Code, run a tray app, sideload the add-in. macOS-primary; Windows newer. Single-user local tool, not a hardened service                                                                                                                                            |
 
-Short version: if you want zero-setup and don't need machine-local context, the official add-in is the easy choice. Draftspect exists for when you want the document work to draw on **your own files and your own configured agent**.
+Short version: if you want zero-setup and don't need machine-local context, the official add-in is the easy choice. Sidewrite exists for when you want the document work to draw on **your own files and your own configured agent**.
 
-> Both send the document content the model needs to Anthropic's API to get a response (any cloud LLM must — the model has to see it). Draftspect's difference is _where the orchestration, file access, and tool execution happen_ (locally, via your Claude Code), not a different data-handling claim.
+> Both send the document content the model needs to Anthropic's API to get a response (any cloud LLM must — the model has to see it). Sidewrite's difference is _where the orchestration, file access, and tool execution happen_ (locally, via your Claude Code), not a different data-handling claim.
 
 ## Choosing the model
 
@@ -44,11 +44,11 @@ Two snapshots below — but the side pane is a full conversational agent, so wha
 
 **Word** — _shown:_ surgical, tracked edits with margin comments. It also rewrites sections, inserts content, sweeps for issues and highlights them by severity, and answers from your context files — every change reviewable as a tracked change.
 
-![Draftspect for Word — tracked changes and comments in a document](docs/images/word-demo.png)
+![Sidewrite — tracked changes and comments in a document](docs/images/word-demo.png)
 
 **Excel** — _shown:_ a range written with a live `=SUM()` total row. It also reads and explains ranges, finds and selects cells, inserts/deletes rows, and works across sheets — all from the same chat, with formulas written as formulas (not baked-in numbers).
 
-![Draftspect for Excel — a sales sheet with a formula-driven total row](docs/images/excel-demo.png)
+![Sidewrite for Excel — a sales sheet with a formula-driven total row](docs/images/excel-demo.png)
 
 ---
 
@@ -70,7 +70,7 @@ Open your document, click the add-in, and try things like:
 - _"Add a Total row with `=SUM()` formulas and read back the revenue total."_
 - _"Review the Background section. Highlight anything weak in yellow and leave a comment explaining why."_
 
-The asks that set Draftspect apart are the ones that pull in **local context** — folders or files you add in the Setup tab become background the agent reads on demand:
+The asks that set Sidewrite apart are the ones that pull in **local context** — folders or files you add in the Setup tab become background the agent reads on demand:
 
 - _"Compare this draft against my `~/Notes` folder and tell me what's missing."_
 - _"Rewrite the Methodology section using the terminology in `~/Research/glossary.md`."_
@@ -93,15 +93,15 @@ Get these in place **before** you launch the app:
 | **Claude Code, signed in**      | `claude` in a terminal. Sign in once (Pro/Max works) and the daemon picks up your OAuth from the system keychain. **Or** export `ANTHROPIC_API_KEY=sk-ant-...` before launch (takes precedence). |
 | **Git**                         | for cloning the repo                                                                                                                                                                             |
 
-If you don't have Claude Code yet, [install it](https://docs.claude.com/en/docs/claude-code/overview) first. Draftspect is a thin layer on top of it — without it, nothing connects.
+If you don't have Claude Code yet, [install it](https://docs.claude.com/en/docs/claude-code/overview) first. Sidewrite is a thin layer on top of it — without it, nothing connects.
 
 ---
 
 ## Install
 
 ```bash
-git clone https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code.git
-cd Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code
+git clone https://github.com/gyuminlee-repo/sidewrite.git
+cd sidewrite
 npm install
 npm start
 ```
@@ -110,7 +110,7 @@ A tray icon (menu bar on macOS, system tray on Windows) appears. First launch of
 
 **Fully quit and reopen Word/Excel** so Office picks up the manifest. Then open it:
 
-- **macOS:** Insert → Add-ins → **Developer Add-ins** → _Draftspect for Word_ / _Draftspect for Excel_.
+- **macOS:** Insert → Add-ins → **Developer Add-ins** → _Sidewrite_ / _Sidewrite for Excel_.
 - **Windows:** auto-sideloaded via the `WEF\Developer` registry key — find it under **Insert → Add-ins** (or **Home → Add-ins**).
 
 > **One install per host.** The manifests use fixed add-in `<Id>` GUIDs, so a single Word (or Excel) install can sideload only one copy at a time. To run two clones side by side, change the `<Id>` in one clone's `manifests/word.xml` / `excel.xml` to a fresh UUID.
@@ -133,7 +133,7 @@ bash scripts/install/uninstall.sh    # take it all back
 What `install.sh` sets up, all for the current user and without administrator rights:
 
 - a systemd user service that starts this checkout's daemon, restarts it when it fails, and keeps running without a login (linger). It uses the Claude login in your WSL home; log in once with `claude` first.
-- the Word manifest under `%APPDATA%\Draftspect\manifests` and its value under the `WEF\Developer` registry key (the same as the tray app's _Install_). Restart Word afterwards.
+- the Word manifest under `%APPDATA%\Sidewrite\manifests` and its value under the `WEF\Developer` registry key (the same as the tray app's _Install_). Restart Word afterwards.
 - a scheduled task that starts WSL at Windows logon, so the service is up when Word opens.
 
 It installs no package and sets no environment variable. Run it again after moving the checkout or changing the Node version: the service is bound to both. Do not run the tray app (`npm start`) at the same time; both want ports 47833/47834.
@@ -187,7 +187,7 @@ The daemon talks to Claude Code **through the Agent SDK**, never by shelling out
 4. **Add context files** for material **outside** the workspace folder — notes, prior drafts, a vendor's spec, a glossary, anywhere on disk. Setup tab → Context files → **+ Add file** / **+ Add folder**, with an optional one-line description so Claude knows when to consult it. Entries are saved into the workspace's `CLAUDE.md` and read on demand via `Read`/`Glob`/`Grep`. (Files _inside_ the workspace don't need adding — Claude reaches them already.)
 5. Chat in the **Chat** tab. Pinned presets (chips above the input) are one-click prompts.
 
-**Slash commands** work from the chat box: type `/yourcommand` and your custom commands (`.claude/commands/*.md` in the workspace, or `~/.claude/commands/*.md`) run just like in the terminal. Note that purely interactive, terminal-only built-ins (`/help`, `/context`, `/clear`, …) produce no chat output — Draftspect shows a one-line "command ran, no output" note so it's clear it executed rather than failing.
+**Slash commands** work from the chat box: type `/yourcommand` and your custom commands (`.claude/commands/*.md` in the workspace, or `~/.claude/commands/*.md`) run just like in the terminal. Note that purely interactive, terminal-only built-ins (`/help`, `/context`, `/clear`, …) produce no chat output — Sidewrite shows a one-line "command ran, no output" note so it's clear it executed rather than failing.
 
 ### Known limitation: cloud-hosted documents (OneDrive / SharePoint)
 
@@ -196,7 +196,7 @@ Workspace auto-detection relies on the host app giving the add-in the document's
 - **Local folders** and **Google Drive for Desktop** present the document as an ordinary local file, so `document.url` is a real filesystem path. Workspace detection works normally.
 - **OneDrive** and **SharePoint** documents are cloud-service-native: the app treats the Microsoft 365 service as the document's canonical location (it co-authors / AutoSaves against the service, not the local synced copy), so `document.url` is an `https://…sharepoint.com/…` URL. There is no API that returns the local synced path for these files — by design.
 
-**Workaround:** the synced copy still exists on disk under your OneDrive/SharePoint folder. Open the add-in → **Setup → Change workspace** and point Draftspect at that local folder yourself; add anything outside it as a **context file**. Everything works normally once the workspace is set — only the _automatic_ detection is affected.
+**Workaround:** the synced copy still exists on disk under your OneDrive/SharePoint folder. Open the add-in → **Setup → Change workspace** and point Sidewrite at that local folder yourself; add anything outside it as a **context file**. Everything works normally once the workspace is set — only the _automatic_ detection is affected.
 
 ### Default presets
 
@@ -303,7 +303,7 @@ Twenty-three tools, A1 notation, 2D arrays:
 
 ## Make it yours
 
-Draftspect is a clone-and-run repo — the code is yours to modify:
+Sidewrite is a clone-and-run repo — the code is yours to modify:
 
 - **Task-pane UI** — `taskpane/shared/taskpane.js` + `styles.css` + the per-host `index.html`. Change the layout, add a tab, restyle.
 - **Presets** — edit the defaults in `taskpane/shared/taskpane.js` (`defaultWordPresets` / `defaultExcelPresets`), or just add/pin your own in the Presets tab at runtime.
@@ -507,10 +507,12 @@ npm test
 
 - Feature branches + PRs; nothing direct to `main`. CI green before merge.
 - Don't bypass the filesystem-write guard on Office files — it protects unsaved work.
-- The product name is **Draftspect** ("Powered by Claude"). Accurate references to the user's real **Claude Code** (install, sign-in, OAuth, the SDK driving it) stay as "Claude Code" — that's correct nominative use.
+- The product name is **Sidewrite** ("Powered by Claude"). Accurate references to the user's real **Claude Code** (install, sign-in, OAuth, the SDK driving it) stay as "Claude Code" — that's correct nominative use.
 
 ---
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Based on [Draftspect](https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code) by Leonard Hope (MIT).

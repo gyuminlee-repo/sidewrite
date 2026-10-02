@@ -7,7 +7,7 @@
 // The same key, folder and file as app/sideload.mjs (winInstall): Office
 // reads each value NAME under the key as the path of a manifest to sideload.
 export const DEVELOPER_KEY = "HKCU\\Software\\Microsoft\\Office\\16.0\\WEF\\Developer";
-export const APP_FOLDER = "Draftspect";
+export const APP_FOLDER = "Sidewrite";
 export const MANIFEST = "word.xml";
 
 // appData: %APPDATA% of the Windows user.
@@ -17,7 +17,7 @@ export function registerPlan({ appData, manifest = MANIFEST, name = APP_FOLDER }
   return { dir, path, key: DEVELOPER_KEY, valueName: path, valueData: path, type: "REG_SZ" };
 }
 
-export const TASK_NAME = "Draftspect WSL keep-alive";
+export const TASK_NAME = "Sidewrite WSL keep-alive";
 
 // What keeps the WSL distro running after logon: a process of it that never
 // ends. The systemd user service in the distro then keeps the daemon up.

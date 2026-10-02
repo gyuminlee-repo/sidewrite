@@ -1,6 +1,6 @@
 # Registers the Word add-in for the current Windows user, the way the tray
 # app does (app/sideload.mjs winInstall): the manifest is copied to
-# %APPDATA%\Draftspect\manifests and a value named after its full path is
+# %APPDATA%\Sidewrite\manifests and a value named after its full path is
 # written under the WEF\Developer key. Word reads that key when it starts
 # and loads the add-in. Current user only; no administrator rights.
 #
@@ -16,7 +16,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $keyPath = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
-$dir = Join-Path $env:APPDATA "Draftspect\manifests"
+$dir = Join-Path $env:APPDATA "Sidewrite\manifests"
 $dst = Join-Path $dir (Split-Path -Leaf $Manifest)
 
 function Test-Registered {

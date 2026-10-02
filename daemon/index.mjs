@@ -59,7 +59,7 @@ const STARTED_AT = Date.now();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..");
 
-// Draftspect deliberately uses 47833/47834. Another local Office add-in
+// Sidewrite deliberately uses 47833/47834. Another local Office add-in
 // on this machine may bind 47823/47824, so a distinct pair avoids a port
 // clash when both run at once. Keep WS_PORT = HTTP_PORT - 1 (the taskpane
 // derives nothing; the WS port is referenced explicitly in taskpane.js
@@ -126,7 +126,7 @@ function errorPageHtml(status, headline, requestedPath) {
   requestedPath = htmlEscape(requestedPath);
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Draftspect — ${status}</title>
+<title>Sidewrite — ${status}</title>
 <style>
   body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
        color:#1a1a1a;margin:0;padding:28px 24px;background:#fff}
@@ -136,16 +136,16 @@ function errorPageHtml(status, headline, requestedPath) {
   code{background:#f2f2f2;padding:1px 5px;border-radius:4px;font-size:12px}
   .foot{color:#999;font-size:12px;border-top:1px solid #eee;padding-top:12px}
 </style></head><body>
-<h1>Draftspect couldn't load this panel</h1>
+<h1>Sidewrite couldn't load this panel</h1>
 <p class="sub">${headline}</p>
 <p>This usually means one of:</p>
 <ol>
-  <li>The <strong>Draftspect tray app isn't running</strong> — start it, then reopen this panel.</li>
+  <li>The <strong>Sidewrite tray app isn't running</strong> — start it, then reopen this panel.</li>
   <li>Word/Excel cached an old add-in — <strong>fully quit the app (⌘Q / Alt+F4) and reopen it</strong> so it re-reads the add-in.</li>
-  <li>This add-in's manifest points at a <strong>different port</strong> than the running Draftspect daemon (e.g. another add-in's daemon answered). Relaunch Draftspect, then quit &amp; reopen Word/Excel.</li>
-  <li>If it persists, reinstall the add-in from the Draftspect tray menu.</li>
+  <li>This add-in's manifest points at a <strong>different port</strong> than the running Sidewrite daemon (e.g. another add-in's daemon answered). Relaunch Sidewrite, then quit &amp; reopen Word/Excel.</li>
+  <li>If it persists, reinstall the add-in from the Sidewrite tray menu.</li>
 </ol>
-<p class="foot">Draftspect daemon on <code>127.0.0.1:${HTTP_PORT}</code> · requested <code>${requestedPath}</code> · ${status}</p>
+<p class="foot">Sidewrite daemon on <code>127.0.0.1:${HTTP_PORT}</code> · requested <code>${requestedPath}</code> · ${status}</p>
 </body></html>`;
 }
 
@@ -232,20 +232,14 @@ const http = createServer(async (req, res) => {
   } catch (err) {
     const reqPath = (req.url || "/").split("?")[0];
     if (err.code === "ENOENT") {
-      sendError(
-        req,
-        res,
-        404,
-        "That page or file isn’t served by this Draftspect daemon.",
-        reqPath,
-      );
+      sendError(req, res, 404, "That page or file isn’t served by this Sidewrite daemon.", reqPath);
     } else {
       console.error("[http]", err);
       sendError(
         req,
         res,
         500,
-        "The Draftspect daemon hit an internal error serving this page.",
+        "The Sidewrite daemon hit an internal error serving this page.",
         reqPath,
       );
     }
@@ -340,7 +334,7 @@ const manuscriptByKey = new Map();
 // fails, the three aliases and well-formed claude-* ids are accepted.
 const modelCache = createModelCache();
 
-// The model to pass to query(). Draftspect always pins an explicit model,
+// The model to pass to query(). Sidewrite always pins an explicit model,
 // never the CLI default: the one the pane chose, or, when it chose none (or
 // has not said yet), the best the account lists (model-list.mjs
 // bestClaudeModel).

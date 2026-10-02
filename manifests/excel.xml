@@ -5,12 +5,12 @@
   xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
   xsi:type="TaskPaneApp">
 
-  <Id>4b5861d6-18ee-4d4a-b9ee-d43d7da80ff4</Id>
+  <Id>b3620db2-f73c-4d61-b91f-3cb8d399bd3b</Id>
   <Version>0.1.2.0</Version>
-  <ProviderName>Draftspect</ProviderName>
+  <ProviderName>Sidewrite</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
-  <DisplayName DefaultValue="Draftspect for Excel" />
-  <Description DefaultValue="Draftspect brings Claude into Excel — read and edit the active workbook and pull in workspace context files. Powered by Claude." />
+  <DisplayName DefaultValue="Sidewrite for Excel" />
+  <Description DefaultValue="Sidewrite brings Claude into Excel — read and edit the active workbook and pull in workspace context files. Powered by Claude." />
   <IconUrl DefaultValue="http://127.0.0.1:47834/icon-32.png" />
   <HighResolutionIconUrl DefaultValue="http://127.0.0.1:47834/icon-64.png" />
   <SupportUrl DefaultValue="http://127.0.0.1:47834/" />

@@ -16,11 +16,11 @@ const read = (rel) => readFile(new URL(`../${rel}`, import.meta.url), "utf8");
 test("registerPlan: the key, folder and value the tray app's sideload writes", async () => {
   const plan = registerPlan({ appData: "C:\\Users\\u\\AppData\\Roaming" });
   assert.deepEqual(plan, {
-    dir: "C:\\Users\\u\\AppData\\Roaming\\Draftspect\\manifests",
-    path: "C:\\Users\\u\\AppData\\Roaming\\Draftspect\\manifests\\word.xml",
+    dir: "C:\\Users\\u\\AppData\\Roaming\\Sidewrite\\manifests",
+    path: "C:\\Users\\u\\AppData\\Roaming\\Sidewrite\\manifests\\word.xml",
     key: "HKCU\\Software\\Microsoft\\Office\\16.0\\WEF\\Developer",
-    valueName: "C:\\Users\\u\\AppData\\Roaming\\Draftspect\\manifests\\word.xml",
-    valueData: "C:\\Users\\u\\AppData\\Roaming\\Draftspect\\manifests\\word.xml",
+    valueName: "C:\\Users\\u\\AppData\\Roaming\\Sidewrite\\manifests\\word.xml",
+    valueData: "C:\\Users\\u\\AppData\\Roaming\\Sidewrite\\manifests\\word.xml",
     type: "REG_SZ",
   });
   // The same constants as app/sideload.mjs (winInstall): a manifest the tray
