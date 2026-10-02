@@ -413,6 +413,23 @@ const Artifact = z.object({
 // mode: how the marked copy shows the changes (aux-service.mjs MARKED_MODES).
 const MarkedArtifact = Artifact.extend({ mode: z.string() });
 
+// What a document was at a status refresh (RevisionSchema doc_state).
+const DocState = z.object({
+  at: z.string(),
+  // response-quotes.mjs snapshotHash of the snapshot of that refresh.
+  text_hash: z.string(),
+  // Paragraphs that hold a tracked change nobody decided yet.
+  tracked_paragraphs: z.number().int().nonnegative(),
+  comments: z.number().int().nonnegative(),
+  // Of those, the rationale comments of the tool.
+  tool_comments: z.number().int().nonnegative(),
+  track_changes_on: z.boolean().nullable().default(null),
+  saved: z.boolean().nullable().default(null),
+  file: z
+    .object({ mtime: z.string(), bytes: z.number().int().nonnegative() })
+    .nullable()
+    .default(null),
+});
 // The two ends of the link between a manuscript and a supplementary
 // document. manuscript, doc: the path of the other document, relative to the
 // folder of this file ("/" separators) when it is under it, absolute
@@ -542,6 +559,13 @@ export const RevisionSchema = z.object({
   // default: a file from before them saves as it was loaded.
   part_of: PartOf.nullish(),
   parts: z.array(Part).optional(),
+  // What the document was at the last status refresh of its own pane
+  // (review-service.mjs docState). The manuscript reads it for a supplement
+  // that is not open, to tell whether what this file records can still be
+  // trusted: saved says whether Word held unsaved changes then (null: Word
+  // did not say), file what the file on disk was. Optional and without a
+  // default: a file from before it saves as it was loaded.
+  doc_state: DocState.nullish(),
 });
 
 // ---- paths ----------------------------------------------------------------
@@ -1467,6 +1491,13 @@ export function mirrorFromMain(rev, main) {
       profile_overrides: clone(main.profile_overrides ?? {}),
     }),
   );
+}
+
+// The state of the document at a status refresh (DocState above).
+export function setDocState(rev, docState) {
+  const next = clone(rev);
+  next.doc_state = DocState.parse(docState);
+  return next;
 }
 
 // part_of: { manuscript, label, joined_at }, or null to take the link away.

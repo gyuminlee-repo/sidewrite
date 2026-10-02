@@ -35,7 +35,7 @@ import {
   removePart,
 } from "../daemon/revision-store.mjs";
 import { linkCandidates, storedPartPath, resolvePart } from "../daemon/revision-parts.mjs";
-import { createReviewService, PART_NO_TURNS } from "../daemon/review-service.mjs";
+import { createReviewService } from "../daemon/review-service.mjs";
 import { createResponseService } from "../daemon/response-service.mjs";
 import { createAuxService } from "../daemon/aux-service.mjs";
 
@@ -119,12 +119,13 @@ test("a review file from before the link fields loads and saves byte for byte", 
   const raw = JSON.parse(await readFile(fixture, "utf8"));
   const text = JSON.stringify(raw, null, 2) + "\n";
   assert.equal("part_of" in raw || "parts" in raw, false, "the fixture is the old format");
+  assert.equal("doc_state" in raw, false, "and from before the state of the document");
   const dir = await mkdtemp(join(tmpdir(), "parts-old-"));
   try {
     const path = join(dir, "paper.revision.json");
     await writeFile(path, text);
     const loaded = await loadRevision(path, "x");
-    assert.equal("part_of" in loaded || "parts" in loaded, false);
+    assert.equal("part_of" in loaded || "parts" in loaded || "doc_state" in loaded, false);
     await saveRevision(path, loaded, new Date(raw.updated_at));
     assert.equal(await readFile(path, "utf8"), text);
   } finally {
@@ -760,11 +761,6 @@ test("in a supplement, what the manuscript owns is refused with the name of the 
       const r = await w.ask("SI.docx", type, payload);
       assert.equal(r.ok, false, `${type} was not refused`);
       assert.equal(r.error, "Edit this in paper.docx.", type);
-    }
-    // No review turn yet, and none is queued.
-    for (const type of ["review_propose", "review_preview"]) {
-      const r = await w.ask("SI.docx", type, { ref: "R1.1", paragraphs: [] });
-      assert.deepEqual([r.ok, r.error], [false, PART_NO_TURNS], type);
     }
     assert.equal(w.pushed.length, 0);
     assert.equal(await w.raw("SI.docx"), before, "nothing was written");

@@ -31,6 +31,7 @@ import {
   toolTrackedEdit,
   PANE_CAPS,
   collectReviewSnapshot,
+  documentSaved,
   selectionParagraphs,
   selectCommentById,
   selectParagraphByIndex,
@@ -1382,6 +1383,7 @@ Office.onReady((info) => {
       },
       word: {
         collectReviewSnapshot,
+        documentSaved,
         // Read for the submission checklist, as the Tools tab reads them.
         collectHeadings,
         readFormatSnapshot,

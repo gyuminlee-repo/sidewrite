@@ -21,6 +21,11 @@
 // of a Word pane that is connected now. A render is found by the ids of a
 // recorded figure change: no request names a path to read back.
 //
+// A supplementary document in the revision of a manuscript takes no new
+// record: the requests are those of the manuscript, whose letter counts the
+// record, so propose answers "Record this under <manuscript>." there. What
+// such a file recorded before it joined can still be decided.
+//
 // After a request that changed something, the Word panes of that manuscript
 // are told ({ type: "review_event", event: "figures_changed", ref }), so the
 // Review and Response tabs show the new state without a press on Refresh.
@@ -29,7 +34,8 @@ import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
-import { localDocPath } from "./revision-store.mjs";
+import { loadRevision, localDocPath, revisionPathFor } from "./revision-store.mjs";
+import { linkedSummary } from "./revision-parts.mjs";
 
 export const FIGURES_PREFIX = "/figures";
 const PAGE = {
@@ -127,6 +133,18 @@ export function createFigureHttp({
     return hit.path;
   }
 
+  // A new record in the file of a supplement: refused, with where it goes.
+  // A review file that cannot be read is left to the service to report.
+  async function refuseInPart(path) {
+    let main = null;
+    try {
+      main = linkedSummary(path, await loadRevision(revisionPathFor(path), path)).part_of;
+    } catch {
+      main = null;
+    }
+    if (main) throw Object.assign(new Error(`Record this under ${main.name}.`), { status: 409 });
+  }
+
   const json = (res, status, body) => {
     res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(body));
@@ -160,6 +178,7 @@ export function createFigureHttp({
     } else if (req.method === "POST" && POSTS.has(name)) {
       const body = await readBody(req);
       const doc = openDoc(body.doc);
+      if (name === "propose") await refuseInPart(doc);
       const out = await service[name](doc, body);
       tellPanes(body.doc, typeof body.ref === "string" ? body.ref : null);
       return json(res, 200, { ok: true, ...out });

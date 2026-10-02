@@ -2131,7 +2131,7 @@ function isoOrNull(d) {
 // same set as getComments) for the "Delete ALL comments" backup.
 export async function collectReviewSnapshot({ replies = false } = {}) {
   return await Word.run(async (context) => {
-    const { paragraphs, idMode } = await getParagraphsWithIds(context);
+    const { paragraphs, idMode, trackChangesOn } = await getParagraphsWithIds(context);
     const oox = paragraphs.items.map((p) => p.getOoxml());
     const comments = context.document.body.getComments();
     comments.load("items/id, items/content, items/resolved, items/authorName");
@@ -2156,6 +2156,9 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
       probes.map(({ ps }) => ps.items[0] ?? null),
     );
     return {
+      // Is Track Changes on in the document (the daemon keeps it with the
+      // state of the document at this refresh).
+      track_changes_on: trackChangesOn,
       paragraphs: paragraphs.items.map((p, i) => ({
         index: i,
         id: idMode === "uniqueLocalId" ? p.uniqueLocalId : null,
@@ -2189,6 +2192,23 @@ export async function collectReviewSnapshot({ replies = false } = {}) {
       }),
     };
   });
+}
+
+// Has the document no unsaved changes: Word.Document.saved, "true indicates
+// that the document hasn't changed since it was saved" (WordApi 1.1,
+// https://learn.microsoft.com/en-us/javascript/api/word/word.document#word-word-document-saved-member;
+// the manifest asks for WordApi 1.4). null when Word does not say: the
+// daemon then keeps "not known" and never takes it for saved.
+export async function documentSaved() {
+  try {
+    return await Word.run(async (context) => {
+      context.document.load("saved");
+      await context.sync();
+      return typeof context.document.saved === "boolean" ? context.document.saved : null;
+    });
+  } catch {
+    return null;
+  }
 }
 
 // Paragraphs under the current selection, for "Propose changes".

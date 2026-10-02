@@ -54,7 +54,7 @@ import {
   linkedFilesText,
   partOfText,
   editedInText,
-  PART_NO_TURNS,
+  changesElsewhere,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
@@ -161,8 +161,11 @@ export function initReviewPane({
   };
   // The manuscript this file belongs to, when it is a supplementary file. What
   // the manuscript owns (comment list, requests, rules) is then shown and not
-  // changed here, and no review turn is started yet.
+  // changed here; changes are proposed here for this file as in a manuscript.
   const partOf = () => state.linked?.part_of ?? null;
+  // The changes of a comment in the other files of the revision, as the last
+  // load gave them: where its requests stand there.
+  const elsewhere = (ref) => changesElsewhere(state.linked, ref);
 
   function el(tag, props = {}, ...kids) {
     const n = document.createElement(tag);
@@ -533,6 +536,7 @@ export function initReviewPane({
       working: state.turn?.ref === c.ref ? state.turn : null,
       now,
       noChange: state.results.get(c.ref)?.noChange === true,
+      elsewhere: elsewhere(c.ref),
     });
   // Open or close the card of a row; one card is open at a time. A card opened
   // by the author is scrolled to the top of the list area, under the bar that
@@ -601,7 +605,7 @@ export function initReviewPane({
           // L5: "Done" needs a second try while something is left open:
           // a requirement no change answers, a change not decided in Word,
           // or a ledger rule in violation.
-          const left = doneBlockers(c, state.revision?.ledger);
+          const left = doneBlockers(c, state.revision?.ledger, elsewhere(c.ref));
           if (status.value === "done" && left.length && state.confirmDone !== c.ref) {
             state.confirmDone = c.ref;
             throw new Error(
@@ -617,10 +621,10 @@ export function initReviewPane({
         class: "btn-primary btn-small",
         text: "Propose changes",
       });
-      // In a supplementary file the button is not in the card: a sentence
-      // says so in its place.
+      // In a supplementary file the requests are shown and not edited; the
+      // turn is proposed here as in a manuscript, for this file.
       const main = partOf();
-      if (!main) proposeButtons.push(propose);
+      proposeButtons.push(propose);
       propose.disabled = isTurnInFlight() || queue.running;
       // The turn is taken on the click, before the selection and refresh()
       // waits: a second click meanwhile is ignored (Codex review 8) and the
@@ -682,7 +686,7 @@ export function initReviewPane({
       );
       // What the reviewer asks: one line per request with where it stands. The
       // box to change the list opens from Edit.
-      const rows = requirementStates(c);
+      const rows = requirementStates(c, elsewhere(c.ref));
       const editing = state.reqEdit.has(c.ref);
       const edit = el("button", {
         type: "button",
@@ -770,8 +774,7 @@ export function initReviewPane({
         { class: "review-comment-body" },
         progressEl,
         result,
-        el("div", { class: "review-card-actions" }, status, main ? null : propose),
-        main ? el("div", { class: "review-part-note", text: `${PART_NO_TURNS}.` }) : null,
+        el("div", { class: "review-card-actions" }, status, propose),
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
         requestList,
@@ -839,7 +842,7 @@ export function initReviewPane({
         body.append(line);
       }
       for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));
-      if (!main) body.append(advanced);
+      body.append(advanced);
       box.append(card);
     }
     // The prompt shown by Preview prompt sits under Advanced in its card.
@@ -1008,7 +1011,7 @@ export function initReviewPane({
 
   // L7: everything that waits for the author in one box.
   function renderDecisions() {
-    const d = pendingDecisions(state.revision);
+    const d = pendingDecisions(state.revision, state.linked);
     const box = $("review-decisions");
     // A request waits for the author only once a turn has run for its comment;
     // before that it waits for the tool. Those items stay in the list (hidden)
@@ -1186,7 +1189,7 @@ export function initReviewPane({
     const comments = state.revision?.comments ?? [];
     const hasReview = comments.length > 0 || state.draft.length > 0;
     // In a supplementary file the review is pasted, split and changed in
-    // the manuscript; review turns of this file come with the next version.
+    // the manuscript.
     const part = !!partOf();
     $("review-start").hidden = hasReview || part;
     $("review-paste-section").hidden = part;
@@ -1203,8 +1206,8 @@ export function initReviewPane({
     // Refresh status stays reachable while nothing is loaded (no daemon), so a
     // press says why; once a review is loaded and empty there is nothing to list.
     $("review-comments-section").hidden = comments.length === 0 && !!state.revision;
-    $("review-propose-all").hidden = comments.length === 0 || part;
-    $("review-more").hidden = comments.length === 0 || part;
+    $("review-propose-all").hidden = comments.length === 0;
+    $("review-more").hidden = comments.length === 0;
     $("review-submit-box").hidden = comments.length === 0;
     // The submission check counts the answers of the letter: it runs in the
     // manuscript. The comment cleanup under it is each file's own.
@@ -1281,7 +1284,9 @@ export function initReviewPane({
     renderCandidates();
     renderDecisions();
     renderExternal();
-    $("review-figures-all").replaceChildren(figuresLink());
+    // The figures page records under the manuscript, not under one of its
+    // supplementary files (daemon/figure-http.mjs).
+    $("review-figures-all").replaceChildren(...(partOf() ? [] : [figuresLink()]));
     showProgress();
     $("review-file").textContent = state.path ? `Review file: ${state.path}` : "";
     if (root.scrollTop !== keep) root.scrollTop = keep;
@@ -1312,7 +1317,10 @@ export function initReviewPane({
     const withModel = ran ? ` with ${ran}` : "";
     const blockedText = `${blocked} edit${blocked === 1 ? " was" : "s were"} blocked (see the blocked list of the comment)`;
     // Requests the turn left without a change, a question or a note.
-    const open = openRequestsText((state.revision?.comments ?? []).find((x) => x.ref === ref));
+    const open = openRequestsText(
+      (state.revision?.comments ?? []).find((x) => x.ref === ref),
+      elsewhere(ref),
+    );
     const line =
       n > 0
         ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
@@ -1463,8 +1471,11 @@ export function initReviewPane({
   // the author or a turn asked for, the small line for an automatic one.
   // Returns the invariant report (review-view.js invariantReport).
   async function refreshWith(report) {
+    // Has Word unsaved changes of the document (null: it did not say). The
+    // daemon keeps it with the state of the document at this refresh.
+    const saved = word.documentSaved ? await word.documentSaved() : null;
     const snapshot = await word.collectReviewSnapshot();
-    const r = await ask("review_refresh", { snapshot });
+    const r = await ask("review_refresh", { snapshot, saved });
     // Word refuses Comment.resolved in a document in compatibility mode
     // (GeneralException on every comment). The refresh itself has succeeded,
     // so its counts are still shown and the refusal is added to them.

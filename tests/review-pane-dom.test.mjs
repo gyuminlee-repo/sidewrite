@@ -1749,7 +1749,8 @@ test("stale_target refreshes the status with the document as it is now; a runnin
   await settle();
   assert.deepEqual(
     t.requests.filter((r) => r.type === "review_refresh").map((r) => r.payload),
-    [{ snapshot: now }],
+    // saved: this Word did not say whether the document has unsaved changes.
+    [{ snapshot: now, saved: null }],
   );
   // H1: Word applied an edit and the daemon could not save its record.
   const loads = () => t.requests.filter((r) => r.type === "review_load").length;

@@ -25,7 +25,7 @@
 // error }). Their model calls can outlast any request timeout of the pane.
 // handler-wrap.mjs wraps both kinds.
 
-import { access } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import {
   localDocPath,
@@ -74,6 +74,7 @@ import {
   leaveMain,
   addPart,
   removePart,
+  setDocState,
 } from "./revision-store.mjs";
 import {
   storedPartPath,
@@ -86,6 +87,10 @@ import {
   partChangeRefs,
   linkedSummary,
   refuseInPart,
+  otherFiles,
+  linkedChanges,
+  linkedAnswers,
+  outsideNotes,
 } from "./revision-parts.mjs";
 import {
   classifyRevision,
@@ -110,6 +115,7 @@ import {
 import { appendDecisions, decisionRecord, redactQuotes } from "./decision-log.mjs";
 import { wrapHandlers } from "./handler-wrap.mjs";
 import { effectiveProfile, rationaleLang, splitPatterns } from "./journal-profile.mjs";
+import { snapshotHash } from "./response-quotes.mjs";
 
 async function exists(p) {
   try {
@@ -246,10 +252,31 @@ const MAIN_ONLY = [
 ];
 // Of those, the ones that write nothing themselves.
 const MAIN_ONLY_READS = new Set(["review_split", "ledger_suggest"]);
-// Review turns in a supplement come with the next step (the prompt of a turn
-// does not know the file yet): until then none is started or previewed.
-const PART_TURNS = ["review_propose", "review_preview"];
-export const PART_NO_TURNS = "Changes in this file come in the next version.";
+
+// What a document was at a status refresh, for its review file (doc_state,
+// revision-store.mjs DocState). snapshot: what the task pane collected.
+// saved: what Word said about unsaved changes then (Word.Document.saved;
+// anything but a boolean is "not known"). file: { mtime, bytes } of the file
+// on disk, or null.
+export function docState(snapshot, { saved = null, file = null, now = new Date() } = {}) {
+  const comments = snapshot?.comments ?? [];
+  return {
+    at: now.toISOString(),
+    text_hash: snapshotHash(snapshot),
+    tracked_paragraphs: (snapshot?.paragraphs ?? []).filter(
+      (p) => (p.w_ins ?? 0) + (p.w_del ?? 0) > 0,
+    ).length,
+    comments: comments.length,
+    tool_comments: comments.filter((c) => TOOL_COMMENT_PREFIX.test(String(c.content ?? ""))).length,
+    track_changes_on:
+      typeof snapshot?.track_changes_on === "boolean" ? snapshot.track_changes_on : null,
+    saved: typeof saved === "boolean" ? saved : null,
+    file,
+  };
+}
+// The changes of a review file as the other files of its revision see them.
+const changeStates = (rev) =>
+  JSON.stringify(rev.comments.map((c) => [c.ref, c.changes.map((ch) => [ch.id, ch.state])]));
 
 // The comments whose stale marks are not what they were, and not empty.
 function staleChanges(before, after) {
@@ -439,7 +466,7 @@ export function createReviewService({
     (main.revision?.parts ?? []).find((p) => resolvePart(dirname(main.doc), p.doc) === doc);
   // What the pane is told about the link, with one sentence when the
   // manuscript cannot be read from.
-  function linkedReply(d, revision, link = null) {
+  async function linkedReply(d, revision, link = null) {
     const main = link?.main;
     const note = !main
       ? null
@@ -448,7 +475,15 @@ export function createReviewService({
         : main.revision.comments.length === 0
           ? `${main.name} lists no reviewer comments now, so this list was left as it was.`
           : null;
-    return { ...linkedSummary(d.doc, revision), note };
+    // Where the requests stand in the other files of the revision, as their
+    // review files have it. A file that cannot be read tells nothing.
+    let changes = [];
+    try {
+      changes = linkedChanges(await otherFiles(d.doc, revision));
+    } catch (e) {
+      log(`[review] linked files not read: ${e?.message ?? e}`);
+    }
+    return { ...linkedSummary(d.doc, revision), note, changes };
   }
   // The other open panes of a revision load their file again.
   function tellLinked(d, docs) {
@@ -461,6 +496,31 @@ export function createReviewService({
     }
   }
   const partDocs = (doc, rev) => (rev?.parts ?? []).map((p) => resolvePart(dirname(doc), p.doc));
+  // A change of this document was recorded, decided or found in a refresh:
+  // the other open panes of its revision load again and show where the
+  // request stands now. Never throws: what Word applied stays recorded.
+  async function tellOthers(d, rev = null) {
+    try {
+      const own = rev ?? (await load(d));
+      if (!own.part_of && !own.parts?.length) return;
+      tellLinked(
+        d,
+        (await otherFiles(d.doc, own)).map((f) => f.doc),
+      );
+    } catch (e) {
+      log(`[review] linked panes not told: ${e?.message ?? e}`);
+    }
+  }
+  // What the author answered in the other files of the revision.
+  async function answersElsewhere(d, rev) {
+    if (!rev.part_of && !rev.parts?.length) return [];
+    try {
+      return linkedAnswers(await otherFiles(d.doc, rev));
+    } catch (e) {
+      log(`[review] linked answers not read: ${e?.message ?? e}`);
+      return [];
+    }
+  }
 
   // Decision receipts (decision-log.mjs). A receipt never stops the feature
   // it records: a failure only logs.
@@ -521,6 +581,7 @@ export function createReviewService({
       );
       await linkReceipt(d, key, h.ref, findComment(revision, h.ref), h.saved);
     }
+    if (done.some((h) => h.saved)) await tellOthers(d, revision);
   }
   // The requirement link of a recorded change, for the decision log.
   const linkReceipt = (d, key, ref, comment, saved) =>
@@ -565,9 +626,13 @@ export function createReviewService({
           paragraphs: rev.snapshot?.paragraphs ?? [],
           paragraph_ids: rev.snapshot?.ids ?? null,
           comment_ids: recordedCommentIds(rev),
-          // What the author answered to questions of this review: a source
-          // of numbers for an edit, like the comment.
-          author_texts: authorAnswers(rev),
+          // What the author answered to questions of this review, in this
+          // file and in the other files of its revision: a source of numbers
+          // for an edit, like the comment.
+          author_texts: [
+            ...authorAnswers(rev),
+            ...(await answersElsewhere(d, rev)).map((q) => q.answer),
+          ],
           recent_changes: since
             ? rev.comments
                 .flatMap((x) => x.changes)
@@ -612,7 +677,7 @@ export function createReviewService({
       onEdit: async ({ ref, change, attempt_id = null, at: d = at(key) }) => {
         let saved = null;
         let comment = null;
-        await update(d, (rev) => {
+        const revision = await update(d, (rev) => {
           const base = withComment(d, rev, ref);
           const r = addChange(base, ref, change);
           saved = r.change;
@@ -621,6 +686,7 @@ export function createReviewService({
         });
         await linkReceipt(d, key, ref, comment, saved);
         sendEvent(key, { type: "review_event", event: "change_recorded", ref, change: saved });
+        await tellOthers(d, revision);
         return saved;
       },
       // office_ask_author: the question goes under the comment and the pane
@@ -826,7 +892,11 @@ export function createReviewService({
   }
 
   async function buildFor(d, ref, paragraphs, key) {
-    const rev = await load(d);
+    // In a supplement the copy of what the manuscript owns is brought up to
+    // date before every turn (and before its preview), in a save of its own;
+    // the manuscript is read before that, plainly.
+    const link = await linkOf(d);
+    const rev = link ? await update(d, (file) => inLine(file, link)) : await load(d);
     const comment = findComment(rev, ref);
     if (!comment) throw new Error(`No reviewer comment ${ref}. Save the comment list first.`);
     const profile = await profileOf(d, rev);
@@ -855,7 +925,22 @@ export function createReviewService({
       // policy_packs of the journal profile: which rule packs the turn carries.
       profile,
       includeForbid: includeForbid(),
+      // A turn in a supplement is told its file and what the turn of the
+      // manuscript left for another file. It is not given the manuscript.
+      part: link
+        ? {
+            name: basename(d.doc),
+            main_name: link.main.name,
+            outside: outsideNotes(link.main.revision, ref),
+          }
+        : null,
+      linkedAnswers: await answersElsewhere(d, rev),
     });
+    if (link) {
+      log(
+        `[review] part turn ${ref} file=${basename(d.doc)} main=${link.main.name} outside=${built.outsideIds.join(",") || "-"}`,
+      );
+    }
     return { rev, comment, built };
   }
 
@@ -886,7 +971,7 @@ export function createReviewService({
         log(`[review] link restored in ${main.name} for ${basename(own)}`);
         tellLinked(d, [main.doc, own]);
       }
-      return { path, revision, linked: linkedReply(d, revision, link) };
+      return { path, revision, linked: await linkedReply(d, revision, link) };
     },
     // Manuscripts in the folder of this document whose revision it could join.
     async review_link_candidates(msg, key) {
@@ -952,7 +1037,7 @@ export function createReviewService({
       );
       log(`[review] link join ${basename(own)} -> ${name} comments=${revision.comments.length}`);
       tellLinked(d, [mainDoc, own, ...partDocs(mainDoc, saved)]);
-      return { revision, linked: linkedReply(d, revision) };
+      return { revision, linked: await linkedReply(d, revision) };
     },
     // The link is taken away at both ends, this file first. The copy of what
     // the manuscript owns goes with it; what is this file's own stays.
@@ -967,7 +1052,7 @@ export function createReviewService({
       if (entry) await withRevision(main.path, main.doc, (m) => removePart(m, entry.doc));
       log(`[review] link leave ${basename(own)} from ${main.name}`);
       tellLinked(d, [main.doc, own, ...partDocs(main.doc, main.revision)]);
-      return { revision, linked: linkedReply(d, revision) };
+      return { revision, linked: await linkedReply(d, revision) };
     },
     async review_split(msg, key) {
       const d = at(key);
@@ -1036,11 +1121,26 @@ export function createReviewService({
       const revision = await update(d, async (rev) => {
         // A comment that has changes in a supplement stays: those edits are
         // in that document. Its file is read, never written from here.
-        const inParts = rev.parts?.length ? partChangeRefs(await loadParts(d.doc, rev)) : new Map();
+        // So does one a running turn or an unanswered edit of a supplement
+        // holds (inflight is keyed by review file).
+        const parts = rev.parts?.length ? await loadParts(d.doc, rev) : [];
+        const inParts = partChangeRefs(parts);
+        const names = new Map(parts.map((p) => [revisionPathFor(p.doc), p.name]));
+        const heldInParts = new Map();
+        for (const e of inflight.values()) {
+          const name = names.get(resolve(e.path));
+          if (name && !heldInParts.has(e.ref)) heldInParts.set(e.ref, name);
+        }
         for (const c of rev.comments) {
-          if (!listed.has(c.ref) && inParts.has(c.ref)) {
+          if (listed.has(c.ref)) continue;
+          if (inParts.has(c.ref)) {
             throw new Error(
               `Comment ${c.ref} has recorded change(s) in ${inParts.get(c.ref)}; keep it`,
+            );
+          }
+          if (heldInParts.has(c.ref)) {
+            throw new Error(
+              `Comment ${c.ref} is being worked on in ${heldInParts.get(c.ref)}; keep it`,
             );
           }
         }
@@ -1203,6 +1303,16 @@ export function createReviewService({
       let dropped = [];
       let stale = [];
       let done = [];
+      let moved = false;
+      // The file on disk as it is now, for doc_state: read before the chain
+      // of the review file, and nothing when it cannot be read.
+      let onDisk = null;
+      try {
+        const s = await stat(d.doc);
+        onDisk = { mtime: s.mtime.toISOString(), bytes: s.size };
+      } catch {
+        onDisk = null;
+      }
       const revision = await update(d, (file) => {
         // What this daemon knows Word applied goes in first, as it was applied.
         const u = recordUnsaved(d, file);
@@ -1229,9 +1339,17 @@ export function createReviewService({
         }
         next = afterRefresh?.(next, snapshot) ?? next;
         stale = staleChanges(old, next);
-        return setSnapshot(next, texts, new Date(), snapshotIds(snapshot));
+        moved = changeStates(file) !== changeStates(next);
+        const now = new Date();
+        return setDocState(
+          setSnapshot(next, texts, now, snapshotIds(snapshot)),
+          docState(snapshot, { saved: msg.saved, file: onDisk, now }),
+        );
       });
       await unsavedDone(d, key, revision, done);
+      // A change was decided in Word, or found: the other open panes of the
+      // revision show where its request stands now.
+      if (moved) await tellOthers(d, revision);
       for (const x of stale) log(`[response] stale ${x.ref} ${x.stale.join(",")}`);
       for (const x of resolved) {
         forgetLate(x.tool_call_id);
@@ -1624,11 +1742,11 @@ export function createReviewService({
     },
   };
 
-  // In the file of a supplement what the manuscript owns is not changed, and
-  // no review turn is started yet. In a manuscript with supplements, their
-  // open panes are told to load again after a change of what they copy.
+  // In the file of a supplement what the manuscript owns is not changed. In
+  // a manuscript with supplements, their open panes are told to load again
+  // after a change of what they copy.
   // (An unsaved document has no file and is no supplement.)
-  for (const type of [...MAIN_ONLY, ...PART_TURNS]) {
+  for (const type of MAIN_ONLY) {
     const fn = impl[type];
     impl[type] = async (msg, key, host) => {
       const d = at(key);
@@ -1638,10 +1756,9 @@ export function createReviewService({
       } catch {
         /* no readable file: the request itself says so, or needs none */
       }
-      if (rev?.part_of && PART_TURNS.includes(type)) throw new Error(PART_NO_TURNS);
       refuseInPart(rev);
       const out = await fn(msg, key, host);
-      if (rev?.parts?.length && MAIN_ONLY.includes(type) && !MAIN_ONLY_READS.has(type)) {
+      if (rev?.parts?.length && !MAIN_ONLY_READS.has(type)) {
         tellLinked(d, partDocs(d.doc, rev));
       }
       return out;

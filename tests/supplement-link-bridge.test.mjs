@@ -111,7 +111,7 @@ const snap = (text) => ({
 const revisionOf = async (doc) =>
   JSON.parse(await readFile(doc.replace(/\.docx$/, ".revision.json"), "utf8"));
 
-test("real bridge, two panes: a join in the supplement reaches the manuscript's pane; tool results do not cross", async () => {
+test("real bridge, two panes: a join and a recorded change reach the other pane; tool results do not cross", async () => {
   const dir = await mkdtemp(join(tmpdir(), "parts-bridge-"));
   const paper = join(dir, "paper.docx");
   const si = join(dir, "SI.docx");
@@ -187,12 +187,76 @@ test("real bridge, two panes: a join in the supplement reaches the manuscript's 
       0,
       "the change is the manuscript's",
     );
+    // The change recorded in the manuscript is told to the supplement's
+    // pane, which loads again and sees where the comment stands there.
+    await until(() => supp.of("review_event").length, "the event in the supplement's pane");
+    assert.deepEqual(
+      supp.of("review_event").map((e) => [e.event, e.doc]),
+      [["linked_changed", "paper.docx"]],
+    );
     // The supplement's copy still follows the manuscript after it.
     const again = await supp.ask("review_load");
     assert.deepEqual(
       [again.revision.comments[0].changes.length, again.linked.part_of.name],
       [0, "paper.docx"],
     );
+    assert.deepEqual(
+      again.linked.changes.map((x) => [x.file, x.ref, x.state]),
+      [["paper.docx", "R1.1", "pending"]],
+    );
+
+    // The other way: a tracked edit of the supplement. Its call goes to the
+    // supplement's pane only, the manuscript's pane cannot answer it, the
+    // change lands in the supplement's review file, and the manuscript's
+    // pane is told.
+    assert.equal((await supp.ask("review_refresh", { snapshot: snap(BEFORE) })).ok, true);
+    const mainEvents = main.of("review_event").length;
+    const mainCalls = main.of("tool_call").length;
+    const inSupp = d.edit(d.keys.get(si), { find: "30 C", replace: "30 degrees Celsius" }, "R1.1");
+    const suppCall = await until(
+      () => supp.of("tool_call")[0],
+      "tool_call in the supplement's pane",
+    );
+    assert.equal(main.of("tool_call").length, mainCalls, "no call in the manuscript's pane");
+    const appliedInSupp = {
+      ok: true,
+      word_comment_id: 3,
+      paragraph_index: 1,
+      before: BEFORE,
+      after: "Cells grew on the substrate at 30 degrees Celsius.",
+    };
+    main.send({ type: "tool_result", id: suppCall.id, ok: true, result: appliedInSupp });
+    await sleep(50);
+    assert.equal(
+      (await revisionOf(si)).comments[0].changes.length,
+      0,
+      "not taken from the manuscript's pane",
+    );
+    supp.send({ type: "tool_result", id: suppCall.id, ok: true, result: appliedInSupp });
+    const rs = await inSupp;
+    assert.equal(rs.ok, true, JSON.stringify(rs));
+    assert.equal((await revisionOf(si)).comments[0].changes.length, 1);
+    assert.equal(
+      (await revisionOf(paper)).comments[0].changes.length,
+      1,
+      "the manuscript's file holds its own change only",
+    );
+    await until(
+      () => main.of("review_event").length > mainEvents,
+      "the event in the manuscript's pane",
+    );
+    assert.deepEqual(
+      main
+        .of("review_event")
+        .slice(mainEvents)
+        .map((e) => [e.event, e.doc]),
+      [["linked_changed", "SI.docx"]],
+    );
+    assert.deepEqual(
+      (await main.ask("review_load")).linked.changes.map((x) => [x.file, x.ref, x.state]),
+      [["SI.docx", "R1.1", "pending"]],
+    );
+    const suppEvents = supp.of("review_event").length;
 
     // A change of the comment list in the manuscript reaches the supplement's pane.
     const more = await main.ask("review_save_comments", {
@@ -202,9 +266,16 @@ test("real bridge, two panes: a join in the supplement reaches the manuscript's 
       ],
     });
     assert.equal(more.ok, true, more.error);
-    await until(() => supp.of("review_event").length, "the event in the supplement's pane");
+    await until(
+      () => supp.of("review_event").filter((e) => e.event === "linked_changed").length > 1,
+      "the event in the supplement's pane",
+    );
     assert.deepEqual(
-      supp.of("review_event").map((e) => [e.event, e.doc]),
+      supp
+        .of("review_event")
+        .slice(suppEvents)
+        .filter((e) => e.event === "linked_changed")
+        .map((e) => [e.event, e.doc]),
       [["linked_changed", "paper.docx"]],
     );
     assert.deepEqual(

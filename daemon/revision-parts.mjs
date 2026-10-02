@@ -176,6 +176,73 @@ export function linkedSummary(doc, rev) {
   };
 }
 
+// The other files of the revision a document is in: [{ doc, name, revision }].
+// For a supplement: its manuscript, then the other supplements of that
+// manuscript. For a manuscript: its supplements. For any other document: [].
+// revision is null for a file whose review file is not there. Plain reads.
+export async function otherFiles(doc, rev) {
+  const own = resolve(doc);
+  if (rev?.part_of) {
+    const main = await loadMain(own, rev.part_of);
+    const rest = main.revision ? await loadParts(main.doc, main.revision) : [];
+    return [
+      { doc: main.doc, name: main.name, revision: main.revision },
+      ...rest
+        .filter((p) => p.doc !== own)
+        .map(({ doc, name, revision }) => ({ doc, name, revision })),
+    ];
+  }
+  if (!rev?.parts?.length) return [];
+  return (await loadParts(own, rev)).map(({ doc, name, revision }) => ({ doc, name, revision }));
+}
+
+// The changes on record in those files, as the pane of this document shows
+// where a request stands elsewhere (never saved):
+//   [{ file, ref, id, state, requirement_ids }]
+// state is the one the last status refresh of THAT file wrote into its
+// review file (a change no refresh has seen yet is pending).
+export function linkedChanges(files) {
+  return files.flatMap((f) =>
+    (f.revision?.comments ?? []).flatMap((c) =>
+      c.changes.map((ch) => ({
+        file: f.name,
+        ref: c.ref,
+        id: ch.id,
+        state: ch.state,
+        requirement_ids: ch.rationale?.requirement_ids ?? [],
+      })),
+    ),
+  );
+}
+
+// What the author answered to questions asked in those files:
+//   [{ file, ref, id, question, answer }]
+export function linkedAnswers(files) {
+  return files.flatMap((f) =>
+    (f.revision?.comments ?? []).flatMap((c) =>
+      (c.questions ?? [])
+        .filter((q) => q.answer)
+        .map((q) => ({
+          file: f.name,
+          ref: c.ref,
+          id: q.id,
+          question: q.question,
+          answer: q.answer,
+        })),
+    ),
+  );
+}
+
+// The requests of one comment that the turn of the manuscript noted as
+// belonging to another file: [{ id, text, why }], in the order of the list.
+export function outsideNotes(mainRev, ref) {
+  const c = (mainRev?.comments ?? []).find((x) => x.ref === ref);
+  const why = new Map((c?.requirements_outside ?? []).map((n) => [n.id, n.why]));
+  return (c?.requirements ?? [])
+    .filter((r) => why.has(r.id))
+    .map((r) => ({ id: r.id, text: r.text, why: why.get(r.id) ?? "" }));
+}
+
 // What belongs to the manuscript is changed in the manuscript: a request
 // that would change it in the file of a supplement is refused.
 export function refuseInPart(rev) {

@@ -1583,7 +1583,8 @@ body {
 }
 .review-req-open,
 .review-req-needs_author,
-.review-req-figure_waiting {
+.review-req-figure_waiting,
+.review-req-waiting_elsewhere {
   color: color-mix(in srgb, var(--status-warn) 55%, var(--fg));
   font-weight: 600;
 }

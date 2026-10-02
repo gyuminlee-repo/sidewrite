@@ -5,12 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import {
-  joinLabel,
-  linkedFilesText,
-  partOfText,
-  PART_NO_TURNS,
-} from "../taskpane/shared/review-view.js";
+import { joinLabel, linkedFilesText, partOfText } from "../taskpane/shared/review-view.js";
 
 class FakeEl {
   constructor(tag, id = null) {
@@ -161,7 +156,7 @@ test("the words of the link", () => {
     "Linked files: SI.docx, S2.docx",
   );
   assert.match(partOfText(MAIN), /edited in paper\.docx/);
-  for (const s of [joinLabel(CANDIDATES[0]), partOfText(MAIN), PART_NO_TURNS]) {
+  for (const s of [joinLabel(CANDIDATES[0]), partOfText(MAIN)]) {
     assert.equal(s.includes(String.fromCharCode(0x2014)), false, "no em dash");
   }
 });
@@ -208,7 +203,7 @@ test("a refused join says why and joins nothing", async () => {
   assert.equal(t.$("review-linked").hidden, true);
 });
 
-test("after the join: the rows of the manuscript, read-only, and no enabled Propose changes", async () => {
+test("after the join: the rows of the manuscript, read-only, with Propose changes for this file", async () => {
   const t = await setup({ revision: EMPTY, linked: FREE, candidates: CANDIDATES });
   await t.$("review-link-candidates").children[0].click();
   assert.deepEqual(t.sent("review_link_join")[0].payload, { main: "/m/paper.docx" });
@@ -225,17 +220,24 @@ test("after the join: the rows of the manuscript, read-only, and no enabled Prop
     ["R1.1", "R1.2", "R2.1"],
   );
   assert.equal(findAll(list, (n) => n.attributes["data-req-id"] === "q2").length, 3);
-  // Propose changes: in no card, the sentence in its place. A turn of the
-  // pane that ends brings no button back.
-  t.pane.setTurnBusy(false);
-  assert.equal(buttons(list, "Propose changes").length, 0);
-  assert.equal(texts(list).filter((s) => s === `${PART_NO_TURNS}.`).length, 3);
-  assert.equal(t.$("review-propose-all").hidden, true);
-  assert.equal(t.$("review-more").hidden, true);
+  // Propose changes: in every card, as in a manuscript, with Propose all,
+  // More and the prompt preview.
+  assert.deepEqual(
+    buttons(list, "Propose changes").map((b) => b.disabled),
+    [false, false, false],
+  );
+  assert.equal(
+    texts(list).some((s) => /next version/.test(s)),
+    false,
+  );
+  assert.equal(t.$("review-propose-all").hidden, false);
+  assert.equal(t.$("review-more").hidden, false);
+  assert.equal(buttons(list, "Preview prompt").length, 3);
+  // The figures page records under the manuscript: no way to it from here.
+  assert.equal(t.$("review-figures-all").children.length, 0);
   // What the manuscript owns cannot be changed here.
   assert.equal(buttons(list, "Edit").length, 0);
   assert.equal(buttons(list, "Save requirements").length, 0);
-  assert.equal(buttons(list, "Preview prompt").length, 0);
   assert.equal(findAll(list, (n) => n.tagName === "TEXTAREA").length, 0);
   assert.equal(texts(list).filter((s) => s === "(edited in paper.docx)").length, 3);
   assert.equal(t.$("review-paste-section").hidden, true);
@@ -301,7 +303,7 @@ test("the manuscript's pane: one line names the linked files, and everything els
     [false, false, false],
   );
   assert.equal(buttons(list, "Edit").length, 3);
-  assert.equal(texts(list).includes(`${PART_NO_TURNS}.`), false);
+  assert.equal(t.$("review-figures-all").children.length, 1);
   assert.equal(buttons(t.$("review-ledger"), "Remove").length, 1);
   assert.equal(t.$("review-ledger-note").hidden, true);
   assert.equal(t.$("review-ledger-form").hidden, false);
@@ -426,4 +428,161 @@ test("the page holds the elements of the link, and the Response tab is inside it
   // The dispatcher passes the event to both tabs.
   const pane = await readFile(new URL("../taskpane/shared/taskpane.js", import.meta.url), "utf8");
   assert.match(pane, /if \(msg\.event === "linked_changed"\) responsePane\?\.onEvent\(msg\);/);
+});
+
+// ---- step A2: turns in a supplementary file, and where a request stands in the other file
+
+const COUNTS = { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 };
+const stateOf = (card) =>
+  findAll(card, (n) => /^review-comment-state( |$)/.test(n.attributes.class ?? ""))[0].textContent;
+const requestRows = (card) =>
+  findAll(card, (n) => n.attributes.class === "review-req").map((row) => [
+    row.attributes["data-state"],
+    findAll(row, (n) => /^review-req-state /.test(n.attributes.class ?? ""))[0].textContent,
+  ]);
+const cardOf = (t, ref) =>
+  t.$("review-comments").children.find((c) => c.attributes["data-ref"] === ref);
+
+// A pane whose Word answers: a refresh and a turn can be asked for.
+async function setupTurns(world) {
+  globalThis.document = fakeDocument();
+  const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
+  const requests = [];
+  const sendRequest = async (type, payload) => {
+    requests.push({ type, payload });
+    const base = { ok: true, revision: world.revision };
+    if (type === "review_refresh") return { ...base, rows: [], counts: COUNTS, external: [] };
+    if (type === "review_propose") return { ...base, started: true, ref: payload.ref };
+    return { ...base, path: world.path, linked: world.linked };
+  };
+  let busy = false;
+  const pane = initReviewPane({
+    sendRequest,
+    word: {
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }),
+      documentSaved: async () => world.saved,
+      selectionParagraphs: async () => [],
+      resolveComment: async () => {},
+    },
+    onTurnStarted() {
+      busy = true;
+      return () => (busy = false);
+    },
+    isTurnInFlight: () => busy,
+  });
+  await pane.reload();
+  const $ = (id) => document.getElementById(id);
+  return { pane, requests, $, sent: (type) => requests.filter((r) => r.type === type) };
+}
+
+test("Propose changes in a supplementary file starts a turn for this file, after a refresh that tells whether the document is saved", async () => {
+  const t = await setupTurns({
+    revision: REVISION,
+    path: "/m/SI.revision.json",
+    linked: { part_of: MAIN, parts: [], note: null, changes: [] },
+    saved: false,
+  });
+  const button = buttons(cardOf(t, "R1.2"), "Propose changes")[0];
+  assert.equal(button.disabled, false);
+  await button.click();
+  assert.deepEqual(
+    t.requests.slice(-2).map((r) => r.type),
+    ["review_refresh", "review_propose"],
+  );
+  assert.equal(t.sent("review_refresh")[0].payload.saved, false);
+  assert.equal(t.sent("review_propose")[0].payload.ref, "R1.2");
+  // The turn ends: the clock of the card stops.
+  t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.2", ok: true });
+  await new Promise((r) => setTimeout(r, 5));
+  // Preview prompt asks the daemon for the prompt of this file.
+  await buttons(cardOf(t, "R1.1"), "Preview prompt")[0].click();
+  assert.equal(t.sent("review_preview")[0].payload.ref, "R1.1");
+});
+
+test("the manuscript's pane shows where a request stands in the supplementary file, and follows it without Refresh", async () => {
+  const parts = [{ doc: "/m/SI.docx", name: "SI.docx", label: "SI" }];
+  const change = (ref, state) => ({
+    file: "SI.docx",
+    ref,
+    id: `${ref}-1`,
+    state,
+    requirement_ids: ["q2"],
+  });
+  const world = {
+    revision: REVISION,
+    path: "/m/paper.revision.json",
+    linked: { part_of: null, parts, note: null, changes: [] },
+    saved: true,
+  };
+  const t = await setupTurns(world);
+  assert.deepEqual(requestRows(cardOf(t, "R1.2")), [["open", "Not yet"]]);
+  assert.equal(stateOf(cardOf(t, "R1.2")), "Not started");
+  // The supplement recorded a change for R1.2: the daemon tells this pane.
+  world.linked = { ...world.linked, changes: [change("R1.2", "pending")] };
+  t.pane.onEvent({ type: "review_event", event: "linked_changed", doc: "SI.docx" });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(t.sent("review_refresh").length, 0, "no refresh was pressed or sent");
+  assert.deepEqual(requestRows(cardOf(t, "R1.2")), [
+    ["waiting_elsewhere", "Waiting for your decision in SI.docx"],
+  ]);
+  assert.equal(stateOf(cardOf(t, "R1.2")), "1 change to review in SI.docx");
+  assert.deepEqual(requestRows(cardOf(t, "R1.1")), [["open", "Not yet"]], "R1.1 is as it was");
+  // The author accepted it there.
+  world.linked = { ...world.linked, changes: [change("R1.2", "accepted")] };
+  t.pane.onEvent({ type: "review_event", event: "linked_changed", doc: "SI.docx" });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(requestRows(cardOf(t, "R1.2")), [["changed_elsewhere", "Changed in SI.docx"]]);
+  assert.equal(stateOf(cardOf(t, "R1.2")), "Changed in SI.docx");
+  // Or rejected it: the request is open again.
+  world.linked = { ...world.linked, changes: [change("R1.2", "rejected")] };
+  t.pane.onEvent({ type: "review_event", event: "linked_changed", doc: "SI.docx" });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(requestRows(cardOf(t, "R1.2")), [["open", "Not yet"]]);
+  assert.equal(stateOf(cardOf(t, "R1.2")), "Not started");
+});
+
+test("the supplementary file's pane shows where a request stands in the manuscript", async () => {
+  const t = await setupTurns({
+    revision: REVISION,
+    path: "/m/SI.revision.json",
+    linked: {
+      part_of: MAIN,
+      parts: [],
+      note: null,
+      changes: [
+        {
+          file: "paper.docx",
+          ref: "R1.1",
+          id: "R1.1-1",
+          state: "accepted",
+          requirement_ids: ["q2"],
+        },
+        {
+          file: "paper.docx",
+          ref: "R2.1",
+          id: "R2.1-1",
+          state: "pending",
+          requirement_ids: ["q2"],
+        },
+      ],
+    },
+    saved: true,
+  });
+  assert.deepEqual(requestRows(cardOf(t, "R1.1")), [
+    ["changed_elsewhere", "Changed in paper.docx"],
+  ]);
+  assert.equal(stateOf(cardOf(t, "R1.1")), "Changed in paper.docx");
+  assert.deepEqual(requestRows(cardOf(t, "R2.1")), [
+    ["waiting_elsewhere", "Waiting for your decision in paper.docx"],
+  ]);
+  assert.equal(stateOf(cardOf(t, "R2.1")), "1 change to review in paper.docx");
+  assert.deepEqual(requestRows(cardOf(t, "R1.2")), [["open", "Not yet"]]);
+  // A daemon from before step A2 sends no changes: the rows are as before.
+  const old = await setupTurns({
+    revision: REVISION,
+    path: "/m/SI.revision.json",
+    linked: { part_of: MAIN, parts: [], note: null },
+    saved: null,
+  });
+  assert.deepEqual(requestRows(cardOf(old, "R1.1")), [["open", "Not yet"]]);
 });
