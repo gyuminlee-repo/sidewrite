@@ -227,3 +227,33 @@ test("Adopt over HTTP writes only under the figures folder of that manuscript", 
     await w.cleanup();
   }
 });
+
+// The acceptance run (scripts/e2e, the Figures button step) reads this line
+// to tell that the button of the pane reached a browser.
+test("a load of the page itself logs one quoted line; its files, the API and a refused request log none", async () => {
+  const w = await figureWorld({ runPy: fakeRunPy() });
+  try {
+    const pageLines = () => w.lines.filter((l) => l.startsWith("[figures] page GET"));
+    const page = await w.call("", {
+      path: `/figures/?doc=${encodeURIComponent(w.doc)}&ref=R1.1`,
+      headers: { "User-Agent": "Mozilla/5.0 test-browser" },
+    });
+    assert.equal(page.status, 200);
+    assert.equal(
+      pageLines().at(-1),
+      `[figures] page GET doc=${JSON.stringify(w.doc)} ref="R1.1" ua="Mozilla/5.0 test-browser"`,
+    );
+    const n = pageLines().length;
+    await w.call("", { path: "/figures/figures.js" });
+    await w.call("manuscripts");
+    await w.call("", { path: "/figures/", host: "example.org" });
+    assert.equal(pageLines().length, n);
+    // A query with a line break stays on the one line.
+    await w.call("", { path: `/figures/?doc=${encodeURIComponent("a\n[figures] forged")}` });
+    const last = pageLines().at(-1);
+    assert.equal(last.split("\n").length, 1);
+    assert.match(last, /^\[figures\] page GET doc="a\\n\[figures\] forged" ref=null ua=/);
+  } finally {
+    await w.cleanup();
+  }
+});

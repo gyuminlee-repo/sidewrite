@@ -205,6 +205,14 @@ export function createFigureHttp({
       } else if (path === FIGURES_PREFIX) {
         res.writeHead(302, { Location: `${FIGURES_PREFIX}/` }).end();
       } else if (PAGE[path]) {
+        // One line per load of the page itself (not its files or the API):
+        // the acceptance run reads it to tell that the "Figures and other
+        // files" button of the pane reached a browser. Quoted as JSON, so a
+        // query cannot write a line of its own into the log.
+        if (path === `${FIGURES_PREFIX}/`)
+          log(
+            `[figures] page GET doc=${JSON.stringify(url.searchParams.get("doc"))} ref=${JSON.stringify(url.searchParams.get("ref"))} ua=${JSON.stringify(String(req.headers["user-agent"] ?? "").slice(0, 160))}`,
+          );
         const [file, type] = PAGE[path];
         const data = await readFile(join(pageDir, file));
         res.writeHead(200, { "Content-Type": type, "X-Content-Type-Options": "nosniff" });
