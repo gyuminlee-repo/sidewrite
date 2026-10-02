@@ -1480,6 +1480,9 @@ body {
 .review-comment-state {
   grid-column: 2;
   grid-row: 2;
+  /* It may name a file ("1 change to review in SI.docx"): a long name wraps. */
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 12px;
   color: var(--fg-muted);
 }
@@ -1579,6 +1582,8 @@ body {
   min-width: 0;
 }
 .review-req-state {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--fg-muted);
 }
 .review-req-open,
