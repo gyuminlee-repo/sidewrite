@@ -3,7 +3,8 @@
 // stage-2 acceptance procedure), and the path rewrite that runs a
 // feature_list verify_command against this run's files.
 
-import { formatRationaleComment } from "../../daemon/review-tools.mjs";
+import { formatRationaleComment, TOOL_COMMENT_PREFIX } from "../../daemon/review-tools.mjs";
+import { UNSAVED_TEXT, UNSAVED_UNKNOWN } from "../../daemon/submission-check.mjs";
 import { normalizeParaText, placedRuns } from "../../daemon/revision-classify.mjs";
 import { rewriteSegments } from "../../daemon/word-diff.mjs";
 import { paragraphHash } from "../../daemon/doc-diff.mjs";
@@ -2691,4 +2692,410 @@ export function table(rows) {
     line("step", "result", "detail"),
     ...rows.map((r) => line(r.step, r.result, String(r.got ?? "").slice(0, 160))),
   ].join("\n");
+}
+
+// ---- Real Word: "Check now", the figures button, the resident daemon ----
+// Each returns judged rows { id, result: "PASS" | "FAIL" | "NOTE", expect,
+// got } from what the run read itself: the rows the pane drew, Word over
+// COM, revision.json, the hash of a file on the disk, the daemon log.
+
+const rowOf = (id, pass, expect, got) => ({
+  id,
+  result: pass ? "PASS" : "FAIL",
+  expect,
+  got: String(got ?? ""),
+});
+const nameOfPath = (p) =>
+  String(p ?? "")
+    .split(/[\\/]/)
+    .pop();
+
+// The line aux-service.mjs writes for every submission_check job.
+export function submissionLogLine(log) {
+  const m = [
+    ...String(log ?? "").matchAll(
+      /^\[tools\] submission_check rows=(\d+) ready=(\d+) not_ready=(\d+) not_applicable=(\d+) saved=(\S+)$/gm,
+    ),
+  ].at(-1);
+  if (!m) return null;
+  return {
+    rows: Number(m[1]),
+    ready: Number(m[2]),
+    not_ready: Number(m[3]),
+    not_applicable: Number(m[4]),
+    saved: m[5] === "true" ? true : m[5] === "false" ? false : null,
+  };
+}
+
+// Did anything the letter model is built from change between two reads of
+// revision.json, as far as the run can tell: the answers with their
+// citations, a declined comment, the overrides of the profile.
+export function letterInputsChanged(before, after) {
+  const of = (rev) =>
+    JSON.stringify({
+      comments: (rev?.comments ?? []).map((c) => ({
+        ref: c.ref,
+        declined: c.declined ?? null,
+        response: c.response ?? null,
+      })),
+      overrides: rev?.profile_overrides ?? null,
+    });
+  return of(before) !== of(after);
+}
+
+// The rows of one press of "Check now", judged.
+//   step      the answer of the pane step submission-check: { ok, message,
+//             message_error, rows: [{ id, state, text, file }], asof }
+//   word      word-com.ps1 state: { saved, revisions, comments }
+//   revision  revision.json read right after the press
+//   letterSha sha256 of the file response_export.path names, as it is on the
+//             disk now (null: not there)
+//   letter    "ready": nothing the letter is built from changed since the
+//             last export, as far as the run knows; "changed": it did
+//   log       the daemon log written since the press
+// Rows the run cannot tell by itself (answers, requests, format_counts, the
+// rows of another file) are NOTE.
+export function submissionEvidence({ step, word, revision, letterSha, letter = "ready", log }) {
+  const rows = [];
+  // The rows of the open file come before those of a supplementary file
+  // with the same id (submission-check.mjs): the first of an id is judged.
+  const shown = step?.rows ?? [];
+  const byId = new Map();
+  for (const r of shown) if (!byId.has(r.id)) byId.set(r.id, r);
+  const describe = (r) => (r ? `${r.state}: ${r.text}` : "no such row");
+  const saved = word?.saved;
+  const line = submissionLogLine(log);
+
+  rows.push(
+    rowOf(
+      "job",
+      step?.ok !== false && !step?.message_error && shown.length > 0 && !!line,
+      "rows drawn, no error, the daemon logged the job",
+      step?.ok === false || step?.message_error
+        ? `error: ${step?.error ?? step?.message}`
+        : `${shown.length} rows; log: ${line ? `rows=${line.rows} saved=${line.saved}` : "no submission_check line"}`,
+    ),
+  );
+  rows.push(
+    rowOf(
+      "saved",
+      typeof saved === "boolean" && line?.saved === saved,
+      `the pane sent what Word says over COM (Saved=${saved})`,
+      `pane sent saved=${line ? line.saved : "-"}, COM Saved=${saved ?? "not read"}`,
+    ),
+  );
+
+  const revisions = word?.revisions?.length ?? null;
+  const comments = word?.comments ?? null;
+  const tool = comments
+    ? comments.filter((c) => TOOL_COMMENT_PREFIX.test(c.text ?? "")).length
+    : null;
+  const expectState = (id, ready, why) => {
+    const r = byId.get(id);
+    const want = ready ? "ready" : "not_ready";
+    rows.push(rowOf(id, !!r && r.state === want, `${want} (${why})`, describe(r)));
+  };
+  if (revisions === null)
+    rows.push(rowOf("changes_decided", false, "Word's revisions", "COM state not read"));
+  else expectState("changes_decided", revisions === 0, `Word lists ${revisions} revisions`);
+  if (tool === null)
+    rows.push(rowOf("tool_comments", false, "Word's comments", "COM state not read"));
+  else {
+    expectState("tool_comments", tool === 0, `Word has ${tool} comments of the tool`);
+    expectState(
+      "file_clean",
+      revisions === 0 && comments.length === 0,
+      `Word lists ${revisions} revisions and ${comments.length} comments`,
+    );
+  }
+
+  // The copies made from the saved file.
+  const copy = (id, what, artifact) => {
+    const r = byId.get(id);
+    if (id === "anonymized_copy" && r?.state === "not_applicable")
+      return rows.push(
+        rowOf(
+          id,
+          /anonymized copy/.test(r.text),
+          "not_applicable (the profile asks for none)",
+          describe(r),
+        ),
+      );
+    if (saved === false)
+      return rows.push(
+        rowOf(
+          id,
+          r?.state === "not_ready" && r.text === UNSAVED_TEXT,
+          `not_ready: ${UNSAVED_TEXT}`,
+          describe(r),
+        ),
+      );
+    if (saved !== true)
+      return rows.push(rowOf(id, false, "Word says whether the document is saved", describe(r)));
+    if (!artifact?.path) {
+      const head = `No ${what} is on record for this file.`;
+      return rows.push(
+        rowOf(
+          id,
+          r?.state === "not_ready" && r.text.startsWith(head) && !r.text.includes(UNSAVED_UNKNOWN),
+          `not_ready: ${head} ...`,
+          describe(r),
+        ),
+      );
+    }
+    rows.push(
+      rowOf(
+        id,
+        !!r && r.text !== UNSAVED_TEXT && !r.text.includes(UNSAVED_UNKNOWN),
+        "a row of the saved file (a copy is on record: its hashes are not judged here)",
+        describe(r),
+      ),
+    );
+  };
+  copy("marked_copy", "marked copy", revision?.artifacts?.marked);
+  copy("anonymized_copy", "anonymized copy", revision?.artifacts?.anonymized);
+
+  // The exported letter: ready only when its record says no check failed,
+  // the file on the disk is the file written, and nothing changed since.
+  {
+    const x = revision?.response_export;
+    const r = byId.get("letter");
+    const name = nameOfPath(x?.path);
+    const sound =
+      !!x && Number.isInteger(x.fail) && x.fail === 0 && !!x.docx_sha && letterSha === x.docx_sha;
+    if (sound && letter === "ready")
+      rows.push(
+        rowOf(
+          "letter",
+          r?.state === "ready" && r.text.includes(name),
+          `ready, naming ${name}`,
+          describe(r),
+        ),
+      );
+    else if (sound)
+      rows.push(
+        rowOf(
+          "letter",
+          r?.state === "not_ready" && /changed after .+ was exported/.test(r.text),
+          `not_ready: ... changed after ${name} was exported ...`,
+          describe(r),
+        ),
+      );
+    else
+      rows.push(
+        rowOf(
+          "letter",
+          r?.state === "not_ready",
+          `not_ready (record: ${x ? `fail=${x.fail}, file ${letterSha === x.docx_sha ? "as written" : "not as written"}` : "no export"})`,
+          describe(r),
+        ),
+      );
+  }
+
+  // Figures: none are on record in this stage.
+  {
+    const r = byId.get("figures");
+    const any = (revision?.comments ?? []).some((c) => (c.figure_changes ?? []).length > 0);
+    if (any) rows.push({ id: "figures", result: "NOTE", expect: "-", got: describe(r) });
+    else
+      rows.push(
+        rowOf(
+          "figures",
+          r?.state === "not_applicable",
+          "not_applicable (no figure change on record)",
+          describe(r),
+        ),
+      );
+  }
+
+  // The line under the rows.
+  rows.push(
+    rowOf(
+      "as_of",
+      saved === false
+        ? /changes that are not saved/.test(step?.asof ?? "")
+        : saved === true && /Press Check now again after a change\./.test(step?.asof ?? ""),
+      saved === false
+        ? "says the document has unsaved changes"
+        : "Press Check now again after a change.",
+      step?.asof ?? "",
+    ),
+  );
+
+  const judged = new Set(rows.map((r) => r.id));
+  for (const r of shown)
+    if (!judged.has(r.id) || byId.get(r.id) !== r)
+      rows.push({ id: r.id, result: "NOTE", expect: "-", got: describe(r) });
+  return { pass: rows.every((r) => r.result !== "FAIL"), rows };
+}
+
+// The page loads the daemon logged (figure-http.mjs): { doc, ref, ua }.
+export function figuresPageGets(log) {
+  const out = [];
+  for (const m of String(log ?? "").matchAll(
+    /^\[figures\] page GET doc=(null|"(?:[^"\\]|\\.)*") ref=(null|"(?:[^"\\]|\\.)*") ua=("(?:[^"\\]|\\.)*")$/gm,
+  )) {
+    try {
+      out.push({ doc: JSON.parse(m[1]), ref: JSON.parse(m[2]), ua: JSON.parse(m[3]) });
+    } catch {
+      /* not a line of figure-http.mjs */
+    }
+  }
+  return out;
+}
+
+// The "Figures and other files" button, judged.
+//   step  the answer of the pane step figures-open: { ok, href, spy:
+//         { supported, wrapped, calls, errors }, pane_url_before,
+//         pane_url_after, figures_pages_before, figures_pages_after }
+//   gets  figuresPageGets of the log written since the click
+// route: "api" (Office.context.ui.openBrowserWindow was called with the
+// link), "fallback" (the API is not there; the link itself was followed) or
+// "unknown" (the call could not be watched).
+export function figuresOpenEvidence({ step, gets }) {
+  const rows = [];
+  let doc = null;
+  try {
+    doc = new URL(step?.href ?? "").searchParams.get("doc");
+  } catch {
+    doc = null;
+  }
+  const spy = step?.spy ?? {};
+  const calls = spy.calls ?? [];
+  const route =
+    calls.length > 0
+      ? "api"
+      : spy.supported === false
+        ? "fallback"
+        : spy.wrapped
+          ? "none"
+          : "unknown";
+  rows.push(
+    rowOf(
+      "clicked",
+      step?.ok !== false && !!step?.href && !!doc,
+      "the link of the pane, with the document in its address",
+      step?.ok === false ? `error: ${step.error}` : step?.href,
+    ),
+  );
+  rows.push(
+    rowOf(
+      "route",
+      route === "fallback" ||
+        route === "unknown" ||
+        (route === "api" && calls[0] === step?.href && !(spy.errors ?? []).length),
+      "openBrowserWindow called once with the link, or the link fallback where the API is missing",
+      `route=${route} supported=${spy.supported ?? "-"} calls=${JSON.stringify(calls)}${(spy.errors ?? []).length ? ` errors=${JSON.stringify(spy.errors)}` : ""}`,
+    ),
+  );
+  const hit = gets.filter((g) => g.doc === doc);
+  rows.push(
+    rowOf(
+      "served",
+      hit.length > 0,
+      `the daemon served /figures/ for ${doc}`,
+      gets.length ? gets.map((g) => `doc=${g.doc} ref=${g.ref}`).join("; ") : "no page load logged",
+    ),
+  );
+  const newInPane = (step?.figures_pages_after ?? []).filter(
+    (u) => !(step?.figures_pages_before ?? []).includes(u),
+  );
+  rows.push(
+    rowOf(
+      "outside the pane",
+      !!step?.pane_url_before &&
+        step.pane_url_after === step.pane_url_before &&
+        newInPane.length === 0,
+      "the pane stayed on its page and no figures page opened inside Word's WebView2",
+      `pane ${step?.pane_url_after === step?.pane_url_before ? "unchanged" : `moved to ${step?.pane_url_after}`}; figures pages in WebView2: ${newInPane.length ? newInPane.join(", ") : "none"}`,
+    ),
+  );
+  if (hit[0]) rows.push({ id: "user agent", result: "NOTE", expect: "-", got: hit[0].ua });
+  return { pass: rows.every((r) => r.result !== "FAIL"), route, rows };
+}
+
+// May the run close the browser window the button opened? Only when it is
+// surely the run's own: a process that was not there before the click, of a
+// browser no process of which ran before it (otherwise the page may have
+// opened as a tab among the user's), the only such process with a window, and
+// its window shows the figures page. browser-windows.ps1 checks the title
+// again and counts the tabs before it closes anything.
+//   before, after: [{ pid, name, title, has_window }] (browser-windows.ps1 list)
+export function browserCloseDecision({ before, after, title }) {
+  if (!Array.isArray(before) || !Array.isArray(after))
+    return { action: "leave", reason: "the browser processes could not be listed" };
+  const old = new Set(before.map((p) => p.pid));
+  const fresh = after.filter((p) => !old.has(p.pid) && p.has_window);
+  const ours = fresh.filter((p) => String(p.title ?? "").includes(title));
+  if (ours.length === 0)
+    return {
+      action: "leave",
+      reason: `no new browser window shows "${title}" (the page opened as a tab of a browser that was already running, or under another title)`,
+    };
+  if (ours.length > 1)
+    return { action: "leave", reason: `${ours.length} new browser windows show "${title}"` };
+  const p = ours[0];
+  if (before.some((b) => b.name === p.name))
+    return {
+      action: "leave",
+      reason: `a ${p.name} process was running before the click, so its window may hold tabs of the user`,
+    };
+  if (fresh.filter((q) => q.name === p.name).length > 1)
+    return { action: "leave", reason: `more than one new ${p.name} window` };
+  return { action: "close", pid: p.pid, name: p.name };
+}
+
+// ---- --resident: the installed daemon, not stopped and not replaced ----
+
+// The file the unit writes the daemon's output to (`systemctl --user cat`),
+// or null when it writes to the journal.
+export function unitLogFile(unitText) {
+  const m = [...String(unitText ?? "").matchAll(/^StandardOutput=(?:append|file):(.+)$/gm)].at(-1);
+  return m ? m[1].trim() : null;
+}
+
+// The processes that listen on 127.0.0.1:<port>, from `ss -ltnp`.
+export function listenerPids(ssText, port) {
+  const pids = new Set();
+  for (const l of String(ssText ?? "").split("\n"))
+    if (l.includes(`127.0.0.1:${port} `))
+      for (const m of l.matchAll(/pid=(\d+)/g)) pids.add(Number(m[1]));
+  return [...pids];
+}
+
+// before, after: { active, main_pid, ws: [pids], http: [pids], uptime_s }
+// read before the Word of the run started and after it was closed.
+// elapsed_s: seconds between the two reads.
+export function residentEvidence({ before, after, elapsed_s }) {
+  const serves = (s) =>
+    !!s?.active && s.main_pid > 0 && s.ws?.includes(s.main_pid) && s.http?.includes(s.main_pid);
+  const say = (s) =>
+    s
+      ? `active=${s.active} MainPID=${s.main_pid} 47833:${JSON.stringify(s.ws)} 47834:${JSON.stringify(s.http)} uptime=${s.uptime_s ?? "-"}s`
+      : "not read";
+  const rows = [
+    rowOf(
+      "serving",
+      serves(before),
+      "the unit is active and its MainPID holds both ports",
+      say(before),
+    ),
+    rowOf(
+      "not restarted",
+      !!after &&
+        after.main_pid === before?.main_pid &&
+        Number.isFinite(after.uptime_s) &&
+        Number.isFinite(before?.uptime_s) &&
+        after.uptime_s >= before.uptime_s + Math.max(0, elapsed_s - 5),
+      `the same MainPID, uptime grew by about ${elapsed_s}s`,
+      `before: ${say(before)} | after: ${say(after)}`,
+    ),
+    rowOf(
+      "still serving",
+      serves(after),
+      "active, both ports held by MainPID after the run",
+      say(after),
+    ),
+  ];
+  return { pass: rows.every((r) => r.result === "PASS"), rows };
 }

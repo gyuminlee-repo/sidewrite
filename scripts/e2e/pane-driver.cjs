@@ -763,6 +763,108 @@ const steps = {
     return view(page);
   },
 
+  // ---- Review tab: "Before submission" and the figures page ----
+  // "Check now" (review-pane.js): the button is disabled while its handler
+  // runs (once), the message line says "Reading the document..." and
+  // "Checking...", and the handler ends with an empty line or an error. The
+  // rows are read once the button is enabled again and the line is neither.
+  async "submission-check"(page) {
+    await steps["open-review"](page);
+    await openFold(page, "review-submit-box");
+    await clearMessage(page);
+    await page.click("#review-submit-check", { timeout: 15_000 });
+    await page.waitForFunction(
+      () => {
+        const b = document.getElementById("review-submit-check");
+        const m = document.getElementById("review-message");
+        const t = m?.textContent.trim() ?? "";
+        if (!b || b.disabled) return false;
+        if (m?.classList.contains("form-error") && t !== "") return true;
+        return !/^(Reading the document|Checking|Waiting for the daemon)/.test(t);
+      },
+      null,
+      { timeout: 5 * 60_000, polling: 200 },
+    );
+    return page.evaluate(() => {
+      const t = (n) => (n ? n.textContent.replace(/\s+/g, " ").trim() : "");
+      const m = document.getElementById("review-message");
+      return {
+        message: t(m),
+        message_error: (m?.classList.contains("form-error") ?? false) && t(m) !== "",
+        count: t(document.getElementById("review-submit-count")),
+        rows: [...document.querySelectorAll("#review-submit-rows .review-submit-row")].map((r) => ({
+          id: r.getAttribute("data-row"),
+          // The class review-submit-<state> (review-pane.js renderSubmission).
+          state:
+            [...(r.classList ?? [])]
+              .find((c) => c.startsWith("review-submit-") && c !== "review-submit-row")
+              ?.slice("review-submit-".length) ?? null,
+          label: t(r.querySelector(".review-submit-state")),
+          text: t(r.querySelector(".review-submit-text")),
+          go: t(r.querySelector(".review-submit-go, .review-figures-open")),
+        })),
+        asof: t(document.querySelector("#review-submit-rows .review-submit-asof")),
+      };
+    });
+  },
+
+  // "Figures and other files" under More (review-pane.js figuresLink). The
+  // call of Office.context.ui.openBrowserWindow is watched by a wrapper that
+  // passes it on; the pages of the WebView2 are listed before and after, so
+  // a figures page that opened inside Word, not in a browser, is seen.
+  // a.settle_ms: how long new pages may take to appear (default 3000).
+  async "figures-open"(page, a) {
+    await steps["open-review"](page);
+    await openFold(page, "review-more");
+    const figurePages = () =>
+      (page.context().browser()?.contexts() ?? [page.context()])
+        .flatMap((c) => c.pages())
+        .map((p) => p.url())
+        .filter((u) => /\/figures\//.test(u));
+    const link = "#review-figures-all a.review-figures-open";
+    await page.waitForSelector(link, { timeout: 30_000 });
+    const href = await page.$eval(link, (n) => n.href);
+    const before = figurePages();
+    const paneBefore = page.url();
+    const spy = await page.evaluate(() => {
+      const rec = { supported: null, wrapped: false, calls: [], errors: [] };
+      try {
+        const office = globalThis.Office;
+        rec.supported =
+          office?.context?.requirements?.isSetSupported?.("OpenBrowserWindowApi", "1.1") ?? null;
+        const ui = office?.context?.ui;
+        if (ui && typeof ui.openBrowserWindow === "function") {
+          const real = ui.openBrowserWindow.bind(ui);
+          ui.openBrowserWindow = (url, ...rest) => {
+            rec.calls.push(String(url));
+            try {
+              return real(url, ...rest);
+            } catch (e) {
+              rec.errors.push(String(e?.message ?? e));
+              throw e;
+            }
+          };
+          rec.wrapped = ui.openBrowserWindow !== real;
+        }
+      } catch (e) {
+        rec.errors.push(String(e?.message ?? e));
+      }
+      globalThis.__e2eFigures = rec;
+      return { supported: rec.supported, wrapped: rec.wrapped };
+    });
+    await page.click(link, { timeout: 15_000 });
+    await sleep(a.settle_ms ?? 3000);
+    const watched = await page.evaluate(() => globalThis.__e2eFigures ?? null);
+    return {
+      href,
+      spy: { ...spy, ...(watched ?? {}) },
+      pane_url_before: paneBefore,
+      pane_url_after: page.url(),
+      figures_pages_before: before,
+      figures_pages_after: figurePages(),
+    };
+  },
+
   // ---- stage parts: a manuscript and its supplementary file ----
 
   // The supplementary file joins the revision of a.main (a file name) by the
