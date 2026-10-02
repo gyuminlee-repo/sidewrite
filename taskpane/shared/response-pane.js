@@ -21,6 +21,7 @@ import {
   undecidedText,
   nextStep,
   exportMessage,
+  letterFromText,
 } from "./response-view.js";
 
 const CONNECTION_LOST =
@@ -57,6 +58,7 @@ export function initResponsePane({
     asking: 0, // job requests sent whose { accepted, job_id } has not come yet
     jobs: new Map(), // job_id -> { resolve, reject } of an askJob waiting for job_done
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
+    partOf: null, // the manuscript this file belongs to, when it is a supplementary file
   };
 
   function el(tag, props = {}, ...kids) {
@@ -386,6 +388,11 @@ export function initResponsePane({
   }
 
   function render() {
+    // A supplementary file: the letter is written from its manuscript, and
+    // the tab is that one sentence.
+    $("response-part-note").textContent = state.partOf ? letterFromText(state.partOf) : "";
+    $("response-part-note").hidden = !state.partOf;
+    $("response-main").hidden = !!state.partOf;
     actionButtons = STATIC_BUTTONS.map((id) => $(id));
     renderProfile();
     renderProposal();
@@ -586,7 +593,7 @@ export function initResponsePane({
   // The saved state: no call into Word.
   async function load() {
     state.profile = await ask("profile_get");
-    await ask("review_load");
+    state.partOf = (await ask("review_load")).linked?.part_of ?? null;
     if (state.profile.problems?.length)
       say(`Profile problem: ${state.profile.problems.join("; ")}`, true);
   }
@@ -599,7 +606,8 @@ export function initResponsePane({
       // A figure change was recorded or decided on the figures page
       // (taskpane.js passes the review_event on): which requests are
       // answered is read again, and the last check is about the state before.
-      else if (msg.event === "figures_changed")
+      // (and: the link of this file to a manuscript changed).
+      else if (msg.event === "figures_changed" || msg.event === "linked_changed")
         load()
           .then(changed, (e) => say(e.message, true))
           .finally(render);
@@ -613,7 +621,7 @@ export function initResponsePane({
       const lost = dropJobs();
       try {
         await load();
-        if (lost && comments().length) await ask("response_state", await docNow());
+        if (lost && comments().length && !state.partOf) await ask("response_state", await docNow());
       } catch (e) {
         say(e.message, true);
       }

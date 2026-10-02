@@ -1043,3 +1043,20 @@ export function submissionGoLabel(go, here = "review") {
   if (!go.tab || !go.target) return "";
   return go.tab === here ? "Go there" : `Go to the ${TAB_NAMES[go.tab] ?? go.tab} tab`;
 }
+
+// ---- a supplementary file in the revision of a manuscript -------------------------
+// (daemon/revision-parts.mjs linkedSummary: part_of is the manuscript of this
+// file, parts are the supplementary files of this manuscript.)
+
+// The button of a manuscript this file could join.
+export const joinLabel = (c) =>
+  `Join the revision of ${c.name}, ${c.comments} comment${c.comments === 1 ? "" : "s"}`;
+// The line of a manuscript that has supplementary files.
+export const linkedFilesText = (parts) => `Linked files: ${parts.map((p) => p.name).join(", ")}`;
+// The line of a supplementary file, and the note where something of the
+// manuscript is shown.
+export const partOfText = (main) =>
+  `This file is part of the revision of ${main.name}. The comments, requests and rules below are edited in ${main.name}.`;
+export const editedInText = (main) => `edited in ${main.name}`;
+// Review turns in a supplementary file come with the next version.
+export const PART_NO_TURNS = "Changes in this file come in the next version";

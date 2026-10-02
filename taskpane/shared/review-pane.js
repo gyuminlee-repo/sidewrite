@@ -50,6 +50,11 @@ import {
   SUBMISSION_STATE_LABELS,
   submissionCount,
   submissionGoLabel,
+  joinLabel,
+  linkedFilesText,
+  partOfText,
+  editedInText,
+  PART_NO_TURNS,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
@@ -151,7 +156,13 @@ export function initReviewPane({
     results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
     cards: new Map(), // ref -> the elements of its card, as of the last render
     submission: null, // { rows, doc, at } of the last "Check now" of this connection
+    linked: null, // { part_of, parts, note } of the last load (null: a daemon from before links)
+    linkCandidates: [], // manuscripts in the folder this file could join
   };
+  // The manuscript this file belongs to, when it is a supplementary file. What
+  // the manuscript owns (comment list, requests, rules) is then shown and not
+  // changed here, and no review turn is started yet.
+  const partOf = () => state.linked?.part_of ?? null;
 
   function el(tag, props = {}, ...kids) {
     const n = document.createElement(tag);
@@ -606,7 +617,10 @@ export function initReviewPane({
         class: "btn-primary btn-small",
         text: "Propose changes",
       });
-      proposeButtons.push(propose);
+      // In a supplementary file the button is not in the card: a sentence
+      // says so in its place.
+      const main = partOf();
+      if (!main) proposeButtons.push(propose);
       propose.disabled = isTurnInFlight() || queue.running;
       // The turn is taken on the click, before the selection and refresh()
       // waits: a second click meanwhile is ignored (Codex review 8) and the
@@ -685,7 +699,12 @@ export function initReviewPane({
       const requestList = el(
         "div",
         { class: "review-req-list" },
-        el("div", { class: "review-questions-head" }, "What the reviewer asks ", edit),
+        el(
+          "div",
+          { class: "review-questions-head" },
+          "What the reviewer asks ",
+          main ? el("span", { class: "review-part-note", text: `(${editedInText(main)})` }) : edit,
+        ),
         ...(rows.length
           ? rows.map((r) =>
               el(
@@ -751,15 +770,16 @@ export function initReviewPane({
         { class: "review-comment-body" },
         progressEl,
         result,
-        el("div", { class: "review-card-actions" }, status, propose),
+        el("div", { class: "review-card-actions" }, status, main ? null : propose),
+        main ? el("div", { class: "review-part-note", text: `${PART_NO_TURNS}.` }) : null,
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
         requestList,
         // A request that is answered in another file, or a figure change:
         // the comparison and the decision are on the figures page.
-        hasFigureWork(c) ? figuresLink(c.ref) : null,
-        reqs,
-        saveReqs,
+        !main && hasFigureWork(c) ? figuresLink(c.ref) : null,
+        main ? null : reqs,
+        main ? null : saveReqs,
       );
       const card = el("div", { class: "review-comment", "data-ref": c.ref }, head, body);
       const advanced = el(
@@ -819,7 +839,7 @@ export function initReviewPane({
         body.append(line);
       }
       for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));
-      body.append(advanced);
+      if (!main) body.append(advanced);
       box.append(card);
     }
     // The prompt shown by Preview prompt sits under Advanced in its card.
@@ -879,16 +899,91 @@ export function initReviewPane({
           el("strong", { text: item.kind === "forbid" ? "Forbidden wording" : "Instruction" }),
           el("span", { text: ` ${item.text}${how ? ` (${how})` : ""}. ${statusText}. ` }),
           check,
-          edit,
-          remove,
+          partOf() ? null : edit,
+          partOf() ? null : remove,
         ),
       );
+    }
+    // In a supplementary file the rules are those of the manuscript: they
+    // are shown and checked here, and added or changed there.
+    const main = partOf();
+    $("review-ledger-note").textContent = main ? `These rules are ${editedInText(main)}.` : "";
+    $("review-ledger-note").hidden = !main;
+    for (const id of [
+      "review-ledger-form",
+      "review-ledger-advanced",
+      "ledger-import",
+      "ledger-suggest-review",
+      "ledger-candidates",
+    ]) {
+      $(id).hidden = !!main;
     }
     const rules = state.revision?.ledger ?? [];
     $("review-ledger-count").textContent = rules.length ? `(${rules.length})` : "";
     $("review-ledger-add").textContent = state.editingLedger
       ? `Save ${state.editingLedger}`
       : "Add";
+  }
+
+  // The link between a manuscript and its supplementary files. A manuscript:
+  // one line that names them. A supplementary file: the line that says where
+  // its list comes from, with the way out. A file with no review of its own:
+  // the box to join the revision of a manuscript (nothing joins by itself).
+  async function joinRevision(main) {
+    const r = await ask("review_link_join", { main });
+    state.linked = r.linked ?? null;
+    state.linkCandidates = [];
+    $("review-link-path").value = "";
+    say(`Joined the revision of ${partOf()?.name ?? "the manuscript"}.`);
+  }
+  function renderLink() {
+    const main = partOf();
+    const parts = state.linked?.parts ?? [];
+    const line = $("review-linked");
+    line.replaceChildren();
+    if (main) {
+      const leave = el("button", {
+        type: "button",
+        class: "btn-link review-link-leave",
+        text: "Leave this revision",
+      });
+      leave.addEventListener(
+        "click",
+        guard(async () => {
+          await ask("review_link_leave");
+          await load();
+          say(`This file left the revision of ${main.name}.`);
+        }),
+      );
+      line.append(el("div", { class: "review-linked-text", text: partOfText(main) }));
+      if (state.linked.note)
+        line.append(el("div", { class: "form-error", text: state.linked.note }));
+      line.append(leave);
+    } else if (parts.length) {
+      line.append(el("div", { class: "review-linked-text", text: linkedFilesText(parts) }));
+    }
+    line.hidden = !main && parts.length === 0;
+    const empty = (state.revision?.comments ?? []).length === 0 && state.draft.length === 0;
+    $("review-link-box").hidden = !state.linked || !!main || parts.length > 0 || !empty;
+    // With no manuscript to offer, the box is the last thing on the tab.
+    $("review-link-box").setAttribute(
+      "class",
+      `review-fold review-link${state.linkCandidates.length ? "" : " review-link-last"}`,
+    );
+    $("review-link-candidates").replaceChildren(
+      ...state.linkCandidates.map((c) => {
+        const b = el("button", {
+          type: "button",
+          class: "btn-primary btn-small review-link-candidate",
+          text: joinLabel(c),
+        });
+        b.addEventListener(
+          "click",
+          guard(() => joinRevision(c.doc)),
+        );
+        return b;
+      }),
+    );
   }
 
   // P15: candidate rules from the review text, one checkbox each.
@@ -1090,7 +1185,11 @@ export function initReviewPane({
   function renderSections() {
     const comments = state.revision?.comments ?? [];
     const hasReview = comments.length > 0 || state.draft.length > 0;
-    $("review-start").hidden = hasReview;
+    // In a supplementary file the review is pasted, split and changed in
+    // the manuscript; review turns of this file come with the next version.
+    const part = !!partOf();
+    $("review-start").hidden = hasReview || part;
+    $("review-paste-section").hidden = part;
     const collapsed = hasReview && !state.pasteOpen;
     $("review-paste-box").hidden = collapsed;
     $("review-paste-summary").hidden = !hasReview;
@@ -1104,16 +1203,25 @@ export function initReviewPane({
     // Refresh status stays reachable while nothing is loaded (no daemon), so a
     // press says why; once a review is loaded and empty there is nothing to list.
     $("review-comments-section").hidden = comments.length === 0 && !!state.revision;
-    $("review-propose-all").hidden = comments.length === 0;
-    $("review-more").hidden = comments.length === 0;
+    $("review-propose-all").hidden = comments.length === 0 || part;
+    $("review-more").hidden = comments.length === 0 || part;
     $("review-submit-box").hidden = comments.length === 0;
+    // The submission check counts the answers of the letter: it runs in the
+    // manuscript. The comment cleanup under it is each file's own.
+    $("review-submit-check").hidden = part;
+    $("review-submit-rows").hidden = part;
+    $("review-submit-help").textContent = part
+      ? `The submission check runs in ${partOf().name}.`
+      : "Checks this file and the files made from it. Nothing is changed.";
     const notDone = comments.filter((c) => c.status !== "done").length;
     // Once a check has run the header counts its rows, not the comments.
-    $("review-submit-count").textContent = state.submission
-      ? submissionCount(state.submission.rows)
-      : notDone
-        ? `(${notDone} not done)`
-        : "";
+    $("review-submit-count").textContent = part
+      ? ""
+      : state.submission
+        ? submissionCount(state.submission.rows)
+        : notDone
+          ? `(${notDone} not done)`
+          : "";
     renderSubmission();
   }
 
@@ -1164,6 +1272,7 @@ export function initReviewPane({
     // The cards are built anew: the author stays where they were.
     const keep = root.scrollTop;
     renderSections();
+    renderLink();
     renderDraft();
     renderComments();
     renderSummary();
@@ -1334,6 +1443,19 @@ export function initReviewPane({
   async function load() {
     const r = await ask("review_load");
     state.path = r.path;
+    state.linked = r.linked ?? null;
+    // A file with no review of its own and no link: the manuscripts in its
+    // folder it could join. Asked only of a daemon that knows links.
+    state.linkCandidates = [];
+    const free = r.linked && !r.linked.part_of && r.linked.parts.length === 0;
+    if (free && (state.revision?.comments ?? []).length === 0) {
+      try {
+        state.linkCandidates = (await ask("review_link_candidates")).candidates ?? [];
+      } catch {
+        /* the folder could not be read: the path field is still there */
+      }
+    }
+    $("review-link-box").open = state.linkCandidates.length > 0;
   }
 
   const refresh = () => refreshWith(say);
@@ -1485,6 +1607,10 @@ export function initReviewPane({
       // Comments a running turn or an open edit still uses are not removed.
       if (r.warnings?.length) say(r.warnings.join(" "));
     }),
+  );
+  $("review-link-join").addEventListener(
+    "click",
+    guard(() => joinRevision($("review-link-path").value)),
   );
   $("review-refresh").addEventListener(
     "click",
@@ -1875,7 +2001,10 @@ export function initReviewPane({
         msg.event === "edit_blocked" ||
         msg.event === "comment_noted" ||
         // A figure change was recorded or decided on the figures page.
-        msg.event === "figures_changed"
+        msg.event === "figures_changed" ||
+        // The link to a manuscript or a supplementary file changed, or the
+        // manuscript changed what this supplementary file copies.
+        msg.event === "linked_changed"
       ) {
         load()
           .catch((e) => say(e.message, true))

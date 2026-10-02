@@ -260,3 +260,6 @@ export function exportMessage(r) {
       : ""
   }`;
 }
+
+// The Response tab of a supplementary file (main: the manuscript it belongs to).
+export const letterFromText = (main) => `The letter is written from ${main.name}.`;

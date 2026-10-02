@@ -376,6 +376,16 @@ The pictures need PyMuPDF (`pip install pymupdf`). Without it the page says so, 
 
 Known limits of this step: the adopted copy of a table or other file also goes to `figures/submission/` (there is no folder of its own for supplementary files yet), and the list of files to choose from is the `figures` folder, so a supplementary file kept elsewhere is named by its full path. The stored record keeps the field names of a figure (`figure_changes`, `figure`).
 
+### Supplementary Word documents (Review tab, Word)
+
+A supplementary document that is a Word file of its own can join the revision of its manuscript. Open it in Word. While it has no review of its own, the Review tab shows "This file belongs to another manuscript's revision": a button for each manuscript in the same folder that holds reviewer comments ("Join the revision of paper.docx, 23 comments"), and a field for the path of a manuscript kept elsewhere. Nothing is joined until you press a button, because one folder can hold two papers.
+
+After the join the supplementary document shows the comment list, the requests and the rules of the manuscript. They are edited in the manuscript only; the supplementary document copies them every time its pane loads, and an open pane is told when the manuscript changes them. A rule with the scope "Supplement" applies in the supplementary document; a word or section count of the manuscript does not. The Response tab of the supplementary document is one sentence: the letter is written from the manuscript. The manuscript's Review tab names its linked files. "Leave this revision" takes the link away again, with the copied list.
+
+Each document keeps its own `<name>.revision.json`. The link is written in both files (`part_of` in the supplementary document, `parts` in the manuscript), so a file saved by an earlier version of Sidewrite, which drops the field, gets it back the next time the supplementary document is opened. The manuscript keeps a comment while a supplementary document has recorded changes under it.
+
+Known limit of this step: changes cannot be proposed in the supplementary document yet ("Changes in this file come in the next version"), and the response letter does not count or cite it. A file that was renamed after the join is not found again; leave and join once more.
+
 ### Tools tab (Word)
 
 The Tools tab never writes to the open document. A copy is a new file next to the manuscript, made from the file as it was last saved, so save before you make one.

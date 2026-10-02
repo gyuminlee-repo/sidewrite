@@ -938,6 +938,8 @@ async function handleServerMessage(msg) {
       // A decision on the figures page also changes which requests the
       // Response tab counts as answered.
       if (msg.event === "figures_changed") responsePane?.onEvent(msg);
+      // The link of this file to a manuscript changed: the tab is another one.
+      if (msg.event === "linked_changed") responsePane?.onEvent(msg);
       break;
 
     case "response_event":
