@@ -409,7 +409,11 @@ test("changeFlags shows lost facts, unsourced terms and a narrowed range", () =>
         }),
       )
       .map((f) => f.text),
-    ["Lost: 20 mL; Merck", "No source: antifoam", "Narrowed"],
+    [
+      "The old wording had 20 mL; Merck. The new wording does not. Reject the change in Word if that is not meant.",
+      "No source: antifoam",
+      "Only the words that differ are marked in Word, not the whole phrase Claude gave. Nothing to do.",
+    ],
   );
 });
 
@@ -494,10 +498,10 @@ test("L7 pendingDecisions gathers blocked edits, unchecked ledger items and open
   assert.deepEqual(
     [...d.blocked, ...d.ledger, ...d.requirements].map((x) => x.text),
     [
-      'R1.3 blocked by L2: "novel substrate"',
-      "L2 not checked yet",
-      "L3 check failed",
-      "R1.3 q1 has no change: call it novel",
+      "R1.3: an edit (“novel substrate”) was stopped by the rule “L2”. Open the comment to decide.",
+      "The rule “L2” is not checked yet.",
+      "The check of the rule “L3” failed.",
+      "R1.3: nothing changes yet for “call it novel”.",
     ],
   );
   assert.equal(view.pendingDecisions({ comments: [], ledger: [] }).total, 0);
@@ -515,7 +519,7 @@ test("L7 pendingDecisions gathers blocked edits, unchecked ledger items and open
   });
   assert.deepEqual(
     unanswered.blocked.map((x) => x.text),
-    ['R1.3 edit with no answer from Word: "the medium"'],
+    ["R1.3: Word did not answer an edit (“the medium”). Open the comment to check it."],
   );
   // The same edit while Word still works on it (on file from before the
   // call, state applying): nothing to decide yet. An exception being
@@ -541,9 +545,14 @@ test("L7 pendingDecisions gathers blocked edits, unchecked ledger items and open
 test("ledgerStatusText names the stage that checks a non-manuscript item", () => {
   assert.equal(
     view.ledgerStatusText({ status: "violations", violation_count: 2 }),
-    "2 violation(s)",
+    "Found in 2 places",
   );
-  assert.equal(view.ledgerStatusText({ status: "ok" }), "ok");
+  assert.equal(
+    view.ledgerStatusText({ status: "violations", violation_count: 1 }),
+    "Found in 1 place",
+  );
+  assert.equal(view.ledgerStatusText({ status: "ok" }), "No problem found");
+  assert.equal(view.ledgerStatusText({ status: "unchecked" }), "Not checked yet");
   // A check that failed (a model reply that could not be used, a regex that
   // does not compile) passed nothing.
   assert.equal(
@@ -627,12 +636,15 @@ test("an unsure ledger item waits for the author and says how many paragraphs", 
   });
   assert.deepEqual(
     d.ledger.map((x) => x.text),
-    ["L1 unsure on paragraph(s) 5, 8", "L2 unsure on paragraph(s) 5"],
+    [
+      "The rule “L1” is unsure about 2 paragraphs. Look at them in Word.",
+      "The rule “L2” is unsure about 1 paragraph. Look at them in Word.",
+    ],
   );
-  assert.equal(view.ledgerStatusText({ status: "unsure", unsure }), "unsure on 2 paragraph(s)");
+  assert.equal(view.ledgerStatusText({ status: "unsure", unsure }), "unsure about 2 paragraphs");
   assert.equal(
     view.ledgerStatusText({ status: "violations", violation_count: 1, unsure: unsure.slice(0, 1) }),
-    "1 violation(s), unsure on 1 paragraph(s)",
+    "Found in 1 place, unsure about 1 paragraph",
   );
 });
 
@@ -800,8 +812,8 @@ test("an open requirement of a comment under a section names the section", () =>
   assert.deepEqual(
     d.requirements.map((x) => x.text),
     [
-      "R1.1 (Abstract) q1 has no change: Shorten this section.",
-      "R1.2 q1 has no change: Add units.",
+      "R1.1 (Abstract): nothing changes yet for “Shorten this section”.",
+      "R1.2: nothing changes yet for “Add units”.",
     ],
   );
 });
@@ -896,7 +908,7 @@ test("doneBlockers: what is still open when a comment is marked Done", () => {
   );
   // The wording of the open-requirement case is the one the tab always had.
   assert.deepEqual(view.doneBlockers(c([], [{ id: "q1", text: "state the unit" }]), []), [
-    'q1 "state the unit" has no change',
+    '"state the unit" has no change',
   ]);
   // Changes not decided in Word, and confirmed ledger rules with violations.
   assert.deepEqual(
@@ -909,7 +921,7 @@ test("doneBlockers: what is still open when a comment is marked Done", () => {
       ],
     ),
     [
-      'q1 "a" has no change',
+      '"a" has no change',
       "3 changes are not decided in Word (2 pending, 1 not found)",
       "the ledger check has violations (L1: 2, L3: 1)",
     ],

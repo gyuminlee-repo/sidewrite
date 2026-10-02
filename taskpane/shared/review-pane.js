@@ -17,7 +17,6 @@ import {
   commentsToResolve,
   changeFlags,
   requirementsFromText,
-  requirementsLine,
   consistencyMessage,
   consistencyLines,
   openRequestsText,
@@ -31,6 +30,10 @@ import {
   inFlightEdit,
   reviewerOfRef,
   progressText,
+  countsSentence,
+  ledgerHowText,
+  requestStateText,
+  requirementStates,
   clockText,
   commentState,
   firstLine,
@@ -44,7 +47,8 @@ import {
   queueRefs,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
-import { stillPresentLines } from "./residue.js";
+import { stillPresentItems } from "./residue.js";
+import { firstWords, paragraphLabel } from "./paragraph-label.js";
 import { createAutoRefresh } from "./auto-refresh.js";
 
 const UNKNOWN_HINT =
@@ -92,6 +96,8 @@ export function initReviewPane({
     confirmDone: null, // L5: ref whose "Done" was asked once with something left open
     answerDrafts: new Map(), // ref/question id -> answer typed and not saved yet
     reqDrafts: new Map(), // ref -> requirement text typed and not saved yet (Codex review 9)
+    reqEdit: new Set(), // refs whose list of requests is open for editing
+    previewRef: null, // the comment whose prompt is shown under its Advanced
     armedBlocked: new Set(), // ids of blocked edits whose "Allow exception" was pressed once
     armedReapply: new Set(), // ids of outcome_unknown edits whose "Re-apply anyway" was pressed once
     applyingBlocked: new Set(), // ids of blocked edits whose override request is in flight
@@ -123,12 +129,30 @@ export function initReviewPane({
   }
   // The message line as it was last written, for a line put in front of it.
   let said = { text: "", bad: false };
-  function say(text, bad = false) {
+  // details: the exact numbers behind the sentence, under "Details".
+  function say(text, bad = false, details = "") {
     said = { text, bad };
     const m = $("review-message");
     m.textContent = text;
     m.classList.toggle("form-error", bad);
     m.hidden = !text;
+    $("review-message-details").textContent = text ? details : "";
+    $("review-message-more").hidden = !text || !details;
+  }
+  // A paragraph, named by its section and its first words. Pressing it selects
+  // the paragraph in Word. The internal id of a paragraph is never shown.
+  function paragraphLink(index) {
+    const b = el("button", {
+      type: "button",
+      class: "btn-link review-paragraph-link",
+      text: paragraphLabel(state.revision?.snapshot, index).label,
+    });
+    b.title = "Select this paragraph in Word";
+    b.addEventListener(
+      "click",
+      guard(() => word.selectParagraphByIndex(index)),
+    );
+    return b;
   }
   async function ask(type, payload = {}, timeoutMs) {
     const r = await sendRequest(type, payload, timeoutMs ? { timeoutMs } : undefined);
@@ -255,13 +279,12 @@ export function initReviewPane({
   }
 
   function changeRow(ch) {
-    const ids = ch.rationale.requirement_ids ?? [];
     const row = el(
       "button",
       { type: "button", class: `review-change state-${ch.state}` },
       el("span", { class: "review-badge", text: STATE_LABELS[ch.state] ?? ch.state }),
       el("span", {
-        text: ` ${ch.kind}: ${ch.rationale.what}${ids.length ? ` [${ids.join(",")}]` : ""}`,
+        text: ` ${ch.kind}: ${ch.rationale.what}`,
       }),
     );
     row.title = `${ch.rationale.why} / ${ch.rationale.addresses}\nBefore: ${ch.before}\nAfter: ${ch.after}`;
@@ -491,6 +514,7 @@ export function initReviewPane({
 
   function renderComments() {
     const box = $("review-comments");
+    $("review-preview-holder").append($("review-preview")); // out of the cards that go
     box.replaceChildren();
     proposeButtons = [];
     state.cards.clear();
@@ -553,6 +577,7 @@ export function initReviewPane({
           });
           $("review-preview").textContent = r.prompt;
           $("review-preview").hidden = false;
+          state.previewRef = c.ref;
         }),
       );
       const reqs = el("textarea", {
@@ -579,9 +604,53 @@ export function initReviewPane({
             requirements: requirementsFromText(reqs.value),
           });
           state.reqDrafts.delete(c.ref);
+          state.reqEdit.delete(c.ref);
         }),
       );
-      const reqLine = requirementsLine(c);
+      // What the reviewer asks: one line per request with where it stands. The
+      // box to change the list opens from Edit.
+      const rows = requirementStates(c);
+      const editing = state.reqEdit.has(c.ref);
+      const edit = el("button", {
+        type: "button",
+        class: "btn-link",
+        text: editing ? "Close the editor" : "Edit",
+      });
+      edit.addEventListener("click", () => {
+        if (state.reqEdit.has(c.ref)) state.reqEdit.delete(c.ref);
+        else state.reqEdit.add(c.ref);
+        render();
+      });
+      reqs.hidden = !editing;
+      saveReqs.hidden = !editing;
+      const requestList = el(
+        "div",
+        { class: "review-req-list" },
+        el("div", { class: "review-questions-head" }, "What the reviewer asks ", edit),
+        ...(rows.length
+          ? rows.map((r) =>
+              el(
+                "div",
+                {
+                  class: "review-req",
+                  "data-req-id": r.id,
+                  "data-req-text": r.text,
+                  "data-state": r.state,
+                },
+                el("span", { class: "review-req-text", text: r.text }),
+                el("span", {
+                  class: `review-req-state review-req-${r.state}`,
+                  text: requestStateText(r),
+                }),
+              ),
+            )
+          : [
+              el("div", {
+                class: "review-req-none",
+                text: "No requests listed yet. Use Edit to add them, one per line; until then a turn lists them itself.",
+              }),
+            ]),
+      );
       const stateEl = el("span", { class: "review-comment-state" });
       const head = el(
         "button",
@@ -623,15 +692,22 @@ export function initReviewPane({
         { class: "review-comment-body" },
         progressEl,
         result,
-        el("div", { class: "review-card-actions" }, status, propose, preview),
+        el("div", { class: "review-card-actions" }, status, propose),
         c.section ? el("div", { class: "review-comment-section", text: c.section }) : null,
         el("div", { class: "review-comment-text", text: c.text }),
+        requestList,
         reqs,
         saveReqs,
-        el("div", { class: "review-reqs-line", text: reqLine }),
       );
       const card = el("div", { class: "review-comment", "data-ref": c.ref }, head, body);
-      state.cards.set(c.ref, { card, head, body, stateEl, progressEl, clockEl });
+      const advanced = el(
+        "details",
+        { class: "review-card-advanced" },
+        el("summary", { text: "Advanced" }),
+        preview,
+      );
+      advanced.open = state.previewRef === c.ref;
+      state.cards.set(c.ref, { card, head, body, stateEl, progressEl, clockEl, advanced });
       // What the model asked instead of guessing (office_ask_author). An
       // answer goes into the prompt of the next turn.
       if ((c.questions ?? []).length) {
@@ -674,11 +750,23 @@ export function initReviewPane({
       }
       for (const ch of c.changes) body.append(changeRow(ch));
       // Terms the changes took out that other paragraphs still hold (residue.js).
-      for (const line of stillPresentLines(c, state.revision?.snapshot)) {
-        body.append(el("div", { class: "review-residue", text: line }));
+      for (const it of stillPresentItems(c, state.revision?.snapshot)) {
+        const line = el("div", { class: "review-residue", text: it.text });
+        for (const i of it.indexes) line.append(" ", paragraphLink(i));
+        if (it.more) line.append(el("span", { text: ` and ${it.more} more` }));
+        body.append(line);
       }
       for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));
+      body.append(advanced);
       box.append(card);
+    }
+    // The prompt shown by Preview prompt sits under Advanced in its card.
+    const pre = $("review-preview");
+    const shown = state.cards.get(state.previewRef);
+    if (shown) shown.advanced.append(pre);
+    else {
+      state.previewRef = null;
+      $("review-preview-holder").append(pre);
     }
     if (state.openRef && !state.cards.has(state.openRef)) state.openRef = null;
     for (const [ref, els] of state.cards) paintOpen(ref, els);
@@ -721,12 +809,13 @@ export function initReviewPane({
         }),
       );
       const statusText = ledgerStatusText(item);
+      const how = ledgerHowText(item);
       box.append(
         el(
           "div",
-          { class: "review-ledger-item" },
-          el("strong", { text: `${item.id} ${item.kind}` }),
-          el("span", { text: ` ${item.text} [${item.check.type}] ${statusText} ` }),
+          { class: "review-ledger-item", "data-id": item.id, "data-kind": item.kind },
+          el("strong", { text: item.kind === "forbid" ? "Forbidden wording" : "Instruction" }),
+          el("span", { text: ` ${item.text}${how ? ` (${how})` : ""}. ${statusText}. ` }),
           check,
           edit,
           remove,
@@ -784,10 +873,35 @@ export function initReviewPane({
       ...d.requirements.map((x) => ({ x, shown: turnRan(x.ref) })),
     ];
     const total = items.filter((i) => i.shown).length;
-    box.replaceChildren(el("div", { text: `Waiting for you: ${total}` }));
+    const count = el("div", { text: `Waiting for you: ${total}` });
+    count.hidden = true; // the summary of the box says it
+    box.replaceChildren(count);
     for (const { x, shown } of items) {
-      const row = el("div", { class: "review-decision", text: x.text });
+      const row = el("div", {
+        class: "review-decision",
+        text: x.text,
+        role: "button",
+        tabindex: "0",
+        "data-kind": x.kind,
+        "data-ref": x.ref ?? "",
+        "data-req": x.kind.startsWith("request") ? x.id : "",
+      });
       row.hidden = !shown;
+      // Opens what it is about: the comment, or the rules.
+      const go = () => {
+        if (x.ref) openCard(x.ref, { toggle: false });
+        else {
+          $("review-ledger-box").open = true;
+          $("review-ledger-box").scrollIntoView?.({ block: "start" });
+        }
+      };
+      row.addEventListener("click", go);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault?.();
+          go();
+        }
+      });
       box.append(row);
     }
     $("review-waiting-count").textContent = total ? `(${total})` : "";
@@ -802,10 +916,17 @@ export function initReviewPane({
     $("review-external-count").textContent = outside.length ? `(${outside.length})` : "";
     $("review-external-box").hidden = outside.length === 0;
     for (const x of outside) {
-      const where = x.paragraph_index ?? x.old_index;
+      // A deleted paragraph is not in the snapshot: its old first words name it.
+      const what =
+        x.paragraph_index == null
+          ? `\u201c${firstWords(x.before)}\u201d`
+          : paragraphLabel(state.revision?.snapshot, x.paragraph_index).label;
+      const verb = { inserted: "added", deleted: "deleted" }[x.kind] ?? "changed";
       const label =
-        `${x.id} ${x.kind} paragraph ${where}` +
-        (x.lost_facts.length ? `. Lost: ${x.lost_facts.join("; ")}` : "");
+        `A paragraph was ${verb} outside the tool: ${what}.` +
+        (x.lost_facts.length
+          ? ` The old text had ${x.lost_facts.join("; ")}, and the new text does not. Check that this is meant.`
+          : "");
       const go = el("button", { type: "button", class: "review-violation", text: label });
       if (x.paragraph_index != null)
         go.addEventListener(
@@ -866,7 +987,11 @@ export function initReviewPane({
     const box = $("review-consistency");
     box.replaceChildren();
     for (const line of consistencyLines(state.revision?.consistency)) {
-      const b = el("button", { type: "button", class: "review-violation", text: line.text });
+      const b = el("button", {
+        type: "button",
+        class: "review-violation",
+        text: `${paragraphLabel(state.revision?.snapshot, line.paragraph_index).label}: ${line.text}`,
+      });
       b.addEventListener(
         "click",
         guard(() => word.selectParagraphByIndex(line.paragraph_index)),
@@ -889,7 +1014,7 @@ export function initReviewPane({
           if (isTurnInFlight() || queue.running) return;
           return run(
             onTurnStarted(
-              `Review ${line.rewrite_ref}: rewriting paragraph ${line.paragraph_index} (tracked)...`,
+              `Review ${line.rewrite_ref}: rewriting ${paragraphLabel(state.revision?.snapshot, line.paragraph_index).label} (tracked)...`,
             ),
           );
         });
@@ -1118,9 +1243,12 @@ export function initReviewPane({
     const inv = invariantReport(state.revision, snapshot.comments);
     const c = r.counts;
     const outside = r.external?.length
-      ? ` Outside changes: ${r.external.length} (list under Comments and changes).`
+      ? ` Outside changes: ${r.external.length} (list under Changes made outside the tool).`
       : "";
+    // One sentence on what to do next; the full counts are under Details.
     report(
+      countsSentence(c, inv, { outside: r.external?.length ?? 0, unresolved: unresolved.length }),
+      !inv.ok,
       `Accepted ${c.accepted}, rejected ${c.rejected}, edited ${c.user_edited}, pending ${c.pending}, not found ${c.unlocated}. ` +
         `Changes ${inv.changes}, expected tool comments ${inv.expected_comments}, found ${inv.tool_comments}` +
         invariantText(inv) +
@@ -1128,7 +1256,6 @@ export function initReviewPane({
         (unresolved.length
           ? ` ${unresolved.length} rationale comment(s) not marked resolved (Word: ${unresolved[0]}; one cause is a document in compatibility mode).`
           : ""),
-      !inv.ok,
     );
     return inv; // turn_done: a mismatch ends a Propose all run
   }
@@ -1139,13 +1266,29 @@ export function initReviewPane({
     const r = await askJob("ledger_check", { ids, snapshot, full });
     const box = $("review-violations");
     box.replaceChildren();
+    const rules = state.revision?.ledger ?? [];
     for (const res of r.outcomes) {
+      const text = rules.find((i) => i.id === res.id)?.text ?? res.id;
+      const found = res.violations.length;
+      if (found) {
+        box.append(
+          el("div", {
+            class: "review-found",
+            text: `${text}: found in ${found} place${found === 1 ? "" : "s"}`,
+          }),
+        );
+      }
       for (const v of res.violations) {
-        const label =
+        const where =
           v.paragraph_index == null
-            ? `${res.id}: required text is gone`
-            : `${res.id}: paragraph ${v.paragraph_index}${v.match ? ` "${v.match}"` : " (pending deletion)"}`;
-        const b = el("button", { type: "button", class: "review-violation", text: label });
+            ? "Required text is gone"
+            : `${paragraphLabel(state.revision?.snapshot, v.paragraph_index).label}${v.match ? ` has \u201c${v.match}\u201d` : " is waiting to be deleted"}`;
+        const b = el("button", {
+          type: "button",
+          class: "review-violation",
+          "data-rule": res.id,
+          text: where,
+        });
         if (v.paragraph_index != null)
           b.addEventListener(
             "click",
@@ -1154,7 +1297,9 @@ export function initReviewPane({
         box.append(b);
       }
       if (res.status === "error")
-        box.append(el("div", { class: "form-error", text: `${res.id}: ${res.error}` }));
+        box.append(
+          el("div", { class: "form-error", text: `The check of ${text} failed: ${res.error}` }),
+        );
     }
   }
 
@@ -1190,8 +1335,15 @@ export function initReviewPane({
         ...c,
         requirementsText: (c.requirements ?? []).map((q) => q.text).join("\n"),
       }));
-      if (r.warnings?.length) say(`Split by ${r.method}. ${r.warnings.join(" ")}`);
-      else say(`Split by ${r.method}: ${r.comments.length} comment(s). Edit, then Save.`);
+      // regex: found by the numbering and layout of the text; llm: read by the model.
+      const how = r.method === "llm" ? "read by Claude" : "found by the numbering in the text";
+      if (r.warnings?.length) say(`Split into comments (${how}). ${r.warnings.join(" ")}`);
+      else {
+        const n = r.comments.length;
+        say(
+          `Split into ${n} comment${n === 1 ? "" : "s"} (${how}). Check the list, then press Save comment list.`,
+        );
+      }
     }),
   );
   $("review-save").addEventListener(
@@ -1258,13 +1410,21 @@ export function initReviewPane({
   $("review-ledger-add").addEventListener(
     "click",
     guard(async () => {
+      // Only the words typed: the check is drafted from them, as "Draft check
+      // from text" does (a phrase in quotation marks is looked for as written,
+      // anything else is read by Claude).
+      let checkType = $("ledger-check-type").value;
+      let pattern = $("ledger-pattern").value;
+      let flags = $("ledger-flags").value;
+      const drafted = checkType === "regex" && !pattern && !state.editingLedger;
+      if (drafted) ({ checkType, pattern, flags } = ledgerCheckFromText($("ledger-text").value));
       const r = ledgerItemFromForm({
         kind: $("ledger-kind").value,
         text: $("ledger-text").value,
         scope: $("ledger-scope").value,
-        checkType: $("ledger-check-type").value,
-        pattern: $("ledger-pattern").value,
-        flags: $("ledger-flags").value,
+        checkType,
+        pattern,
+        flags,
         expect: $("ledger-expect").value,
       });
       if (r.error) throw new Error(r.error);
@@ -1276,6 +1436,13 @@ export function initReviewPane({
       }
       $("ledger-text").value = "";
       $("ledger-pattern").value = "";
+      if (drafted) {
+        say(
+          checkType === "regex"
+            ? `Rule added. It looks for \u201c${pattern.replace(/\\(.)/g, "$1")}\u201d as written.`
+            : "Rule added. Claude reads each paragraph to check it.",
+        );
+      }
     }),
   );
   // P15: the ledger as a JSON file. Export writes <stem>.ledger.json next to

@@ -421,15 +421,15 @@ test("view: the message after a check and the lines under the button", () => {
   assert.deepEqual(view.consistencyLines(consistency), [
     {
       paragraph_index: 2,
-      text: "p2: changes of different comments work against each other. One change removes the claim the other one explains. (R1.1-1, R2.3-1)",
+      text: "changes of different comments work against each other. One change removes the claim the other one explains.",
     },
     {
       paragraph_index: 5,
-      text: "id5: a sentence takes the review as its source. Cites the review.",
+      text: "a sentence takes the review as its source. Cites the review.",
     },
     {
       paragraph_index: 5,
-      text: "id5 holds 3 changes (R1.1-3, R1.1-4, R1.1-6): read it as a whole and rewrite it if it no longer reads as one paragraph.",
+      text: "This paragraph holds 3 changes: read it as a whole and rewrite it if it no longer reads as one paragraph.",
       rewrite_ref: "R1.1",
     },
   ]);

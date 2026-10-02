@@ -688,7 +688,7 @@ async function main() {
   const resolved = resolvedMatch(
     JSON.parse(fs.readFileSync(REVISION, "utf8")),
     record.word.state_after_refresh,
-    after.message,
+    `${after.message} ${after.message_details ?? ""}`,
   );
   record.word.resolved = resolved;
   rows.push({

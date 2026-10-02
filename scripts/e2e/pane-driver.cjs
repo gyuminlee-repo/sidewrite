@@ -62,6 +62,8 @@ async function clearMessage(page) {
     if (!m) return;
     m.textContent = "";
     m.hidden = true;
+    const d = document.getElementById("review-message-details");
+    if (d) d.textContent = "";
   });
 }
 // until (a RegExp source): the message this step's own action ends with. The
@@ -92,12 +94,23 @@ async function view(page) {
     const q = (s, root = document) => [...root.querySelectorAll(s)];
     return {
       message: t(document.getElementById("review-message")),
+      // The numbers behind the sentence of a refresh (under "Details").
+      message_details: t(document.getElementById("review-message-details")),
       message_error:
         document.getElementById("review-message")?.classList.contains("form-error") ?? false,
       file: t(document.getElementById("review-file")),
       comments: q(".review-comment").map((c) => ({
         ref: t(c.querySelector(".review-comment-head strong")),
-        reqs_line: t(c.querySelector(".review-reqs-line")),
+        // What the reviewer asks, one row per request: the id and the text of each,
+        // as the old line "Requirements: q1 text; q2 text" said them.
+        reqs_line: (() => {
+          const rows = q(".review-req", c);
+          return rows.length
+            ? `Requirements: ${rows
+                .map((r) => `${r.getAttribute("data-req-id")} ${r.getAttribute("data-req-text")}`)
+                .join("; ")}`
+            : "";
+        })(),
         changes: q(".review-change-wrap", c).map((w) => ({
           badge: t(w.querySelector(".review-badge")),
           text: t(w.querySelector(".review-change")),
@@ -106,10 +119,21 @@ async function view(page) {
         blocked: q(".review-blocked", c).map(t),
       })),
       decisions: q("#review-decisions > div").map(t),
+      // What each waiting item is about, from its attributes (its sentence is plain words).
+      decisions_raw: q("#review-decisions > div").map((d) => ({
+        kind: d.getAttribute("data-kind"),
+        ref: d.getAttribute("data-ref"),
+        req: d.getAttribute("data-req"),
+      })),
       consistency: q("#review-consistency .review-violation").map(t),
       external: q("#review-external .review-external-item .review-violation").map(t),
-      ledger: q("#review-ledger .review-ledger-item").map(t),
-      violations: q("#review-violations .review-violation").map(t),
+      // The rule id and kind of a row are in its attributes; the row shows the kind in words.
+      ledger: q("#review-ledger .review-ledger-item").map(
+        (n) => `${n.getAttribute("data-id")} ${n.getAttribute("data-kind")} ${t(n)}`,
+      ),
+      violations: q("#review-violations .review-violation").map(
+        (n) => `${n.getAttribute("data-rule")}: ${t(n)}`,
+      ),
       agent_status: t(document.getElementById("agent-status")),
       delete_all_button: t(document.getElementById("review-delete-all")),
     };
@@ -520,7 +544,7 @@ const steps = {
     if (a.review_file) await page.fill("#review-input", fs.readFileSync(a.review_file, "utf8"));
     await clearMessage(page);
     await page.click("#review-split");
-    const message = await waitMessage(page, 10 * 60_000, "^Split by ");
+    const message = await waitMessage(page, 10 * 60_000, "^Split into ");
     const refs = await page.$$eval(".review-draft-row .review-ref", (ns) => ns.map((n) => n.value));
     return { message, draft_refs: refs };
   },
@@ -570,6 +594,7 @@ const steps = {
   async "ledger-add"(page, a) {
     const items = JSON.parse(fs.readFileSync(a.ledger_file, "utf8")).items;
     await openFold(page, "review-ledger-box");
+    await openFold(page, "review-ledger-advanced");
     for (const it of items) {
       const before = await page.$$eval("#review-ledger .review-ledger-item", (ns) => ns.length);
       await page.selectOption("#ledger-kind", it.kind);
@@ -610,6 +635,14 @@ const steps = {
 
   async preview(page, a) {
     await openCard(page, a.ref);
+    // The preview button is under the Advanced of the card.
+    await page.evaluate((wanted) => {
+      const c = [...document.querySelectorAll(".review-comment")].find(
+        (x) => x.querySelector(".review-comment-head strong")?.textContent.trim() === wanted,
+      );
+      const d = c?.querySelector("details.review-card-advanced");
+      if (d && !d.open) d.querySelector("summary")?.click();
+    }, a.ref);
     await card(page, a.ref).locator("button", { hasText: "Preview prompt" }).click();
     await page.waitForFunction(
       () => document.getElementById("review-preview")?.hidden === false,

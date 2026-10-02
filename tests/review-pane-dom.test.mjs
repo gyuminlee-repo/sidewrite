@@ -787,9 +787,15 @@ test("Refresh: Word refusing to resolve a comment still shows the counts", async
   await t.$("review-refresh").click();
   assert.deepEqual(tried, ["70"]);
   const m = t.$("review-message").textContent;
-  assert.match(m, /^Accepted 1, rejected 0/);
-  assert.match(m, /Outside changes: 1 /);
-  assert.match(m, /1 rationale comment\(s\) not marked resolved \(Word: GeneralException;/);
+  assert.match(m, /^Every change is decided in Word\./);
+  assert.match(m, /1 change was made outside the tool/);
+  assert.match(m, /Word would not mark 1 rationale comment as resolved/);
+  // The numbers are under Details.
+  const d = t.$("review-message-details").textContent;
+  assert.match(d, /^Accepted 1, rejected 0/);
+  assert.match(d, /Outside changes: 1 /);
+  assert.match(d, /1 rationale comment\(s\) not marked resolved \(Word: GeneralException;/);
+  assert.equal(t.$("review-message-more").hidden, false);
 });
 
 test("Clean up tool comments tells the daemon which comment ids are gone", async () => {
@@ -938,10 +944,12 @@ for (const order of ["answer-first", "event-first"]) {
     await split;
     await check;
     assert.equal(t.$("review-draft-actions").hidden, false, `${order}: split shown`);
-    assert.match(t.$("review-message").textContent, /Split by llm: 1 comment/);
+    assert.match(t.$("review-message").textContent, /^Split into 1 comment \(read by Claude\)/);
+    // The rule is named by its words; the paragraph by what it starts with (the
+    // snapshot of this test holds none, so "a paragraph").
     assert.deepEqual(
       t.$("review-violations").children.map((b) => b.textContent),
-      ['L1: paragraph 3 "x"'],
+      ["t: found in 1 place", "a paragraph has \u201cx\u201d"],
     );
     for (const r of t.requests.filter((q) => ["review_split", "ledger_check"].includes(q.type))) {
       assert.equal(r.opts, undefined, `${r.type}: default request timeout`);
@@ -1530,6 +1538,10 @@ test("one Propose changes: a mismatch after the turn says what to do; Refresh st
     await t.$("review-refresh").click();
     assert.match(
       t.$("review-message").textContent,
+      /^The changes on record and the comments in Word do not match\./,
+    );
+    assert.match(
+      t.$("review-message-details").textContent,
       /^Accepted 0, .* found 1 \(MISMATCH: missing -, unrecorded 70\)$/,
     );
   } finally {
@@ -1565,7 +1577,7 @@ test("auto refresh: focus and a turn end refresh quietly; not while there are no
     await wait();
     assert.equal(refreshes(t), 1);
     assert.equal(t.$("review-message").textContent, "KEEP", "the message line is not replaced");
-    assert.match(t.$("review-auto").textContent, /^Auto-refreshed .*Accepted 0, rejected 0/);
+    assert.match(t.$("review-auto").textContent, /^Auto-refreshed .*No changes yet\./);
     listeners.focus(); // again at once: too soon
     await wait();
     assert.equal(refreshes(t), 1);
@@ -1618,7 +1630,9 @@ test("an unanswered normal edit: named as such, no Allow exception, re-apply wit
   assert.equal(find(/Refresh status/).length, 1);
   assert.equal(
     findAll(t.$("review-decisions"), (n) =>
-      /^R1\.1 edit with no answer from Word: "30 °C"$/.test(n.textContent),
+      /^R1\.1: Word did not answer an edit \(\u201c30 °C\u201d\)\. Open the comment to check it\.$/.test(
+        n.textContent,
+      ),
     ).length,
     1,
   );
@@ -2240,7 +2254,7 @@ test("a single Propose changes ends with a line: how many changes, for which com
       resultOf(t, "R1.1"),
       "No change was proposed for R1.1 with Claude · Opus 5.5: the reason is below.",
     );
-    assert.match(t.$("review-message").textContent, /^Accepted 0, /);
+    assert.match(t.$("review-message-details").textContent, /^Accepted 0, /);
     // Two changes on record after the turn, each with its comment in Word.
     await buttons()[0].click();
     await t.wait();
@@ -2273,7 +2287,7 @@ test("a single Propose changes ends with a line: how many changes, for which com
     await t.wait();
     await t.wait();
     assert.equal(resultOf(t, "R1.1"), "Proposed 2 changes for R1.1 with Claude · Opus 5.5.");
-    assert.match(t.$("review-message").textContent, /^Accepted 0, /);
+    assert.match(t.$("review-message-details").textContent, /^Accepted 0, /);
     // An edit the forbid list blocked is said, also when nothing else came.
     await buttons()[0].click();
     await t.wait();
@@ -2385,20 +2399,19 @@ test("after a turn the line names the requests still open; the card shows the st
     { id: "q3", text: "name the test" },
   ];
   const buttons = () => findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+  // What the reviewer asks: a row per request with its state, per card.
   const lines = () =>
-    findAll(t.$("review-comments"), (n) => n.attributes.class === "review-reqs-line").map(
-      (n) => n.textContent,
-    );
+    findAll(t.$("review-comments"), (n) =>
+      ["review-req", "review-req-none"].includes(n.attributes.class),
+    ).map(textOf);
   try {
     await t.pane.reload();
-    assert.equal(
-      lines()[0],
-      "Requirements: q1 state the unit; q2 give the n; q3 name the test. Open: q1, q2, q3.",
-    );
-    assert.equal(
-      lines()[1],
-      "Requests not extracted: add them above, one per line. Until then a turn lists them itself.",
-    );
+    assert.deepEqual(lines().slice(0, 4), [
+      "state the unitNot yet",
+      "give the nNot yet",
+      "name the testNot yet",
+      "No requests listed yet. Use Edit to add them, one per line; until then a turn lists them itself.",
+    ]);
     await buttons()[0].click();
     await t.wait();
     c.changes.push({
@@ -2416,12 +2429,13 @@ test("after a turn the line names the requests still open; the card shows the st
     await t.wait();
     assert.equal(
       resultOf(t, "R1.1"),
-      "Proposed 1 change for R1.1 with Claude · Opus 5.5. 2 requests of R1.1 are still open (q2, q3).",
+      "Proposed 1 change for R1.1 with Claude · Opus 5.5. 2 requests of R1.1 have no change yet: \u201cgive the n\u201d; \u201cname the test\u201d.",
     );
-    assert.equal(
-      lines()[0],
-      "Requirements: q1 state the unit; q2 give the n; q3 name the test. Changed: q1. Open: q2, q3.",
-    );
+    assert.deepEqual(lines().slice(0, 3), [
+      "state the unitChanged",
+      "give the nNot yet",
+      "name the testNot yet",
+    ]);
   } finally {
     await t.pane.reload();
   }
@@ -2471,13 +2485,21 @@ test("a comment card names the places where a term its changes took out is still
       ids: null,
     },
   };
-  const t = await setup({ revision });
-  const lines = findAll(t.$("review-comments"), (n) => n.attributes.class === "review-residue").map(
-    (n) => n.textContent,
-  );
-  assert.deepEqual(lines, [
-    '"essential" (taken out by R1.1-1) is still present in 2 other places: p0, p2.',
+  const selected = [];
+  const t = await setup({
+    revision,
+    word: { selectParagraphByIndex: async (i) => selected.push(i) },
+  });
+  const residue = findAll(t.$("review-comments"), (n) => n.attributes.class === "review-residue");
+  assert.deepEqual(residue.map(textOf), [
+    "\u201cessential\u201d was taken out by this comment's changes. It is still in 2 places:" +
+      "\u201cGene A is essential.\u201d\u201cAn essential gene.\u201d",
   ]);
+  // Each place is a link that selects the paragraph in Word.
+  const links = findAll(residue[0], (n) => /review-paragraph-link/.test(n.attributes.class ?? ""));
+  assert.equal(links.length, 2);
+  await links[1].click();
+  assert.deepEqual(selected, [2]);
 });
 
 // "Check revised paragraphs": a status refresh first (the check reads the
@@ -2533,7 +2555,7 @@ test("Check revised paragraphs refreshes the status, runs the check and lists wh
   const rows = t.$("review-consistency").children;
   assert.deepEqual(
     rows.map((n) => n.textContent),
-    ["p2: the paragraph contradicts itself. It says fast and slow. (R1.1-1)"],
+    ["a paragraph: the paragraph contradicts itself. It says fast and slow."],
   );
   await rows[0].click();
   assert.deepEqual(selected, [2]);

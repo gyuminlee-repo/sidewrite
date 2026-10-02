@@ -114,6 +114,10 @@
             Stop after this one
           </button>
           <div id="review-message" hidden></div>
+          <details class="review-details" id="review-message-more" hidden>
+            <summary>Details</summary>
+            <div id="review-message-details"></div>
+          </details>
         </div>
 
         <!-- Shown until a review has been pasted and split. -->
@@ -193,7 +197,10 @@
             <div id="review-consistency"></div>
           </details>
           <div id="review-comments" class="review-comments"></div>
-          <pre id="review-preview" class="review-preview" hidden></pre>
+          <!-- The prompt of a comment shows under Advanced in its card (review-pane.js). -->
+          <div id="review-preview-holder" hidden>
+            <pre id="review-preview" class="review-preview" hidden></pre>
+          </div>
         </div>
 
         <details class="review-fold" id="review-external-box" hidden>
@@ -210,35 +217,47 @@
             <span id="review-ledger-count" class="review-count"></span>
           </summary>
           <div class="review-ledger-form">
-            <select id="ledger-kind" class="setting-select">
+            <select id="ledger-kind" class="setting-select" aria-label="Kind of rule">
               <option value="instruction">Instruction</option>
-              <option value="forbid">Forbidden</option>
+              <option value="forbid">Forbidden wording</option>
             </select>
-            <select id="ledger-scope" class="setting-select">
-              <option value="manuscript">Manuscript</option>
-              <option value="response">Response letter</option>
-              <option value="supplement">Supplement</option>
-            </select>
-            <input type="text" id="ledger-text" placeholder="Instruction, as you would say it" />
-            <button type="button" class="btn-secondary btn-small" id="ledger-suggest">
-              Draft check from text
-            </button>
-            <select id="ledger-check-type" class="setting-select">
-              <option value="regex">Regex check</option>
-              <option value="llm">LLM check</option>
-            </select>
-            <input type="text" id="ledger-pattern" placeholder="Regex pattern" />
-            <input type="text" id="ledger-flags" placeholder="Flags (i, m, s, u)" value="i" />
-            <select id="ledger-expect" class="setting-select">
-              <option value="absent">Match = violation</option>
-              <option value="present">Must stay in the text</option>
-            </select>
+            <input
+              type="text"
+              id="ledger-text"
+              placeholder='Say it in your own words, for example: do not write "novel"'
+              aria-label="The rule, in your own words"
+            />
             <button type="button" class="btn-primary btn-small" id="review-ledger-add">Add</button>
           </div>
-          <p class="setup-help">
-            An LLM check reads the manuscript one paragraph at a time, so a rule that needs the
-            whole document (a term defined at its first use) is not checked by it.
-          </p>
+          <details class="review-more" id="review-ledger-advanced">
+            <summary>Advanced</summary>
+            <div class="review-ledger-form">
+              <select id="ledger-scope" class="setting-select">
+                <option value="manuscript">Manuscript</option>
+                <option value="response">Response letter</option>
+                <option value="supplement">Supplement</option>
+              </select>
+              <button type="button" class="btn-secondary btn-small" id="ledger-suggest">
+                Draft check from text
+              </button>
+              <select id="ledger-check-type" class="setting-select">
+                <option value="regex">Regex check</option>
+                <option value="llm">LLM check</option>
+              </select>
+              <input type="text" id="ledger-pattern" placeholder="Regex pattern" />
+              <input type="text" id="ledger-flags" placeholder="Flags (i, m, s, u)" value="i" />
+              <select id="ledger-expect" class="setting-select">
+                <option value="absent">Match = violation</option>
+                <option value="present">Must stay in the text</option>
+              </select>
+            </div>
+            <p class="setup-help">
+              Add drafts the check from your words: a phrase in quotation marks is looked for as it
+              is written, anything else is read by Claude. An LLM check reads the manuscript one
+              paragraph at a time, so a rule that needs the whole document (a term defined at its
+              first use) is not checked by it.
+            </p>
+          </details>
           <div id="review-ledger"></div>
           <div class="review-buttons">
             <button type="button" class="btn-secondary btn-small" id="review-check-all">

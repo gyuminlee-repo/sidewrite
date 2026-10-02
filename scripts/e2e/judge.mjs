@@ -547,7 +547,7 @@ export function ollamaSplitEvidence({ select, split, decisions }) {
   return {
     pass:
       selected &&
-      /^Split by /.test(String(split?.message ?? "")) &&
+      /^Split into /.test(String(split?.message ?? "")) &&
       models.some((m) => m.startsWith("ollama:")),
     selected: select?.selected ?? null,
     split_message: split?.message ?? null,
@@ -579,7 +579,7 @@ export function restartSplitEvidence({ provider, split, log, decisions }) {
   ).test(text);
   return {
     pass:
-      /^Split by /.test(String(split?.message ?? "")) &&
+      /^Split into /.test(String(split?.message ?? "")) &&
       restored &&
       judgments[provider] > 0 &&
       Object.keys(judgments).every((id) => id === provider) &&
@@ -1099,8 +1099,9 @@ export const JUDGES = {
   }),
   split: (r) => ({
     pass:
-      /^Split by /.test(r.message) && r.draft_refs.filter((x) => /^R1\.\d$/.test(x)).length === 5,
-    expect: "Split by regex: 5 comment(s) (R1.1-R1.5 after the non-reviewer rows go)",
+      /^Split into /.test(r.message) && r.draft_refs.filter((x) => /^R1\.\d$/.test(x)).length === 5,
+    expect:
+      "Split into n comments (found by the numbering in the text), R1.1-R1.5 after the non-reviewer rows go",
     got: `${r.message} refs=${r.draft_refs.join(",")}`,
   }),
   "edit-draft": (r) => {
@@ -1128,13 +1129,18 @@ export const JUDGES = {
   }),
   "check-all": (r) => {
     const n = (id) => r.violations.filter((v) => v.startsWith(`${id}:`)).length;
-    const want = ["R1.3 q1 has no change", "R1.3 q2 has no change"];
+    // A request no change answers waits as a "request_open" item of its comment.
+    const want = [
+      { ref: "R1.3", req: "q1" },
+      { ref: "R1.3", req: "q2" },
+    ];
+    const waiting = (r.decisions_raw ?? []).filter((d) => d.kind === "request_open");
     return {
       pass:
         n("L1") === 2 &&
         n("L2") === 1 &&
         n("L3") === 0 &&
-        want.every((w) => r.decisions.some((d) => d.startsWith(w))),
+        want.every((w) => waiting.some((d) => d.ref === w.ref && d.req === w.req)),
       expect: "violations L1 2, L2 1, L3 0; waiting: R1.3 q1, R1.3 q2",
       got: `L1 ${n("L1")}, L2 ${n("L2")}, L3 ${n("L3")}; ${r.decisions.join(" | ")}`,
     };
@@ -1156,13 +1162,15 @@ export const JUDGES = {
     };
   },
   refresh: (r) => {
-    const m = /Changes (\d+), expected tool comments (\d+), found (\d+)/.exec(r.message);
+    // The numbers are under "Details"; the sentence says what to do next.
+    const m = /Changes (\d+), expected tool comments (\d+), found (\d+)/.exec(r.message_details);
     return {
       // The parts of a rewritten paragraph share one comment: every comment
       // that is expected is there, and there are not more comments than changes.
-      pass: !!m && Number(m[1]) >= Number(m[2]) && m[2] === m[3] && !has(r.message, "MISMATCH"),
-      expect: "Changes N, expected tool comments M, found M, M <= N. (no MISMATCH)",
-      got: r.message,
+      pass:
+        !!m && Number(m[1]) >= Number(m[2]) && m[2] === m[3] && !has(r.message_details, "MISMATCH"),
+      expect: "Details: Changes N, expected tool comments M, found M, M <= N. (no MISMATCH)",
+      got: `${r.message} | ${r.message_details}`,
     };
   },
   // A document in compatibility mode 14: Word refuses Comment.resolved. The
@@ -1170,9 +1178,9 @@ export const JUDGES = {
   "refresh-mode14": (r) => {
     const m =
       /^Accepted (\d+), rejected (\d+), .*Changes (\d+), expected tool comments (\d+), found (\d+)/.exec(
-        r.message,
+        r.message_details,
       );
-    const n = /(\d+) rationale comment\(s\) not marked resolved \(Word: /.exec(r.message);
+    const n = /(\d+) rationale comment\(s\) not marked resolved \(Word: /.exec(r.message_details);
     const handled = m ? Number(m[1]) + Number(m[2]) : 0;
     return {
       pass:
@@ -1182,21 +1190,21 @@ export const JUDGES = {
         Number(n[1]) === handled &&
         m[3] === m[4] &&
         m[4] === m[5] &&
-        !has(r.message, "MISMATCH"),
+        !has(r.message_details, "MISMATCH"),
       expect:
-        "Accepted a, rejected r ... Changes N, expected tool comments N, found N. (a+r) rationale comment(s) not marked resolved (Word: ...)",
-      got: r.message,
+        "Details: Accepted a, rejected r ... Changes N, expected tool comments N, found N. (a+r) rationale comment(s) not marked resolved (Word: ...)",
+      got: `${r.message} | ${r.message_details}`,
     };
   },
   // The badge part is what the procedure asks a person to confirm
   // (s2-list-matches); the outside-change part is L4.
   "refresh-after-user": (r) => {
     const b = badgesMatch(r);
-    const at = r.external.findIndex((x) => has(x, "Lost: 0.82; 0.91"));
+    const at = r.external.findIndex((x) => has(x, "The old text had 0.82; 0.91"));
     return {
-      pass: b.pass && has(r.message, "Outside changes:") && at >= 0,
+      pass: b.pass && has(r.message_details, "Outside changes:") && at >= 0,
       expect:
-        "R1.1 Accepted, R1.2 Rejected, R1.3 first Edited by you; Outside changes: n; an outside item Lost: 0.82; 0.91",
+        "R1.1 Accepted, R1.2 Rejected, R1.3 first Edited by you; Details: Outside changes: n; an outside item whose old text had 0.82; 0.91",
       got: `${b.got}; outside item ${at + 1} of ${r.external.length}: ${r.external[at] ?? "-"}`,
     };
   },
