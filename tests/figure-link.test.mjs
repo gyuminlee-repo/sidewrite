@@ -4,10 +4,9 @@
 // tells the pane of a decision taken on the page.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import vm from "node:vm";
 import { figuresUrl, hasFigureWork } from "../taskpane/shared/review-view.js";
 import { fakeRunPy, figureWorld } from "./helpers/figure-world.mjs";
+import { figuresPage as openPage } from "./helpers/figures-page.mjs";
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
@@ -304,46 +303,6 @@ test("a change on the figures page is told to the Word pane of that manuscript, 
 
 // ---- the page itself, on a fake DOM ------------------------------------------
 
-// What figures.js needs of a page. replaceChildren and append write the word
-// "null" for a null, as a browser does.
-class PageEl {
-  constructor(tag, id = null) {
-    this.tagName = tag.toUpperCase();
-    this.id = id;
-    this.children = [];
-    this.listeners = {};
-    this.attributes = {};
-    this.className = "";
-    this.textContent = "";
-    this.hidden = false;
-    this.value = "";
-    this.title = "";
-    this.disabled = false;
-    this.style = {};
-    this.scrolled = 0;
-    this.previousElementSibling = { hidden: false };
-  }
-  addEventListener(ev, fn) {
-    (this.listeners[ev] ??= []).push(fn);
-  }
-  append(...kids) {
-    for (const k of kids)
-      this.children.push(
-        k instanceof PageEl ? k : Object.assign(new PageEl("#text"), { textContent: String(k) }),
-      );
-  }
-  replaceChildren(...kids) {
-    this.children = [];
-    this.append(...kids);
-  }
-  setAttribute(k, v) {
-    this.attributes[k] = v;
-  }
-  scrollIntoView() {
-    this.scrolled += 1;
-  }
-}
-
 const PAGE_COMMENTS = ["R1.1", "R1.2", "R2.1"].map((ref) => ({
   ref,
   reviewer: Number(ref[1]),
@@ -357,40 +316,8 @@ const OPEN = [
   { doc: "C:\\work\\My paper #2\\paper.docx", path: "/mnt/c/work/My paper #2/paper.docx" },
 ];
 
-// Runs taskpane/figures/figures.js as the page at `search` would.
-async function figuresPage(search, { manuscripts = OPEN } = {}) {
-  const byId = new Map();
-  const document = {
-    getElementById(id) {
-      if (!byId.has(id)) byId.set(id, new PageEl("div", id));
-      return byId.get(id);
-    },
-    createElement: (tag) => new PageEl(tag),
-  };
-  const asked = [];
-  const fetch = async (url) => {
-    asked.push(url);
-    const reply = (body) => ({ ok: true, json: async () => body, text: async () => body });
-    if (url === "/bridge-token") return reply("token");
-    const u = new URL(url, "http://127.0.0.1:1");
-    const name = u.pathname.split("/").pop();
-    if (name === "manuscripts") return reply({ ok: true, manuscripts });
-    if (name === "files") return reply({ ok: true, folder: "figures", files: [] });
-    return reply({
-      ok: true,
-      name: "paper.docx",
-      folder: "figures",
-      renderer: { available: true, reason: null },
-      comments: PAGE_COMMENTS,
-    });
-  };
-  const src = await readFile(new URL("../taskpane/figures/figures.js", import.meta.url), "utf8");
-  vm.runInNewContext(src, { document, fetch, location: { search }, URLSearchParams, URL });
-  await tick(20);
-  const $ = (id) => document.getElementById(id);
-  const cards = findAll($("comments"), (n) => n.attributes["data-ref"] !== undefined);
-  return { $, asked, cards, card: (ref) => cards.find((c) => c.attributes["data-ref"] === ref) };
-}
+const figuresPage = (search, { manuscripts = OPEN } = {}) =>
+  openPage(search, { manuscripts, comments: PAGE_COMMENTS });
 
 test("the figures page opens at the manuscript and the comment of the link", async () => {
   const t = await figuresPage(`?${new URLSearchParams({ doc: OPEN[1].doc, ref: "R1.2" })}`);

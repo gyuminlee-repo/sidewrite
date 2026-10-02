@@ -359,7 +359,7 @@ test("the draft prompt lists an adopted figure change with its label, summary an
   const built = prompt(revisionWith("adopted"));
   assert.match(
     built.prompt,
-    /Figure changes adopted for this comment \(figure files replaced or added by the author; you may report them\):\n- \[R1\.1-f1\] Figure 2 \(revised figure\) \(answers q1\)\n {2}What changed, in the words of the author: <<<A control curve was added and the time axis gives hours\.>>>/,
+    /Figure changes adopted for this comment \(figures or other files replaced or added by the author outside the Word file; you may report them\):\n- \[R1\.1-f1\] Figure 2 \(revised\) \(answers q1\)\n {2}What changed, in the words of the author: <<<A control curve was added and the time axis gives hours\.>>>/,
   );
   assert.deepEqual(built.figureIds, ["R1.1-f1"]);
   assert.equal(/fig2_after|submission|[0-9a-f]{64}/.test(built.prompt), false);
@@ -386,7 +386,7 @@ test("a figure change that is not adopted is listed under do not report", () => 
     assert.match(
       built.prompt,
       new RegExp(
-        `Figure changes that are not adopted \\(do not report any of these\\):\\n- \\[R1\\.1-f1\\] Figure 2 \\(revised figure\\) \\(answers q1\\): ${why}`,
+        `Figure changes that are not adopted \\(do not report any of these\\):\\n- \\[R1\\.1-f1\\] Figure 2 \\(revised\\) \\(answers q1\\): ${why}`,
       ),
     );
     assert.deepEqual(built.figureIds, []);

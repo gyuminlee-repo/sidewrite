@@ -37,7 +37,7 @@ const FIGURE_RULES = new Map([
   ],
 ]);
 const FIGURE_RULE =
-  "Say what changed in a figure only as the list of adopted figure changes says it. Do not write file names. The tool adds the figure line after your text.";
+  "Say what changed in a figure or other file only as the list of adopted figure changes says it. Do not write file names. The tool adds the figure line after your text.";
 const FIGURE_NOT_DONE = {
   proposed: "not decided by the author yet",
   rejected: "rejected by the author",
@@ -115,13 +115,14 @@ export function buildResponsePrompt({ comment, profile, ledger = [], previous = 
   const adopted = adoptedFigures(comment);
   const figureLine = (f) => {
     const ids = f.requirement_ids ?? [];
-    const what = f.kind === "new" ? "new figure" : "revised figure";
+    // The label says what it is ("Figure 2", "Table S3").
+    const what = f.kind === "new" ? "new" : "revised";
     return `[${f.id}] ${f.figure} (${what})${ids.length ? ` (answers ${ids.join(", ")})` : ""}`;
   };
   if (adopted.length) {
     lines.push(
       "",
-      "Figure changes adopted for this comment (figure files replaced or added by the author; you may report them):",
+      "Figure changes adopted for this comment (figures or other files replaced or added by the author outside the Word file; you may report them):",
     );
     for (const f of adopted) {
       lines.push(`- ${figureLine(f)}`);

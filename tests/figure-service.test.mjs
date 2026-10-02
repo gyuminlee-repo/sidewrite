@@ -278,13 +278,13 @@ test("what is not a figure change is refused with words for the author", async (
   const w = await world();
   try {
     const no = (extra, re) => assert.rejects(w.service.propose(w.doc, w.input(extra)), re);
-    await no({ figure: " " }, /Enter the figure label/);
+    await no({ figure: " " }, /Enter the label of the figure or file/);
     await no({ after: "" }, /Choose the new file/);
     await no({ before: "" }, /Choose the old file/);
     await no({ after: "figures/none.svg" }, /No file at figures\/none\.svg/);
-    await no({ after: "paper.docx" }, /is not a figure file this page reads/);
+    await no({ after: "paper.docx" }, /paper\.docx is the manuscript itself/);
     await no({ after: "figures/fig2_before.svg" }, /are the same file/);
-    await no({ kind: "new" }, /A new figure has no old file/);
+    await no({ kind: "new" }, /A new figure or file has no old file/);
     await no({ ref: "R7.7" }, /No reviewer comment R7\.7/);
     await no({ requirement_ids: ["q9"] }, /No requirement q9/);
     await no({ after: "https://example.org/fig.svg" }, /not a file this computer can open/);
@@ -376,15 +376,19 @@ test("an .ai source with a PDF saved from it: the PDF is shown and submitted, th
   }
 });
 
-test("the file list holds the figure files of the figures folder, newest first, without the pictures", async () => {
+test("the file list holds the files of the figures folder, newest first, without the pictures and the list of sources", async () => {
   const w = await world();
   try {
     const { id } = await w.service.propose(w.doc, w.input());
     await w.service.adopt(w.doc, { ref: "R1.1", id });
-    await writeFile(w.fig("notes.txt"), "not a figure");
+    await writeFile(w.fig("Table_S3_v2.xlsx"), "an invented table");
+    await writeFile(w.fig(".hidden.xlsx"), "not shown");
     const out = await w.service.files(w.doc);
     assert.equal(out.folder, "figures");
+    // FILE_SOURCES.md is written by Adopt and is not a file to record.
+    assert.ok((await listing(w.dir)).includes("figures/submission/FILE_SOURCES.md"));
     assert.deepEqual(out.files.map((f) => f.path).sort(), [
+      "figures/Table_S3_v2.xlsx",
       "figures/fig2_after.svg",
       "figures/fig2_before.svg",
       "figures/submission/fig2_after.svg",

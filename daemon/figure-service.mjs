@@ -1,9 +1,10 @@
-// Figure lane: a reviewer request that is answered by changing a figure.
+// Figure lane: a reviewer request that is answered by changing a figure, or
+// any other file outside the Word file (a supplementary table, a data file).
 //
-// The figure files are made by hand in any tool. This service records which
-// file took the place of which under a reviewer comment, renders both for a
-// comparison, and on Adopt copies the new file into the submission folder.
-// It calls no model and no figure tool.
+// The files are made by hand in any tool. This service records which file
+// took the place of which under a reviewer comment, renders both for a
+// comparison when they are figure files, and on Adopt copies the new file
+// into the submission folder. It calls no model and no figure tool.
 //
 // Where it writes, and nowhere else (all under the manuscript folder):
 //   <figures>/.renders/      pictures and facts of the files, by content hash
@@ -48,8 +49,15 @@ import { outputName, MAX_OUTPUT_NAMES } from "./output-name.mjs";
 
 export const FIGURE_DIR = "figures";
 export const RENDER_DPI = 150;
-// What tools/figure_render.py opens.
+// What tools/figure_render.py opens. A file of another type is recorded,
+// adopted and cited the same way, without a picture.
 export const FIGURE_TYPES = [".pdf", ".ai", ".svg", ".png", ".jpg", ".jpeg", ".tif", ".tiff"];
+// Is there a picture to make of this recorded file ({ path, ... })?
+const canRender = (ref) => FIGURE_TYPES.includes(extname(ref.path).toLowerCase());
+// And of every file of a change that is shown (the view of a side, else its source)?
+const hasPreview = (f) =>
+  [f.before, f.after].filter(Boolean).every((s) => canRender(s.view ?? s.source));
+export const NO_PREVIEW = "No preview for this file type.";
 export const SOURCES_FILE = "FILE_SOURCES.md";
 
 const RENDER_TOOL = join(
@@ -69,6 +77,7 @@ export class FigureError extends Error {
 const refuse = (message, status) => {
   throw new FigureError(message, status);
 };
+const NO_LABEL = 'Enter the label of the figure or file, for example "Figure 2" or "Table S3".';
 
 // What the store refuses (a state that cannot follow, a request the comment
 // does not list) is said to the page as it is.
@@ -169,6 +178,7 @@ export function createFigureService({
     const figures = resolve(docDir, rev.figure_lane?.dir ?? FIGURE_DIR);
     if (!under(docDir, figures)) refuse("The figures folder must be inside the manuscript folder.");
     return {
+      doc,
       docDir,
       figures,
       renders: join(figures, ".renders"),
@@ -187,6 +197,9 @@ export function createFigureService({
 
   // A file the author named: a path in the list of the page, or a pasted
   // one (a Windows path when Word runs on Windows and the daemon in WSL).
+  // Any regular file: a figure, a table, a data file. Not the manuscript
+  // itself (it is changed in Word, with tracked changes) and not a picture
+  // this service made.
   async function namedFile(d, input, what) {
     const raw = String(input ?? "").trim();
     if (!raw) refuse(`Choose ${what}.`);
@@ -194,11 +207,18 @@ export function createFigureService({
     if (local === null || /^[a-z][a-z0-9+.-]*:\/\//i.test(local))
       refuse(`${raw} is not a file this computer can open.`);
     const abs = isAbsolute(local) ? resolve(local) : resolve(d.docDir, local);
+    // A path of the list is relative to the manuscript folder and stays in
+    // it; a file from elsewhere is named by its full path.
+    if (!isAbsolute(local) && !under(d.docDir, abs))
+      refuse(`${raw} is outside the manuscript folder. Paste the full path of the file.`);
     if (abs === d.renders || under(d.renders, abs))
       refuse("A picture made for the comparison cannot be a figure file.");
-    if (!FIGURE_TYPES.includes(extname(abs).toLowerCase()))
-      refuse(`${basename(abs)} is not a figure file this page reads (${FIGURE_TYPES.join(", ")}).`);
+    if (abs === d.doc)
+      refuse(
+        `${basename(abs)} is the manuscript itself. It is changed in Word; record here a file that was changed outside it.`,
+      );
     const st = await stat(abs).catch(() => null);
+    if (st?.isDirectory()) refuse(`${raw} is a folder. Choose a file.`);
     if (!st?.isFile()) refuse(`No file at ${raw}.`);
     return abs;
   }
@@ -313,7 +333,8 @@ export function createFigureService({
     const problems = [];
     const pngs = {};
     for (const side of ["before", "after"]) {
-      if (!f[side]) continue;
+      // No picture is asked for of a file the renderer does not open.
+      if (!f[side] || !canRender(f[side].view ?? f[side].source)) continue;
       let r;
       try {
         r = await renderSide(d, f, side);
@@ -393,7 +414,7 @@ export function createFigureService({
           problems.push(`${label} was saved again since it was proposed: ${ref.path}`);
       }
     }
-    return { ...f, findings: figureFindings(f), problems };
+    return { ...f, preview: hasPreview(f), findings: figureFindings(f), problems };
   }
 
   const api = {
@@ -430,8 +451,9 @@ export function createFigureService({
       };
     },
 
-    // Figure files in the figures folder and one level below it, newest
-    // first. The pictures of the comparison are left out.
+    // The files in the figures folder and one level below it, newest
+    // first. The pictures of the comparison and the list of sources this
+    // service writes are left out.
     async files(doc) {
       const d = dirs(doc, await load(doc));
       const out = [];
@@ -441,7 +463,7 @@ export function createFigureService({
           const path = join(dir, e.name);
           if (e.isDirectory()) {
             if (deep) await read(path, false);
-          } else if (e.isFile() && FIGURE_TYPES.includes(extname(e.name).toLowerCase())) {
+          } else if (e.isFile() && e.name !== SOURCES_FILE) {
             const st = await stat(path);
             out.push({
               path: storedPath(d.docDir, path),
@@ -466,9 +488,9 @@ export function createFigureService({
       if (!findComment(rev, ref)) refuse(`No reviewer comment ${ref}.`, 404);
       const kind = input.kind === "new" ? "new" : "revised";
       const figure = String(input.figure ?? "").trim();
-      if (!figure) refuse('Enter the figure label, for example "Figure 2".');
+      if (!figure) refuse(NO_LABEL);
       if (kind === "new" && String(input.before ?? "").trim())
-        refuse("A new figure has no old file.");
+        refuse("A new figure or file has no old file.");
       const before =
         kind === "revised"
           ? await sideOf(d, input.before, input.before_view, "the old file")
@@ -476,7 +498,7 @@ export function createFigureService({
       const after = await sideOf(d, input.after, input.after_view, "the new file");
       if (before && before.source.path === after.source.path)
         refuse(
-          "The old and the new file are the same file. Save the new figure under a new name; the old file stays.",
+          "The old and the new file are the same file. Save the new version under a new name; the old file stays.",
         );
       let id;
       await update(doc, (cur) => {
@@ -512,7 +534,7 @@ export function createFigureService({
       const take = {};
       if ("figure" in patch) {
         take.figure = String(patch.figure ?? "").trim();
-        if (!take.figure) refuse('Enter the figure label, for example "Figure 2".');
+        if (!take.figure) refuse(NO_LABEL);
       }
       if ("summary" in patch) take.summary = String(patch.summary ?? "").trim();
       if ("requirement_ids" in patch) {
@@ -534,6 +556,7 @@ export function createFigureService({
       const d = dirs(doc, rev);
       const f = figureOf(rev, ref, id);
       if (!f[side]) refuse(`This figure change has no ${side} file.`, 404);
+      if (!canRender(f[side].view ?? f[side].source)) refuse(NO_PREVIEW, 415);
       const r = await renderSide(d, f, side);
       if (r.error) refuse(r.error, 503);
       if (f.renders?.[side]?.of !== r.render.of || !f.facts?.[side])
