@@ -530,37 +530,60 @@ export function requirementsFromText(text) {
     .filter(Boolean);
 }
 
-// L5. The state of every request of a comment, in list order:
-//   changed            a change that is not rejected names it
+// L5. The state of every request of a comment, in list order. The first
+// that holds:
+//   changed            a change in Word that is not rejected names it
+//   figure_changed     an adopted figure change names it (figures page)
 //   needs_author       a question with its id has no answer yet
+//   figure_waiting     a figure change that names it waits for a decision
 //   outside_this_file  the model noted it as belonging to another file (why)
 //   open               none of these: nobody spoke of it
-// A turn has to end every request in one of the first three; open is what a
-// request is until then, so a request passed over in silence shows.
+// A turn has to end every request as changed, needs_author or
+// outside_this_file; open is what a request is until then, so a request
+// passed over in silence shows. A rejected figure change counts for nothing,
+// like a rejected change.
 export function requirementStates(comment) {
   const used = new Set();
   for (const ch of comment?.changes ?? []) {
     if (ch.state === "rejected") continue;
     for (const id of ch.rationale?.requirement_ids ?? []) used.add(id);
   }
+  const figureIds = (state) =>
+    new Set(
+      (comment?.figure_changes ?? [])
+        .filter((f) => f.state === state)
+        .flatMap((f) => f.requirement_ids ?? []),
+    );
+  const adopted = figureIds("adopted");
+  const proposed = figureIds("proposed");
   const asked = new Set(
     (comment?.questions ?? []).filter((q) => !q.answer).map((q) => q.requirement_id),
   );
   const outside = new Map((comment?.requirements_outside ?? []).map((n) => [n.id, n.why]));
-  return (comment?.requirements ?? []).map((r) => ({
-    ...r,
-    state: used.has(r.id)
+  return (comment?.requirements ?? []).map((r) => {
+    const state = used.has(r.id)
       ? "changed"
-      : asked.has(r.id)
-        ? "needs_author"
-        : outside.has(r.id)
-          ? "outside_this_file"
-          : "open",
-    ...(!used.has(r.id) && !asked.has(r.id) && outside.has(r.id) ? { why: outside.get(r.id) } : {}),
-  }));
+      : adopted.has(r.id)
+        ? "figure_changed"
+        : asked.has(r.id)
+          ? "needs_author"
+          : proposed.has(r.id)
+            ? "figure_waiting"
+            : outside.has(r.id)
+              ? "outside_this_file"
+              : "open";
+    return { ...r, state, ...(state === "outside_this_file" ? { why: outside.get(r.id) } : {}) };
+  });
 }
 
 const inState = (comment, state) => requirementStates(comment).filter((r) => r.state === state);
+
+// Figure changes of a comment that are neither adopted nor rejected, and the
+// words for them: "1 figure or file waits for your decision".
+const proposedFigures = (comment) =>
+  (comment?.figure_changes ?? []).filter((f) => f.state === "proposed").length;
+const figuresWaitingText = (n) =>
+  `${n} figure${n === 1 ? "" : "s"} or file${n === 1 ? "" : "s"} ${n === 1 ? "waits" : "wait"} for your decision`;
 
 // Requests of a comment nobody spoke of (open).
 export function unaddressedRequirements(comment) {
@@ -570,7 +593,9 @@ export function unaddressedRequirements(comment) {
 // What a request is, in words, for the list "What the reviewer asks".
 export function requestStateText(r) {
   if (r.state === "changed") return "Changed";
+  if (r.state === "figure_changed") return "Changed in a figure or other file";
   if (r.state === "needs_author") return "Needs your answer";
+  if (r.state === "figure_waiting") return "A figure or file waits for your decision";
   if (r.state === "outside_this_file")
     return r.why ? `In another file: ${r.why}` : "In another file";
   return "Not yet";
@@ -639,6 +664,7 @@ export function consistencyLines(c) {
 // when the list is not empty. ledger: revision.ledger (the confirmed rules,
 // with the status of their last check).
 //   - requests nobody spoke of, and requests that wait for the author (L5)
+//   - figure changes not decided on the figures page
 //   - changes not decided in Word: pending, or not found in the document
 //   - changes applied without their rationale comment (invariantReport's
 //     `uncommented`), and edits Word did not answer (outcome_unknown)
@@ -652,6 +678,8 @@ export function doneBlockers(comment, ledger) {
     out.push(
       `${asked.map((r) => `"${r.text}"`).join(", ")} ${asked.length === 1 ? "waits" : "wait"} for the author's answer`,
     );
+  const figures = proposedFigures(comment);
+  if (figures) out.push(`${figuresWaitingText(figures)} on the figures page`);
   const n = (state) => (comment?.changes ?? []).filter((ch) => ch.state === state).length;
   const pending = n("pending");
   const unlocated = n("unlocated");
@@ -768,15 +796,22 @@ export function pendingDecisions(revision) {
       });
     }
     for (const r of requirementStates(c)) {
-      if (r.state !== "open" && r.state !== "needs_author") continue;
+      const kind = {
+        open: "request_open",
+        needs_author: "request_asked",
+        figure_waiting: "request_figure",
+      }[r.state];
+      if (!kind) continue;
       requirements.push({
         ref: c.ref,
         id: r.id,
-        kind: r.state === "open" ? "request_open" : "request_asked",
+        kind,
         text:
           r.state === "open"
             ? `${who}: nothing changes yet for ${quoted(r.text)}.`
-            : `${who}: Claude waits for your answer about ${quoted(r.text)}.`,
+            : r.state === "needs_author"
+              ? `${who}: Claude waits for your answer about ${quoted(r.text)}.`
+              : `${who}: a figure or file for ${quoted(r.text)} waits for your decision on the figures page.`,
       });
     }
   }
@@ -828,10 +863,11 @@ export function firstLine(text, max = 100) {
 //   done          the comment is marked done
 //   needs_answer  a question to the author has no answer, or an edit is
 //                 blocked and waits for a decision
-//   to_review     changes wait for the author's decision in Word
+//   to_review     changes wait for the author's decision in Word, or a
+//                 figure change waits for it on the figures page
 //   no_change     the last turn of this session proposed nothing (noChange),
 //                 or every request belongs to another file
-//   decided       changes exist and none waits
+//   decided       changes (or adopted figure changes) exist and none waits
 //   not_started   none of the above
 // attention: the author has something to do here.
 export function commentState(comment, { working = null, now = Date.now(), noChange = false } = {}) {
@@ -856,7 +892,10 @@ export function commentState(comment, { working = null, now = Date.now(), noChan
       attention: true,
     };
   }
-  if (changes.length) return { kind: "decided", label: "All changes decided", attention: false };
+  const figures = proposedFigures(comment);
+  if (figures) return { kind: "to_review", label: figuresWaitingText(figures), attention: true };
+  if (changes.length || (comment?.figure_changes ?? []).some((f) => f.state === "adopted"))
+    return { kind: "decided", label: "All changes decided", attention: false };
   if (noChange) return { kind: "no_change", label: "No change proposed", attention: true };
   const reqs = requirementStates(comment);
   if (reqs.length && reqs.every((r) => r.state === "outside_this_file")) {

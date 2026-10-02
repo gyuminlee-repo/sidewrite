@@ -311,8 +311,8 @@ export function initResponsePane({
       ),
     );
 
-    // The requests no accepted change answers: each is cited, or declined
-    // with a reason the letter prints.
+    // The requests no accepted change and no adopted figure change answers:
+    // each is cited, or declined with a reason the letter prints.
     const declined = c.response?.declined_requirements ?? [];
     const saveDeclined = (list) =>
       ask("response_save", { ref: c.ref, declined_requirements: list });
@@ -323,7 +323,13 @@ export function initResponsePane({
           "div",
           { class: "response-req" },
           el("span", {
-            text: `${q.id} ${q.text}: no accepted change${q.pending ? " (a change is pending in Word)" : ""}`,
+            text: `${q.id} ${q.text}: no accepted change${
+              q.pending
+                ? " (a change is pending in Word)"
+                : q.figure
+                  ? " (a figure or file waits for your decision on the figures page)"
+                  : ""
+            }`,
           }),
           reasonInput(key, "response-req-reason"),
           action("Decline", async () => {

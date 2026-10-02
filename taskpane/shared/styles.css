@@ -1528,7 +1528,8 @@ body {
   color: var(--fg-muted);
 }
 .review-req-open,
-.review-req-needs_author {
+.review-req-needs_author,
+.review-req-figure_waiting {
   color: color-mix(in srgb, var(--status-warn) 55%, var(--fg));
   font-weight: 600;
 }
