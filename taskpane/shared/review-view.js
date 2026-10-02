@@ -578,6 +578,28 @@ export function requirementStates(comment) {
 
 const inState = (comment, state) => requirementStates(comment).filter((r) => r.state === state);
 
+// The address of the figures page (daemon/figure-http.mjs) for a manuscript,
+// at one comment. origin: where the daemon serves the pane and that page.
+// doc: the document as this pane named it to the daemon (hello active_doc);
+// the page finds the manuscript by that name. Neither is needed.
+export function figuresUrl(origin, doc = null, ref = null) {
+  const query = new URLSearchParams();
+  if (doc) query.set("doc", doc);
+  if (ref) query.set("ref", ref);
+  const q = query.toString();
+  return `${String(origin ?? "").replace(/\/+$/, "")}/figures/${q ? `?${q}` : ""}`;
+}
+
+// Has this comment something on the figures page: a listed request that
+// belongs to another file, or a figure change in any state.
+export function hasFigureWork(comment) {
+  const listed = new Set((comment?.requirements ?? []).map((r) => r.id));
+  return (
+    (comment?.figure_changes ?? []).length > 0 ||
+    (comment?.requirements_outside ?? []).some((n) => listed.has(n.id))
+  );
+}
+
 // Figure changes of a comment that are neither adopted nor rejected, and the
 // words for them: "1 figure or file waits for your decision".
 const proposedFigures = (comment) =>

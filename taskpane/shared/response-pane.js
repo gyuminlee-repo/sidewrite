@@ -596,6 +596,13 @@ export function initResponsePane({
   return {
     onEvent(msg) {
       if (msg.event === "job_done") jobDone(msg);
+      // A figure change was recorded or decided on the figures page
+      // (taskpane.js passes the review_event on): which requests are
+      // answered is read again, and the last check is about the state before.
+      else if (msg.event === "figures_changed")
+        load()
+          .then(changed, (e) => say(e.message, true))
+          .finally(render);
     },
     // A new connection (welcome). The waits of the old one end with an error
     // (a job_done of the old connection never comes), so no progress line

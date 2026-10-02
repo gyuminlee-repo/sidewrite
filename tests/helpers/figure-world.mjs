@@ -148,6 +148,8 @@ export async function figureWorld({ comments = COMMENTS, runPy, pane = true } = 
     listPanes: () => bridge.listPanes(),
     service,
     pageDir: join(ROOT, "taskpane", "figures"),
+    // As in daemon/index.mjs: what the page changed is told to the pane.
+    sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
     env: ENV,
     log: (s) => lines.push(s),
   });
@@ -157,8 +159,11 @@ export async function figureWorld({ comments = COMMENTS, runPy, pane = true } = 
     const ws = new WebSocket(`ws://127.0.0.1:${bridge.address().port}`);
     sockets.push(ws);
     let welcome = false;
+    const frames = []; // every message the pane got after its welcome
     ws.on("message", (raw) => {
-      if (JSON.parse(raw.toString()).type === "welcome") welcome = true;
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === "welcome") welcome = true;
+      else frames.push(msg);
     });
     await new Promise((resolve, reject) => {
       ws.on("open", resolve);
@@ -167,6 +172,7 @@ export async function figureWorld({ comments = COMMENTS, runPy, pane = true } = 
     ws.send(JSON.stringify({ type: "hello", token: TOKEN, host, active_doc: activeDoc }));
     await until(() => welcome, "welcome");
     return {
+      frames,
       async close() {
         const closed = new Promise((r) => ws.on("close", r));
         ws.close();

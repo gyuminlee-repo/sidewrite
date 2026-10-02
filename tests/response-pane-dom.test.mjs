@@ -861,3 +861,53 @@ test("an answer without its translation says so on the card; Translate asks for 
   assert.equal(byClass(off.card("R1.1"), "response-gloss-missing").length, 0);
   assert.equal(button(off.card("R1.1"), "Translate"), undefined);
 });
+
+// A request answered by a figure file (the figures page), on the card.
+test("a card counts an adopted figure change as the answer, and follows a decision taken on the figures page", async () => {
+  const withFigure = (state) =>
+    revisionOf([
+      C1({
+        changes: [],
+        figure_changes: [{ id: "R1.1-f1", state, requirement_ids: ["q1"] }],
+        response: { text: "Done.", stale: [], citations: [], declined_requirements: [] },
+      }),
+    ]);
+  let now = withFigure("proposed");
+  const t = await setup({
+    revision: now,
+    respond: { review_load: () => ({ ok: true, revision: now }) },
+  });
+  const open = () => byClass(t.card("R1.1"), "response-req").map((r) => r.children[0].textContent);
+  assert.deepEqual(open(), [
+    "q1 state the unit: no accepted change (a figure or file waits for your decision on the figures page)",
+  ]);
+
+  // Adopted on the figures page: the daemon tells the pane, the card follows.
+  now = withFigure("adopted");
+  const loads = t.sent("review_load").length;
+  t.pane.onEvent({ type: "review_event", event: "figures_changed", ref: "R1.1" });
+  await tick();
+  assert.equal(t.sent("review_load").length, loads + 1);
+  assert.deepEqual(open(), []);
+  assert.equal(t.wordCalls.length, 0, "no call into Word for it");
+
+  // Rejected: the request is open again, with nothing waiting.
+  now = withFigure("rejected");
+  t.pane.onEvent({ type: "review_event", event: "figures_changed", ref: "R1.1" });
+  await tick();
+  assert.deepEqual(open(), ["q1 state the unit: no accepted change"]);
+
+  // taskpane.js hands the event of the Review tab to this tab as well.
+  const src = await read("taskpane/shared/taskpane.js");
+  assert.match(
+    src,
+    /case "review_event":\s*reviewPane\?\.onEvent\(msg\);[^}]*?if \(msg\.event === "figures_changed"\) responsePane\?\.onEvent\(msg\);/,
+  );
+  // And gives the Review tab the document and the address for its link.
+  const at = src.indexOf("reviewPane = initReviewPane({");
+  const block = src.slice(at, src.indexOf("word: {", at));
+  assert.match(block, /docUrl: \(\) => activeDocUrl,/);
+  assert.match(block, /daemonOrigin: \(\) => window\.location\.origin,/);
+  const html = await read("taskpane/word/index.html");
+  assert.equal(html.split('id="review-figures-all"').length - 1, 1);
+});

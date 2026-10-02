@@ -1508,6 +1508,23 @@ body {
   overflow-wrap: anywhere;
   color: var(--fg-muted);
 }
+.review-figures {
+  flex: 1 1 100%;
+  min-width: 0;
+  margin-top: 4px;
+}
+.review-figures-open {
+  display: inline-block;
+  text-decoration: none;
+}
+.review-figures-address {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
 .review-req-list {
   flex: 1 1 100%;
   font-size: 12px;

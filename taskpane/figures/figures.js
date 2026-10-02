@@ -12,11 +12,19 @@
   let state = null;
   let files = { folder: "figures", files: [] };
 
+  // A link from the Word pane names the manuscript and the comment:
+  // /figures/?doc=<the document as its pane names it>&ref=<comment>.
+  const link = new URLSearchParams(location.search);
+  let wanted = link.get("doc"); // the manuscript of the link, until it is shown
+  let goTo = link.get("ref"); // the comment to scroll to, once
+  let marked = null; // the comment of the link, shown with a mark
+
   // What the page remembers between two drawings of the list.
   const modeOf = new Map(); // figure id -> "side" | "overlay" | "difference"
   const zoomOf = new Map(); // figure id -> zoom the reader set
   const pictures = new Map(); // "<id>:<side>:<hash>" -> Promise<{ url, width, height } | { error }>
   const forms = new Map(); // comment ref -> the open "Add figure change" form
+  const cards = new Map(); // comment ref -> its card, as of the last drawing
 
   const $ = (id) => document.getElementById(id);
 
@@ -75,6 +83,12 @@
     box.className = bad ? "notice bad" : "notice";
   }
 
+  function linkNote(text) {
+    const box = $("link-note");
+    box.hidden = !text;
+    box.textContent = text;
+  }
+
   // ---- loading ---------------------------------------------------------------
 
   async function loadManuscripts() {
@@ -84,7 +98,17 @@
     pick.replaceChildren(
       ...manuscripts.map((m, i) => el("option", { value: String(i) }, baseName(m.path))),
     );
-    const at = manuscripts.findIndex((m) => m.doc === doc);
+    const at = manuscripts.findIndex((m) => m.doc === (wanted ?? doc));
+    // The manuscript of the link is not open in a pane: said plainly. Its
+    // comment is not looked for in another manuscript; a reload looks for
+    // the manuscript again.
+    linkNote(
+      wanted && at < 0
+        ? `The manuscript of this link is not open in a Word pane: ${baseName(wanted)}. Open it in Word with the Sidewrite pane, then press Reload.` +
+            (manuscripts.length ? ` This page shows ${baseName(manuscripts[0].path)}.` : "")
+        : "",
+    );
+    if (at >= 0) wanted = null;
     doc = manuscripts.length ? manuscripts[Math.max(at, 0)].doc : null;
     pick.value = String(Math.max(at, 0));
     pick.disabled = manuscripts.length < 2;
@@ -114,6 +138,21 @@
       notice(e.message, true);
     }
     draw();
+    showLinked();
+  }
+
+  // The comment the link names is scrolled to once and keeps its mark.
+  function showLinked() {
+    if (!goTo || !state || wanted) return;
+    const ref = goTo;
+    goTo = null;
+    if (!state.comments.some((c) => c.ref === ref)) {
+      linkNote(`The comment of this link is not in this manuscript: ${ref}.`);
+      return;
+    }
+    marked = ref;
+    draw();
+    cards.get(ref)?.scrollIntoView({ block: "start" });
   }
 
   // One request that changes something, then the list again.
@@ -702,9 +741,12 @@
       c.figures.filter((f) => f.state === "proposed").flatMap((f) => f.requirement_ids),
     );
     const outside = c.requirements.some((q) => q.outside);
-    return el(
+    const card = el(
       "section",
-      { class: outside ? "comment outside" : "comment", "data-ref": c.ref },
+      {
+        class: `comment${outside ? " outside" : ""}${c.ref === marked ? " linked" : ""}`,
+        "data-ref": c.ref,
+      },
       el("h2", {}, commentTitle(c), c.section ? ` (${c.section})` : ""),
       el("p", { class: "comment-text" }, c.text),
       c.requirements.length
@@ -742,10 +784,13 @@
           "Add figure change",
         ),
     );
+    cards.set(c.ref, card);
+    return card;
   }
 
   function draw() {
     const list = $("comments");
+    cards.clear();
     $("empty").hidden = !!doc;
     if (!state) {
       list.replaceChildren();
@@ -771,14 +816,15 @@
       (c) => c.requirements.some((q) => q.outside) || c.figures.length,
     );
     const rest = state.comments.filter((c) => !first.includes(c));
+    // (replaceChildren writes the word "null" for a null: none is passed.)
     list.replaceChildren(
-      first.length
-        ? el("div", { class: "group" }, "Requests outside the Word file, and figure changes")
-        : null,
+      ...(first.length
+        ? [el("div", { class: "group" }, "Requests outside the Word file, and figure changes")]
+        : []),
       ...first.map(commentCard),
-      rest.length
-        ? el("div", { class: "group" }, first.length ? "Other comments" : "Comments")
-        : null,
+      ...(rest.length
+        ? [el("div", { class: "group" }, first.length ? "Other comments" : "Comments")]
+        : []),
       ...rest.map(commentCard),
     );
   }
@@ -787,6 +833,8 @@
   $("manuscript").addEventListener("change", (e) => {
     doc = manuscripts[Number(e.target.value)]?.doc ?? null;
     forms.clear();
+    wanted = goTo = marked = null;
+    linkNote("");
     reload({ list: false });
   });
 
