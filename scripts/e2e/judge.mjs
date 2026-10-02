@@ -163,6 +163,60 @@ export function minimalFind(ch) {
   return a[0] !== b[0] && a[a.length - 1] !== b[b.length - 1];
 }
 
+// --screenshots. The file of the n-th pane step: "07-propose-R1.1.png",
+// "03-show-tab-tools.png". What tells two calls of a step apart (the comment,
+// the tab) is in the name; nothing else of the arguments is.
+export function shotName(n, step, args = {}) {
+  const part = [args.ref, args.tab].find((x) => typeof x === "string" && /^[\w.-]+$/.test(x));
+  return `${String(n).padStart(2, "0")}-${step}${part ? `-${part}` : ""}.png`;
+}
+
+// Pane steps that wait for a model (the others answer from the daemon or
+// from Word alone). split: only when no pattern splits the review, and for
+// the requests it then extracts.
+export const MODEL_STEPS = new Set([
+  "split",
+  "propose",
+  "propose-all",
+  "propose-stop",
+  "check-paragraphs",
+  "rewrite-paragraph",
+  "suggest-ledger",
+  "load-letter",
+  "response-draft",
+  "response-draft-all",
+  "tools-translate",
+  "tools-ask",
+  "tools-extract",
+]);
+
+// One row of shots/timings.json. seconds: from the start of the step's
+// process to its answer (about 2 s of it are the driver connecting to the
+// pane); turn_seconds: what the step measured itself from the click to the
+// end of the turn; waiting: what the pane said 4 s and 20 s into the wait;
+// progress: the progress lines a propose step saw.
+export function stepTiming({ n, step, args = {}, shot, seconds, result }) {
+  const bare = step.replace(/^(?:mode14|special)-/, "");
+  return {
+    n,
+    step,
+    ...(args.ref ? { ref: args.ref } : {}),
+    ...(args.tab ? { tab: args.tab } : {}),
+    model_call: MODEL_STEPS.has(bare),
+    ok: result?.ok !== false,
+    seconds,
+    turn_seconds: result?.seconds ?? null,
+    shot: result?.shot === null ? null : shot,
+    shot_error: result?.shot_error ?? null,
+    waiting: (result?.waiting ?? []).map((w) => ({
+      ...w,
+      ...(w.shot ? { shot: String(w.shot).split(/[\\/]/).pop() } : {}),
+    })),
+    progress: result?.progress_samples ?? [],
+    message: result?.message ?? result?.error ?? null,
+  };
+}
+
 // Replace each `from` prefix with its `to`, longest first so a folder and a
 // file inside it do not clash.
 export function rewriteCommand(cmd, map) {

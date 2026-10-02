@@ -7,6 +7,10 @@
 // Environment: PLAYWRIGHT_CORE (path of a playwright-core package),
 // E2E_CDP_PORT (the --remote-debugging-port given to Word),
 // E2E_PANE_ORIGIN (default http://127.0.0.1:47834).
+// E2E_SHOT (optional, the run's --screenshots): the path of a PNG. The pane
+// is photographed when the step is over (also when it failed), and while it
+// runs after 4 s and after 20 s (<name>-wait1.png, <name>-wait2.png) with the
+// texts that tell the user what is going on (`waiting` in the answer).
 // Element ids come from taskpane/word/index.html and the class names from
 // taskpane/shared/review-pane.js, response-pane.js and tools-pane.js.
 
@@ -308,7 +312,50 @@ function providersView(page) {
   });
 }
 
+// What tells a user what the pane is doing: the lines that say it.
+function paneState(page) {
+  return page.evaluate(() => {
+    const t = (id) => (document.getElementById(id)?.textContent ?? "").replace(/\s+/g, " ").trim();
+    return {
+      message: t("review-message"),
+      progress: t("review-progress"),
+      agent_status: t("agent-status"),
+      connection: t("connection-status"),
+      models_line: t("models-line"),
+      input_disabled: document.getElementById("input")?.disabled ?? null,
+    };
+  });
+}
+
 const steps = {
+  // Screenshot runs: one tab shown, nothing pressed in it. a.tab: chat,
+  // review, tools, setup, library or the tab of the letter.
+  async "show-tab"(page, a) {
+    await page.waitForFunction(
+      (tab) => {
+        const shown = () =>
+          document.querySelector(`.tab-content[data-tab="${tab}"]`)?.hidden === false;
+        if (!shown()) document.querySelector(`button.tab[data-tab="${tab}"]`)?.click();
+        return shown();
+      },
+      a.tab,
+      { timeout: 60_000, polling: 500 },
+    );
+    // What the tab asks the daemon for when it opens has time to arrive.
+    await sleep(a.settle_ms ?? 3000);
+    return { tab: a.tab, ...(await paneState(page)) };
+  },
+
+  // Screenshot runs: "Refresh status" pressed while no daemon answers.
+  async "refresh-offline"(page) {
+    await clearMessage(page);
+    await page.click("#review-refresh", { timeout: 15_000 });
+    const message = await waitMessage(page, 40_000).catch(
+      (e) => `no message within 40 s (${String(e.message).split("\n")[0]})`,
+    );
+    return { message, ...(await paneState(page)) };
+  },
+
   // The tab buttons get their click handlers when taskpane.js has run, which
   // can be after the page is reachable over CDP: a click before that does
   // nothing and every later step would wait on a hidden tab. Click until the
@@ -1067,9 +1114,45 @@ if (require.main === module) {
     if (!fn) throw new Error(`unknown step ${step}`);
     const a = argsFile ? JSON.parse(fs.readFileSync(argsFile, "utf8")) : {};
     const { browser, page } = await connect();
+    const shot = process.env.E2E_SHOT;
+    const waiting = [];
+    const timers = [];
+    const during = (n, ms) =>
+      timers.push(
+        setTimeout(() => {
+          const file = shot.replace(/\.png$/, `-wait${n}.png`);
+          paneState(page)
+            .then((state) => waiting.push({ after_ms: ms, shot: file, ...state }))
+            .then(() => page.screenshot({ path: file, fullPage: true }))
+            .catch((e) => waiting.push({ after_ms: ms, error: String(e?.message ?? e) }));
+        }, ms),
+      );
+    if (shot) {
+      during(1, 4000);
+      during(2, 20_000);
+    }
+    const after = async () => {
+      for (const t of timers) clearTimeout(t);
+      if (!shot) return {};
+      const error = await page
+        .screenshot({ path: shot, fullPage: true })
+        .then(() => null)
+        .catch((e) => String(e?.message ?? e));
+      return { shot: error ? null : shot, shot_error: error, waiting };
+    };
     try {
-      const out = await fn(page, a);
-      process.stdout.write(JSON.stringify({ ok: true, step, ...out }) + "\n");
+      let out;
+      try {
+        out = await fn(page, a);
+      } catch (e) {
+        const taken = await after();
+        process.stdout.write(
+          JSON.stringify({ ok: false, error: String(e?.message ?? e), ...taken }) + "\n",
+        );
+        process.exitCode = 1;
+        return;
+      }
+      process.stdout.write(JSON.stringify({ ok: true, step, ...out, ...(await after()) }) + "\n");
     } finally {
       await browser.close().catch(() => {});
     }

@@ -221,6 +221,21 @@ Other options: `--cdp-port`, `--win-node`, `--fixture`, `--review`,
 `--ledger`, `--features S2-18..S2-34`, `--skip-knob`, `--skip-mode14`,
 `--keep-on-fail` (leave Word and the daemon up after a failed step).
 
+`--screenshots` (off by default) saves a PNG of the task pane after every
+pane step as `shots/NN-<step>[-<comment or tab>].png` in the run folder, and
+one 4 s and one 20 s into a step that takes that long (`-wait1`, `-wait2`).
+`shots/timings.json` has a row per step: the seconds from the start of the
+step to its answer, the seconds of the turn as the step measured them, what
+the pane said during the wait (message, progress line, status, the models
+line), and whether the step waits for a model. A step that fails is
+photographed too. Stage 2 adds pictures that are not steps of the run and are
+not judged: every tab before anything is pasted, the chat and Setup after the
+turns, the answer of "Check revised paragraphs", the Word window of the run
+once the first tracked change is in (`word-shot.ps1`: the window draws
+itself, so no other window is in the picture and it is not moved or focused),
+and after the verify commands the pane with the daemon stopped ("Refresh
+status" pressed), after which the daemon is started again for the cleanup.
+
 ## Pane steps
 
 `pane-driver.cjs <step> <args.json>` runs one step and prints one JSON line.
