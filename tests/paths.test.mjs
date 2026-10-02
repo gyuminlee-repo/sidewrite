@@ -6,15 +6,15 @@ import assert from "node:assert/strict";
 import { docDirFromActiveUrl, isInOrUnder } from "../taskpane/shared/paths.js";
 
 test("a Windows document folder and the WSL workspace folder of it are one place", () => {
-  const url = "D:\\_workspace\\cc\\draftspect-s2test\\e2e-20261002-004055\\review_manuscript.docx";
+  const url = "D:\\papers\\revision\\run-1\\review_manuscript.docx";
   const dir = docDirFromActiveUrl(url);
-  assert.equal(dir, "D:/_workspace/cc/draftspect-s2test/e2e-20261002-004055");
+  assert.equal(dir, "D:/papers/revision/run-1");
   assert.equal(
-    isInOrUnder(dir, "/mnt/d/_workspace/cc/draftspect-s2test/e2e-20261002-004055"),
+    isInOrUnder(dir, "/mnt/d/papers/revision/run-1"),
     true,
   );
-  assert.equal(isInOrUnder(dir, "/mnt/d/_workspace/cc/draftspect-s2test"), true);
-  assert.equal(isInOrUnder(dir, "/mnt/d/_workspace"), true);
+  assert.equal(isInOrUnder(dir, "/mnt/d/papers/revision"), true);
+  assert.equal(isInOrUnder(dir, "/mnt/d/papers"), true);
   assert.equal(isInOrUnder(dir, "/mnt/d"), true);
 });
 
