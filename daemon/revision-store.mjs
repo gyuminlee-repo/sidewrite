@@ -413,6 +413,21 @@ const Artifact = z.object({
 // mode: how the marked copy shows the changes (aux-service.mjs MARKED_MODES).
 const MarkedArtifact = Artifact.extend({ mode: z.string() });
 
+// The two ends of the link between a manuscript and a supplementary
+// document. manuscript, doc: the path of the other document, relative to the
+// folder of this file ("/" separators) when it is under it, absolute
+// otherwise. label: what the response letter calls the supplement.
+const PartOf = z.object({
+  manuscript: z.string().min(1),
+  label: z.string().default(""),
+  joined_at: z.string(),
+});
+const Part = z.object({
+  doc: z.string().min(1),
+  label: z.string().default(""),
+  joined_at: z.string(),
+});
+
 export const RevisionSchema = z.object({
   version: z.literal(REVISION_VERSION),
   manuscript: z.string(),
@@ -519,6 +534,14 @@ export const RevisionSchema = z.object({
   artifacts: z
     .object({ marked: MarkedArtifact.nullish(), anonymized: Artifact.nullish() })
     .nullish(),
+  // A supplementary document in the revision of a manuscript
+  // (revision-parts.mjs). part_of: in the file of the supplement, the
+  // manuscript it belongs to. parts: in the file of the manuscript, its
+  // supplements. The link is written at both ends, so an end an earlier
+  // daemon dropped is put back from the other. Optional and without a
+  // default: a file from before them saves as it was loaded.
+  part_of: PartOf.nullish(),
+  parts: z.array(Part).optional(),
 });
 
 // ---- paths ----------------------------------------------------------------
@@ -1356,5 +1379,135 @@ export function setArtifact(rev, kind, artifact) {
   else delete all[kind];
   if (Object.keys(all).length) next.artifacts = all;
   else delete next.artifacts;
+  return next;
+}
+
+// ---- supplementary documents ---------------------------------------------------
+// A supplementary document has a review file of its own, linked to the file
+// of the manuscript (part_of here, parts there). The manuscript owns the
+// comment list, the requests, the ledger rules and the journal profile; the
+// file of the supplement holds a copy of them (mirrorFromMain) and what is
+// its own: its changes, blocked edits, questions and check results.
+
+// What a ledger check result depends on: the rule, not its last result.
+export const ruleFingerprint = (item) =>
+  JSON.stringify([item.kind, item.text, item.scope, item.check]);
+
+const RESULT_KEYS = [
+  "status",
+  "violation_count",
+  "checked_at",
+  "violations",
+  "unsure",
+  "checked_hashes",
+];
+
+// Work of its own under a comment: it stays in the file of the supplement
+// whatever the manuscript lists.
+const hasLocalWork = (c) =>
+  c.changes.length > 0 ||
+  c.blocked.length > 0 ||
+  (c.questions ?? []).length > 0 ||
+  (c.figure_changes ?? []).length > 0;
+
+// The file of a supplement (rev) brought in line with the file of its
+// manuscript (main, as loadRevision gives it). Copied as they are: the
+// comments (ref, reviewer, text, section), their requests WITH THEIR IDS and
+// the request counter, the named terms, the journal profile and its
+// overrides, the ledger rules and the ledger counter. replaceComments is not
+// used: it numbers requests by their text, and the ids must be those of the
+// manuscript, because the response check counts by id. Everything else under
+// a comment is the supplement's own and stays. A comment the manuscript no
+// longer lists stays, after the listed ones, while it has work of its own.
+// Ledger: a rule for the supplement applies here as a manuscript rule, so
+// the prompt and the pre-check need no second scope; a count rule of the
+// manuscript describes the sections of the manuscript and is left out; the
+// result of a rule is kept while the rule is the one it was checked as.
+// A counter is never below an id this file still names (withCounters).
+// Run on a file that is already in line, it returns an equal revision.
+export function mirrorFromMain(rev, main) {
+  const listed = new Set(main.comments.map((c) => c.ref));
+  const comments = main.comments.map((m) => {
+    const row = {
+      ...clone(findComment(rev, m.ref) ?? {}),
+      ref: m.ref,
+      reviewer: m.reviewer,
+      text: m.text,
+      requirements: clone(m.requirements ?? []),
+      requirement_seq: m.requirement_seq ?? null,
+      named_terms: clone(m.named_terms ?? []),
+    };
+    if (m.section === undefined) delete row.section;
+    else row.section = m.section;
+    return row;
+  });
+  const orphans = rev.comments.filter((c) => !listed.has(c.ref) && hasLocalWork(c)).map(clone);
+  const ledger = main.ledger
+    .filter((it) => !(it.check.type === "count" && it.scope === "manuscript"))
+    .map((it) => {
+      const rule = {
+        id: it.id,
+        kind: it.kind,
+        text: it.text,
+        scope: it.scope === "supplement" ? "manuscript" : it.scope,
+        check: clone(it.check),
+        source: clone(it.source ?? null),
+      };
+      const own = rev.ledger.find((x) => x.id === it.id);
+      if (!own || ruleFingerprint(own) !== ruleFingerprint(rule)) return rule;
+      return { ...rule, ...Object.fromEntries(RESULT_KEYS.map((k) => [k, clone(own[k])])) };
+    });
+  return withCounters(
+    RevisionSchema.parse({
+      ...clone(rev),
+      comments: [...comments, ...orphans],
+      ledger,
+      ledger_seq: main.ledger_seq ?? null,
+      journal_profile: main.journal_profile ?? null,
+      profile_overrides: clone(main.profile_overrides ?? {}),
+    }),
+  );
+}
+
+// part_of: { manuscript, label, joined_at }, or null to take the link away.
+export function setPartOf(rev, partOf) {
+  const next = clone(rev);
+  if (partOf) next.part_of = PartOf.parse(partOf);
+  else delete next.part_of;
+  return next;
+}
+
+// The file of a supplement that leaves its revision: the link goes, and with
+// it the copy of what the manuscript owns. What is its own stays: a comment
+// with changes, blocked edits, questions or figure changes, and the snapshot.
+export function leaveMain(rev) {
+  const next = setPartOf(rev, null);
+  next.comments = next.comments.filter(hasLocalWork);
+  next.ledger = [];
+  next.journal_profile = null;
+  next.profile_overrides = {};
+  return next;
+}
+
+// part: { doc, label, joined_at }. null when the manuscript lists that
+// document under that label already.
+export function addPart(rev, part) {
+  const row = Part.parse(part);
+  const old = (rev.parts ?? []).find((p) => p.doc === row.doc);
+  if (old && old.label === row.label) return null;
+  const next = clone(rev);
+  next.parts = [
+    ...(next.parts ?? []).filter((p) => p.doc !== row.doc),
+    old ? { ...old, label: row.label } : row,
+  ];
+  return next;
+}
+
+// null when the manuscript does not list that document.
+export function removePart(rev, doc) {
+  if (!(rev.parts ?? []).some((p) => p.doc === doc)) return null;
+  const next = clone(rev);
+  next.parts = next.parts.filter((p) => p.doc !== doc);
+  if (!next.parts.length) delete next.parts;
   return next;
 }

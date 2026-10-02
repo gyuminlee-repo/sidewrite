@@ -678,6 +678,8 @@ const review = createReviewService({
   manuscriptSeen: (key) => (startsSession(key) ? null : (manuscriptByKey.get(key)?.hashes ?? null)),
   manuscriptGiven: (key, hashes) => manuscriptByKey.set(key, { hashes, fresh: startsSession(key) }),
   sendEvent: (key, obj) => bridge.sendToTaskpane(obj, key),
+  // The other open panes of a revision (a manuscript and its supplements).
+  listPanes: () => bridge.listPanes(),
   // The answers of the response letter that a change of the manuscript made
   // out of date (same rule as the Response tab).
   afterRefresh: (rev, snap) => markStale(rev, snap),

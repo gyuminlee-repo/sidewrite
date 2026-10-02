@@ -45,6 +45,7 @@ import {
 import { classifyRevision } from "./revision-classify.mjs";
 import { appendDecisions, decisionRecord } from "./decision-log.mjs";
 import { wrapHandlers } from "./handler-wrap.mjs";
+import { refuseInPart } from "./revision-parts.mjs";
 import { checkLlmItem, inScope } from "./ledger-check.mjs";
 import {
   effectiveProfile,
@@ -232,6 +233,17 @@ export function refreshed(rev, snapshot, headings, profile) {
   }
   return next;
 }
+
+// Requests that are refused in the file of a supplementary document.
+const PART_REFUSED = [
+  "profile_set",
+  "response_import_previous",
+  "response_save",
+  "response_draft",
+  "response_translate",
+  "response_check",
+  "response_export",
+];
 
 export function createResponseService({
   getContext,
@@ -935,6 +947,18 @@ export function createResponseService({
       };
     },
   };
+
+  // The letter is written from the manuscript: in the file of a
+  // supplementary document (revision-parts.mjs) the answers, the checks, the
+  // export and the profile of the paper are not changed. response_state and
+  // response_locate stay: they compute what this file itself cites.
+  for (const type of PART_REFUSED) {
+    const fn = impl[type];
+    impl[type] = async (msg, key, host) => {
+      refuseInPart(await load(at(key)));
+      return fn(msg, key, host);
+    };
+  }
 
   return {
     handlers: wrapHandlers(impl, {

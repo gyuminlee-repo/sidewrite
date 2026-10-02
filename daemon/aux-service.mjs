@@ -64,6 +64,7 @@ import {
   setProfile,
 } from "./revision-store.mjs";
 import { wrapHandlers } from "./handler-wrap.mjs";
+import { refuseInPart } from "./revision-parts.mjs";
 import { effectiveProfile, mergeProfile, regexProblems } from "./journal-profile.mjs";
 import { extractGuidelineRules } from "./guideline-extract.mjs";
 import { splitSentences } from "./review-split.mjs";
@@ -312,6 +313,8 @@ export function createAuxService({
       let added = [];
       let skipped = [];
       await update(d, (rev) => {
+        // Rules and the profile belong to the manuscript of a supplement.
+        refuseInPart(rev);
         const r = importLedgerItems(rev, picks);
         ({ added, skipped } = r);
         if (!Object.keys(overrides).length) return r.revision;
