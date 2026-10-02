@@ -47,6 +47,9 @@ import {
   queueRefs,
   figuresUrl,
   hasFigureWork,
+  SUBMISSION_STATE_LABELS,
+  submissionCount,
+  submissionGoLabel,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
@@ -107,6 +110,14 @@ export function initReviewPane({
   docUrl = () => null,
   // () => where the daemon serves this pane, and with it the figures page.
   daemonOrigin = () => globalThis.location?.origin ?? "",
+  // (tab, elementId) => shows that tab of the pane and brings the element
+  // into view (taskpane.js, where the active tab is set). A row of the
+  // submission checklist is fixed there.
+  goTo = () => {},
+  // (type, payload) => the result of a job of the Tools tab's service
+  // (tools-pane.js job): its job_done comes as a tools_event, which that
+  // pane waits for. The submission checklist is such a job.
+  toolsJob = null,
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -139,6 +150,7 @@ export function initReviewPane({
     pasteOpen: false, // the paste box is shown although a review is split
     results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
     cards: new Map(), // ref -> the elements of its card, as of the last render
+    submission: null, // { rows, doc, at } of the last "Check now" of this connection
   };
 
   function el(tag, props = {}, ...kids) {
@@ -1096,7 +1108,54 @@ export function initReviewPane({
     $("review-more").hidden = comments.length === 0;
     $("review-submit-box").hidden = comments.length === 0;
     const notDone = comments.filter((c) => c.status !== "done").length;
-    $("review-submit-count").textContent = notDone ? `(${notDone} not done)` : "";
+    // Once a check has run the header counts its rows, not the comments.
+    $("review-submit-count").textContent = state.submission
+      ? submissionCount(state.submission.rows)
+      : notDone
+        ? `(${notDone} not done)`
+        : "";
+    renderSubmission();
+  }
+
+  // The rows of the last "Check now": the state, one sentence, and the way
+  // to where the row is fixed. They are as of that press: the line under
+  // them says when, and a new connection drops them.
+  function renderSubmission() {
+    const box = $("review-submit-rows");
+    const check = state.submission;
+    if (!check) return box.replaceChildren();
+    const rows = check.rows.map((row) => {
+      const label = submissionGoLabel(row.go);
+      let go = null;
+      if (label) {
+        go = el("button", { type: "button", class: "btn-link review-submit-go", text: label });
+        go.addEventListener(
+          "click",
+          guard(() =>
+            Number.isInteger(row.go.paragraph)
+              ? word.selectParagraphByIndex(row.go.paragraph)
+              : goTo(row.go.tab, row.go.target),
+          ),
+        );
+      }
+      return el(
+        "div",
+        { class: `review-submit-row review-submit-${row.state}`, "data-row": row.id },
+        el("span", {
+          class: "review-submit-state",
+          text: SUBMISSION_STATE_LABELS[row.state] ?? row.state,
+        }),
+        el("span", { class: "review-submit-text", text: row.text }),
+        go,
+      );
+    });
+    box.replaceChildren(
+      ...rows,
+      el("div", {
+        class: "review-submit-asof",
+        text: `${check.doc ? `${check.doc}, c` : "C"}hecked at ${check.at}. Press Check now again after a change.`,
+      }),
+    );
   }
 
   function render() {
@@ -1562,6 +1621,33 @@ export function initReviewPane({
   async function markCleaned(ids) {
     if (ids?.length) await ask("review_comments_cleaned", { ids: ids.map(String) });
   }
+  // Check now: the pane reads the document (text, comments, headings,
+  // formatting) and the daemon answers the rows. Nothing is changed. The
+  // formatting is read last and on its own: when Word cannot give it, the
+  // row that needs it says so and the other rows are still computed.
+  $("review-submit-check").addEventListener(
+    "click",
+    once(
+      "submit-check",
+      guard(async () => {
+        if (!toolsJob) throw new Error("The checklist is not available in this pane.");
+        say("Reading the document...");
+        const snapshot = await word.collectReviewSnapshot();
+        const headings = (await word.collectHeadings?.()) ?? [];
+        const format = (await word.readFormatSnapshot?.().catch(() => null)) ?? null;
+        say("Checking...");
+        const r = await toolsJob("submission_check", { snapshot, headings, format });
+        if (!r?.ok) throw new Error(r?.error || "The check failed.");
+        state.submission = {
+          rows: r.rows ?? [],
+          doc: r.doc_name ?? null,
+          at: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        };
+        say("");
+      }),
+      () => $("review-submit-check"),
+    ),
+  );
   $("review-clean-tool").addEventListener(
     "click",
     once(
@@ -1807,6 +1893,7 @@ export function initReviewPane({
     reload: () =>
       (dropJobs(),
       endAllWaits(CONNECTION_LOST),
+      (state.submission = null),
       (state.reviewTurnOpen = false),
       stopProgress(),
       load())

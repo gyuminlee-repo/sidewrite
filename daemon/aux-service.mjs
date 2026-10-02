@@ -6,7 +6,7 @@
 // Jobs (AUX_JOBS; they call a model or a Python tool): accepted at once, the
 // result follows as { type: "tools_event", event: "job_done", job_id, result }.
 //   selection_translate, selection_ask, profile_rules_extract, marked_build,
-//   anonymize
+//   anonymize, submission_check
 //
 // The selection requests get the selected text from the pane and answer with
 // text for the pane. They read no file and no revision, and nothing of the
@@ -33,6 +33,11 @@
 // profile turns on (format-check.mjs) over the formatting the pane read, and
 // the count rules of the ledger (count-check.mjs) over the snapshot and the
 // headings. Nothing of the result is stored.
+//
+// Submission checklist. submission_check answers the rows of "Before
+// submission" (submission-check.mjs) for the document as the pane read it
+// just now. The record is brought up to date with that document in memory
+// and is not saved; nothing of a row is stored.
 //
 // Nothing here writes to the open document. A copy (marked, anonymized) is a
 // new file next to the manuscript, made from the file as it was last saved.
@@ -63,10 +68,14 @@ import { SAVE_FIRST } from "./doc-bytes.mjs";
 import { runPy as defaultRunPy } from "./py-tool.mjs";
 import { runMarkedDiff } from "./marked-diff.mjs";
 import { runAnonymize } from "./anonymize.mjs";
-import { findFormatIssues } from "./format-check.mjs";
+import { findFormatIssues, formatRulesOn } from "./format-check.mjs";
 import { checkCountItem } from "./count-check.mjs";
-import { usableHeadings, writingJob } from "./response-service.mjs";
+import { refreshed, usableHeadings, writingJob } from "./response-service.mjs";
 import { buildGlossPrompt } from "./response-prompt.mjs";
+import { submissionRows } from "./submission-check.mjs";
+
+// The Tools tab names the format rules that are on (format-check.mjs).
+export { formatRulesOn };
 
 export const AUX_JOBS = new Set([
   "selection_translate",
@@ -74,6 +83,7 @@ export const AUX_JOBS = new Set([
   "profile_rules_extract",
   "marked_build",
   "anonymize",
+  "submission_check",
 ]);
 
 export const MARKED_MODES = ["track_changes", "color"];
@@ -94,20 +104,6 @@ export const buildAskPrompt = (text, question) => ({
 });
 
 const isObj = (x) => !!x && typeof x === "object" && !Array.isArray(x);
-const named = (x) => Array.isArray(x) && x.some((s) => typeof s === "string" && s);
-
-// The format rules a profile turns on, by name, for the line above the
-// findings. An empty table is always reported.
-export function formatRulesOn(profile = {}) {
-  const italics = profile.italics ?? {};
-  return [
-    italics.statistics === true && "statistics symbols in italics",
-    named(italics.genera) && "species names in italics",
-    named(italics.genes) && "gene names in italics",
-    named(profile.subscripts) && "formula digits in subscript",
-    profile.first_line_indent != null && "first-line indent",
-  ].filter(Boolean);
-}
 
 function selectedText(msg) {
   const text = String(msg.text ?? "").trim();
@@ -375,6 +371,32 @@ export function createAuxService({
         `[tools] format_check paragraphs=${snapshot.paragraphs.length} headings=${headings.length} rules=${format.rules.length} findings=${format.findings.length} counts=${counts.length}`,
       );
       return { format, counts };
+    },
+
+    // The rows of the submission checklist for the open file. A job: it
+    // hashes files, and a plain request is waited for 10 s only. It reads
+    // only: the record is refreshed in memory, as the Response tab's check
+    // refreshes it, and is not saved.
+    async submission_check(msg, key) {
+      const d = at(key);
+      const snapshot = msg.snapshot;
+      if (!isObj(snapshot) || !Array.isArray(snapshot.paragraphs))
+        throw new Error("The request holds no document snapshot.");
+      const { headings } = usableHeadings(msg.headings, snapshot);
+      const stored = await load(d);
+      const { profile } = await profileOf(d, stored);
+      const revision = refreshed(stored, snapshot, headings, profile);
+      const rows = submissionRows({
+        revision,
+        profile,
+        live: { snapshot, headings, format: isObj(msg.format) ? msg.format : null },
+        file: basename(d.doc),
+      });
+      const count = (state) => rows.filter((r) => r.state === state).length;
+      log(
+        `[tools] submission_check rows=${rows.length} ready=${count("ready")} not_ready=${count("not_ready")} not_applicable=${count("not_applicable")}`,
+      );
+      return { rows, doc_name: basename(d.doc) };
     },
 
     // Which saved file the copies are made from, and the profile in force.

@@ -1020,3 +1020,26 @@ export function candidateLabel(c) {
       : "LLM check";
   return `${kind}, ${check}: ${c.text}`;
 }
+
+// ---- "Before submission": the checklist (daemon/submission-check.mjs) -------
+
+export const SUBMISSION_STATE_LABELS = {
+  ready: "Ready",
+  not_ready: "Not ready",
+  not_applicable: "Not needed",
+};
+
+// The count in the header of the section once a check has run.
+export const submissionCount = (rows) =>
+  `(${(rows ?? []).filter((r) => r.state === "not_ready").length} not ready)`;
+
+const TAB_NAMES = { review: "Review", response: "Response", tools: "Tools" };
+
+// What the button of a row says, by where the row is fixed ("" for a row
+// without one). here: the tab the checklist is on.
+export function submissionGoLabel(go, here = "review") {
+  if (!go) return "";
+  if (Number.isInteger(go.paragraph)) return "Show in Word";
+  if (!go.tab || !go.target) return "";
+  return go.tab === here ? "Go there" : `Go to the ${TAB_NAMES[go.tab] ?? go.tab} tab`;
+}
