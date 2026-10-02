@@ -169,12 +169,14 @@ test("rewriteCommand: longest prefix wins, other text kept", () => {
 
 test("judge: pane texts against the procedure wording", () => {
   const ok = judge("refresh", {
-    message:
+    message: "4 changes are waiting for your decision in Word.",
+    message_details:
       "Accepted 0, rejected 0, edited 0, pending 4, not found 0. Changes 4, expected tool comments 4, found 4.",
   });
   assert.equal(ok.pass, true);
   const bad = judge("refresh", {
-    message:
+    message: "The changes on record and the comments in Word do not match.",
+    message_details:
       "Accepted 0, rejected 0, edited 0, pending 4, not found 0. Changes 4, expected tool comments 4, found 3 (MISMATCH: missing R1.2-1, unrecorded -)",
   });
   assert.equal(bad.pass, false);
@@ -431,7 +433,7 @@ test("judge refresh-mode14: counts, no mismatch, and the not-resolved note for e
     `Accepted ${a}, rejected 0, edited 0, pending 0, not found 0. Changes 1, expected tool comments 1, found 1.`;
   const note = (n) =>
     ` ${n} rationale comment(s) not marked resolved (Word: GeneralException; one cause is a document in compatibility mode).`;
-  const j = (message) => judge("refresh-mode14", { message }).pass;
+  const j = (message) => judge("refresh-mode14", { message: "", message_details: message }).pass;
   assert.equal(j(head(1) + note(1)), true);
   assert.equal(j(head(1)), false); // no note: the resolve was not refused
   assert.equal(j(head(1) + note(2)), false); // not one note per handled change
@@ -748,7 +750,8 @@ test("ollamaSplitEvidence: Ollama chosen, the split done, a receipt with an olla
   const select = { ok: true, selected: { id: "ollama", model: "qwen3.5:9b" }, message: "" };
   const split = {
     ok: true,
-    message: "Split by regex: 7 comment(s). Edit, then Save.",
+    message:
+      "Split into 7 comments (found by the numbering in the text). Check the list, then press Save comment list.",
     draft_refs: [],
   };
   const decisions =
@@ -804,7 +807,9 @@ test("focusEvidence, suggestEvidence and cleanupEvidence", async () => {
     changed: true,
     after:
       "Auto-refreshed 10:00:00: Changes 5, expected tool comments 5, found 5. Outside changes: 1.",
-    external: ["X1: a sentence was deleted. Lost: 0.82; 0.91"],
+    external: [
+      "A paragraph was deleted outside the tool: \u201cThe yield was 0.82...\u201d. The old text had 0.82; 0.91, and the new text does not. Check that this is meant.",
+    ],
   };
   assert.equal(focusEvidence(focus).pass, true);
   assert.equal(focusEvidence({ ...focus, external: [] }).pass, false);
@@ -948,7 +953,8 @@ test("restartSplitEvidence: after a daemon restart the split used the stored pro
   const { restartSplitEvidence } = await import("../scripts/e2e/judge.mjs");
   const split = {
     ok: true,
-    message: "Split by regex: 7 comment(s). Edit, then Save.",
+    message:
+      "Split into 7 comments (found by the numbering in the text). Check the list, then press Save comment list.",
     draft_refs: [],
   };
   const log = [
@@ -1118,7 +1124,7 @@ test("a held click or another action's late message is not the result of the ste
   const done = {
     ok: true,
     message:
-      "Split by regex. Text before the first reviewer (usually the editor letter) is kept as E.1. Delete it if it asks for nothing. requirement extraction failed: reply was not JSON; add them by hand",
+      "Split into comments (found by the numbering in the text). Text before the first reviewer (usually the editor letter) is kept as E.1. Delete it if it asks for nothing. requirement extraction failed: reply was not JSON; add them by hand",
     draft_refs: refs,
   };
   assert.equal(JUDGES.split(done).pass, true);
@@ -1156,14 +1162,17 @@ test("the pane steps wait for the message their own action ends with", async () 
   const waits = [...driver.matchAll(/waitMessage\(page, [^,]+, "((?:[^"\\]|\\.)*)"\)/g)].map((m) =>
     JSON.parse(`"${m[1]}"`),
   );
-  assert.deepEqual(waits, ["^Split by ", "forbidden rule", "candidate rule\\(s\\) by "]);
-  assert.match("Split by regex: 5 comment(s). Edit, then Save.", new RegExp(waits[0]));
+  assert.deepEqual(waits, ["^Split into ", "forbidden rule", "candidate rule\\(s\\) by "]);
+  assert.match(
+    "Split into 5 comments (found by the numbering in the text). Check the list, then press Save comment list.",
+    new RegExp(waits[0]),
+  );
   assert.match("1 candidate rule(s) by regex. Tick the ones to keep", new RegExp(waits[2]));
   // allow-exception: the refusal of the forbid guard, as the daemon words it.
   assert.ok(read("../daemon/review-tools.mjs").includes("matches forbidden rule(s) ${open.join("));
   const HOLD = "Waiting for the daemon to confirm the stored provider choice...";
   for (const w of waits) assert.doesNotMatch(HOLD, new RegExp(w));
-  assert.ok(pane.includes("say(`Split by ${r.method}"));
+  assert.ok(pane.includes('`Split into ${n} comment${n === 1 ? "" : "s"} (${how}).'));
   assert.ok(pane.includes("candidate rule(s) by ${r.method}."));
   assert.ok(pane.includes(`const PROVIDER_WAIT = "${HOLD}";`));
 });
@@ -2064,7 +2073,7 @@ test("judge check-paragraphs: the check ran to its message, with or without prob
 });
 
 test("judge refresh: the parts of a rewrite share a comment, so changes may outnumber comments", () => {
-  const j = (message) => judge("refresh", { message }).pass;
+  const j = (message) => judge("refresh", { message: "", message_details: message }).pass;
   assert.equal(
     j(
       "Accepted 0, rejected 0, edited 0, pending 6, not found 0. Changes 6, expected tool comments 3, found 3.",
@@ -2093,4 +2102,60 @@ test("judge rewrite-paragraph: the turn ran and left changes marked as a rewrite
     judge("rewrite-paragraph", { ...ok, message_error: true }, { ref: "R1.3" }).pass,
     false,
   );
+});
+
+// The Review tab shows plain words; the judge reads what each row is about from
+// the attributes the driver collects (decisions_raw, the ledger id and kind,
+// the rule of a finding, the requests of a card) and the numbers of a refresh
+// from the Details of the message.
+test("judge: the Review steps read the plain-word rows through their attributes", () => {
+  const waiting = [
+    { kind: "request_open", ref: "R1.3", req: "q1" },
+    { kind: "request_open", ref: "R1.3", req: "q2" },
+    { kind: "rule", ref: "", req: "" },
+  ];
+  const finds = (L1, L2) => [
+    ...Array.from({ length: L1 }, () => "L1: Methods: “The incubation...” has “30 degrees”"),
+    ...Array.from({ length: L2 }, () => "L2: Results: “The extract...” has “novel”"),
+  ];
+  const checkAll = (r) => judge("check-all", r).pass;
+  assert.equal(checkAll({ violations: finds(2, 1), decisions: [], decisions_raw: waiting }), true);
+  assert.equal(
+    checkAll({ violations: finds(2, 1), decisions: [], decisions_raw: waiting.slice(0, 1) }),
+    false,
+  );
+  assert.equal(checkAll({ violations: finds(1, 1), decisions: [], decisions_raw: waiting }), false);
+  assert.equal(
+    judge("edit-draft", {
+      comments: ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"].map((ref) => ({
+        ref,
+        reqs_line:
+          ref === "R1.3"
+            ? "Requirements: q1 say how growth was followed; q2 describe the synthetic carbon source as a novel substrate"
+            : "",
+      })),
+    }).pass,
+    true,
+  );
+  assert.equal(
+    judge("split", {
+      message: "Split into 5 comments (found by the numbering in the text). Check the list.",
+      draft_refs: ["R1.1", "R1.2", "R1.3", "R1.4", "R1.5"],
+    }).pass,
+    true,
+  );
+  const after = {
+    comments: [
+      { ref: "R1.1", changes: [{ badge: "Accepted" }] },
+      { ref: "R1.2", changes: [{ badge: "Rejected" }] },
+      { ref: "R1.3", changes: [{ badge: "Edited by you" }, { badge: "Accepted" }] },
+    ],
+    message: "1 change was made outside the tool.",
+    message_details: "Accepted 1. Outside changes: 1 (list under Changes made outside the tool).",
+    external: [
+      "A paragraph was changed outside the tool: Results: “The yield was...”. The old text had 0.82; 0.91, and the new text does not. Check that this is meant.",
+    ],
+  };
+  assert.equal(judge("refresh-after-user", after).pass, true);
+  assert.equal(judge("refresh-after-user", { ...after, external: [] }).pass, false);
 });

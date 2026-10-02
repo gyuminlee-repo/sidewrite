@@ -30,6 +30,10 @@ function _normalizePathForCompare(p) {
   s = s.replace(/^\/([a-zA-Z]):/, "$1:");
   // Backslash → forward slash for consistent comparison.
   s = s.replace(/\\/g, "/");
+  // The daemon runs under WSL and keeps a Windows drive as /mnt/<drive>
+  // (daemon/workspace.mjs windowsPathToWsl), while Word reports the drive:
+  // "D:/x" and "/mnt/d/x" are one folder, so both are compared as "d:/x".
+  s = s.replace(/^\/mnt\/([a-zA-Z])(?=\/|$)/, "$1:");
   // Trim trailing separator(s) so containment math is uniform.
   s = s.replace(/\/+$/, "");
   return s;

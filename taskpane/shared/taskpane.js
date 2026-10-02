@@ -1349,6 +1349,14 @@ Office.onReady((info) => {
       usedLabel,
       isTurnInFlight: () => turn.inFlight,
       providersReady: () => providersPane?.whenRestored() ?? null,
+      // The Stop button of the chat, for the Stop of a comment card.
+      stopTurn: () => $stopAgent?.click(),
+      // The last answer of the model in the chat: why a turn proposed nothing.
+      lastReply: () => {
+        const all = $messages.querySelectorAll(".msg.assistant");
+        const t = all.length ? all[all.length - 1].textContent.trim() : "";
+        return t || null;
+      },
       // Called before review_propose is sent; the returned release ends
       // this turn if the request fails and no later turn has begun.
       onTurnStarted: (note) => {
@@ -2179,6 +2187,7 @@ const $workspaceCwd = document.getElementById("workspace-cwd");
 const $addWorkspace = document.getElementById("add-workspace");
 const $workspaceError = document.getElementById("workspace-error");
 const $workspaceWarning = document.getElementById("workspace-warning");
+const $workspaceMismatch = document.getElementById("workspace-mismatch");
 
 // The workspace is simply the folder the open document lives in. We follow
 // it automatically. An explicit "Change workspace" pick overrides that and
@@ -2204,8 +2213,9 @@ function setWorkspaceDisplay(cwd) {
 // folder — the agent's filesystem tools won't see the doc's siblings.
 function refreshMismatchIndicator() {
   let mismatch = false;
+  let docDir = "";
   if (activeDocUrl && currentWorkspaceCwd) {
-    const docDir = docDirFromActiveUrl(activeDocUrl);
+    docDir = docDirFromActiveUrl(activeDocUrl);
     // Mismatch if docDir isn't underneath the workspace cwd. Cloud-hosted
     // docs (docDir === "") fall through as not-a-mismatch — there's no
     // filesystem location to compare, so the chip stays neutral.
@@ -2213,15 +2223,17 @@ function refreshMismatchIndicator() {
   }
   const baseTitle =
     "The agent reads source files (CLAUDE.md, notes, references) from the workspace folder — click to switch workspaces.";
-  if (mismatch) {
-    $workspaceChip.classList.add("mismatch");
-    $workspaceWarning.hidden = false;
-    $workspaceChip.title =
-      baseTitle + " (⚠ The current workspace doesn't match the doc you're editing.)";
-  } else {
-    $workspaceChip.classList.remove("mismatch");
-    $workspaceWarning.hidden = true;
-    $workspaceChip.title = baseTitle;
+  // What the problem is, for the icon (hover) and for the Setup tab (click).
+  const problem = mismatch
+    ? `This document is in ${docDir}, outside the workspace folder ${currentWorkspaceCwd}. Claude cannot read the files next to the document. Use Change workspace in Setup to pick the document's folder.`
+    : "";
+  $workspaceChip.classList.toggle("mismatch", mismatch);
+  $workspaceWarning.hidden = !mismatch;
+  $workspaceWarning.title = problem;
+  $workspaceChip.title = mismatch ? `${problem}\n\n${baseTitle}` : baseTitle;
+  if ($workspaceMismatch) {
+    $workspaceMismatch.textContent = problem;
+    $workspaceMismatch.hidden = !mismatch;
   }
 }
 

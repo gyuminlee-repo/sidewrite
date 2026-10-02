@@ -24,7 +24,7 @@
 // front of these lines goes what the turn itself said is left
 // (comment.same_term_at, from its last line "Same term still at: ...").
 
-import { namedTerms, namedTermLines } from "./named-terms.js";
+import { namedTerms, namedTermLines, termPlaces } from "./named-terms.js";
 
 const STOP = new Set(
   (
@@ -102,6 +102,46 @@ export function stillPresentLines(comment, snapshot) {
     return [...(turnRan ? namedTermLines(comment, snapshot) : []), ...head];
   }
   return [...head, ...computedLines(comment, snapshot)];
+}
+
+// The same lines as stillPresentLines, for the card: no paragraph ids. Each
+// item is { text, indexes, more }: the sentence, the paragraph indexes it
+// names (at most MAX_LINKS, shown as links) and how many more there are. The
+// ids the turn reported (comment.same_term_at) are mapped to indexes by the
+// snapshot; one that is not in it is left out rather than shown as an id.
+const MAX_LINKS = 12;
+const placesIn = (n) => `${n} place${n === 1 ? "" : "s"}`;
+const item = (text, all) => ({
+  text,
+  indexes: all.slice(0, MAX_LINKS),
+  more: Math.max(0, all.length - MAX_LINKS),
+});
+
+export function stillPresentItems(comment, snapshot) {
+  const ids = snapshot?.ids ?? [];
+  const said = (comment?.same_term_at ?? []).map((id) => ids.indexOf(id)).filter((i) => i >= 0);
+  const head = said.length ? [item("Claude also reported the same term in:", said)] : [];
+  if (namedTerms(comment).length) {
+    const turnRan = (comment?.changes ?? []).length > 0;
+    const rows = turnRan
+      ? termPlaces(comment, snapshot?.paragraphs, ids)
+          .filter((r) => r.places.length)
+          .map((r) =>
+            item(
+              `The reviewer names “${r.term}”. It is still in ${placesIn(r.places.length)}:`,
+              r.places.map((p) => p.index),
+            ),
+          )
+      : [];
+    return [...rows, ...head];
+  }
+  const computed = stillPresent(comment, snapshot?.paragraphs).map((r) =>
+    item(
+      `“${r.term}” was taken out by this comment's changes. It is still in ${placesIn(r.places.length)}:`,
+      r.places,
+    ),
+  );
+  return [...head, ...computed];
 }
 
 function computedLines(comment, snapshot) {

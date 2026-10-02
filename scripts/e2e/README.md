@@ -257,7 +257,7 @@ comes out black (the WebView2 pane can), no file is written and
 Stage 2: `open-review`, `split`, `edit-draft`, `ledger-add`, `check-all`,
 `preview`, `propose`, `refresh`, `clean-tool`, `delete-all`, `view`.
 `split` and `suggest-ledger` wait for the message their own action ends with
-(`Split by ...`, `... candidate rule(s) by ...`) or for an error. The line
+(`Split into ...`, `... candidate rule(s) by ...`) or for an error. The line
 can show other text first: the notice of a click held until the daemon has
 confirmed the stored provider, or the late result of an earlier action.
 Stage 2.5:

@@ -93,45 +93,42 @@ test("the card line, the Done question and the waiting list name each state", ()
     questions: [question("q2")],
     requirements_outside: [{ id: "q3", why: "A file of its own.", at: "t" }],
   };
-  assert.equal(
-    view.requirementsLine(comment),
-    "Requirements: q1 state the unit; q2 say which run time is right; q3 add the raw data as a supplementary table; q4 soften the claim in the abstract. Changed: q1. Waiting for the author: q2. Outside this file: q3 (A file of its own.). Open: q4.",
-  );
-  assert.equal(
-    view.requirementsLine({ requirements: REQS.slice(0, 1), changes: [change(["q1"])] }),
-    "Requirements: q1 state the unit. Changed: q1.",
-  );
-  // No list: said as that, not passed over.
-  assert.equal(
-    view.requirementsLine({ requirements: [] }),
-    "Requests not extracted: add them above, one per line. Until then a turn lists them itself.",
-  );
+  // What each request is, in words, for the list "What the reviewer asks".
+  assert.deepEqual(view.requirementStates(comment).map(view.requestStateText), [
+    "Changed",
+    "Needs your answer",
+    "In another file: A file of its own.",
+    "Not yet",
+  ]);
   // Only an open request counts as unaddressed.
   assert.deepEqual(
     view.unaddressedRequirements(comment).map((r) => r.id),
     ["q4"],
   );
   assert.deepEqual(view.doneBlockers(comment, []), [
-    'q4 "soften the claim in the abstract" has no change',
-    'q2 "say which run time is right" waits for the author\'s answer',
+    '"soften the claim in the abstract" has no change',
+    '"say which run time is right" waits for the author\'s answer',
   ]);
   const waiting = view.pendingDecisions({ comments: [comment], ledger: [] }).requirements;
   assert.deepEqual(
     waiting.map((w) => w.text),
     [
-      "R1.1 q2 waits for the author's answer: say which run time is right",
-      "R1.1 q4 has no change: soften the claim in the abstract",
+      "R1.1: Claude waits for your answer about \u201csay which run time is right\u201d.",
+      "R1.1: nothing changes yet for \u201csoften the claim in the abstract\u201d.",
     ],
   );
   // The line after a turn.
-  assert.equal(view.openRequestsText(comment), "1 request of R1.1 is still open (q4).");
+  assert.equal(
+    view.openRequestsText(comment),
+    "1 request of R1.1 has no change yet: \u201csoften the claim in the abstract\u201d.",
+  );
   assert.equal(
     view.openRequestsText({
       ref: "R1.2",
       requirements: REQS.slice(0, 3),
       changes: [change(["q1"])],
     }),
-    "2 requests of R1.2 are still open (q2, q3).",
+    "2 requests of R1.2 have no change yet: \u201csay which run time is right\u201d; \u201cadd the raw data as a supplementary table\u201d.",
   );
   assert.equal(
     view.openRequestsText({

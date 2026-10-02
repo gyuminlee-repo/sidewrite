@@ -367,6 +367,33 @@ export function invariantText(inv) {
   return ` (MISMATCH: ${parts.join("; ")})`;
 }
 
+// What the author should do next, after a status refresh, in one sentence.
+// The full counts go under "Details" (the pane writes them there).
+export function countsSentence(c, inv, { outside = 0, unresolved = 0 } = {}) {
+  const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  let line;
+  if (!inv.ok) {
+    line =
+      "The changes on record and the comments in Word do not match. Open Details to see which, then check those comments in Word.";
+  } else if (c.pending > 0) {
+    line = `${n(c.pending, "change is", "changes are")} waiting for your decision in Word.`;
+  } else if (inv.changes > 0) {
+    line = "Every change is decided in Word.";
+  } else {
+    line = "No changes yet. Ask for changes on a comment to begin.";
+  }
+  if (c.unlocated > 0) {
+    line += ` ${n(c.unlocated, "change was", "changes were")} not found in the document.`;
+  }
+  if (outside > 0) {
+    line += ` ${n(outside, "change was", "changes were")} made outside the tool; see "Changes made outside the tool".`;
+  }
+  if (unresolved > 0) {
+    line += ` Word would not mark ${n(unresolved, "rationale comment", "rationale comments")} as resolved; that happens in a document in compatibility mode.`;
+  }
+  return line;
+}
+
 // Design 0 C1: once the author accepts or rejects a change, its rationale
 // comment is marked resolved. Returns ids of open comments to resolve.
 export function commentsToResolve(rows, revision, comments) {
@@ -401,13 +428,16 @@ export const SKIPPED_SCOPE_LABELS = {
   supplement: "Checked at the supplement stage",
 };
 
-const unsureText = (item) => `unsure on ${item.unsure.length} paragraph(s)`;
+const unsureText = (item) =>
+  `unsure about ${item.unsure.length} paragraph${item.unsure.length === 1 ? "" : "s"}`;
+
+const places = (n) => `${n} place${n === 1 ? "" : "s"}`;
 
 export function ledgerStatusText(item) {
   if (item?.status === "violations")
     return item.unsure?.length
-      ? `${item.violation_count} violation(s), ${unsureText(item)}`
-      : `${item.violation_count} violation(s)`;
+      ? `Found in ${places(item.violation_count)}, ${unsureText(item)}`
+      : `Found in ${places(item.violation_count)}`;
   if (item?.status === "unsure") return unsureText(item);
   // The check did not run to its end (a model reply that could not be used
   // or a failed call, a regex that does not compile): no paragraph of it is
@@ -417,7 +447,18 @@ export function ledgerStatusText(item) {
     if (item.check?.type === "count") return "Checked in the Tools tab";
     return SKIPPED_SCOPE_LABELS[item.scope] ?? `Checked at the ${item.scope} stage`;
   }
+  if (item?.status === "unchecked") return "Not checked yet";
+  if (item?.status === "ok") return "No problem found";
   return item?.status;
+}
+
+// How a rule is checked, in words (the type and the pattern stay in Advanced).
+export function ledgerHowText(item) {
+  const k = item?.check?.type;
+  if (k === "regex") return "looks for the exact words";
+  if (k === "llm") return "Claude reads each paragraph";
+  if (k === "count") return "counted in the Tools tab";
+  return "";
 }
 
 // Parse the ledger form into the ledger item shape of the daemon.
@@ -456,12 +497,27 @@ export function ledgerItemFromForm({ kind, text, scope, checkType, pattern, flag
 export function changeFlags(ch) {
   const out = [];
   if (ch?.comment_missing) out.push({ kind: "comment-missing", text: "No rationale comment" });
-  if (ch?.lost_facts?.length) out.push({ kind: "lost", text: `Lost: ${ch.lost_facts.join("; ")}` });
+  // lost_facts (daemon/edit-facts.mjs lostFacts): numbers with units, versions,
+  // parenthesised text and names that the deleted text had and the new text
+  // does not.
+  if (ch?.lost_facts?.length) {
+    out.push({
+      kind: "lost",
+      text: `The old wording had ${ch.lost_facts.join("; ")}. The new wording does not. Reject the change in Word if that is not meant.`,
+    });
+  }
   if (ch?.unsourced_terms?.length)
     out.push({ kind: "unsourced", text: `No source: ${ch.unsourced_terms.join(", ")}` });
   if (ch?.from_review?.length)
     out.push({ kind: "unsourced", text: `From the review: ${ch.from_review.join(", ")}` });
-  if (ch?.narrowed_from) out.push({ kind: "narrowed", text: "Narrowed" });
+  // narrowed_from (daemon/edit-facts.mjs narrowEdit, review-tools.mjs recordApplied):
+  // the task pane cut the words the old and the new text share at both ends.
+  if (ch?.narrowed_from) {
+    out.push({
+      kind: "narrowed",
+      text: "Only the words that differ are marked in Word, not the whole phrase Claude gave. Nothing to do.",
+    });
+  }
   if (ch?.rewrite_id) out.push({ kind: "narrowed", text: "Rewrite" });
   return out;
 }
@@ -511,30 +567,20 @@ export function unaddressedRequirements(comment) {
   return inState(comment, "open").map(({ state, ...r }) => r);
 }
 
-// The line of a comment card under its requirement box.
-export function requirementsLine(comment) {
-  const rows = requirementStates(comment);
-  if (!rows.length) {
-    return "Requests not extracted: add them above, one per line. Until then a turn lists them itself.";
-  }
-  const part = (label, state, text = (r) => r.id) => {
-    const of = rows.filter((r) => r.state === state);
-    return of.length ? ` ${label}: ${of.map(text).join(", ")}.` : "";
-  };
-  return (
-    `Requirements: ${rows.map((r) => `${r.id} ${r.text}`).join("; ")}.` +
-    part("Changed", "changed") +
-    part("Waiting for the author", "needs_author") +
-    part("Outside this file", "outside_this_file", (r) => (r.why ? `${r.id} (${r.why})` : r.id)) +
-    part("Open", "open")
-  );
+// What a request is, in words, for the list "What the reviewer asks".
+export function requestStateText(r) {
+  if (r.state === "changed") return "Changed";
+  if (r.state === "needs_author") return "Needs your answer";
+  if (r.state === "outside_this_file")
+    return r.why ? `In another file: ${r.why}` : "In another file";
+  return "Not yet";
 }
 
-// After a turn: "2 requests of R1.2 are still open (q2, q3)."; "" when none is.
+// After a turn: "2 requests of R1.2 have no change yet: ...", the requests in words; "" when none is.
 export function openRequestsText(comment) {
   const open = inState(comment, "open");
   if (!open.length) return "";
-  return `${open.length} request${open.length === 1 ? "" : "s"} of ${comment.ref} ${open.length === 1 ? "is" : "are"} still open (${open.map((r) => r.id).join(", ")}).`;
+  return `${open.length} request${open.length === 1 ? "" : "s"} of ${comment.ref} ${open.length === 1 ? "has" : "have"} no change yet: ${open.map((r) => `\u201c${r.text}\u201d`).join("; ")}.`;
 }
 
 // ---- "Check revised paragraphs" (daemon/paragraph-check.mjs) ---------------
@@ -577,13 +623,13 @@ export function consistencyLines(c) {
   return [
     ...c.findings.map((f) => ({
       paragraph_index: f.paragraph_index,
-      text: `${f.paragraph_id ?? `p${f.paragraph_index}`}: ${CONSISTENCY_KIND[f.kind] ?? f.kind} ${f.detail}${f.change_ids.length ? ` (${f.change_ids.join(", ")})` : ""}`,
+      text: `${CONSISTENCY_KIND[f.kind] ?? f.kind} ${f.detail}`,
     })),
     ...c.paragraphs
       .filter((p) => p.many)
       .map((p) => ({
         paragraph_index: p.index,
-        text: `${p.id ?? `p${p.index}`} holds ${p.change_ids.length} changes (${p.change_ids.join(", ")}): read it as a whole and rewrite it if it no longer reads as one paragraph.`,
+        text: `This paragraph holds ${p.change_ids.length} changes: read it as a whole and rewrite it if it no longer reads as one paragraph.`,
         rewrite_ref: rewriteRef(p.change_ids),
       })),
   ];
@@ -600,11 +646,11 @@ export function consistencyLines(c) {
 export function doneBlockers(comment, ledger) {
   const out = [];
   const open = unaddressedRequirements(comment);
-  if (open.length) out.push(`${open.map((r) => `${r.id} "${r.text}"`).join(", ")} has no change`);
+  if (open.length) out.push(`${open.map((r) => `"${r.text}"`).join(", ")} has no change`);
   const asked = inState(comment, "needs_author");
   if (asked.length)
     out.push(
-      `${asked.map((r) => `${r.id} "${r.text}"`).join(", ")} ${asked.length === 1 ? "waits" : "wait"} for the author's answer`,
+      `${asked.map((r) => `"${r.text}"`).join(", ")} ${asked.length === 1 ? "waits" : "wait"} for the author's answer`,
     );
   const n = (state) => (comment?.changes ?? []).filter((ch) => ch.state === state).length;
   const pending = n("pending");
@@ -703,14 +749,22 @@ export const inFlightEdit = (b) => b.state === "applying" && (b.blocked_by ?? []
 export function pendingDecisions(revision) {
   const blocked = [];
   const requirements = [];
+  const ruleText = (id) => (revision?.ledger ?? []).find((i) => i.id === id)?.text ?? id;
+  const quoted = (t) => `“${String(t).replace(/[.\s]+$/, "")}”`;
+  const named = (i) => quoted(i.text ?? i.id);
   for (const c of revision?.comments ?? []) {
+    const who = `${c.ref}${c.section ? ` (${c.section})` : ""}`;
     for (const b of c.blocked ?? []) {
       if (inFlightEdit(b)) continue;
+      const newText = b.args?.replace ?? b.args?.insert_after ?? "";
       blocked.push({
         ref: c.ref,
         id: b.id,
+        kind: "edit_blocked",
         // No forbid rule: a normal edit Word did not answer (outcome unknown).
-        text: `${c.ref} ${b.blocked_by.length ? `blocked by ${b.blocked_by.join(", ")}` : "edit with no answer from Word"}: "${b.args?.replace ?? b.args?.insert_after ?? ""}"`,
+        text: b.blocked_by.length
+          ? `${who}: an edit (${quoted(newText)}) was stopped by the rule ${b.blocked_by.map((r) => quoted(ruleText(r))).join(", ")}. Open the comment to decide.`
+          : `${who}: Word did not answer an edit (${quoted(newText)}). Open the comment to check it.`,
       });
     }
     for (const r of requirementStates(c)) {
@@ -718,7 +772,11 @@ export function pendingDecisions(revision) {
       requirements.push({
         ref: c.ref,
         id: r.id,
-        text: `${c.ref}${c.section ? ` (${c.section})` : ""} ${r.id} ${r.state === "open" ? "has no change" : "waits for the author's answer"}: ${r.text}`,
+        kind: r.state === "open" ? "request_open" : "request_asked",
+        text:
+          r.state === "open"
+            ? `${who}: nothing changes yet for ${quoted(r.text)}.`
+            : `${who}: Claude waits for your answer about ${quoted(r.text)}.`,
       });
     }
   }
@@ -727,9 +785,12 @@ export function pendingDecisions(revision) {
     .filter((i) => i.status === "unchecked" || i.status === "error" || i.unsure?.length)
     .map((i) => ({
       id: i.id,
+      kind: "rule",
       text: i.unsure?.length
-        ? `${i.id} unsure on paragraph(s) ${i.unsure.map((u) => u.paragraph_index).join(", ")}`
-        : `${i.id} ${i.status === "error" ? "check failed" : "not checked yet"}`,
+        ? `The rule ${named(i)} is ${unsureText(i)}. Look at them in Word.`
+        : i.status === "error"
+          ? `The check of the rule ${named(i)} failed.`
+          : `The rule ${named(i)} is not checked yet.`,
     }));
   return {
     blocked,
@@ -739,11 +800,100 @@ export function pendingDecisions(revision) {
   };
 }
 
-// L9. "R1.3 running 1:05. 2 of 3 comments not done."
-export function progressText({ ref, startedAt, now = Date.now(), comments = [] }) {
+// ---- The list of comments: one compact row each --------------------------------
+
+// m:ss from a start time to `now` (ms, or an ISO string for the start).
+export function clockText(startedAt, now = Date.now()) {
   const t0 = typeof startedAt === "string" ? Date.parse(startedAt) : startedAt;
   const s = Math.max(0, Math.floor((now - t0) / 1000));
-  const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// The first line of a comment, cut at `max` characters on a word end.
+export function firstLine(text, max = 100) {
+  const line =
+    String(text ?? "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find(Boolean) ?? "";
+  if (line.length <= max) return line;
+  const cut = line.slice(0, max);
+  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), max >> 1))}...`;
+}
+
+// Where a comment stands, in words, from what the pane already knows (the
+// review file, plus what it holds in memory for this session). Nothing is
+// stored for it.
+//   working       a turn of this comment runs now (working: { startedAt })
+//   done          the comment is marked done
+//   needs_answer  a question to the author has no answer, or an edit is
+//                 blocked and waits for a decision
+//   to_review     changes wait for the author's decision in Word
+//   no_change     the last turn of this session proposed nothing (noChange),
+//                 or every request belongs to another file
+//   decided       changes exist and none waits
+//   not_started   none of the above
+// attention: the author has something to do here.
+export function commentState(comment, { working = null, now = Date.now(), noChange = false } = {}) {
+  if (working) {
+    return {
+      kind: "working",
+      label: `Working ${clockText(working.startedAt, now)}`,
+      attention: false,
+    };
+  }
+  if (comment?.status === "done") return { kind: "done", label: "Done", attention: false };
+  const asked = (comment?.questions ?? []).filter((q) => !q.answer).length;
+  const blocked = (comment?.blocked ?? []).filter((b) => !inFlightEdit(b)).length;
+  if (asked) return { kind: "needs_answer", label: "Needs your answer", attention: true };
+  if (blocked) return { kind: "needs_answer", label: "Needs your decision", attention: true };
+  const changes = comment?.changes ?? [];
+  const waiting = changes.filter((ch) => ch.state === "pending" || ch.state === "unlocated").length;
+  if (waiting) {
+    return {
+      kind: "to_review",
+      label: `${waiting} change${waiting === 1 ? "" : "s"} to review in Word`,
+      attention: true,
+    };
+  }
+  if (changes.length) return { kind: "decided", label: "All changes decided", attention: false };
+  if (noChange) return { kind: "no_change", label: "No change proposed", attention: true };
+  const reqs = requirementStates(comment);
+  if (reqs.length && reqs.every((r) => r.state === "outside_this_file")) {
+    return { kind: "no_change", label: "Belongs to another file", attention: false };
+  }
+  return { kind: "not_started", label: "Not started", attention: false };
+}
+
+// "20 comments, 2 done. 3 need you." The header of the list.
+export function summaryText(comments, states) {
+  const n = comments.length;
+  if (!n) return "";
+  const need = states.filter((s) => s.attention).length;
+  const done = states.filter((s) => s.kind === "done").length;
+  return (
+    `${n} comment${n === 1 ? "" : "s"}` +
+    (done ? `, ${done} done` : "") +
+    `. ${need ? `${need} ${need === 1 ? "needs" : "need"} you.` : "None needs you right now."}`
+  );
+}
+
+// "Review: 5 comments from 1 reviewer", the line the paste box shrinks to.
+export function reviewLine(comments) {
+  const n = comments.length;
+  const refs = comments.map((c) => reviewerOfRef(c.ref));
+  const reviewers = new Set(refs.filter((r) => r > 0)).size;
+  const editor = refs.includes(0);
+  const from = [
+    reviewers ? `${reviewers} reviewer${reviewers === 1 ? "" : "s"}` : "",
+    editor ? "the editor" : "",
+  ].filter(Boolean);
+  return `Review: ${n} comment${n === 1 ? "" : "s"}${from.length ? ` from ${from.join(" and ")}` : ""}`;
+}
+
+// L9. "R1.3 running 1:05. 2 of 3 comments not done."
+export function progressText({ ref, startedAt, now = Date.now(), comments = [] }) {
+  const clock = clockText(startedAt, now);
   const open = comments.filter((c) => c.status !== "done").length;
   return `${ref} running ${clock}. ${open} of ${comments.length} comments not done.`;
 }
