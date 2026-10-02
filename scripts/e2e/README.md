@@ -440,6 +440,121 @@ in the picture and it is not moved or focused; when more than a tenth of it
 comes out black (the WebView2 pane can), no file is written and
 `word_window_shot` in `result.json` says `dropped` with the share.
 
+## Stage parts
+
+```sh
+node scripts/e2e/run-acceptance.mjs --stage parts \
+  --base-dir <folder on a Windows drive, as a WSL path> \
+  --playwright-core 'D:\path\to\node_modules\playwright-core'
+```
+
+A manuscript and its supplementary Word file in one revision (README
+"Supplementary Word documents", steps A1 and A2): the link, the copied
+comment list, a turn in each file, the forbid guard in the supplementary
+file, where a request stands in the other file, a turn in both panes at the
+same time, and leaving. Both documents are open in the Word of the run, each
+with its pane, on one daemon.
+
+The files are invented (`make_parts_fixture.py`, `--spec` prints what the
+stage reads): `paper.docx` (`tests/fixtures/parts_paper.docx`), `SI.docx`
+(`parts_si.docx`: supplementary methods and one table), the review
+`parts_review.txt` of four comments and the ledger `parts_ledger.json` with
+one forbidden word, "novel" (rule L1).
+
+| Comment | Asks for a change              | The stage uses it for |
+| ------- | ------------------------------ | --------------------- |
+| R1.1    | only in the supplementary file | c, d, e, f, h         |
+| R1.2    | in both files                  | g                     |
+| R1.3    | only in the manuscript         | (context)             |
+| R1.4    | in a figure file               | (context)             |
+
+No feature list, no `--conditional`. `--supplement`, `--fixture`, `--review`
+and `--ledger` replace the files; `--provider` chooses the provider of the
+review turns in both panes. The requests of each comment are typed by the
+run (`edit-draft`), so their ids do not depend on a model.
+
+The rows of the table of the run, in order. A judged row writes
+`ok/parts-<letter>.evidence.json` (and `.ok` when it passed) and prints, for
+each check that failed, which pane or file, what was expected and what was
+found (`judge.mjs` `partsVerdict`); the table at the end cuts that line, the
+line printed when the row was judged and `result.json` have it whole.
+
+| Row | What is done                                                                                                                                                                    | Judged (`judge.mjs`)                                                                                                                                                                                                                                                                                                                          |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a   | the manuscript gets its review, list and rule; `SI.docx` is opened in the same Word (`word-com.ps1 open-edit`)                                                                  | `partsBeforeJoin`: the pane of `SI.docx` shows the join box with "Join the revision of paper.docx, 4 comments" and no comment row; neither review file holds a link                                                                                                                                                                           |
+| b   | the candidate button is pressed in the pane of `SI.docx`; the pane of `paper.docx` is only watched (`wait-linked`)                                                              | `partsJoined`: four rows in `SI.docx`, the rule shown with no Edit or Remove button and the note "These rules are edited in paper.docx.", Propose changes in every card, `part_of` and `parts` in the two files, the same request ids, "Linked files: SI.docx" in the manuscript's pane                                                       |
+| c   | Propose changes for R1.1 in the pane of `paper.docx`                                                                                                                            | `partsMainOutside`: every request of R1.1 is in `requirements_outside` of `paper.revision.json`, no change was recorded, Word lists no new tracked change in `paper.docx`                                                                                                                                                                     |
+| d   | Propose changes for R1.1 in the pane of `SI.docx`                                                                                                                               | `partsSuppChange`: a new change under R1.1 in `SI.revision.json`, every one with its comment; Word lists more tracked changes in `SI.docx` and a comment that begins `[R1.1]`; none in `paper.revision.json`; the paragraph texts of `paper.docx` (pane step `snapshot`) are the same before and after                                        |
+| e   | an edit that writes "novel" is put on file for R1.1 of `SI.docx` under a rule the ledger does not have (L9) and sent with "Allow exception", as `forbidGuard()` of stage 2 does | `forbidBlockEvidence` with the review file and the Word state of `SI.docx`: the pane shows the refusal by L1, the daemon logged `[review] blocked R1.1 by=L1`, recorded the blocked edit, Word has no new tracked change                                                                                                                      |
+| f   | nothing is pressed in the pane of `paper.docx`: the step waits for its row of R1.1 (`wait-state`)                                                                               | `partsCrossState`: the row says "n change(s) to review in SI.docx" and the request the change names shows "Waiting for your decision in SI.docx"                                                                                                                                                                                              |
+| g   | Propose changes for R1.2 in both panes, started together (two driver processes)                                                                                                 | `partsBoth`: both steps ended; both `[review] prompt R1.2` lines come before the first `[review] turn done R1.2`; a new change in each review file; in each document more tracked changes and between one and that many new `[R1.2]` comments; no log line with `outcome unknown`, `from another pane`, `unknown id` or `late result dropped` |
+| h   | in the pane of `paper.docx` the review is split again and saved without R1.1 (`save-without`)                                                                                   | `partsKeep`: the message line shows "Comment R1.1 has recorded change(s) in SI.docx; keep it" as an error; the comment list in `paper.revision.json` is as it was                                                                                                                                                                             |
+| i   | `SI.docx` is saved through Word (`word-com.ps1 save`), then its pane refreshes                                                                                                  | not judged, see below                                                                                                                                                                                                                                                                                                                         |
+| j   | "Leave this revision" in the pane of `SI.docx`                                                                                                                                  | `partsLeft`: the join box is shown again with the manuscript as a candidate, `part_of` and `parts` are gone, every change `SI.revision.json` held is still in it                                                                                                                                                                              |
+
+Two rows are told and not judged (`NOTE`):
+
+- **Document.saved and the file on disk** (row i). The pane step `doc-saved`
+  reads `Word.Document.saved` in the pane of `SI.docx` at four points: right
+  after it opened, after the tracked edit of row d, before the save and
+  after the save through Word. With each reading: the modification time and
+  the size of `SI.docx` as the daemon's side sees them (`fs.statSync` from
+  WSL), then `doc_state` as the status refresh after the save wrote it into
+  `SI.revision.json`. The row prints the raw property with its type, what
+  the pane would send (`true`, `false` or `null`) and the error when Office
+  gave none. This is the experiment for the confirmed-state guard of the
+  next step (does the property turn false on an edit and true on a save; do
+  the time and the size change with a save and only then).
+- **The session each pane's turns started on.** From the daemon's
+  `[diag] message → ensure loop key=... resume=...` lines. The resume hint is
+  kept per host and folder (`daemon/sessions.mjs`), and both files are in one
+  folder, so the pane that starts second is expected to print "resumed" with
+  a session id: its turns then continue the transcript of the other pane's
+  session.
+  The row says so when it happens. Nothing in step A2 changes this.
+
+What the stage assumes about Word and Office.js, and what the log shows when
+an assumption does not hold:
+
+| Assumption                                                                                                                                                       | When it is wrong                                                                                                                                                                         |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Documents.Open` over COM opens a second document writable in the Word of the run                                                                                | the row "SI.docx opened in the Word of the run" fails with Word's error, or with `read_only=true`, and the stage stops there                                                             |
+| a document opened that way shows its task pane by itself (the `Office.AutoShowTaskpaneWithDocument` part `embed_taskpane.py` writes), as the first document does | "SI.docx: open-review" fails after 120 s with `pane not reachable on port 9333: no pane page of SI.docx yet (pane pages: ...)`; the list names the documents of the panes that are there |
+| the panes of two documents of one Word are pages of the same WebView2 debugging endpoint                                                                         | the same message, with only the manuscript in the list                                                                                                                                   |
+| a pane page can be told by `Office.context.document.url` (it ends in the file name), or once it has loaded by its "Review file:" line                            | the same message with `(a pane that names no document yet)` for a page whose `Office.context.document.url` is empty and whose Review tab has not loaded                                  |
+| a pane whose document is not the window in front still runs: it answers the daemon and applies tracked edits                                                     | rows d, e or g fail: the step of the pane in the back ends with `turn ... still running`, or the log has `outcome unknown` lines (row g names them)                                      |
+| two driver processes can be connected to the endpoint at once                                                                                                    | row g: "both propose steps ended without an error" fails with the error of the second connection                                                                                         |
+| the two turns of row g overlap (each takes far longer than the second click)                                                                                     | row g: "the two turns ran at the same time" fails with the positions of the log lines; the other checks of the row still say whether each change landed in its own files                 |
+| the turn of the manuscript notes the request of R1.1 as another file's (a model decides it)                                                                      | row c fails with what the turn did instead: `outside [...], questions n, changes n`                                                                                                      |
+| the turn of the supplementary file names the request in `rationale.requirement_ids` (a model does)                                                               | row f: "a pending change of R1.1 names a request" fails with the ids of each change                                                                                                      |
+| `Word.Document.saved` (WordApi 1.1) can be read in the pane                                                                                                      | the NOTE of row i shows `Document.saved=null` with Office's error; the pane then sends `null` and `doc_state.saved` is `null`                                                            |
+| a file Word holds open can be read for its time and size from WSL                                                                                                | the NOTE of row i shows `file not read`, and `doc_state.file` is `null`                                                                                                                  |
+
+Pane steps of the stage (all take the pane of the document named by the
+environment variable `E2E_PANE_DOC`, which the runner sets to `paper` or
+`SI`):
+
+| Step           | Args                                  | Does and returns                                                                                                      |
+| -------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `link-join`    | `main` (file name)                    | presses "Join the revision of `main`, ..."; the view once the line of the manuscript shows, or with the error message |
+| `link-leave`   |                                       | presses "Leave this revision"; the view after "This file left the revision of ..."                                    |
+| `wait-state`   | `ref`, `until` (RegExp), `timeout_ms` | presses nothing; `matched` is true once the row of `ref` says `until`; the view                                       |
+| `wait-linked`  | `until` (RegExp), `timeout_ms`        | presses nothing; `matched` is true once the line of linked files says `until`; the view                               |
+| `save-without` | `review_file`, `drop`, `requirements` | splits the review again, removes the row `drop`, Save; the view after the refusal or after the save                   |
+| `doc-saved`    |                                       | `saved` (as the pane sends it), `raw` and `raw_type` (the property as Office.js gave it), `error`                     |
+
+The view of every Review step now also has, per comment, `state` (the line
+of its row), `requests` (`id`, `state`, `text`) and `can_propose`, and for
+the tab `linked` (the line that names the manuscript or the linked files),
+`link_box` (`shown`, `candidates`), `ledger_note` and `ledger_edit_buttons`.
+
+The Word side of the stage (`word-com.ps1 open-edit`, the choice of a pane
+by its document, two driver processes at once, the six pane steps above)
+had not run in Word when it was written. Its judges were tested with inputs
+written by hand (`tests/e2e-judge-parts.test.mjs`), the choice of the pane
+with document names written by hand (the same file), and the wait conditions
+and reads of the new steps on an empty page (`tests/e2e-pane-driver.test.mjs`).
+
 ## Pane steps
 
 `pane-driver.cjs <step> <args.json>` runs one step and prints one JSON line.
@@ -564,7 +679,7 @@ paragraph text`, files under `special/`): `make_tracked_special.py` builds
 | `judge.mjs`          | WSL          | COM plan from revision.json, expected pane texts, path rewrite (tests: `tests/e2e-judge.test.mjs`) |
 | `pane-driver.cjs`    | Windows node | one pane step per call over CDP                                                                    |
 | `word-launch.ps1`    | Windows      | Word with a CDP port on its pane                                                                   |
-| `word-com.ps1`       | Windows      | accept/reject, hand edits, comments, quit                                                          |
+| `word-com.ps1`       | Windows      | accept/reject, hand edits, comments, a second document, save, quit                                 |
 | `embed_taskpane.py`  | WSL          | auto-open task pane parts in a copy                                                                |
 
 ## Word as the judge of the marked copy
