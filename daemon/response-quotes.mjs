@@ -17,6 +17,10 @@ import { splitSentences } from "./review-split.mjs";
 // Only changes that are in the manuscript now are cited.
 export const CITABLE = new Set(["accepted", "user_edited"]);
 
+// Only figure changes the author adopted are reported and printed.
+export const adoptedFigures = (comment) =>
+  (comment?.figure_changes ?? []).filter((f) => f.state === "adopted");
+
 // The accepted view: the paragraph as the reviewer will read it. (The change
 // classifier reads p.text on purpose; quotes must not.)
 export const viewText = (p) => normalizeParaText(p?.reviewed_text ?? p?.text);
@@ -243,7 +247,11 @@ export function keepLines(fresh, old = []) {
 //                  no paragraph at all, falls back to the index saved with
 //                  the citation. (A change that is not found any more keeps
 //                  its last index; it is change_state that tells that one.)
-//   change_state   the cited changes are not the accepted changes any more
+//   change_state   the cited changes are not the accepted changes any more,
+//                  or the adopted figure changes are not the ones saved with
+//                  the answer at the last refresh (figure_ids). A response
+//                  without that list (the citations a pane says it showed,
+//                  response_save) is not judged on figures.
 //   lines_old      the manuscript text changed since the PDF the line
 //                  numbers were read from (render: revision.response_render)
 export function staleReasons(comment, snapshot, render) {
@@ -267,6 +275,11 @@ export function staleReasons(comment, snapshot, render) {
     (comment.changes ?? []).filter((ch) => CITABLE.has(ch.state)).map((ch) => ch.id),
   );
   if (cited.size !== now.size || [...cited].some((id) => !now.has(id))) out.add("change_state");
+  if (Array.isArray(r.figure_ids)) {
+    const figures = adoptedFigures(comment).map((f) => f.id);
+    if (r.figure_ids.length !== figures.length || figures.some((id) => !r.figure_ids.includes(id)))
+      out.add("change_state");
+  }
   if (cits.length && render && render.snapshot_hash !== snapshotHash(snapshot))
     out.add("lines_old");
   return ["quote_changed", "change_state", "lines_old"].filter((x) => out.has(x));

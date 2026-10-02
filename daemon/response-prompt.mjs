@@ -5,10 +5,12 @@
 // are in the manuscript now, with their rationale) and what it must not
 // claim. Location lines, line numbers, quotes and the author's reasons for
 // declining are added by the tool (response-model.mjs), so the prompt gives
-// the model none of them to copy.
+// the model none of them to copy. The same holds for a figure change the
+// author adopted on the figures page: the model is told its label and what
+// the author said changed; the figure line with the file name is the tool's.
 
 import { inScope } from "./ledger-check.mjs";
-import { CITABLE } from "./response-quotes.mjs";
+import { CITABLE, adoptedFigures } from "./response-quotes.mjs";
 
 export const RESPONSE_SYSTEM =
   'You draft one answer in an author\'s response letter to a journal reviewer. Reply with JSON only: {"response": "<text>"}.';
@@ -22,6 +24,24 @@ export const RESPONSE_RULES = [
   "Do not write location lines, line numbers, section names or quotes of the manuscript. The tool adds them after your text.",
   "Use numbers only as they appear below.",
 ];
+
+// The two rules about what may be claimed, for a comment with figure changes.
+const FIGURE_RULES = new Map([
+  [
+    RESPONSE_RULES[2],
+    "Never claim a change that is not listed as in the manuscript or as an adopted figure change.",
+  ],
+  [
+    RESPONSE_RULES[3],
+    "If no change is listed as in the manuscript and no figure change as adopted, do not say that anything was revised.",
+  ],
+]);
+const FIGURE_RULE =
+  "Say what changed in a figure only as the list of adopted figure changes says it. Do not write file names. The tool adds the figure line after your text.";
+const FIGURE_NOT_DONE = {
+  proposed: "not decided by the author yet",
+  rejected: "rejected by the author",
+};
 
 // Why a change that is not in the manuscript must not be reported.
 const NOT_DONE = {
@@ -89,6 +109,32 @@ export function buildResponsePrompt({ comment, profile, ledger = [], previous = 
       );
   }
 
+  // Figure changes: only for a comment that has one, so every other prompt
+  // reads as before.
+  const figures = comment.figure_changes ?? [];
+  const adopted = adoptedFigures(comment);
+  const figureLine = (f) => {
+    const ids = f.requirement_ids ?? [];
+    const what = f.kind === "new" ? "new figure" : "revised figure";
+    return `[${f.id}] ${f.figure} (${what})${ids.length ? ` (answers ${ids.join(", ")})` : ""}`;
+  };
+  if (adopted.length) {
+    lines.push(
+      "",
+      "Figure changes adopted for this comment (figure files replaced or added by the author; you may report them):",
+    );
+    for (const f of adopted) {
+      lines.push(`- ${figureLine(f)}`);
+      lines.push(`  What changed, in the words of the author: ${q(f.summary || "(not said)")}`);
+    }
+  }
+  const open = figures.filter((f) => f.state !== "adopted");
+  if (open.length) {
+    lines.push("", "Figure changes that are not adopted (do not report any of these):");
+    for (const f of open)
+      lines.push(`- ${figureLine(f)}: ${FIGURE_NOT_DONE[f.state] ?? "not adopted"}`);
+  }
+
   lines.push("", "Author instructions for the letter:");
   for (const i of instructions) lines.push(`- [${i.id}] ${i.text}`);
   for (const rule of L.rules ?? []) lines.push(`- ${rule}`);
@@ -107,13 +153,19 @@ export function buildResponsePrompt({ comment, profile, ledger = [], previous = 
     );
 
   lines.push("", "Rules:");
-  const rules = [...RESPONSE_RULES, ...(L.max_words ? [`At most ${L.max_words} words.`] : [])];
+  const rules = [
+    ...(figures.length
+      ? [...RESPONSE_RULES.map((r) => FIGURE_RULES.get(r) ?? r), FIGURE_RULE]
+      : RESPONSE_RULES),
+    ...(L.max_words ? [`At most ${L.max_words} words.`] : []),
+  ];
   rules.forEach((r, n) => lines.push(`${n + 1}. ${r.replace("{lang}", L.lang)}`));
   lines.push("", 'Reply with JSON only: {"response": "<text>"}');
   return {
     system: RESPONSE_SYSTEM,
     prompt: lines.join("\n"),
     changeIds: done.map((ch) => ch.id),
+    figureIds: adopted.map((f) => f.id),
     instructionIds: instructions.map((i) => i.id),
     forbidIds: forbids.map((i) => i.id),
   };

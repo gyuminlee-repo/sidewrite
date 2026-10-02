@@ -301,3 +301,25 @@ test("session_init carries the state of a model that declines the manuscript", (
     /const stayState = \(key\) => \{\s*const d = staysOn\(key\);\s*return d\s*\? \{ original: d\.original, fallback: d\.fallback, category: d\.category, stay: true \}\s*: null;\s*\};/,
   );
 });
+
+// Figure lane: the figures page and its API are answered by figure-http.mjs
+// before the static files, with the bridge token and the panes of the bridge.
+test("the figures route is asked before the static files and may name only documents of connected panes", () => {
+  assert.match(code, /import \{ createFigureHttp \} from "\.\/figure-http\.mjs";/);
+  const at = code.indexOf("const figureHttp = createFigureHttp({");
+  assert.ok(at > 0);
+  const block = code.slice(at, code.indexOf("});", at));
+  assert.match(block, /origin: HTTP_ORIGIN,/);
+  assert.match(block, /token: BRIDGE_TOKEN,/);
+  // The bridge is made after the HTTP server: until then no pane is connected.
+  assert.match(block, /listPanes: \(\) => figureBridge\?\.listPanes\(\) \?\? \[\],/);
+  assert.match(code, /\n\}\);\nfigureBridge = bridge;\n/);
+  assert.ok(code.indexOf("let figureBridge = null;") < at);
+  assert.match(block, /service: createFigureService\(\),/);
+  const route = code.indexOf("if (await figureHttp(req, res)) return;");
+  assert.ok(route > 0);
+  assert.ok(route < code.indexOf('const relPath = urlPath === "/" ? "/index.html" : urlPath;'));
+  assert.ok(route > code.indexOf("const http = createServer(async (req, res) => {"));
+  // The path is matched in figure-http.mjs: index.mjs has no route of its own.
+  assert.equal(/figures/.test(code.replace(/"figures"\),/, "")), false);
+});
