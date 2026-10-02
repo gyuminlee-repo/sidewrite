@@ -189,6 +189,10 @@ test("each edit of the run passes the guards of the daemon and reaches Word with
         blocked_id: seeded.blocked.id,
       });
       assert.equal(r.applied, true, `${c.name}: ${r.result?.message}`);
+      // The answer brings the file without the item: the pane takes it
+      // (review-pane.js ask) and the row leaves the card, which is what the
+      // pane step apply-seeded waits for.
+      assert.deepEqual(r.revision.comments.find((x) => x.ref === J.CITE_SEED_REF).blocked, []);
       assert.equal(t.calls.length, sent + 1, c.name);
       const [name, args] = t.calls[sent];
       assert.equal(name, "office_tracked_edit");
@@ -403,6 +407,13 @@ test("the row of an edit: the answer of the tool is told, the fields decide", ()
   );
   assert.equal(row(applied, null).result, "FAIL");
   assert.match(row(applied, null).got, /no checker result/);
+  // A citation deleted whole and typed again as words passes, and is told.
+  const flat = {
+    ...CHECKS.tracked.result,
+    flattened: [{ kind: "ZOTERO_ITEM", shown: "(Belloc, 2020)", text: "Earlier invented work" }],
+  };
+  assert.equal(row(applied, flat).result, "PASS");
+  assert.match(row(applied, flat).got, /; replaced by plain text: ZOTERO_ITEM \(Belloc, 2020\)$/);
 });
 
 // The pane's snapshot of the fixture, as the driver step returns it.

@@ -28,10 +28,16 @@ It holds when
     document variables of word/settings.xml are the same.
 A itself must be balanced too: a broken A makes the comparison mean nothing.
 
-Not judged, only listed (`text_changed`): a live Zotero or EndNote citation
-whose visible text is no longer the text its instruction records
-(plainCitation, DisplayText). The field is whole; the plugin will notice the
-difference at its next refresh.
+Not judged, only listed:
+  text_changed  a live Zotero or EndNote citation whose visible text is no
+                longer the text its instruction records (plainCitation,
+                DisplayText). The field is whole; the plugin will notice the
+                difference at its next refresh.
+  flattened     a field that lies whole in a tracked deletion while its
+                visible text stands again, as plain inserted text, in the
+                same paragraph: an edit replaced a range that held the field.
+                Nothing is half, but once the change is accepted the citation
+                is plain text and the plugin no longer knows it.
 
 Prints one line per failure, then one JSON line. Exit code 0 when everything
 holds, 1 when not, 2 when a file cannot be read. Standard library only.
@@ -122,7 +128,7 @@ class Story:
         ctx = TRACKED.get(tag, ctx)
         if tag == W + "p":
             row = {"index": len(self.paragraphs), "text": "", "depth_start": len(self.open)}
-            row.update(begin=0, separate=0, end=0)
+            row.update(begin=0, separate=0, end=0, inserted="")
             self.paragraphs.append(row)
             self.para.append(row)
         elif tag == W + "fldChar":
@@ -136,6 +142,8 @@ class Story:
         elif tag in (W + "t", W + "delText"):
             if self.para:
                 self.para[-1]["text"] += el.text or ""
+                if ctx == "ins" and not self.open:
+                    self.para[-1]["inserted"] += el.text or ""
             if self.open and self.open[-1]["phase"] == "result":
                 self.open[-1]["result"].append((el.text or "", ctx))
                 self.mark(self.open[-1], "result", ctx)
@@ -241,7 +249,11 @@ def read(path):
             out["fields"] += story.fields
             out["errors"] += story.errors
             out["paragraphs"] += [
-                {"story": name, **{k: v for k, v in p.items() if k != "text"}, "text": p["text"][:40]}
+                {
+                    "story": name,
+                    **{k: v for k, v in p.items() if k not in ("text", "inserted")},
+                    "text": p["text"][:40],
+                }
                 for p in story.paragraphs
                 if p["begin"] or p["separate"] or p["end"] or p["depth_start"] or p["depth_end"]
             ]
@@ -366,6 +378,15 @@ def compare(before, after, expect_removed=None):
         if accepted != want or rejected != want:
             changed.append({**brief(f), "recorded": want, "accepted": accepted, "rejected": rejected})
 
+    # A field that lies whole in a deletion while its visible text was typed
+    # again next to it as plain inserted text: the edit took the field for
+    # words. Whole by every rule above; after accept-all the citation is text.
+    flattened = []
+    for f in after["fields"]:
+        shown = "".join(t for t, _ in f["result"]).strip()
+        if f["state"] == "deleted" and shown and shown in (f["paragraph"] or {}).get("inserted", ""):
+            flattened.append({**brief(f), "shown": shown})
+
     return lines, {
         "ok": not failures,
         "failures": sorted(set(failures)),
@@ -384,6 +405,7 @@ def compare(before, after, expect_removed=None):
         "properties": props["props"],
         "doc_vars": props["vars"],
         "text_changed": changed,
+        "flattened": flattened,
         "paragraphs": after["paragraphs"],
     }
 

@@ -1373,8 +1373,11 @@ async function mainS4() {
 // tracked, all accepted and all rejected.
 
 const firstLine = (e) => String(e?.message ?? e).split("\n")[0];
+// A row of the stage that is no pane step: in the table of the run and,
+// like the steps, in result.json.
 const citeRow = (row) => {
   rows.push(row);
+  record.steps.push({ ...row });
   console.log(`${row.result}  ${row.step}  ${String(row.got ?? "").slice(0, 400)}`);
   save();
 };
@@ -1423,7 +1426,13 @@ function citeSave(name) {
   record.cite.saves[name] = saved;
   if (!saved.ok) return null;
   const copy = path.join(CITE_DIR, `${name}.docx`);
-  fs.copyFileSync(DOC, copy);
+  try {
+    fs.copyFileSync(DOC, copy);
+  } catch (e) {
+    // The row of this check then says that there is no file to check.
+    record.cite.saves[name] = { ...saved, ok: false, error: `copy: ${firstLine(e)}` };
+    return null;
+  }
   return copy;
 }
 
@@ -1611,6 +1620,13 @@ async function mainCite() {
     got: changed.length
       ? changed.map((f) => `${f.kind} "${f.recorded}" -> "${f.accepted}"`).join("; ")
       : "none",
+  });
+  // Whole by the rules, and still lost as a citation once accepted.
+  const flat = tracked?.flattened ?? [];
+  citeRow({
+    step: "cite: citations an edit replaced by plain text (not judged)",
+    result: "NOTE",
+    got: flat.length ? flat.map((f) => `${f.kind} ${f.shown} in "${f.text}"`).join("; ") : "none",
   });
 }
 

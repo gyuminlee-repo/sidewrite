@@ -1200,9 +1200,13 @@ export function fieldsLine(check) {
     return `no checker result (${check?.error ?? "the checker did not run"})`;
   }
   const s = check.after.by_state ?? {};
+  // A field deleted whole whose text was typed again as plain words passes,
+  // and is told: after accept-all that citation is text.
+  const flat = (check.flattened ?? []).map((f) => `${f.kind} ${f.shown}`);
   const counts =
     `fields ${check.before.fields} -> ${check.after.fields}` +
-    ` (live ${s.live ?? 0}, in deletions ${s.deleted ?? 0}, in insertions ${s.inserted ?? 0}, split ${s.split ?? 0})`;
+    ` (live ${s.live ?? 0}, in deletions ${s.deleted ?? 0}, in insertions ${s.inserted ?? 0}, split ${s.split ?? 0})` +
+    (flat.length ? `; replaced by plain text: ${flat.join("; ")}` : "");
   if (check.ok) return counts;
   const f = check.split?.[0] ?? check.missing?.[0] ?? check.added?.[0] ?? null;
   const u = check.unbalanced?.[0];

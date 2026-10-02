@@ -163,6 +163,20 @@ class Check(unittest.TestCase):
         self.assertEqual((code, out["failures"]), (0, []))
         self.assertEqual(out["after"]["by_state"]["deleted"], 1)
         self.assertEqual(out["after"]["list"][0]["state"], "deleted")
+        self.assertEqual(out["flattened"], [])
+
+    def test_a_deleted_field_whose_text_was_typed_again_is_listed_as_flattened(self):
+        typed = (
+            '<w:ins w:id="901" w:author="Hand" w:date="2026-01-01T00:00:00Z"><w:r>'
+            '<w:t xml:space="preserve">inexpensive culture (Arden, 2019) and</w:t></w:r></w:ins>'
+        )
+        flat = self.head + deleted(self.code + self.tail) + typed + self.rest
+        code, out, lines = self.run_tool(self.copy("flat.docx", lambda _x: flat))
+        self.assertEqual((code, out["ok"], lines), (0, True, []))
+        self.assertEqual(
+            [(f["kind"], f["shown"], f["state"]) for f in out["flattened"]],
+            [("ZOTERO_ITEM", "(Arden, 2019)", "deleted")],
+        )
 
     def test_a_removed_field_needs_expect_removed_with_its_count(self):
         gone = self.copy("gone.docx", lambda _x: self.head + self.rest)
