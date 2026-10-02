@@ -32,7 +32,7 @@ this stage (`S4-30..S4-33,S4-37`).
   `HKCU\Software\Microsoft\Office\16.0\WEF\Developer`).
 - Node on Windows and an existing `playwright-core` package on Windows (no
   browser download is needed: the runner only attaches over CDP).
-- Ports 47833/47834 free (no other Draftspect daemon) and a free CDP port
+- Ports 47833/47834 free (no other Sidewrite daemon) and a free CDP port
   (default 9333). The installed daemon (`scripts/install`, a systemd user
   unit) is the one exception: when it is active the run stops it at the
   start and starts it again when the run ends, also after a failure or

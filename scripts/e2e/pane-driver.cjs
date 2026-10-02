@@ -1,4 +1,4 @@
-// Drives the Draftspect Word task pane over the Chrome DevTools Protocol.
+// Drives the Sidewrite Word task pane over the Chrome DevTools Protocol.
 // Runs on Windows node (the pane is a WebView2 inside Word). One step per
 // process: the runner calls it once per step and reads one JSON line.
 //

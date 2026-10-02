@@ -1,15 +1,15 @@
 {
-  "name": "draftspect-office-addins",
+  "name": "sidewrite",
   "version": "0.1.0",
-  "description": "Draftspect — Microsoft Office (Word + Excel) add-ins that bring your local Claude Code into Office. Powered by Claude.",
+  "description": "Sidewrite — Microsoft Office (Word + Excel) add-ins that bring your local Claude Code into Office. Powered by Claude.",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code.git"
+    "url": "git+https://github.com/gyuminlee-repo/sidewrite.git"
   },
-  "homepage": "https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code#readme",
+  "homepage": "https://github.com/gyuminlee-repo/sidewrite#readme",
   "bugs": {
-    "url": "https://github.com/LeonardHope/Draftspect-Add-Ins-for-Word-and-Excel-Powered-by-Claude-Code/issues"
+    "url": "https://github.com/gyuminlee-repo/sidewrite/issues"
   },
   "main": "app/main.mjs",
   "type": "module",
