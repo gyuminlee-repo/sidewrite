@@ -44,6 +44,21 @@ import { referenceSection, paraText, wordsIn } from "./ref-section.mjs";
 export const STAT =
   /(?<![\p{L}\p{N}.])(?:[pqPQ](?=\s*(?:[<>=≤≥]|-?values?\b|-?adjusted))|t(?=\()|n(?=\s*[=≤≥]))/gu;
 
+const named = (x) => Array.isArray(x) && x.some((s) => typeof s === "string" && s);
+
+// The format rules a profile turns on, by name, for the line above the
+// findings. An empty table is always reported.
+export function formatRulesOn(profile = {}) {
+  const italics = profile.italics ?? {};
+  return [
+    italics.statistics === true && "statistics symbols in italics",
+    named(italics.genera) && "species names in italics",
+    named(italics.genes) && "gene names in italics",
+    named(profile.subscripts) && "formula digits in subscript",
+    profile.first_line_indent != null && "first-line indent",
+  ].filter(Boolean);
+}
+
 const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const list = (x) => (Array.isArray(x) ? x.filter((s) => typeof s === "string" && s) : []);
 const alt = (names) =>

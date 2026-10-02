@@ -44,6 +44,7 @@ import {
   addChangeComment,
 } from "./tools-word.js";
 import { initReviewPane } from "./review-pane.js";
+import { createGoTo } from "./go-to.js";
 import { initResponsePane } from "./response-pane.js";
 import { initToolsPane } from "./tools-pane.js";
 import { initProvidersPane } from "./providers-pane.js";
@@ -1353,6 +1354,10 @@ Office.onReady((info) => {
       // For the link to the figures page of this manuscript.
       docUrl: () => activeDocUrl,
       daemonOrigin: () => window.location.origin,
+      // The submission checklist: where a row is fixed, and its check (a job
+      // of the Tools tab's service, whose events that pane waits for).
+      goTo: createGoTo(setActiveTab),
+      toolsJob: (type, payload) => toolsPane.job(type, payload),
       isTurnInFlight: () => turn.inFlight,
       providersReady: () => providersPane?.whenRestored() ?? null,
       // The Stop button of the chat, for the Stop of a comment card.
@@ -1375,6 +1380,9 @@ Office.onReady((info) => {
       },
       word: {
         collectReviewSnapshot,
+        // Read for the submission checklist, as the Tools tab reads them.
+        collectHeadings,
+        readFormatSnapshot,
         selectionParagraphs,
         selectCommentById,
         selectParagraphByIndex,

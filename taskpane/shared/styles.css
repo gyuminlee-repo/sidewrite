@@ -1377,6 +1377,43 @@ body {
   font-weight: 400;
   color: var(--fg-muted);
 }
+/* The submission checklist: one row per check, the state in front. */
+.review-submit-rows {
+  margin: 6px 0 10px;
+  font-size: 12px;
+}
+.review-submit-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  align-items: baseline;
+  padding: 5px 0;
+  border-top: 1px solid var(--border);
+}
+.review-submit-state {
+  flex: none;
+  font-weight: 600;
+}
+.review-submit-not_ready .review-submit-state {
+  color: var(--status-err);
+}
+.review-submit-not_applicable .review-submit-state,
+.review-submit-asof {
+  color: var(--fg-muted);
+}
+.review-submit-text {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.review-submit-go {
+  flex: none;
+  font-size: 12px;
+}
+.review-submit-asof {
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+}
 .review-danger {
   margin-top: 14px;
   border: 1px solid var(--status-err);

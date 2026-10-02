@@ -10,8 +10,25 @@
 // Only the `response` and `gloss` text is prose a person or the model wrote.
 // Headings, location lines, quotes, line ranges and figure lines are computed.
 
+import { createHash } from "node:crypto";
 import { locationLine, renderFrame } from "./response-lines.mjs";
 import { adoptedFigures } from "./response-quotes.mjs";
+
+// One value for "what the letter says": the sha256 of the paragraphs in
+// order, each as [kind, text, color, ref]. A list per paragraph, so the order
+// of the keys of a model does not matter, and a key a later version adds to
+// the model does not change the value. An export records it
+// (response_export.model_sha); the submission checklist compares it with the
+// model built from the record as it is now (submission-check.mjs).
+export function letterModelSha(model) {
+  const rows = (model?.paragraphs ?? []).map((p) => [
+    String(p.kind ?? ""),
+    String(p.text ?? ""),
+    p.color ?? null,
+    p.ref ?? null,
+  ]);
+  return createHash("sha256").update(JSON.stringify(rows), "utf8").digest("hex");
+}
 
 // The line of an adopted figure change: its label and the name of the copy
 // in the submission folder. What changed in the figure is said by the answer

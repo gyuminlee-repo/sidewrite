@@ -64,7 +64,12 @@ import {
   viewText,
 } from "./response-quotes.mjs";
 import { applyLineResults, lineRequests, locate, savePdf } from "./response-lines.mjs";
-import { answerProse, buildLetterModel, letterPlainText } from "./response-model.mjs";
+import {
+  answerProse,
+  buildLetterModel,
+  letterModelSha,
+  letterPlainText,
+} from "./response-model.mjs";
 import { checkResponses, summarize, wordCount } from "./response-check.mjs";
 import { buildGlossPrompt, buildResponsePrompt, parseDraft } from "./response-prompt.mjs";
 import { runPy as defaultRunPy } from "./py-tool.mjs";
@@ -901,12 +906,18 @@ export function createResponseService({
       const { paths, wanted, paragraphs, verify } = await oneExport(d.doc, () =>
         writeLetter(d, model, snapshot.paragraphs.map(viewText), overwrite),
       );
+      // The two hashes are what the submission checklist compares later: the
+      // letter is current while the model built then is the model built now
+      // and the file is still the file that was written.
+      const docx_sha = await sha256File(paths.docx);
       const revision = await update(d, (rev) =>
         setExport(rev, {
           path: paths.docx,
           exported_at: new Date().toISOString(),
           fail: summary.fail,
           warn: summary.warn,
+          model_sha: letterModelSha(model),
+          docx_sha,
         }),
       );
       log(`[response] export path=${paths.docx} paragraphs=${paragraphs} verify=ok`);

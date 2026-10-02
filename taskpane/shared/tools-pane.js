@@ -303,6 +303,9 @@ export function initToolsPane({
     onEvent(msg) {
       if (msg.event === "job_done") jobDone(msg);
     },
+    // A job of this tab's service for another tab (the submission checklist
+    // of the Review tab): the job_done events of the service come here.
+    job: askJob,
     // A new connection (welcome): the waits of the old one end with an error.
     async reload() {
       dropJobs();
