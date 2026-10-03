@@ -826,31 +826,82 @@ const steps = {
     const href = await page.$eval(link, (n) => n.href);
     const before = figurePages();
     const paneBefore = page.url();
+    // The first run (2026-10-03) read wrapped=true and no call while the page
+    // opened in Edge: an assignment to `Office.context.ui.openBrowserWindow`
+    // need not reach what the pane reads later (review-pane.js openInBrowser
+    // reads `office.context.ui` again at the click), and the old check
+    // compared with a bound copy, which always differs. Now the wrapper
+    // counts as installed only when a fresh read through the same path
+    // returns it; it is put on the object read, else on the object of its
+    // prototype chain that holds the method.
+    // Independent of the wrapper, a listener on the document (bubbling, so
+    // after the link's own handler) records whether the click's default was
+    // prevented: openInBrowser returned true, i.e. the API was called and did
+    // not throw (review-pane.js figuresLink). Not prevented: the link itself
+    // was followed (the fallback).
     const spy = await page.evaluate(() => {
-      const rec = { supported: null, wrapped: false, calls: [], errors: [] };
+      const rec = {
+        supported: null,
+        wrapped: false,
+        installed_on: null,
+        calls: [],
+        errors: [],
+        default_prevented: null,
+      };
       try {
-        const office = globalThis.Office;
+        const read = () => globalThis.Office?.context?.ui;
         rec.supported =
-          office?.context?.requirements?.isSetSupported?.("OpenBrowserWindowApi", "1.1") ?? null;
-        const ui = office?.context?.ui;
-        if (ui && typeof ui.openBrowserWindow === "function") {
-          const real = ui.openBrowserWindow.bind(ui);
-          ui.openBrowserWindow = (url, ...rest) => {
+          globalThis.Office?.context?.requirements?.isSetSupported?.(
+            "OpenBrowserWindowApi",
+            "1.1",
+          ) ?? null;
+        const ui = read();
+        const real = ui?.openBrowserWindow;
+        if (typeof real === "function") {
+          const wrap = function (url, ...rest) {
             rec.calls.push(String(url));
             try {
-              return real(url, ...rest);
+              return real.call(this, url, ...rest);
             } catch (e) {
               rec.errors.push(String(e?.message ?? e));
               throw e;
             }
           };
-          rec.wrapped = ui.openBrowserWindow !== real;
+          const holds = () => read()?.openBrowserWindow === wrap;
+          try {
+            ui.openBrowserWindow = wrap;
+          } catch {
+            /* not writable: the prototype below */
+          }
+          if (holds()) rec.installed_on = "object";
+          else {
+            let o = read();
+            while (o && !Object.prototype.hasOwnProperty.call(o, "openBrowserWindow"))
+              o = Object.getPrototypeOf(o);
+            if (o) {
+              try {
+                Object.defineProperty(o, "openBrowserWindow", {
+                  value: wrap,
+                  writable: true,
+                  configurable: true,
+                });
+              } catch (e) {
+                rec.errors.push(`wrap: ${String(e?.message ?? e)}`);
+              }
+              if (holds()) rec.installed_on = "prototype";
+            }
+          }
+          rec.wrapped = holds();
         }
       } catch (e) {
         rec.errors.push(String(e?.message ?? e));
       }
+      document.addEventListener?.("click", (ev) => {
+        if (ev.target?.closest?.("a.review-figures-open"))
+          rec.default_prevented = ev.defaultPrevented;
+      });
       globalThis.__e2eFigures = rec;
-      return { supported: rec.supported, wrapped: rec.wrapped };
+      return { supported: rec.supported, wrapped: rec.wrapped, installed_on: rec.installed_on };
     });
     await page.click(link, { timeout: 15_000 });
     await sleep(a.settle_ms ?? 3000);

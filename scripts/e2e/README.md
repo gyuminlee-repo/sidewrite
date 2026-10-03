@@ -264,20 +264,31 @@ verify command of the feature list that does would see it.
 
 `--figures-button` presses "Figures and other files" under More (pane step
 `figures-open`, `figuresButton`, judged by `figuresOpenEvidence`), after the
-first two presses of `--check-now`. The step wraps
-`Office.context.ui.openBrowserWindow` in the pane with a function that
-records the call and passes it on, lists the pages of the WebView2 before and
-after, and clicks. The daemon logs each load of the page itself
-(`figure-http.mjs`: `[figures] page GET doc="..." ref=... ua="..."`, quoted
-as JSON). The rows:
+first two presses of `--check-now`. The button is the one of the whole
+manuscript under More (`#review-figures-all`, `figuresLink()` without a
+comment), so the page is asked for with `doc=` and `ref=null`; a comment card
+has a button of its own only when the comment has figure work
+(`review-pane.js` `hasFigureWork`), which stage 3 has not. The step records
+whether the pane's own click handler prevented the link
+(`default_prevented`: `openInBrowser` returned true, so the API was called
+and did not throw), wraps `Office.context.ui.openBrowserWindow` to see the
+address it is called with (`wrapped` only when a fresh read of
+`Office.context.ui.openBrowserWindow` returns the wrapper; `installed_on`
+says whether it went on the object or on its prototype), lists the pages of
+the WebView2 before and after, and clicks. The daemon logs each load of the
+page itself (`figure-http.mjs`: `[figures] page GET doc="..." ref=...
+ua="..."`, quoted as JSON). Afterwards the run shows the Response tab again
+(`show-tab`, nothing pressed in it): S3-39 fills fields of that tab without
+opening it, and the first run with these flags (2026-10-03) left the Review
+tab shown, so those fields were hidden and the fills timed out. The rows:
 
-| Row                | Passes when                                                                                                                                               |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `clicked`          | the link was there and its address names the document (`doc=`)                                                                                            |
-| `route`            | `openBrowserWindow` was called once with that address and did not throw (`route=api`), or the API is missing and the link was followed (`route=fallback`) |
-| `served`           | within `--figures-timeout` seconds (default 30) the daemon logged a page load with that `doc`                                                             |
-| `outside the pane` | the pane stayed on its page and no `/figures/` page appeared among the pages of Word's WebView2                                                           |
-| `user agent`       | `NOTE`: the browser's User-Agent; it is not used to tell a browser from the WebView2                                                                      |
+| Row                | Passes when                                                                                                                                                                                                                                                                                              |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `clicked`          | the link was there and its address names the document (`doc=`)                                                                                                                                                                                                                                           |
+| `route`            | the handler prevented the link (`route=api`) with no error, and, when the wrapper held, one call with that address; or the API is missing and the link was followed (`route=fallback`). Fails on `fallback-despite-api` (the API is there, the link was followed) and `unknown` (the click was not seen) |
+| `served`           | within `--figures-timeout` seconds (default 30) the daemon logged a page load with that `doc`                                                                                                                                                                                                            |
+| `outside the pane` | the pane stayed on its page and no `/figures/` page appeared among the pages of Word's WebView2                                                                                                                                                                                                          |
+| `user agent`       | `NOTE`: the browser's User-Agent; it is not used to tell a browser from the WebView2                                                                                                                                                                                                                     |
 
 The browser window the button opened is closed only when it is surely the
 run's own (`browserCloseDecision`, then `browser-windows.ps1 close`): a
@@ -300,7 +311,8 @@ What these two steps assume, and what the run shows when it is wrong:
 | COM edits without a save leave `Document.Saved` false (press 1)                                                                                                        | a `NOTE` "the rows of an unsaved document were not exercised"; the press is judged as a saved one                                                                                            |
 | the letter model computed by Check now, on the record refreshed in memory, hashes like the one the export wrote                                                        | `letter` fails at press 1 or 2 with `not_ready: The answers, the accepted changes or the line numbers changed after ... was exported`. That is a finding about the hash, not about the judge |
 | `word-com.ps1 save` works on the manuscript while its pane is open                                                                                                     | `check now: the manuscript saved through Word` fails with Word's error; press 2 is then judged on an unsaved document                                                                        |
-| `Office.context.ui.openBrowserWindow` can be wrapped in the page (the property is writable)                                                                            | `route=unknown` (`wrapped` false): the row passes and says the route was not watched; `served` and `outside the pane` still judge                                                            |
+| `Office.context.ui.openBrowserWindow` can be wrapped where the pane reads it (the first run read `wrapped=true` with no call; the old check was wrong)                 | `wrapped=no (address not watched)` in the `route` row: the row is then judged on `default_prevented` alone; `served` still checks the address the browser asked for                          |
+| a `click` listener on the document runs after the link's own handler and sees its `preventDefault`                                                                     | `route=unknown default_prevented=-`: the row fails                                                                                                                                           |
 | Office opens the address in the default browser of Windows (OpenBrowserWindowApi 1.1)                                                                                  | `served` fails with `no page load logged`. When the link fallback opened the page inside Word instead, `outside the pane` fails and names the page                                           |
 | a Word on Windows reaches the daemon at 127.0.0.1:47834 from the browser (WSL forwards localhost)                                                                      | `served` fails; the browser shows a page that cannot be reached                                                                                                                              |
 | the browser sets the window title to the page's `<title>` within 10 s of the page load                                                                                 | the window is left open: `left open: no new browser window shows "Sidewrite figures and other files" ...`                                                                                    |
@@ -850,10 +862,10 @@ Stage 3 (Response tab). Each step returns what the tab shows: `message`,
 
 Review tab, the two buttons of `--check-now` and `--figures-button` (stage 3):
 
-| Step               | Args        | Does and returns                                                                                                                                                                                                                                                                  |
-| ------------------ | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `submission-check` |             | opens "Before submission", presses Check now, waits until the button is enabled again and the message line is neither "Reading the document..." nor "Checking..."; `rows` (`id`, `state`, `label`, `text`, `go`), `asof`, `count`, `message`, `message_error`                     |
-| `figures-open`     | `settle_ms` | opens More, wraps `openBrowserWindow`, presses "Figures and other files", waits `settle_ms` (default 3000); `href`, `spy` (`supported`, `wrapped`, `calls`, `errors`), `pane_url_before`, `pane_url_after`, `figures_pages_before`, `figures_pages_after` (pages of the WebView2) |
+| Step               | Args        | Does and returns                                                                                                                                                                                                                                                                                                       |
+| ------------------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submission-check` |             | opens "Before submission", presses Check now, waits until the button is enabled again and the message line is neither "Reading the document..." nor "Checking..."; `rows` (`id`, `state`, `label`, `text`, `go`), `asof`, `count`, `message`, `message_error`                                                          |
+| `figures-open`     | `settle_ms` | opens More, wraps `openBrowserWindow`, presses "Figures and other files", waits `settle_ms` (default 3000); `href`, `spy` (`supported`, `wrapped`, `installed_on`, `calls`, `errors`, `default_prevented`), `pane_url_before`, `pane_url_after`, `figures_pages_before`, `figures_pages_after` (pages of the WebView2) |
 
 `judge.mjs` holds the expected texts of these steps (`JUDGES`) and the
 evidence builders of the stage 2.5 markers (`modelsEvidence`,

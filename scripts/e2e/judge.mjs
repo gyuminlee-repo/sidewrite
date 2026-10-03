@@ -2274,9 +2274,22 @@ export function onlyOwnNames(line, names) {
 // another Word's pane is not a tool call and is left out. A turn line
 // ("[agent] turn doc=<path> ...") names its document by path, so one of
 // another folder is foreign whatever its file name is.
+// A line with its JSON-quoted values decoded ("D:\\run\\a.docx" becomes
+// D:\run\a.docx), as figure-http.mjs writes the page loads. A quoted text
+// that is not JSON stays as it is.
+const unquoted = (l) =>
+  l.replace(/"(?:[^"\\]|\\.)*"/g, (m) => {
+    try {
+      return String(JSON.parse(m));
+    } catch {
+      return m;
+    }
+  });
 export function foreignLogLines(lines, own, names = []) {
   return (lines ?? [])
-    .filter((l) => /\.docx\b/i.test(l) && !own.some((p) => l.includes(p)))
+    .filter(
+      (l) => /\.docx\b/i.test(l) && !own.some((p) => l.includes(p) || unquoted(l).includes(p)),
+    )
     .filter((l) => !onlyOwnNames(l, names))
     .filter((l) => !/^\[bridge\] hello received|^\[diag\] hello /.test(l));
 }
@@ -2946,12 +2959,17 @@ export function figuresPageGets(log) {
 
 // The "Figures and other files" button, judged.
 //   step  the answer of the pane step figures-open: { ok, href, spy:
-//         { supported, wrapped, calls, errors }, pane_url_before,
-//         pane_url_after, figures_pages_before, figures_pages_after }
+//         { supported, wrapped, installed_on, calls, errors,
+//         default_prevented }, pane_url_before, pane_url_after,
+//         figures_pages_before, figures_pages_after }
 //   gets  figuresPageGets of the log written since the click
-// route: "api" (Office.context.ui.openBrowserWindow was called with the
-// link), "fallback" (the API is not there; the link itself was followed) or
-// "unknown" (the call could not be watched).
+// route, from default_prevented, which is what the pane's own click handler
+// did (review-pane.js figuresLink): "api" (openInBrowser returned true: the
+// API was there, called, and did not throw), "fallback" (the API is missing
+// and the link itself was followed), "fallback-despite-api" (the API is
+// there and the link was followed all the same: it threw or was not called)
+// or "unknown" (the click was not seen). The wrapper, when it held, adds the
+// address the API was called with.
 export function figuresOpenEvidence({ step, gets }) {
   const rows = [];
   let doc = null;
@@ -2962,14 +2980,15 @@ export function figuresOpenEvidence({ step, gets }) {
   }
   const spy = step?.spy ?? {};
   const calls = spy.calls ?? [];
+  const prevented = spy.default_prevented;
   const route =
-    calls.length > 0
+    prevented === true
       ? "api"
-      : spy.supported === false
-        ? "fallback"
-        : spy.wrapped
-          ? "none"
-          : "unknown";
+      : prevented === false
+        ? spy.supported === false
+          ? "fallback"
+          : "fallback-despite-api"
+        : "unknown";
   rows.push(
     rowOf(
       "clicked",
@@ -2982,10 +3001,11 @@ export function figuresOpenEvidence({ step, gets }) {
     rowOf(
       "route",
       route === "fallback" ||
-        route === "unknown" ||
-        (route === "api" && calls[0] === step?.href && !(spy.errors ?? []).length),
-      "openBrowserWindow called once with the link, or the link fallback where the API is missing",
-      `route=${route} supported=${spy.supported ?? "-"} calls=${JSON.stringify(calls)}${(spy.errors ?? []).length ? ` errors=${JSON.stringify(spy.errors)}` : ""}`,
+        (route === "api" &&
+          !(spy.errors ?? []).length &&
+          (!spy.wrapped || (calls.length === 1 && calls[0] === step?.href))),
+      "the click handler prevented the link (openBrowserWindow called without an error; with the wrapper in place, once with the link), or the link fallback where the API is missing",
+      `route=${route} default_prevented=${prevented ?? "-"} supported=${spy.supported ?? "-"} wrapped=${spy.wrapped ? (spy.installed_on ?? "yes") : "no (address not watched)"} calls=${JSON.stringify(calls)}${(spy.errors ?? []).length ? ` errors=${JSON.stringify(spy.errors)}` : ""}`,
     ),
   );
   const hit = gets.filter((g) => g.doc === doc);

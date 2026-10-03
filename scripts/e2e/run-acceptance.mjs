@@ -1576,6 +1576,18 @@ async function mainS3() {
   // figuresButton below the stage 4 flow).
   const checkedAt = opt["check-now"] ? await submissionCheck() : null;
   if (opt["figures-button"]) await figuresButton();
+  // Both press buttons of the Review tab and leave it shown; S3-39 fills
+  // the Response tab without opening it (response-set-lang), so its fields
+  // were hidden and the fill timed out (run of 2026-10-03). The tab is shown
+  // again, pressing nothing in it.
+  if (checkedAt || opt["figures-button"]) {
+    const back = pane("show-tab", { tab: "response", settle_ms: 1000 });
+    rows.push({
+      step: "check now / figures button: the Response tab shown again",
+      result: back.ok === false ? "FAIL" : "PASS",
+      got: back.ok === false ? back.error : "shown",
+    });
+  }
 
   // ---- S3-39: the languages of the profile reach both prompts ----
   note(

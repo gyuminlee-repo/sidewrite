@@ -303,13 +303,21 @@ const HREF = `http://127.0.0.1:47834/figures/?doc=${encodeURIComponent(DOC)}`;
 const figuresStep = (extra = {}) => ({
   ok: true,
   href: HREF,
-  spy: { supported: true, wrapped: true, calls: [HREF], errors: [] },
+  spy: {
+    supported: true,
+    wrapped: true,
+    installed_on: "object",
+    calls: [HREF],
+    errors: [],
+    default_prevented: true,
+  },
   pane_url_before: "http://127.0.0.1:47834/word/index.html",
   pane_url_after: "http://127.0.0.1:47834/word/index.html",
   figures_pages_before: [],
   figures_pages_after: [],
   ...extra,
 });
+const spyOf = (extra = {}) => ({ ...figuresStep().spy, ...extra });
 const getLine = (doc, ua = "Mozilla/5.0 (Windows NT 10.0) Edg/140.0") =>
   `[figures] page GET doc=${JSON.stringify(doc)} ref=null ua=${JSON.stringify(ua)}`;
 
@@ -327,11 +335,22 @@ test("figures: the API route and the link fallback both pass when the page was s
   assert.equal(api.route, "api");
   assert.equal(byId(api.rows)["user agent"].result, "NOTE");
   const fallback = J.figuresOpenEvidence({
-    step: figuresStep({ spy: { supported: false, wrapped: false, calls: [], errors: [] } }),
+    step: figuresStep({
+      spy: spyOf({ supported: false, wrapped: false, calls: [], default_prevented: false }),
+    }),
     gets,
   });
   assert.equal(fallback.pass, true);
   assert.equal(fallback.route, "fallback");
+  // The wrapper did not hold (the first run, 2026-10-03: no call seen); the
+  // pane's handler prevented the link, so the API ran: the address is not
+  // watched and the row passes on what the handler did.
+  const unwatched = J.figuresOpenEvidence({
+    step: figuresStep({ spy: spyOf({ wrapped: false, installed_on: null, calls: [] }) }),
+    gets,
+  });
+  assert.equal(unwatched.pass, true, JSON.stringify(unwatched.rows));
+  assert.match(byId(unwatched.rows).route.got, /route=api .*wrapped=no \(address not watched\)/);
 });
 
 test("figures: every judged row fails on an input that is wrong for it", () => {
@@ -343,16 +362,16 @@ test("figures: every judged row fails on an input that is wrong for it", () => {
   };
   failOf({ ok: false, error: "no link" }, "clicked");
   failOf(figuresStep({ href: "http://127.0.0.1:47834/figures/" }), "clicked");
-  // The API is there and watched, but was not called, or with another address.
-  failOf(figuresStep({ spy: { supported: true, wrapped: true, calls: [], errors: [] } }), "route");
-  failOf(
-    figuresStep({ spy: { supported: true, wrapped: true, calls: ["http://x/"], errors: [] } }),
-    "route",
-  );
-  failOf(
-    figuresStep({ spy: { supported: true, wrapped: true, calls: [HREF], errors: ["denied"] } }),
-    "route",
-  );
+  // The wrapper held, but saw no call, another address, or two calls.
+  failOf(figuresStep({ spy: spyOf({ calls: [] }) }), "route");
+  failOf(figuresStep({ spy: spyOf({ calls: ["http://x/"] }) }), "route");
+  failOf(figuresStep({ spy: spyOf({ calls: [HREF, HREF] }) }), "route");
+  // The API is supported, yet the handler followed the link (it threw, or
+  // was not called): a defect of the pane.
+  failOf(figuresStep({ spy: spyOf({ errors: ["denied"], default_prevented: false }) }), "route");
+  failOf(figuresStep({ spy: spyOf({ calls: [], default_prevented: false }) }), "route");
+  // The click was not seen by the listener.
+  failOf(figuresStep({ spy: spyOf({ default_prevented: null }) }), "route");
   // No page load, or one of another document.
   failOf(figuresStep(), "served", []);
   failOf(figuresStep(), "served", J.figuresPageGets(getLine("D:\\other.docx")));
@@ -533,4 +552,41 @@ test("README: the new steps, the flag and the assumptions", () => {
     "browser-windows.ps1",
   ])
     assert.ok(readme.includes(s), s);
+});
+
+// ---- the isolation check and the line of a page load ----------------------
+
+test("isolation: a page load of the run's own document passes, one of another document fails", () => {
+  const own = ["D:\\test-root\\run\\e2e-1", "/mnt/d/test-root/run/e2e-1"];
+  const line = (doc) =>
+    `[figures] page GET doc=${JSON.stringify(doc)} ref=null ua=${JSON.stringify("Mozilla/5.0 Edg/154.0")}`;
+  const mine = line("D:\\test-root\\run\\e2e-1\\review_manuscript.docx");
+  // As the log has it: the backslashes doubled by the quoting, so the run
+  // folder is not in the line as written (the run of 2026-10-03 failed so).
+  assert.ok(!mine.includes(own[0]));
+  assert.deepEqual(J.foreignLogLines([mine], own), []);
+  // Another document in the same line shape stays foreign: [figures] lines
+  // are not exempt as such.
+  const other = line("D:\\Users\\me\\paper.docx");
+  assert.deepEqual(J.foreignLogLines([other], own), [other]);
+  const sibling = line("D:\\test-root\\run\\e2e-2\\review_manuscript.docx");
+  assert.deepEqual(J.foreignLogLines([sibling], own), [sibling]);
+  // Plain lines are judged as before.
+  assert.deepEqual(J.foreignLogLines(["[review] edit /mnt/d/test-root/run/e2e-1/a.docx"], own), []);
+  assert.equal(J.foreignLogLines(["[review] edit /home/u/b.docx"], own).length, 1);
+});
+
+test("runner: after Check now and the figures button the Response tab is shown again before S3-39", () => {
+  const runner = read("../scripts/e2e/run-acceptance.mjs");
+  const s3 = runner.slice(
+    runner.indexOf("async function mainS3()"),
+    runner.indexOf("// Stage 4 (S4-30"),
+  );
+  const back = s3.indexOf('pane("show-tab", { tab: "response"');
+  assert.ok(back > s3.indexOf("await figuresButton();"));
+  assert.ok(back < s3.indexOf('pane("response-set-lang", { lang: "German"'));
+  // response-set-lang does not open the tab itself: the reason for that line.
+  const driver = read("../scripts/e2e/pane-driver.cjs");
+  const setLang = driver.slice(driver.indexOf('async "response-set-lang"'));
+  assert.doesNotMatch(setLang.slice(0, setLang.indexOf("\n  },")), /data-tab|show-tab/);
 });
