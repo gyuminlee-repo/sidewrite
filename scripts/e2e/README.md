@@ -7,7 +7,10 @@ steps, and the feature_list verify commands. It has four flows: stage 2
 stage 3 (`--stage s3`, `S3-30..S3-41`, the response letter) and stage 4
 (`--stage s4`, `S4-30..S4-33,S4-37,S4-38`, the Tools tab). A fifth flow,
 `--stage cite`, has no feature list: it asks whether tracked edits leave the
-fields of Zotero and EndNote whole (section "Stage cite" below).
+fields of Zotero and EndNote whole (section "Stage cite" below). Stage parts
+(`--stage parts`) has none either, nor has `--resident`, a short stage on
+the installed daemon (section "Stage resident"). Stage 3 takes two steps more
+with `--check-now` and `--figures-button`.
 
 Stage 4 opens the fake manuscript `tests/fixtures/aux_manuscript.docx`
 (`make_aux_fixture.py`, every sentence invented) with the journal profile
@@ -40,7 +43,9 @@ this stage (`S4-30..S4-33,S4-37`).
   start and starts it again when the run ends, also after a failure or
   Ctrl-C (`resident-unit.mjs`). With `--keep-on-fail` the run's own daemon
   stays on the ports, so the unit cannot come back until that daemon is
-  stopped; then `bash scripts/install/daemon-service.sh install`.
+  stopped; then `bash scripts/install/daemon-service.sh install`. With
+  `--resident` it is the other way round: the unit must be running, and it
+  stays running.
 - The run folder must be on a Windows drive (for example under `/mnt/d`).
   Windows scripts are copied there and run from there, never from a UNC path.
 
@@ -212,6 +217,106 @@ A step that only reads or computes again (`open-response`, `response-locate`,
 `result.json`); a step that writes or asks a model is not. The flow has no
 fixed wait: every Response step waits for the message its own action ends
 with.
+
+### Stage 3 with `--check-now` and `--figures-button`
+
+```sh
+node scripts/e2e/run-acceptance.mjs --stage s3 --check-now --figures-button \
+  --base-dir <folder on a Windows drive, as a WSL path> \
+  --playwright-core 'D:\path\to\node_modules\playwright-core' \
+  --feature-list <stage 3 feature_list.json> \
+  --plan-repo <repo path the feature_list commands cd into>
+```
+
+Two buttons of the Review tab that had only been tested without Word. Both
+flags are off by default; without them stage 3 runs as above. Stage 3 carries
+them because it is the cheapest flow that exports a response letter (stage 4
+has no review loaded, so "Before submission" is hidden, and stage parts runs
+the turns of two documents). Each judged row is printed as
+`PASS|FAIL  check now (<press>): <row id>  <state>: <the text the pane shows>`
+and kept in `result.json` (`check_now`, `figures_button`).
+
+`--check-now` presses "Check now" (pane step `submission-check`) three times
+(`submissionCheck` in `run-acceptance.mjs`, judged by `submissionEvidence` in
+`judge.mjs`):
+
+1. `unsaved`: right after the export of S3-40, while the manuscript holds the
+   run's Word edits that were never saved.
+2. `saved`: after `word-com.ps1 save` of the manuscript (in the run folder).
+3. `after S3-39`: at the end of the stage, after the German draft of R1.1.
+
+| Row                                              | Expected, from what the run reads itself                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `job`                                            | rows drawn, no error on the message line, the daemon logged `[tools] submission_check rows=...`                                                                                                                                                                                                                                                                   |
+| `saved`                                          | the `saved=` of that line is `Document.Saved` as `word-com.ps1 state` reads it just before the press                                                                                                                                                                                                                                                              |
+| `changes_decided`, `tool_comments`, `file_clean` | ready exactly when Word over COM lists no revision; no comment that starts `[R<n>.<m>]` or `[E.<m>]` (`TOOL_COMMENT_PREFIX`); no revision and no comment                                                                                                                                                                                                          |
+| `marked_copy`, `anonymized_copy`                 | Word says unsaved: not ready with the text "This document has changes that are not saved. ...". Saved: no copy is on record in this stage, so not ready with "No marked copy is on record for this file. ..." and not the unsaved text. The anonymized row may instead be "not needed" when the profile asks for no copy                                          |
+| `letter`                                         | the run hashes the file `response_export.path` names. When the record says `fail` 0 and the hash is `docx_sha`: ready and naming that file at presses 1 and 2; at press 3 not ready "... changed after <file> was exported ..." when the answers, a decline or `profile_overrides` changed since press 2 (`letterInputsChanged`), else ready. Otherwise not ready |
+| `figures`                                        | not needed: no figure change is on record in this stage                                                                                                                                                                                                                                                                                                           |
+| `as_of`                                          | the line under the rows says the document has unsaved changes, or "Press Check now again after a change."                                                                                                                                                                                                                                                         |
+| `answers`, `requests`, `format_counts`           | `NOTE`: printed with their text, not judged (the run has no reading of its own for them)                                                                                                                                                                                                                                                                          |
+
+Press 1 is followed by the row `check now: the manuscript saved through
+Word`. When Word already says `Saved` before it, a `NOTE` says that the rows
+of an unsaved document were not exercised. The save changes the manuscript
+on disk before S3-39; nothing in the flow reads that file afterwards, but a
+verify command of the feature list that does would see it.
+
+`--figures-button` presses "Figures and other files" under More (pane step
+`figures-open`, `figuresButton`, judged by `figuresOpenEvidence`), after the
+first two presses of `--check-now`. The button is the one of the whole
+manuscript under More (`#review-figures-all`, `figuresLink()` without a
+comment), so the page is asked for with `doc=` and `ref=null`; a comment card
+has a button of its own only when the comment has figure work
+(`review-pane.js` `hasFigureWork`), which stage 3 has not. The step records
+whether the pane's own click handler prevented the link
+(`default_prevented`: `openInBrowser` returned true, so the API was called
+and did not throw), wraps `Office.context.ui.openBrowserWindow` to see the
+address it is called with (`wrapped` only when a fresh read of
+`Office.context.ui.openBrowserWindow` returns the wrapper; `installed_on`
+says whether it went on the object or on its prototype), lists the pages of
+the WebView2 before and after, and clicks. The daemon logs each load of the
+page itself (`figure-http.mjs`: `[figures] page GET doc="..." ref=...
+ua="..."`, quoted as JSON). Afterwards the run shows the Response tab again
+(`show-tab`, nothing pressed in it): S3-39 fills fields of that tab without
+opening it, and the first run with these flags (2026-10-03) left the Review
+tab shown, so those fields were hidden and the fills timed out. The rows:
+
+| Row                | Passes when                                                                                                                                                                                                                                                                                              |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `clicked`          | the link was there and its address names the document (`doc=`)                                                                                                                                                                                                                                           |
+| `route`            | the handler prevented the link (`route=api`) with no error, and, when the wrapper held, one call with that address; or the API is missing and the link was followed (`route=fallback`). Fails on `fallback-despite-api` (the API is there, the link was followed) and `unknown` (the click was not seen) |
+| `served`           | within `--figures-timeout` seconds (default 30) the daemon logged a page load with that `doc`                                                                                                                                                                                                            |
+| `outside the pane` | the pane stayed on its page and no `/figures/` page appeared among the pages of Word's WebView2                                                                                                                                                                                                          |
+| `user agent`       | `NOTE`: the browser's User-Agent; it is not used to tell a browser from the WebView2                                                                                                                                                                                                                     |
+
+The browser window the button opened is closed only when it is surely the
+run's own (`browserCloseDecision`, then `browser-windows.ps1 close`): a
+process that started after the click, of a browser (msedge, chrome, firefox,
+brave, opera, vivaldi) no process of which ran before the click, the only such
+new window, its title "Sidewrite figures and other files", and exactly one
+tab in it by UI Automation. Then `CloseMainWindow`, never a forced stop.
+Otherwise the window stays and the row `figures button: the browser window it
+opened` says `left open: <why>`. With a browser of the user already running
+(Edge keeps background processes for startup boost) the page opens as a tab
+of the user's own window, and it is always left open.
+
+What these two steps assume, and what the run shows when it is wrong:
+
+| Assumed                                                                                                                                                                | When it is wrong                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a paragraph holds `w_ins` or `w_del` in the pane's snapshot exactly when Word over COM lists a revision there (`RevList` of `word-com.ps1`, every kind of `Revisions`) | `changes_decided` and `file_clean` fail with `ready: ...` while COM counts n revisions: Word has a revision the snapshot does not see (a formatting change, a paragraph mark)                |
+| the snapshot lists every comment, resolved ones too, as COM does (`collectReviewSnapshot` loads `items/resolved` and keeps them)                                       | `tool_comments` reads ready while COM counts n comments of the tool                                                                                                                          |
+| `Word.Document.saved` in the pane agrees with `Document.Saved` over COM                                                                                                | `check now (...): saved` fails with `pane sent saved=true, COM Saved=false` (or `null`), and `marked_copy` then shows the record's text where the unsaved one was expected                   |
+| COM edits without a save leave `Document.Saved` false (press 1)                                                                                                        | a `NOTE` "the rows of an unsaved document were not exercised"; the press is judged as a saved one                                                                                            |
+| the letter model computed by Check now, on the record refreshed in memory, hashes like the one the export wrote                                                        | `letter` fails at press 1 or 2 with `not_ready: The answers, the accepted changes or the line numbers changed after ... was exported`. That is a finding about the hash, not about the judge |
+| `word-com.ps1 save` works on the manuscript while its pane is open                                                                                                     | `check now: the manuscript saved through Word` fails with Word's error; press 2 is then judged on an unsaved document                                                                        |
+| `Office.context.ui.openBrowserWindow` can be wrapped where the pane reads it (the first run read `wrapped=true` with no call; the old check was wrong)                 | `wrapped=no (address not watched)` in the `route` row: the row is then judged on `default_prevented` alone; `served` still checks the address the browser asked for                          |
+| a `click` listener on the document runs after the link's own handler and sees its `preventDefault`                                                                     | `route=unknown default_prevented=-`: the row fails                                                                                                                                           |
+| Office opens the address in the default browser of Windows (OpenBrowserWindowApi 1.1)                                                                                  | `served` fails with `no page load logged`. When the link fallback opened the page inside Word instead, `outside the pane` fails and names the page                                           |
+| a Word on Windows reaches the daemon at 127.0.0.1:47834 from the browser (WSL forwards localhost)                                                                      | `served` fails; the browser shows a page that cannot be reached                                                                                                                              |
+| the browser sets the window title to the page's `<title>` within 10 s of the page load                                                                                 | the window is left open: `left open: no new browser window shows "Sidewrite figures and other files" ...`                                                                                    |
+| UI Automation lists the tabs of Edge and Chrome as `TabItem` elements of the window                                                                                    | the window is left open: `left open: the window has 0 tabs` (or more)                                                                                                                        |
 
 ## Stage cite
 
@@ -652,6 +757,64 @@ written by hand (`tests/e2e-judge-parts.test.mjs`), the choice of the pane
 with document names written by hand (the same file), and the wait conditions
 and reads of the new steps on an empty page (`tests/e2e-pane-driver.test.mjs`).
 
+## Stage resident
+
+```sh
+node scripts/e2e/run-acceptance.mjs --resident \
+  --base-dir <folder on a Windows drive, as a WSL path> \
+  --playwright-core 'D:\path\to\node_modules\playwright-core'
+```
+
+Every other stage stops the installed daemon (`sidewrite-daemon.service`)
+and starts one of its own. `--resident` is a short stage that does neither:
+the Word of the run, with the add-in registered and the pane opened by the
+document (as in every stage), connects to the daemon of the unit on
+47833/47834, the Review tab opens (`open-review`: the line "Review file:
+<run folder>/paper.revision.json" comes from the daemon's answer) and is read
+again (`view`). No model, no write to Word. Nothing of the unit is started,
+stopped or restarted; the run ends with "unit is not active" when it is not
+running (start it with `systemctl --user start sidewrite-daemon.service`).
+
+The unit runs the checkout it was installed from (its `WorkingDirectory`),
+not necessarily the one the runner is started from: the pane and the daemon
+the stage exercises are those of that checkout. To test a branch, install the
+unit from it (`bash scripts/install/daemon-service.sh install`) or restart it
+after that checkout has the code.
+
+The log of the unit is the file its `StandardOutput=append:` line names
+(`systemctl --user cat sidewrite-daemon.service`; the install writes
+`$HOME/.claude/office-addins/daemon.log`), read from the size it had when the
+run started. The daemon's lines are not in the journal, which holds only the
+messages of systemd itself; `journalctl --user -u sidewrite-daemon.service
+--since @<start>` is read instead only when the unit names no file. The rows:
+
+| Row                                                                | Passes when                                                                                                                      |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `open-review`, `view (the Review tab read again)`                  | the pane answered with the review file of the run folder, and read the tab again without an error                                |
+| `no tool call on other documents`                                  | no line of the unit's log since the start names a `.docx` outside the run folder (hello lines aside)                             |
+| `resident: serving`                                                | before Word started: the unit is active and its `MainPID` holds both ports (`ss -ltnp`)                                          |
+| `resident: not restarted`                                          | after Word was closed: the same `MainPID`, and `uptime_s` of `GET /health` grew by the time between the two reads (5 s of slack) |
+| `resident: still serving`                                          | after Word was closed: active, both ports held by `MainPID`                                                                      |
+| `resident: the Word of the run closed, other Word processes alive` | the cleanup of every stage                                                                                                       |
+
+| Assumed                                                                                                                     | When it is wrong                                                                                                                            |
+| --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| nobody else uses the unit during the run (it also serves the user's own Word panes)                                         | `no tool call on other documents` fails and names the line of the other document. The run cannot tell such a line from one it caused itself |
+| the unit writes its output to the file of `StandardOutput=append:` (as `scripts/install/unit.mjs` renders it)               | `result.json` `resident.log` shows `{ since }` and the row reads the journal, where the daemon's lines are not: it passes on an empty log   |
+| `ss -ltnp` shows the pid of a process of the same user                                                                      | `resident: serving` fails with `47833:[] 47834:[]` while the unit is active                                                                 |
+| `systemctl --user show -p MainPID --value` gives the pid of node (`Type=simple`)                                            | `resident: serving` fails with the pids `ss` shows next to another MainPID                                                                  |
+| the pane of a Word started with the WebView2 variables of `word-launch.ps1` loads from the unit as from a daemon of the run | `open-review` fails with `pane not reachable on port 9333` or no "Review file:" line within 60 s                                            |
+
+Opening the pane from the Word ribbon instead of by the document is not
+automated. `manifests/word.xml` declares no add-in commands (no
+`VersionOverrides`), so Word has no Sidewrite button on the ribbon: by hand the
+pane is opened through the Office Add-ins dialog (Home or Insert, Add-ins, My
+Add-ins, Developer Add-ins), a dialog of web content with labels in the
+language of Office and in a window of its own. Driving it with UI
+Automation, even scoped to the Word the run started, would rest on localized
+names and on the inner structure of that dialog, and none of it could be
+tried when the stage was written.
+
 ## Pane steps
 
 `pane-driver.cjs <step> <args.json>` runs one step and prints one JSON line.
@@ -696,6 +859,13 @@ Stage 3 (Response tab). Each step returns what the tab shows: `message`,
 | `response-locate`    |                                                             | Update line numbers; `Line numbers updated: ...`                                         |
 | `response-check`     |                                                             | Run checks; `Checked: ...`                                                               |
 | `response-export`    | `format` (`text` for the plain-text files)                  | Export; `Exported...` or, while a check fails, `Not exported: ...`                       |
+
+Review tab, the two buttons of `--check-now` and `--figures-button` (stage 3):
+
+| Step               | Args        | Does and returns                                                                                                                                                                                                                                                                                                       |
+| ------------------ | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submission-check` |             | opens "Before submission", presses Check now, waits until the button is enabled again and the message line is neither "Reading the document..." nor "Checking..."; `rows` (`id`, `state`, `label`, `text`, `go`), `asof`, `count`, `message`, `message_error`                                                          |
+| `figures-open`     | `settle_ms` | opens More, wraps `openBrowserWindow`, presses "Figures and other files", waits `settle_ms` (default 3000); `href`, `spy` (`supported`, `wrapped`, `installed_on`, `calls`, `errors`, `default_prevented`), `pane_url_before`, `pane_url_after`, `figures_pages_before`, `figures_pages_after` (pages of the WebView2) |
 
 `judge.mjs` holds the expected texts of these steps (`JUDGES`) and the
 evidence builders of the stage 2.5 markers (`modelsEvidence`,
@@ -770,14 +940,15 @@ paragraph text`, files under `special/`): `make_tracked_special.py` builds
 
 ## Files
 
-| File                 | Runs on      | Does                                                                                               |
-| -------------------- | ------------ | -------------------------------------------------------------------------------------------------- |
-| `run-acceptance.mjs` | WSL          | the whole run                                                                                      |
-| `judge.mjs`          | WSL          | COM plan from revision.json, expected pane texts, path rewrite (tests: `tests/e2e-judge.test.mjs`) |
-| `pane-driver.cjs`    | Windows node | one pane step per call over CDP                                                                    |
-| `word-launch.ps1`    | Windows      | Word with a CDP port on its pane                                                                   |
-| `word-com.ps1`       | Windows      | accept/reject, hand edits, comments, a second document, save, quit                                 |
-| `embed_taskpane.py`  | WSL          | auto-open task pane parts in a copy                                                                |
+| File                  | Runs on      | Does                                                                                               |
+| --------------------- | ------------ | -------------------------------------------------------------------------------------------------- |
+| `run-acceptance.mjs`  | WSL          | the whole run                                                                                      |
+| `judge.mjs`           | WSL          | COM plan from revision.json, expected pane texts, path rewrite (tests: `tests/e2e-judge.test.mjs`) |
+| `pane-driver.cjs`     | Windows node | one pane step per call over CDP                                                                    |
+| `word-launch.ps1`     | Windows      | Word with a CDP port on its pane                                                                   |
+| `word-com.ps1`        | Windows      | accept/reject, hand edits, comments, a second document, save, quit                                 |
+| `browser-windows.ps1` | Windows      | the browser processes before and after the figures button; closes the run's own window only        |
+| `embed_taskpane.py`   | WSL          | auto-open task pane parts in a copy                                                                |
 
 ## Word as the judge of the marked copy
 

@@ -96,7 +96,19 @@ import {
   trackedPlaced,
   table,
 } from "./judge.mjs";
+import {
+  browserCloseDecision,
+  figuresOpenEvidence,
+  figuresPageGets,
+  letterInputsChanged,
+  listenerPids,
+  residentEvidence,
+  submissionEvidence,
+  unitLogFile,
+} from "./judge.mjs";
+import { createHash } from "node:crypto";
 import { pauseResident } from "./resident-unit.mjs";
+import { HEALTH_URL, unitName } from "../install/unit.mjs";
 import { refusalsFromLog, rewritesFromLog } from "./replay-lib.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -185,6 +197,17 @@ const { values: opt } = parseArgs({
     "skip-special": { type: "boolean", default: false },
     // Leave Word and the daemon running when a step fails, to look at them.
     "keep-on-fail": { type: "boolean", default: false },
+    // Stage 3 only, off by default: "Check now" of "Before submission",
+    // pressed three times (submissionCheck), with a save of the manuscript
+    // through Word between the first two.
+    "check-now": { type: "boolean", default: false },
+    // Stage 3 only, off by default: the "Figures and other files" button
+    // (figuresButton), judged from the daemon log within this many seconds.
+    "figures-button": { type: "boolean", default: false },
+    "figures-timeout": { type: "string", default: "30" },
+    // A short stage of its own on the installed daemon (sidewrite-daemon
+    // unit), which stays running: no daemon of the run, no stop of the unit.
+    resident: { type: "boolean", default: false },
   },
 });
 
@@ -198,7 +221,10 @@ if (!opt["playwright-core"])
   die("--playwright-core (Windows path of a playwright-core package) is required");
 
 // Stages without a feature list: their rows and markers are their result.
-const NO_FEATURES = ["cite", "parts"];
+const NO_FEATURES = ["cite", "parts", "resident"];
+if (opt.resident && opt.stage && opt.stage.toLowerCase() !== "resident")
+  die(`--resident is a stage of its own; it does not go with --stage ${opt.stage}`);
+if (opt.resident) opt.stage = "resident";
 let STAGE;
 try {
   STAGE = (opt.stage ?? stageOf(opt.features ?? defaultFeatures("s2"))).toLowerCase();
@@ -211,8 +237,12 @@ try {
 } catch (e) {
   die(e.message);
 }
-if (!["s2", "s25", "s3", "s4", "cite", "parts"].includes(STAGE))
-  die(`there is no flow for stage ${STAGE} (s2, s25, s3, s4, cite, parts)`);
+if (!["s2", "s25", "s3", "s4", "cite", "parts", "resident"].includes(STAGE))
+  die(`there is no flow for stage ${STAGE} (s2, s25, s3, s4, cite, parts, resident)`);
+if ((opt["check-now"] || opt["figures-button"]) && STAGE !== "s3")
+  die("--check-now and --figures-button are steps of stage 3 (--stage s3)");
+const FIGURES_TIMEOUT_MS = Number(opt["figures-timeout"]) * 1000;
+if (!(FIGURES_TIMEOUT_MS > 0)) die("--figures-timeout takes a number of seconds");
 opt.fixture ??= path.join(
   REPO,
   "tests/fixtures",
@@ -641,6 +671,13 @@ async function setup() {
   if (STAGE === "cite")
     for (const f of ["word-own.ps1", "marked-diff-word.ps1"])
       fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
+  if (opt["figures-button"])
+    fs.copyFileSync(
+      path.join(HERE, "browser-windows.ps1"),
+      path.join(TOOLS, "browser-windows.ps1"),
+    );
+  // --resident: the installed daemon stays and serves the pane.
+  if (STAGE === "resident") return setupResident();
   // The installed daemon holds both ports: it makes way for the run.
   resident = pauseResident();
   if (resident.paused)
@@ -680,6 +717,259 @@ async function setup() {
   await startDaemon(LOG, env);
 
   record.word.launch = launchWord(DOC, path.join(RUN, "webview2"));
+  save();
+}
+
+// ---- real Word: "Check now", the figures button, the resident daemon --------
+// Steps that had only been checked without Word. Each judged row goes into
+// the table of the run as "<what>: <row id>" with the text the pane showed.
+
+const sha256Of = (file) => {
+  try {
+    return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  } catch {
+    return null;
+  }
+};
+// A path of the record as aux-service.mjs reads it: absolute, or relative to
+// the folder of the manuscript with "/". A Windows path is read through WSL.
+const recordPath = (p) =>
+  !p
+    ? null
+    : /^[A-Za-z]:[\\/]/.test(p)
+      ? unixPath(p)
+      : path.isAbsolute(p)
+        ? p
+        : path.join(path.dirname(DOC), ...p.split("/"));
+function judgedRows(what, evidence) {
+  for (const r of evidence.rows) {
+    const row = { step: `${what}: ${r.id}`, result: r.result, got: r.got };
+    rows.push(row);
+    console.log(`${row.result}  ${row.step}  ${String(r.got).slice(0, 200)}`);
+  }
+  save();
+}
+
+// "Check now" (stage 3, --check-now). Without `baseline`: pressed while the
+// manuscript has the run's unsaved Word edits, then the manuscript is saved
+// through Word and it is pressed again; returns revision.json as it was then.
+// With `baseline` (that revision.json): pressed once more, and the letter
+// row is expected to say the letter is out of date when the answers or the
+// profile overrides changed since.
+async function submissionCheck(baseline = null) {
+  const readRevision = () => JSON.parse(fs.readFileSync(REVISION, "utf8"));
+  const press = (label, letter) => {
+    const word = com("state");
+    const at = readLog(daemonLog).length;
+    const step = pane("submission-check");
+    const revision = readRevision();
+    const letterFile = recordPath(revision.response_export?.path);
+    const evidence = submissionEvidence({
+      step,
+      word,
+      revision,
+      letterSha: letterFile ? sha256Of(letterFile) : null,
+      letter,
+      log: readLog(daemonLog).slice(at),
+    });
+    if (label === "unsaved" && word.saved !== false)
+      evidence.rows.push({
+        id: "unsaved state",
+        result: "NOTE",
+        got: `Word said Saved=${word.saved} before the save: the rows of an unsaved document were not exercised`,
+      });
+    judgedRows(`check now (${label})`, evidence);
+    (record.check_now ??= {})[label] = {
+      step,
+      word: {
+        saved: word.saved,
+        revisions: word.revisions?.length,
+        comments: word.comments?.length,
+      },
+      letter,
+      evidence,
+    };
+    save();
+    return revision;
+  };
+  if (baseline) {
+    const changed = letterInputsChanged(baseline, readRevision());
+    press("after S3-39", changed ? "changed" : "ready");
+    return baseline;
+  }
+  press("unsaved", "ready");
+  let saved;
+  try {
+    saved = com("save", ["-AllowDir", winPath(RUN)]);
+  } catch (e) {
+    saved = { ok: false, error: firstLine(e) };
+  }
+  record.word.save_check_now = saved;
+  rows.push({
+    step: "check now: the manuscript saved through Word",
+    result: saved.ok && saved.saved ? "PASS" : "FAIL",
+    got: saved.ok ? `saved=${saved.saved} revisions=${saved.revisions}` : saved.error,
+  });
+  return press("saved", "ready");
+}
+
+// The title of the figures page (taskpane/figures/index.html).
+const FIGURES_TITLE = "Sidewrite figures and other files";
+// "Figures and other files" (stage 3, --figures-button): pressed in the
+// pane; judged from the daemon's line of the page load and from the pages of
+// the WebView2. The browser window it opened is closed only when it is surely
+// the run's own (browserCloseDecision); otherwise it stays and a NOTE says so.
+async function figuresButton() {
+  const browsers = () => {
+    try {
+      return powershell("browser-windows.ps1", ["-Action", "list"], 60_000).processes ?? null;
+    } catch (e) {
+      record.figures_list_error = firstLine(e);
+      return null;
+    }
+  };
+  const before = browsers();
+  const at = readLog(daemonLog).length;
+  const step = pane("figures-open");
+  let gets = [];
+  await until(
+    () => (gets = figuresPageGets(readLog(daemonLog).slice(at))).length > 0,
+    FIGURES_TIMEOUT_MS,
+    "the figures page",
+  ).catch(() => {});
+  const evidence = figuresOpenEvidence({ step, gets });
+  judgedRows("figures button", evidence);
+  // The title of the window comes a moment after the page was asked for.
+  let after = browsers();
+  await until(
+    () =>
+      browserCloseDecision({ before, after: (after = browsers()), title: FIGURES_TITLE }).action ===
+      "close",
+    10_000,
+    "a window of the figures page",
+  ).catch(() => {});
+  const decision = browserCloseDecision({ before, after, title: FIGURES_TITLE });
+  let closed = null;
+  if (decision.action === "close") {
+    try {
+      closed = powershell("browser-windows.ps1", [
+        "-Action",
+        "close",
+        "-ProcessId",
+        String(decision.pid),
+        "-Title",
+        FIGURES_TITLE,
+      ]);
+    } catch (e) {
+      closed = { ok: false, closed: false, reason: firstLine(e) };
+    }
+  }
+  const left = closed?.closed ? null : (closed?.reason ?? decision.reason);
+  rows.push({
+    step: "figures button: the browser window it opened",
+    result: "NOTE",
+    got: left
+      ? `left open: ${left}`
+      : `closed ${decision.name} (pid ${decision.pid}, ${closed.tabs} tab)`,
+  });
+  console.log(`NOTE  figures button: the browser window it opened  ${rows.at(-1).got}`);
+  record.figures_button = { step, gets, evidence, before, after, decision, closed };
+  save();
+}
+
+// --resident: the installed daemon serves the pane. Nothing of it is stopped
+// or started; its log is the file the unit writes to (or the journal when the
+// unit names none), from the size it had at the start of the run.
+const RESIDENT_UNIT = `${unitName}.service`;
+let residentLog = null;
+const quiet = (cmd, args) => {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe" });
+  } catch (e) {
+    return String(e.stdout ?? "");
+  }
+};
+async function residentProbe() {
+  let uptime = null;
+  try {
+    uptime = (await (await fetch(HEALTH_URL)).json()).uptime_s ?? null;
+  } catch {
+    uptime = null;
+  }
+  const ss = quiet("ss", ["-ltnp"]);
+  return {
+    active: quiet("systemctl", ["--user", "is-active", RESIDENT_UNIT]).trim() === "active",
+    main_pid:
+      Number(quiet("systemctl", ["--user", "show", "-p", "MainPID", "--value", RESIDENT_UNIT])) ||
+      0,
+    ws: listenerPids(ss, WS_PORT),
+    http: listenerPids(ss, HTTP_PORT),
+    uptime_s: uptime,
+    at: Date.now(),
+  };
+}
+function residentLogText() {
+  if (!residentLog) return "";
+  if (residentLog.file) {
+    try {
+      return fs.readFileSync(residentLog.file).subarray(residentLog.from).toString("utf8");
+    } catch (e) {
+      record.resident.log_error = firstLine(e);
+      return "";
+    }
+  }
+  return quiet("journalctl", [
+    "--user",
+    "-u",
+    RESIDENT_UNIT,
+    "--since",
+    `@${residentLog.since}`,
+    "-o",
+    "cat",
+    "--no-pager",
+  ]);
+}
+async function setupResident() {
+  const before = await residentProbe();
+  record.resident = { unit: RESIDENT_UNIT, before };
+  if (!before.active)
+    die(
+      `${RESIDENT_UNIT} is not active: start it (systemctl --user start ${RESIDENT_UNIT}), or run without --resident`,
+    );
+  if (!listening(WS_PORT) || !listening(HTTP_PORT))
+    die(`${RESIDENT_UNIT} is active but does not listen on ${WS_PORT} and ${HTTP_PORT}`);
+  const file = unitLogFile(quiet("systemctl", ["--user", "cat", RESIDENT_UNIT]));
+  residentLog = file
+    ? { file, from: fs.existsSync(file) ? fs.statSync(file).size : 0 }
+    : { since: Math.floor(Date.now() / 1000) };
+  record.resident.log = residentLog;
+  record.word.preexisting = wordPids();
+  embedTaskpane(opt.fixture, DOC);
+  record.word.launch = launchWord(DOC, path.join(RUN, "webview2"));
+  save();
+}
+// The pane of the run's own Word opens on the resident daemon and one
+// request that only reads goes there and back (the state of the Review tab).
+async function mainResident() {
+  note("open-review", pane("open-review"), { ctx: { revisionPath: REVISION } });
+  note("view", pane("view"), { label: "view (the Review tab read again)" });
+}
+async function residentAfter() {
+  const after = await residentProbe();
+  const evidence = residentEvidence({
+    before: record.resident.before,
+    after,
+    elapsed_s: Math.round((after.at - record.resident.before.at) / 1000),
+  });
+  record.resident.after = after;
+  record.resident.evidence = evidence;
+  judgedRows("resident", evidence);
+  const c = record.cleanup;
+  rows.push({
+    step: "resident: the Word of the run closed, other Word processes alive",
+    result: c.own_word_gone === true && c.preexisting_alive === true ? "PASS" : "FAIL",
+    got: `own_word_gone=${c.own_word_gone} preexisting_alive=${c.preexisting_alive}`,
+  });
   save();
 }
 
@@ -1281,6 +1571,24 @@ async function mainS3() {
   if (openCheck.ok) record.word.close_other = com("close-other", ["-Other", winPath(docx)]);
   marker("s3-open-check", openCheckEvidence(openCheck, modelParagraphs, docx, secondPath));
 
+  // --check-now, --figures-button (off by default): right after the last
+  // export, before anything changes the record again (submissionCheck,
+  // figuresButton below the stage 4 flow).
+  const checkedAt = opt["check-now"] ? await submissionCheck() : null;
+  if (opt["figures-button"]) await figuresButton();
+  // Both press buttons of the Review tab and leave it shown; S3-39 fills
+  // the Response tab without opening it (response-set-lang), so its fields
+  // were hidden and the fill timed out (run of 2026-10-03). The tab is shown
+  // again, pressing nothing in it.
+  if (checkedAt || opt["figures-button"]) {
+    const back = pane("show-tab", { tab: "response", settle_ms: 1000 });
+    rows.push({
+      step: "check now / figures button: the Response tab shown again",
+      result: back.ok === false ? "FAIL" : "PASS",
+      got: back.ok === false ? back.error : "shown",
+    });
+  }
+
   // ---- S3-39: the languages of the profile reach both prompts ----
   note(
     "response-set-lang",
@@ -1305,6 +1613,9 @@ async function mainS3() {
   note("response-set-lang", pane("response-set-lang", { lang: "", rationale_lang: "" }), {
     label: "response-set-lang (the profile's own again)",
   });
+  // --check-now: once more after the draft of S3-39, which changed the
+  // answers the letter was exported with.
+  if (checkedAt) await submissionCheck(checkedAt);
 }
 
 // Stage 4 (S4-30..S4-33, S4-37, S4-38): the Tools tab on the fake manuscript
@@ -2629,9 +2940,15 @@ async function cleanup() {
 let failed = null;
 try {
   await setup();
-  await { s2: main, s25: mainS25, s3: mainS3, s4: mainS4, cite: mainCite, parts: mainParts }[
-    STAGE
-  ]();
+  await {
+    s2: main,
+    s25: mainS25,
+    s3: mainS3,
+    s4: mainS4,
+    cite: mainCite,
+    parts: mainParts,
+    resident: mainResident,
+  }[STAGE]();
 } catch (e) {
   failed = e;
   record.error = String(e?.stack ?? e);
@@ -2644,11 +2961,13 @@ function isolationCheck() {
   // Stage parts: the daemon writes the link between the two files of the
   // run with their bare names ("link join SI.docx -> paper.docx").
   const bare = STAGE === "parts" ? [path.basename(DOC), path.basename(SI_DOC)] : [];
-  const foreign = foreignLogLines(
-    [LOG, KNOB_LOG].flatMap((f) => readLog(f).split("\n")),
-    own,
-    bare,
-  );
+  // --resident: what the installed daemon logged since the run started. It
+  // also serves the user's own Word panes; a line of theirs fails this row.
+  const lines =
+    STAGE === "resident"
+      ? residentLogText().split("\n")
+      : [LOG, KNOB_LOG].flatMap((f) => readLog(f).split("\n"));
+  const foreign = foreignLogLines(lines, own, bare);
   record.isolation = { foreign_lines: foreign.slice(0, 20), count: foreign.length };
   rows.push({
     step: "no tool call on other documents",
@@ -2693,6 +3012,10 @@ if (STAGE === "s2") {
     );
   }
   await tidy();
+} else if (STAGE === "resident") {
+  // No feature list and no daemon of the run: the unit must still serve.
+  await tidy();
+  if (record.resident) await residentAfter();
 } else {
   // Stage 3: its features before the cleanup, then the ones of
   // --after-cleanup (S3-41: Word and the daemon are gone). Stage 2.5: the
