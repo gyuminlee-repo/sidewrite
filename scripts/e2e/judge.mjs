@@ -3002,7 +3002,8 @@ export function figuresOpenEvidence({ step, gets }) {
       "route",
       route === "fallback" ||
         (route === "api" &&
-          !(spy.errors ?? []).length &&
+          // A wrapper Office would not let in ("wrap: ...") is no error of the call.
+          !(spy.errors ?? []).some((e) => !String(e).startsWith("wrap:")) &&
           (!spy.wrapped || (calls.length === 1 && calls[0] === step?.href))),
       "the click handler prevented the link (openBrowserWindow called without an error; with the wrapper in place, once with the link), or the link fallback where the API is missing",
       `route=${route} default_prevented=${prevented ?? "-"} supported=${spy.supported ?? "-"} wrapped=${spy.wrapped ? (spy.installed_on ?? "yes") : "no (address not watched)"} calls=${JSON.stringify(calls)}${(spy.errors ?? []).length ? ` errors=${JSON.stringify(spy.errors)}` : ""}`,

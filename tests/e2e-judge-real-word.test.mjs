@@ -351,6 +351,20 @@ test("figures: the API route and the link fallback both pass when the page was s
   });
   assert.equal(unwatched.pass, true, JSON.stringify(unwatched.rows));
   assert.match(byId(unwatched.rows).route.got, /route=api .*wrapped=no \(address not watched\)/);
+  // The second run, 2026-10-03: Office refused the wrapper (a property it
+  // will not let be redefined); the handler prevented the link all the same.
+  const refused = J.figuresOpenEvidence({
+    step: figuresStep({
+      spy: spyOf({
+        wrapped: false,
+        installed_on: null,
+        calls: [],
+        errors: ["wrap: Cannot redefine property: openBrowserWindow"],
+      }),
+    }),
+    gets,
+  });
+  assert.equal(refused.pass, true, JSON.stringify(refused.rows));
 });
 
 test("figures: every judged row fails on an input that is wrong for it", () => {
@@ -369,6 +383,8 @@ test("figures: every judged row fails on an input that is wrong for it", () => {
   // The API is supported, yet the handler followed the link (it threw, or
   // was not called): a defect of the pane.
   failOf(figuresStep({ spy: spyOf({ errors: ["denied"], default_prevented: false }) }), "route");
+  // The handler prevented the link but the call itself reported an error.
+  failOf(figuresStep({ spy: spyOf({ errors: ["denied"] }) }), "route");
   failOf(figuresStep({ spy: spyOf({ calls: [], default_prevented: false }) }), "route");
   // The click was not seen by the listener.
   failOf(figuresStep({ spy: spyOf({ default_prevented: null }) }), "route");
