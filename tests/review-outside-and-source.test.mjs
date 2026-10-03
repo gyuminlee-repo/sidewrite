@@ -1,8 +1,8 @@
 // Three things a judged revision showed:
 //  - what is not in this file (a figure file, the supplement, the title page)
 //    is declared outside this file, not put to the author as a question;
-//  - a request the reviewer made conditional is asked, not decided from what
-//    the manuscript does not say;
+//  - a request the reviewer made conditional on evidence the manuscript does
+//    not give gets the change it asks for, with a question to the author;
 //  - a fact a change takes from the review and the manuscript does not have
 //    is marked in its rationale comment.
 // All texts here are made up.
@@ -33,10 +33,15 @@ test("prompt rule: outside this file is a note, the author's records are a quest
     rule,
     /office_ask_author only for what the author's records or judgement must settle/,
   );
+  // A request conditional on evidence the manuscript does not give: the
+  // change the reviewer asked for is the default and the question goes with
+  // it (the question alone left an unsupported claim standing).
+  assert.doesNotMatch(rule, /ask whether the condition holds/);
   assert.match(
     rule,
-    /"unless it was verified"[^.]*ask whether the condition holds; that the manuscript does not mention it settles nothing/,
+    /conditional on evidence[^.]*is not left as it is when the manuscript does not give that evidence: make the change the reviewer asked for in that case \(take the claim out, or restate it as what was observed\) and also call office_ask_author with the same request id/,
   );
+  assert.match(rule, /The question goes with the change, not in place of it\./);
   const { text } = buildReviewPrompt({
     comment: { ref: "R1.1", reviewer: 1, text: "Provide the raw curves." },
     fence: "F1",

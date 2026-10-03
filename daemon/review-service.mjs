@@ -66,6 +66,7 @@ import {
   answerQuestion,
   authorAnswers,
   setRequirementOutside,
+  addRewriteStopped,
   setSameTerm,
   byCreated,
   ruleFingerprint,
@@ -728,6 +729,11 @@ export function createReviewService({
         await update(d, (rev) => setRequirementOutside(withComment(d, rev, ref), ref, note));
         sendEvent(key, { type: "review_event", event: "comment_noted", ref });
       },
+      // office_tracked_rewrite stopped after some of its parts went in.
+      onRewriteStopped: async ({ ref, record, at: d = at(key) }) => {
+        await update(d, (rev) => addRewriteStopped(withComment(d, rev, ref), ref, record));
+        sendEvent(key, { type: "review_event", event: "comment_noted", ref });
+      },
       // blocked_id: the approved exception the edit came from (its item is
       // marked by review_override). attempt_id: the item a normal edit wrote
       // before Word was called (onAttempt); it turns outcome_unknown here
@@ -966,6 +972,7 @@ export function createReviewService({
           }
         : null,
       linkedAnswers: await answersElsewhere(d, rev),
+      consistency: rev.consistency,
     });
     if (link) {
       log(

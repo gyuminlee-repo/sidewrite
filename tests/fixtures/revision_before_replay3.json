@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "manuscript": "/work/paper/paper.docx",
+  "updated_at": "2026-10-02T09:00:00.000Z",
+  "comments": [
+    {
+      "ref": "R1.1",
+      "reviewer": 1,
+      "text": "Remove the claim that the pathway is redundant unless a knockout shows it. Also fix the abstract.",
+      "section": "Major comments",
+      "requirements": [
+        {
+          "id": "q1",
+          "text": "Remove the claim that the pathway is redundant unless a knockout shows it"
+        },
+        {
+          "id": "q2",
+          "text": "Also fix the abstract"
+        }
+      ],
+      "status": "in_progress",
+      "changes": [
+        {
+          "id": "R1.1-1",
+          "word_comment_id": "4",
+          "paragraph_index": 1,
+          "paragraph_id": "A2",
+          "kind": "replace",
+          "find": "is redundant",
+          "text": "was not required",
+          "before": "The pathway is redundant in this host.",
+          "after": "The pathway was not required in this host.",
+          "rationale": {
+            "what": "restated",
+            "why": "asked",
+            "addresses": "R1.1",
+            "requirement_ids": ["q1"]
+          },
+          "override_of": [],
+          "lost_facts": [],
+          "unsourced_terms": [],
+          "from_review": [],
+          "narrowed_from": null,
+          "rewrite_id": "R1.1-wabc",
+          "context": null,
+          "duplicate_before": false,
+          "comment_missing": null,
+          "comment_cleaned_at": null,
+          "created_at": "2026-10-02T09:00:00.000Z",
+          "state": "pending",
+          "checked_at": null
+        }
+      ],
+      "blocked": [],
+      "requirement_seq": 2,
+      "blocked_seq": 0,
+      "questions": [
+        {
+          "id": "a1",
+          "requirement_id": "q1",
+          "question": "Is there a knockout?",
+          "why": "not in the text",
+          "asked_at": "2026-10-02T09:00:00.000Z",
+          "answer": "",
+          "answered_at": null
+        }
+      ],
+      "named_terms": ["redundant"],
+      "same_term_at": [],
+      "requirements_outside": [],
+      "response": null,
+      "declined": null,
+      "figure_changes": [],
+      "figure_seq": 0
+    },
+    {
+      "ref": "R1.2",
+      "reviewer": 1,
+      "text": "Add the control strain to Table S3.",
+      "requirements": [
+        {
+          "id": "q1",
+          "text": "Add the control strain to Table S3"
+        }
+      ],
+      "status": "pending",
+      "changes": [],
+      "blocked": [],
+      "requirement_seq": 1,
+      "blocked_seq": 0,
+      "questions": [],
+      "named_terms": [],
+      "same_term_at": [],
+      "requirements_outside": [
+        {
+          "id": "q1",
+          "why": "Table S3 is in the supplementary file",
+          "at": "2026-10-02T09:00:00.000Z"
+        }
+      ],
+      "response": null,
+      "declined": null,
+      "figure_changes": [],
+      "figure_seq": 0
+    }
+  ],
+  "ledger": [],
+  "ledger_seq": 0,
+  "snapshot": {
+    "taken_at": "2026-10-02T09:00:00.000Z",
+    "paragraphs": [
+      "Introduction",
+      "The pathway is redundant in this host.",
+      "Results",
+      "Growth was slower than the parent."
+    ],
+    "ids": ["A1", "A2", "A3", "A4"]
+  },
+  "external": [],
+  "consistency": {
+    "checked_at": "2026-10-02T09:05:00.000Z",
+    "model": null,
+    "paragraphs": [
+      {
+        "index": 1,
+        "id": "A2",
+        "change_ids": ["R1.1-1"],
+        "many": false
+      }
+    ],
+    "findings": [
+      {
+        "paragraph_index": 1,
+        "paragraph_id": "A2",
+        "kind": "claim_left",
+        "detail": "The claim stays.",
+        "change_ids": ["R1.1-1"]
+      }
+    ],
+    "warnings": []
+  },
+  "journal_profile": null,
+  "profile_overrides": {},
+  "response_render": null,
+  "response_export": null,
+  "figure_lane": null
+}

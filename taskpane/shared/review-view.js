@@ -566,7 +566,11 @@ export function requirementStates(comment, elsewhere = []) {
   const asked = new Set(
     (comment?.questions ?? []).filter((q) => !q.answer).map((q) => q.requirement_id),
   );
-  const outside = new Map((comment?.requirements_outside ?? []).map((n) => [n.id, n.why]));
+  // A note with a part covers only that part of its request: the request
+  // gets its state from the rest, and the part a row of its own after it.
+  const notes = comment?.requirements_outside ?? [];
+  const outside = new Map(notes.filter((n) => !n.part).map((n) => [n.id, n.why]));
+  const partOf = new Map(notes.filter((n) => n.part).map((n) => [n.id, n]));
   // id -> the file of the first change elsewhere that names it, decided and waiting.
   const away = (states) => {
     const files = new Map();
@@ -578,7 +582,7 @@ export function requirementStates(comment, elsewhere = []) {
   };
   const changedAway = away(DECIDED_ELSEWHERE);
   const waitingAway = away(WAITING_ELSEWHERE);
-  return (comment?.requirements ?? []).map((r) => {
+  return (comment?.requirements ?? []).flatMap((r) => {
     const state = used.has(r.id)
       ? "changed"
       : adopted.has(r.id)
@@ -594,13 +598,16 @@ export function requirementStates(comment, elsewhere = []) {
                 : outside.has(r.id)
                   ? "outside_this_file"
                   : "open";
-    return {
+    const row = {
       ...r,
       state,
       ...(state === "outside_this_file" ? { why: outside.get(r.id) } : {}),
       ...(state === "changed_elsewhere" ? { file: changedAway.get(r.id) } : {}),
       ...(state === "waiting_elsewhere" ? { file: waitingAway.get(r.id) } : {}),
     };
+    const p = partOf.get(r.id);
+    if (!p || state === "outside_this_file") return [row];
+    return [row, { ...r, state: "outside_this_file", why: p.why, part: p.part }];
   });
 }
 
@@ -670,6 +677,8 @@ export function requestStateText(r) {
   if (r.state === "needs_author") return "Needs your answer";
   if (r.state === "figure_waiting") return "A figure or file waits for your decision";
   if (r.state === "waiting_elsewhere") return `Waiting for your decision in ${r.file}`;
+  if (r.state === "outside_this_file" && r.part)
+    return `This part is in another file: ${r.part}${r.why ? ` (${r.why})` : ""}`;
   if (r.state === "outside_this_file")
     return r.why ? `In another file: ${r.why}` : "In another file";
   return "Not yet";
@@ -734,6 +743,58 @@ export function consistencyLines(c) {
   ];
 }
 
+// What is on record about the paragraphs a comment changed, for its card
+// and for its next turn: findings of the last paragraph check that say the
+// paragraph contradicts itself or still makes a withdrawn claim, and
+// rewrites Word stopped part way. Derived from the review file; nothing is
+// stored for it. A finding counts for a comment when the checked paragraph
+// held one of its changes; a rewrite stays until all of its changes are
+// rejected.
+export const SURFACED_FINDINGS = ["contradiction", "claim_left"];
+
+export function paragraphFindings(comment, consistency) {
+  const own = new Set(
+    (comment?.changes ?? []).filter((ch) => ch.state !== "rejected").map((ch) => ch.id),
+  );
+  if (!consistency || !own.size) return [];
+  const held = new Map((consistency.paragraphs ?? []).map((p) => [p.index, p.change_ids ?? []]));
+  return (consistency.findings ?? []).filter(
+    (f) =>
+      SURFACED_FINDINGS.includes(f.kind) &&
+      [...(held.get(f.paragraph_index) ?? []), ...(f.change_ids ?? [])].some((id) => own.has(id)),
+  );
+}
+
+export function stoppedRewrites(comment) {
+  const rejected = new Set(
+    (comment?.changes ?? []).filter((ch) => ch.state === "rejected").map((ch) => ch.id),
+  );
+  return (comment?.rewrites_stopped ?? []).filter(
+    (w) => !w.change_ids.length || w.change_ids.some((id) => !rejected.has(id)),
+  );
+}
+
+const stoppedText = (w) =>
+  `The rewrite of this paragraph stopped after ${w.applied} of ${w.parts} parts (${w.code}): ${w.change_ids.join(", ") || "its changes"} ${w.change_ids.length === 1 ? "is" : "are"} in the document and the paragraph may read unevenly.`;
+
+// [{ kind: "finding" | "rewrite_stopped", paragraph_index, paragraph_id, text }]
+export function commentNotices(comment, consistency) {
+  return [
+    ...paragraphFindings(comment, consistency).map((f) => ({
+      kind: "finding",
+      paragraph_index: f.paragraph_index,
+      paragraph_id: f.paragraph_id ?? `p${f.paragraph_index}`,
+      text: `The paragraph check found: ${CONSISTENCY_KIND[f.kind] ?? f.kind} ${f.detail}`,
+    })),
+    ...stoppedRewrites(comment).map((w) => ({
+      kind: "rewrite_stopped",
+      paragraph_index: w.paragraph_index,
+      paragraph_id: w.paragraph_id ?? (w.paragraph_index == null ? null : `p${w.paragraph_index}`),
+      text: stoppedText(w),
+    })),
+  ];
+}
+
 // What is still open when a comment is marked Done; the tab asks once more
 // when the list is not empty. ledger: revision.ledger (the confirmed rules,
 // with the status of their last check).
@@ -743,7 +804,7 @@ export function consistencyLines(c) {
 //   - changes applied without their rationale comment (invariantReport's
 //     `uncommented`), and edits Word did not answer (outcome_unknown)
 //   - ledger rules whose last check found violations
-export function doneBlockers(comment, ledger, elsewhere = []) {
+export function doneBlockers(comment, ledger, elsewhere = [], consistency = null) {
   const out = [];
   const open = unaddressedRequirements(comment, elsewhere);
   if (open.length) out.push(`${open.map((r) => `"${r.text}"`).join(", ")} has no change`);
@@ -780,6 +841,14 @@ export function doneBlockers(comment, ledger, elsewhere = []) {
     out.push(
       `${unknown.length} ${unknown.length === 1 ? "edit" : "edits"} got no answer from Word and may be applied (${unknown.map((b) => b.id).join(", ")})`,
     );
+  for (const n of commentNotices(comment, consistency)) {
+    const at = n.paragraph_id ? `paragraph ${n.paragraph_id}` : "a paragraph";
+    out.push(
+      n.kind === "finding"
+        ? `the paragraph check found a problem in ${at} this comment changed`
+        : `the rewrite of ${at} stopped part way`,
+    );
+  }
   const dirty = (ledger ?? []).filter((i) => i.status === "violations");
   if (dirty.length)
     out.push(

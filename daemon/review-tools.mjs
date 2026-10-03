@@ -172,7 +172,8 @@ const commentRef = (what) =>
 export const ASK_AUTHOR_DESCRIPTION =
   "Review turns only. Ask the author ONE question instead of changing the manuscript, when what the comment needs cannot be told from the manuscript or the review: " +
   "which of two numbers that differ is right, how something was measured, a statistic that would have to be computed again, a count or a direction that is only in the author's records. " +
-  "The question is kept on the card of the comment; the author's answer comes with the next turn. Do not edit the text the question is about in this turn.";
+  "The question is kept on the card of the comment; the author's answer comes with the next turn. Do not edit the text the question is about in this turn, " +
+  "except for a request the reviewer made conditional on evidence the manuscript does not give: there the change the reviewer asked for is made and this question goes with it (same requirement_id).";
 
 export const askAuthorShape = {
   comment_ref: commentRef('Reviewer comment the question belongs to, e.g. "R1.3".'),
@@ -233,7 +234,7 @@ export async function askAuthor(deps, args, turn) {
   return {
     ok: true,
     question_id: saved.id,
-    message: `Recorded as ${saved.id} on the card of ${turn.ref}. Leave the text it is about as it is in this turn; the author's answer comes with the next turn.`,
+    message: `Recorded as ${saved.id} on the card of ${turn.ref}. Leave the text it is about as it is in this turn (unless the question goes with the change of a request made conditional on evidence the manuscript does not give); the author's answer comes with the next turn.`,
   };
 }
 
@@ -248,22 +249,32 @@ export const requirementOutsideShape = {
     .string()
     .min(1)
     .describe("Which file or place it belongs to, and what has to be done there."),
+  part: z
+    .string()
+    .optional()
+    .describe(
+      "Only when the rest of the request is changed in this file: which part of it belongs to the other file. The author then sees both, the change here and this part as outside this file.",
+    ),
 };
 
 // office_requirement_outside. deps: { begin(), getReviewContext(ref),
-// onRequirementOutside({ref, note: {id, why}, at}), log }.
+// onRequirementOutside({ref, note: {id, why, part}, at}), log }.
 export async function requirementOutside(deps, args, turn) {
   const t = await noteTurn(deps, "office_requirement_outside", args, turn);
   if (t.error) return t.error;
   await deps.onRequirementOutside({
     ref: turn.ref,
-    note: { id: args.requirement_id, why: args.why },
+    note: { id: args.requirement_id, why: args.why, ...(args.part ? { part: args.part } : {}) },
     at: t.at,
   });
-  deps.log?.(`[review] requirement outside ${turn.ref} ${args.requirement_id}`);
+  deps.log?.(
+    `[review] requirement outside ${turn.ref} ${args.requirement_id}${args.part ? " part=1" : ""}`,
+  );
   return {
     ok: true,
-    message: `${args.requirement_id} is shown to the author as outside this file.`,
+    message: args.part
+      ? `The part of ${args.requirement_id} you named is shown to the author as outside this file, next to what is changed here.`
+      : `${args.requirement_id} is shown to the author as outside this file.`,
   };
 }
 
@@ -928,6 +939,26 @@ export async function applyTrackedRewrite(deps, args, turn) {
         `Not applied: ${stopped.message ?? stopped.code ?? "the task pane refused the first part"} Nothing of the rewrite is in the document.${stopped.code === "ParagraphNotPlain" ? " Change this paragraph with office_tracked_edit, one place at a time." : ""}`,
         { code: stopped.code ?? "RewriteStopped", applied_parts: 0, parts: parts.length },
       );
+    }
+    // Marked, not undone: an edit that takes the parts back would be one
+    // more tracked change on a paragraph Word already found different. The
+    // card of the comment shows the record until those changes are rejected.
+    try {
+      await deps.onRewriteStopped?.({
+        ref: turn.ref,
+        record: {
+          rewrite_id: rewriteId,
+          paragraph_index: index,
+          paragraph_id: args.paragraph_id,
+          applied,
+          parts: parts.length,
+          code: stopped.code ?? "refused",
+          change_ids: changeIds,
+        },
+        at,
+      });
+    } catch (e) {
+      deps.log?.(`[review] rewrite stop not recorded ${turn.ref}: ${e?.message ?? e}`);
     }
     return fail(
       `The rewrite stopped: ${applied} of ${parts.length} parts are in the document (changes ${changeIds.join(", ")}), then a part was refused (${stopped.code ?? stopped.message ?? "refused"}). Do not send the rewrite again. The paragraph now reads as given in paragraph_now: finish it with office_tracked_edit, or tell the author.`,

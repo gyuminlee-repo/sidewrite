@@ -316,7 +316,10 @@ export function changesReport(revision, headings = [], turns = {}, rewriteTurns 
       comment: c.text,
       requirements,
       // The requests no change names (whatever else was said about them).
-      unmet_requirements: requirements.filter((q) => q.state !== "changed").map((q) => q.id),
+      // A row of the part of a request that is in another file is not the request.
+      unmet_requirements: requirements
+        .filter((q) => !q.part && q.state !== "changed")
+        .map((q) => q.id),
       questions: (c.questions ?? []).map((q) => ({
         id: q.id,
         requirement_id: q.requirement_id ?? null,
@@ -327,6 +330,7 @@ export function changesReport(revision, headings = [], turns = {}, rewriteTurns 
       outside: (c.requirements_outside ?? []).map((n) => ({
         requirement_id: n.id,
         why: n.why ?? "",
+        ...(n.part ? { part: n.part } : {}),
       })),
       still_present: stillPresent(c, snapshot?.paragraphs),
       // [{ term, places: [{ index, id, kind }] }]: no place, the term is gone.

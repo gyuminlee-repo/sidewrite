@@ -299,7 +299,12 @@ test("office_requirement_outside: a listed request of the turn's comment; the lo
   assert.deepEqual(d.noted, [["R1.1", { id: "q3", why: "It is a supplementary file." }]]);
   assert.deepEqual(d.lines, ["[review] requirement outside R1.1 q3"]);
   assert.ok(REVIEW_NOTE_TOOLS.has("office_requirement_outside"));
-  assert.deepEqual(Object.keys(requirementOutsideShape), ["comment_ref", "requirement_id", "why"]);
+  assert.deepEqual(Object.keys(requirementOutsideShape), [
+    "comment_ref",
+    "requirement_id",
+    "why",
+    "part",
+  ]);
 });
 
 test("prompt: each listed request must end as a change, a question or an outside note; without a list the turn makes one", () => {
@@ -307,7 +312,7 @@ test("prompt: each listed request must end as a change, a question or an outside
   const { text } = buildReviewPrompt({ comment, fence: "F1" });
   assert.ok(
     text.includes(
-      "Every request above ends this turn in one of three ways: a change that names its id, office_ask_author with its id (it waits for the author), or office_requirement_outside with its id (what it asks for is in another file). A request with none of these is shown to the author as open.",
+      "Every request above ends this turn in at least one of three ways: a change that names its id, office_ask_author with its id (it waits for the author), or office_requirement_outside with its id (what it asks for is in another file). A change can come with a question (a request conditional on evidence) or with a note for the part that is in another file (office_requirement_outside with part). A request with none of these is shown to the author as open.",
     ),
   );
   const bare = buildReviewPrompt({ comment: { ...comment, requirements: [] }, fence: "F1" }).text;

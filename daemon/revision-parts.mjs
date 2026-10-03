@@ -341,12 +341,16 @@ export function linkedAnswers(files) {
 
 // The requests of one comment that the turn of the manuscript noted as
 // belonging to another file: [{ id, text, why }], in the order of the list.
+// part: only that part of the request was left for another file.
 export function outsideNotes(mainRev, ref) {
   const c = (mainRev?.comments ?? []).find((x) => x.ref === ref);
-  const why = new Map((c?.requirements_outside ?? []).map((n) => [n.id, n.why]));
+  const notes = new Map((c?.requirements_outside ?? []).map((n) => [n.id, n]));
   return (c?.requirements ?? [])
-    .filter((r) => why.has(r.id))
-    .map((r) => ({ id: r.id, text: r.text, why: why.get(r.id) ?? "" }));
+    .filter((r) => notes.has(r.id))
+    .map((r) => {
+      const n = notes.get(r.id);
+      return { id: r.id, text: r.text, why: n.why ?? "", ...(n.part ? { part: n.part } : {}) };
+    });
 }
 
 // What belongs to the manuscript is changed in the manuscript: a request

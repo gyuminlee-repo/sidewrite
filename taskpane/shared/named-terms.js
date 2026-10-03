@@ -25,6 +25,16 @@
 // ("upregulated" finds "upregulation"; "convergence" finds "convergent"),
 // which can take in a different word that starts the same; the turn decides
 // what to change, this only shows where to look.
+// A phrase of several words also stands in a paragraph that has one of its
+// content words (five letters or more) in another form of the same family:
+// "network densification" is found where only "densified network" or
+// "densification" stands. Families are compared by a stem made by taking
+// off a few suffixes of English inflection and derivation (familyStem), as
+// whole words: a stem inside a longer word ("distribution" in
+// "redistribution") is no hit. A content word whose family stands in more
+// than a fifth of the paragraphs (never fewer than 3) is vocabulary of the
+// paper and is not searched this way (as in residue.js): a general word
+// would list most of the paper. Such a place carries the form found.
 //
 // What a paragraph is (a guess from its text, for the label next to its id):
 //   caption  starts like "Figure 2", "Fig. S1", "Table 3", "Scheme 1"
@@ -135,23 +145,99 @@ function termRe(term) {
   return new RegExp(`(?<![\\p{L}\\p{N}])${core}(?![\\p{L}\\p{N}])`, "iu");
 }
 
-// [{ term, places: [{ index, id, kind }] }] for the terms of a comment, in
-// the paragraphs given (ids: their task pane ids, or null).
+// The family stem of a word: lower case, a plural taken off, then one
+// derivational or inflectional ending, which must leave four letters or
+// more; a final "e" goes. "densification", "densified", "densifies" ->
+// "densify"; "density" and "dense" stay apart from them; "station" stays
+// whole (what is left of "-ation" is too short), so "state" is not of it.
+// Assumed: English.
+const FAMILY_ENDINGS = [
+  [/(?:ification|ified|ifying|ify)$/, "ify"],
+  [/(?:[iy][sz]ation|[iy][sz]ed|[iy][sz]ing|[iy][sz]e)$/, "ize"],
+  [/(?:ation|ated|ating|ate)$/, ""],
+  [/(?:ution|uted|uting|ute)$/, "ut"],
+  [/(?<=[st])ion$/, ""],
+  [/(?:ment|ing|ed)$/, ""],
+];
+const trimE = (w) => (w.length > 4 && w.endsWith("e") ? w.slice(0, -1) : w);
+export function familyStem(word) {
+  let w = String(word ?? "").toLowerCase();
+  if (w.length > 5 && w.endsWith("ies")) w = `${w.slice(0, -3)}y`;
+  else if (w.length > 4 && w.endsWith("s") && !/(?:ss|us|is)$/.test(w)) w = w.slice(0, -1);
+  for (const [re, add] of FAMILY_ENDINGS) {
+    const m = re.exec(w);
+    if (!m) continue;
+    const base = w.slice(0, m.index);
+    return base.length < 4 ? trimE(w) : `${add ? base : trimE(base)}${add}`;
+  }
+  return trimE(w);
+}
+
+const FAMILY_SKIP = new Set(
+  "about above after among based being between could other since their there these those under using where which while would within without".split(
+    " ",
+  ),
+);
+const wordsOf = (t) => String(t ?? "").match(/\p{L}+/gu) ?? [];
+
+// Per paragraph text, Map stem -> the first form it has. The card asks for
+// every comment on every render, so the maps are kept (at most CACHE_MAX
+// paragraph texts; then the cache starts again).
+const CACHE_MAX = 5000;
+const stemCache = new Map();
+function paragraphStems(text) {
+  let m = stemCache.get(text);
+  if (m) return m;
+  m = new Map();
+  for (const w of wordsOf(text)) {
+    const s = familyStem(w);
+    if (!m.has(s)) m.set(s, w);
+  }
+  if (stemCache.size >= CACHE_MAX) stemCache.clear();
+  stemCache.set(text, m);
+  return m;
+}
+
+// The rare content words of a phrase, by stem; null for a single word.
+// stems: per paragraph, Map stem -> the first form it has.
+function familyStems(term, stems) {
+  const parts = term.split(/\s+/);
+  if (parts.length < 2) return null;
+  const filled = stems.filter((m) => m.size).length;
+  const most = Math.max(3, Math.ceil(filled / 5));
+  const out = new Set();
+  for (const w of parts) {
+    if (!/^\p{L}{5,}$/u.test(w) || FAMILY_SKIP.has(w.toLowerCase())) continue;
+    const s = familyStem(w);
+    if (stems.filter((m) => m.has(s)).length <= most) out.add(s);
+  }
+  return out;
+}
+
+// [{ term, places: [{ index, id, kind, form? }] }] for the terms of a
+// comment, in the paragraphs given (ids: their task pane ids, or null).
+// form: the word found when only a word of the family of the phrase stands.
 export function termPlaces(comment, paragraphs, ids = null) {
   const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
   const kinds = paragraphKinds(texts);
+  let stems = null;
+  const stemsOf = () => (stems ??= texts.map(paragraphStems));
   return namedTerms(comment).map((term) => {
     const re = termRe(term);
+    const family = /\s/.test(term) ? familyStems(term, stemsOf()) : null;
     return {
       term,
-      places: texts.flatMap((t, index) =>
-        re.test(t) ? [{ index, id: ids?.[index] ?? `p${index}`, kind: kinds[index] }] : [],
-      ),
+      places: texts.flatMap((t, index) => {
+        const at = { index, id: ids?.[index] ?? `p${index}`, kind: kinds[index] };
+        if (re.test(t)) return [at];
+        const hit = family && [...family].find((s) => stems[index].has(s));
+        return hit ? [{ ...at, form: stems[index].get(hit) }] : [];
+      }),
     };
   });
 }
 
-const placeText = (p) => `${p.id} (${p.kind})`;
+const placeText = (p) => `${p.id} (${p.kind}${p.form ? `, as "${p.form}"` : ""})`;
 
 // The lines of the prompt block. Most places of a term shown: `most`.
 export function termBlock(comment, paragraphs, ids = null, { most = 30 } = {}) {
