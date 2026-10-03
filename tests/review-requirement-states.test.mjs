@@ -312,7 +312,7 @@ test("prompt: each listed request must end as a change, a question or an outside
   const { text } = buildReviewPrompt({ comment, fence: "F1" });
   assert.ok(
     text.includes(
-      "Every request above ends this turn in one of three ways: a change that names its id, office_ask_author with its id (it waits for the author), or office_requirement_outside with its id (what it asks for is in another file). A request with none of these is shown to the author as open.",
+      "Every request above ends this turn in at least one of three ways: a change that names its id, office_ask_author with its id (it waits for the author), or office_requirement_outside with its id (what it asks for is in another file). A change can come with a question (a request conditional on evidence) or with a note for the part that is in another file (office_requirement_outside with part). A request with none of these is shown to the author as open.",
     ),
   );
   const bare = buildReviewPrompt({ comment: { ...comment, requirements: [] }, fence: "F1" }).text;

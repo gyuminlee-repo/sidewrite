@@ -141,6 +141,12 @@ test("rule: a request conditional on evidence the file does not give gets its ch
     assert.match(rule, /office_requirement_outside with its id and `part`/);
     assert.doesNotMatch(rule, /ask whether the condition holds/);
   }
+  // The rule that sends what only the author knows to a question names the exception.
+  assert.match(
+    REVIEW_RULES[7],
+    /One exception, below: a request the reviewer made conditional on evidence/,
+  );
+  assert.match(REVIEW_RULES[8], /A change can also have a question beside it/);
 });
 
 test("review_preview: the prompt of a turn carries the findings of the last paragraph check", async () => {

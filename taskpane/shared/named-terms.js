@@ -180,6 +180,24 @@ const FAMILY_SKIP = new Set(
 );
 const wordsOf = (t) => String(t ?? "").match(/\p{L}+/gu) ?? [];
 
+// Per paragraph text, Map stem -> the first form it has. The card asks for
+// every comment on every render, so the maps are kept (at most CACHE_MAX
+// paragraph texts; then the cache starts again).
+const CACHE_MAX = 5000;
+const stemCache = new Map();
+function paragraphStems(text) {
+  let m = stemCache.get(text);
+  if (m) return m;
+  m = new Map();
+  for (const w of wordsOf(text)) {
+    const s = familyStem(w);
+    if (!m.has(s)) m.set(s, w);
+  }
+  if (stemCache.size >= CACHE_MAX) stemCache.clear();
+  stemCache.set(text, m);
+  return m;
+}
+
 // The rare content words of a phrase, by stem; null for a single word.
 // stems: per paragraph, Map stem -> the first form it has.
 function familyStems(term, stems) {
@@ -203,15 +221,7 @@ export function termPlaces(comment, paragraphs, ids = null) {
   const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
   const kinds = paragraphKinds(texts);
   let stems = null;
-  const stemsOf = () =>
-    (stems ??= texts.map((t) => {
-      const m = new Map();
-      for (const w of wordsOf(t)) {
-        const s = familyStem(w);
-        if (!m.has(s)) m.set(s, w);
-      }
-      return m;
-    }));
+  const stemsOf = () => (stems ??= texts.map(paragraphStems));
   return namedTerms(comment).map((term) => {
     const re = termRe(term);
     const family = /\s/.test(term) ? familyStems(term, stemsOf()) : null;
