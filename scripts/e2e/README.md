@@ -1062,6 +1062,13 @@ manuscript. One review turn per comment, in order; a turn that fails or runs
 longer than `--turn-minutes` is recorded and the next comment goes on. Word
 and the resident daemon are handled as in the acceptance run.
 
+`node scripts/e2e/term-family-count.mjs <run folder>` counts again, with the
+code of this checkout, where the terms the reviewers named stand in the
+text the run left (`snapshot.paragraphs` of `manuscript.revision.json`):
+per term the places matched as written and those matched only by a word
+family, counts only. Run it from two checkouts to compare a change of
+`taskpane/shared/named-terms.js` on a real run.
+
 Before the run a Word of its own is asked whether it opens the copy the run
 will use (the add-in tagged on) as it is, with the same call as the Word judge
 of the marked copies (`OpenReadOnly` in `word-own.ps1`). A file Word wants to repair ends the run with "run again with --repair";
