@@ -5,7 +5,8 @@
 # Every action prints one JSON object.
 #
 # Actions
-#   state           comments (with done = resolved) and revisions of the document
+#   state           comments (with done = resolved) and revisions of the
+#                   document, and saved (Document.Saved, read only)
 #   apply           -PlanJson <file>: accept or reject the tracked changes of
 #                   each rationale comment, optionally edit one inserted word
 #   hand-insert     -PlanJson <file> -ChangeId <id> -Text <s>: a tracked
@@ -100,6 +101,8 @@ switch ($Action) {
     Out ([ordered]@{
       ok = $true
       track_revisions = $d.TrackRevisions
+      # Read only: Word's own answer to "no unsaved changes" (Document.Saved).
+      saved = [bool]$d.Saved
       comments = @(CommentList | ForEach-Object { [ordered]@{ text = $_.text; author = $_.author; start = $_.start; end = $_.end; done = $_.done } })
       revisions = @(RevList | ForEach-Object { [ordered]@{ type = $_.type; text = $_.text; start = $_.start; end = $_.end } })
     })
