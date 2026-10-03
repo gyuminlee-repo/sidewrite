@@ -256,13 +256,24 @@ function classifyByContext(change, t, revisions, placed = null) {
       if (has(L + I + D + R)) return "pending";
       const a = has(L + I + R);
       const b = has(L + D + R);
-      if (a && !b) return "accepted";
+      // A later change of the same turn inside this one's inserted text (the
+      // find of a sibling falls in it) leaves no deleted text to show: Word
+      // drops deleted text of a pending insertion outright. The form then
+      // reads accepted while its text is still a tracked insertion.
+      if (a && !b) return placed && ownTracked("ins", L, I, R) ? "pending" : "accepted";
       if (b && !a) return "rejected";
     } else if (change.kind === "insert") {
       const a = has(L + I + R);
       const b = has(L + R);
       if (a && !b) return ownTracked("ins", L, I, R) ? "pending" : "accepted";
-      if (b && !a) return "rejected";
+      // L + R is also found where a sibling rewrote the right context and
+      // its new text opens with the same words: the insertion still stands,
+      // tracked, before the sibling. Its own text in a tracked insertion is
+      // no reject; fewer context words decide.
+      if (b && !a) {
+        const own = boundedMatches(t, normalizeParaText(I)).length > 0;
+        if (!(placed && own && ownTracked("ins", "", I, ""))) return "rejected";
+      }
     } else {
       const a = has(L + R);
       const b = has(L + D + R);

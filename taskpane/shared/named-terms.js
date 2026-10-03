@@ -25,16 +25,20 @@
 // ("upregulated" finds "upregulation"; "convergence" finds "convergent"),
 // which can take in a different word that starts the same; the turn decides
 // what to change, this only shows where to look.
-// A phrase of several words also stands in a paragraph that has one of its
-// content words (five letters or more) in another form of the same family:
+// A phrase of several words also stands in a paragraph that has every one
+// of its rare content words (five letters or more; the parts of a
+// hyphenated word count apart) in some form of the same family:
 // "network densification" is found where only "densified network" or
 // "densification" stands. Families are compared by a stem made by taking
 // off a few suffixes of English inflection and derivation (familyStem), as
 // whole words: a stem inside a longer word ("distribution" in
 // "redistribution") is no hit. A content word whose family stands in more
 // than a fifth of the paragraphs (never fewer than 3) is vocabulary of the
-// paper and is not searched this way (as in residue.js): a general word
-// would list most of the paper. Such a place carries the form found.
+// paper and is not required (as in residue.js); a phrase whose content
+// words are all such vocabulary is not searched this way. One rare word of
+// a phrase alone is no hit when the phrase has another: a manuscript of 200
+// paragraphs has many words in a few dozen of them, and a phrase was listed
+// wherever any one of its words stood. Such a place carries the forms found.
 //
 // What a paragraph is (a guess from its text, for the label next to its id):
 //   caption  starts like "Figure 2", "Fig. S1", "Table 3", "Scheme 1"
@@ -201,12 +205,11 @@ function paragraphStems(text) {
 // The rare content words of a phrase, by stem; null for a single word.
 // stems: per paragraph, Map stem -> the first form it has.
 function familyStems(term, stems) {
-  const parts = term.split(/\s+/);
-  if (parts.length < 2) return null;
+  if (term.split(/\s+/).length < 2) return null;
   const filled = stems.filter((m) => m.size).length;
   const most = Math.max(3, Math.ceil(filled / 5));
   const out = new Set();
-  for (const w of parts) {
+  for (const w of wordsOf(term)) {
     if (!/^\p{L}{5,}$/u.test(w) || FAMILY_SKIP.has(w.toLowerCase())) continue;
     const s = familyStem(w);
     if (stems.filter((m) => m.has(s)).length <= most) out.add(s);
@@ -216,7 +219,8 @@ function familyStems(term, stems) {
 
 // [{ term, places: [{ index, id, kind, form? }] }] for the terms of a
 // comment, in the paragraphs given (ids: their task pane ids, or null).
-// form: the word found when only a word of the family of the phrase stands.
+// form: the words found (" / " between them) when only words of the family
+// of the phrase stand.
 export function termPlaces(comment, paragraphs, ids = null) {
   const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
   const kinds = paragraphKinds(texts);
@@ -230,8 +234,10 @@ export function termPlaces(comment, paragraphs, ids = null) {
       places: texts.flatMap((t, index) => {
         const at = { index, id: ids?.[index] ?? `p${index}`, kind: kinds[index] };
         if (re.test(t)) return [at];
-        const hit = family && [...family].find((s) => stems[index].has(s));
-        return hit ? [{ ...at, form: stems[index].get(hit) }] : [];
+        const hit = family?.size && [...family].every((s) => stems[index].has(s));
+        return hit
+          ? [{ ...at, form: [...family].map((s) => stems[index].get(s)).join(" / ") }]
+          : [];
       }),
     };
   });

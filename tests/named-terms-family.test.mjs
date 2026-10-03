@@ -108,3 +108,51 @@ test("termBlock: a family place names the form found", () => {
     lines.join("\n"),
   );
 });
+
+// The trap of a long manuscript: each word of a phrase stands in several
+// paragraphs, below the fifth that makes it vocabulary, and the phrase in
+// none or one. One word alone listed the phrase wherever it stood (a replay
+// on 210 paragraphs, 2026-10-03: a two-word phrase at 21 places, none of
+// them the phrase).
+const LONG = [
+  /* 0 */ "Station timetables were redrawn for the winter service.",
+  /* 1 */ "Each station gained a second entrance.",
+  /* 2 */ "The station forecourt was paved again.",
+  /* 3 */ "A new station opened on the river bank.",
+  /* 4 */ "The timetable of the night buses stayed the same.",
+  /* 5 */ "Timetables were printed in two languages.",
+  /* 6 */ "Riders asked for a clearer timetable.",
+  /* 7 */ "The cable stays of the south bridge were inspected.",
+  /* 8 */ "Two retrofits of the deck joints followed.",
+  /* 9 */ "The retrofit budget was approved in March.",
+  /* 10 */ "Cable retrofits on the south bridge ended in May.",
+  /* 11 */ "Traffic counts rose on the ring road.",
+  /* 12 */ "Lane widths were checked against the standard.",
+  /* 13 */ "The ferry ran every half hour.",
+  /* 14 */ "Parking fees doubled in the centre.",
+  /* 15 */ "Cyclists used the new path along the canal.",
+  /* 16 */ "The tram depot was moved to the east.",
+  /* 17 */ "Freight trains ran only at night.",
+  /* 18 */ "Bus shelters were replaced on two routes.",
+  /* 19 */ "The survey closed at the end of the year.",
+];
+
+test("a phrase stands by family only where all its rare words stand, not one of them", () => {
+  const rows = (text) =>
+    termPlaces(comment(text), LONG).map((r) => ({
+      exact: r.places.filter((p) => !p.form).map((p) => p.index),
+      family: r.places.filter((p) => p.form).map((p) => [p.index, p.form]),
+    }));
+  // "station" and "timetable" stand in 4 paragraphs each (not more than a
+  // fifth of 20), together in one.
+  const [st] = rows('The phrase "station timetable" is unclear.');
+  assert.deepEqual(st.exact, []);
+  assert.deepEqual(st.family, [[0, "Station / timetables"]]);
+  // A hyphenated word counts by its parts: "cable" and "retrofit" both.
+  const [cr] = rows('Say what "cable-stay retrofit" means.');
+  assert.deepEqual(cr.exact, []);
+  assert.deepEqual(cr.family, [[10, "Cable / retrofits"]]);
+  console.log(
+    `named-terms family trap: paragraphs=${LONG.length} station_timetable=${st.family.length} cable_stay_retrofit=${cr.family.length}`,
+  );
+});
