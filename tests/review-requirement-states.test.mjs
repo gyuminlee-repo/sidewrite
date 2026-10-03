@@ -299,7 +299,12 @@ test("office_requirement_outside: a listed request of the turn's comment; the lo
   assert.deepEqual(d.noted, [["R1.1", { id: "q3", why: "It is a supplementary file." }]]);
   assert.deepEqual(d.lines, ["[review] requirement outside R1.1 q3"]);
   assert.ok(REVIEW_NOTE_TOOLS.has("office_requirement_outside"));
-  assert.deepEqual(Object.keys(requirementOutsideShape), ["comment_ref", "requirement_id", "why"]);
+  assert.deepEqual(Object.keys(requirementOutsideShape), [
+    "comment_ref",
+    "requirement_id",
+    "why",
+    "part",
+  ]);
 });
 
 test("prompt: each listed request must end as a change, a question or an outside note; without a list the turn makes one", () => {

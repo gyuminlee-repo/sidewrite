@@ -21,6 +21,7 @@ import {
   consistencyLines,
   openRequestsText,
   doneBlockers,
+  commentNotices,
   ledgerDraftFromChange,
   ledgerFormFromItem,
   ledgerCheckFromText,
@@ -610,7 +611,12 @@ export function initReviewPane({
           // L5: "Done" needs a second try while something is left open:
           // a requirement no change answers, a change not decided in Word,
           // or a ledger rule in violation.
-          const left = doneBlockers(c, state.revision?.ledger, elsewhere(c.ref));
+          const left = doneBlockers(
+            c,
+            state.revision?.ledger,
+            elsewhere(c.ref),
+            state.revision?.consistency,
+          );
           if (status.value === "done" && left.length && state.confirmDone !== c.ref) {
             state.confirmDone = c.ref;
             throw new Error(
@@ -723,6 +729,7 @@ export function initReviewPane({
                   "data-req-id": r.id,
                   "data-req-text": r.text,
                   "data-state": r.state,
+                  ...(r.part ? { "data-req-part": r.part } : {}),
                 },
                 el("span", { class: "review-req-text", text: r.text }),
                 el("span", {
@@ -853,6 +860,13 @@ export function initReviewPane({
         const line = el("div", { class: "review-residue", text: it.text });
         for (const i of it.indexes) line.append(" ", paragraphLink(i));
         if (it.more) line.append(el("span", { text: ` and ${it.more} more` }));
+        body.append(line);
+      }
+      // A paragraph check finding or a stopped rewrite in a paragraph this
+      // comment changed (commentNotices).
+      for (const n of commentNotices(c, state.revision?.consistency)) {
+        const line = el("div", { class: "review-residue review-notice", text: n.text });
+        if (n.paragraph_index != null) line.append(" ", paragraphLink(n.paragraph_index));
         body.append(line);
       }
       for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));

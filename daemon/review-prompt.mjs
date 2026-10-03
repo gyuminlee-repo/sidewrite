@@ -6,6 +6,7 @@ import { inManuscriptScope } from "./ledger-check.mjs";
 import { paragraphHash } from "./doc-diff.mjs";
 // One implementation for the prompt and for the card of the task pane.
 import { termBlock } from "../taskpane/shared/named-terms.js";
+import { commentNotices } from "../taskpane/shared/review-view.js";
 
 // Rules 2 to 4 are a policy pack ("review_scope": keep to what the reviewer
 // asked, no revision history in the manuscript, facts only). A journal
@@ -40,7 +41,7 @@ export const REVIEW_RULES = [
   "Do not pass over a request in silence. Each one ends the turn as a change that names its id, as a question to the author (office_ask_author with its id), or as a note that it belongs to another file (office_requirement_outside with its id). What is left with none of these stays open on the card of the author.",
   "When three or more places of one paragraph have to change, or the argument of the paragraph changes, do not patch it sentence by sentence: write the paragraph anew and send it with office_tracked_rewrite (its paragraph id and the whole new text; only the words that differ become tracked changes). Start from the paragraph as it reads now, with the pending changes of other comments in it, and keep what you do not mean to change word for word. One or two words in a paragraph stay with office_tracked_edit.",
   'The reviewer\'s own words come first. For each term listed under "Terms this comment names", go to every place given, headings, figure and table legends and the methods included, and change it there, or name the place and the reason it stays in your end report.',
-  'Tell apart what is not in this file from what only the author knows. What the comment asks of a figure file, the supplementary material, the title page, the response letter or any other file is declared with office_requirement_outside: it is not a question. Use office_ask_author only for what the author\'s records or judgement must settle. A request the reviewer made conditional ("unless it was verified", "if this was controlled for") is not decided by you: ask whether the condition holds; that the manuscript does not mention it settles nothing.',
+  'Tell apart what is not in this file from what only the author knows. What the comment asks of a figure file, the supplementary material, the title page, the response letter or any other file is declared with office_requirement_outside: it is not a question. Use office_ask_author only for what the author\'s records or judgement must settle. When one request is partly answered in this file and partly belongs to another file, make the change and also call office_requirement_outside with its id and `part` naming what belongs elsewhere. A request the reviewer made conditional on evidence ("if there is no evidence for this, remove the claim", "unless it was verified") is not left as it is when the manuscript does not give that evidence: make the change the reviewer asked for in that case (take the claim out, or restate it as what was observed) and also call office_ask_author with the same request id to ask whether the evidence exists, so the author can reject the change if it does. The question goes with the change, not in place of it.',
   "A claim you change for this comment is changed everywhere the manuscript makes it: abstract, introduction, results, discussion, conclusion, headings, figure and table legends. That is part of what the comment asks for. Before the turn ends, look through the manuscript for the same claim and the same term, and change those places too (each with its own office_tracked_edit) or name them in your answer.",
   'When the reviewer says a claim does not hold, is not supported, or should be removed or not made, take the claim out or rewrite it as what was observed. Do not keep the claim and put a caveat next to it ("although this was not measured"): no sentence and no paragraph may state a claim and its denial together. Write a limitation, or an experiment that was not done, into the manuscript only when the reviewer asks for that.',
   'Before you end the turn, check: every request has a change, a question or a note; no changed paragraph states a claim and its denial together; the term you changed is not left elsewhere without being named. End your answer with the line "Same term still at: " followed by the ids of the paragraphs where it is left, or "none".',
@@ -52,7 +53,7 @@ export const REVIEW_RULES = [
 // there the manuscript itself is one of the other files.
 export const OUTSIDE_RULE = 11;
 export const outsideRuleInPart = (part) =>
-  `Tell apart what is not in this file from what only the author knows. This file is a supplementary file: what the comment asks of the main manuscript (${part.main_name}), a figure file, another supplementary file, the title page, the response letter or any other file is declared with office_requirement_outside: it is not a question. Use office_ask_author only for what the author's records or judgement must settle. A request the reviewer made conditional ("unless it was verified", "if this was controlled for") is not decided by you: ask whether the condition holds; that this file does not mention it settles nothing.`;
+  `Tell apart what is not in this file from what only the author knows. This file is a supplementary file: what the comment asks of the main manuscript (${part.main_name}), a figure file, another supplementary file, the title page, the response letter or any other file is declared with office_requirement_outside: it is not a question. Use office_ask_author only for what the author's records or judgement must settle. When one request is partly answered in this file and partly belongs to another file, make the change and also call office_requirement_outside with its id and \`part\` naming what belongs elsewhere. A request the reviewer made conditional on evidence ("if there is no evidence for this, remove the claim", "unless it was verified") is not left as it is when this file does not give that evidence: make the change the reviewer asked for in that case (take the claim out, or restate it as what was observed) and also call office_ask_author with the same request id to ask whether the evidence exists, so the author can reject the change if it does. The question goes with the change, not in place of it.`;
 
 // The fence of one prompt: a string that is not in the comment, so no line
 // of the comment can close the block it stands in. random: for tests.
@@ -259,6 +260,8 @@ export function buildReviewPrompt({
   // What the author answered to questions asked in the other files of the
   // revision: [{ file, ref, id, question, answer }] (linkedAnswers).
   linkedAnswers = [],
+  // revision.consistency: the last paragraph check (commentNotices).
+  consistency = null,
   fence, // tests give one; a turn takes a new one (commentFence)
 }) {
   const inScope = ledger.filter(inManuscriptScope);
@@ -310,13 +313,24 @@ export function buildReviewPrompt({
       const why = String(o.why ?? "")
         .replace(/\s+/g, " ")
         .trim();
-      lines.push(`- [${o.id}] ${o.text}${why ? ` (note: ${why})` : ""}`);
+      const only = o.part ? ` (only this part: ${String(o.part).replace(/\s+/g, " ").trim()})` : "";
+      lines.push(`- [${o.id}] ${o.text}${only}${why ? ` (note: ${why})` : ""}`);
     }
     lines.push("");
   }
   // The terms the comment names, with every paragraph that holds them now.
   const terms = termBlock(comment, manuscript?.paragraphs ?? [], manuscript?.ids ?? null);
   if (terms.length) lines.push(...terms, "");
+  // What is on record about the paragraphs this comment changed: a finding
+  // of the last paragraph check, a rewrite that stopped part way.
+  const notices = commentNotices(comment, consistency);
+  if (notices.length) {
+    lines.push(
+      `On record for paragraphs this comment changed${consistency?.checked_at ? ` (paragraph check of ${consistency.checked_at})` : ""}. Read each paragraph as it is now; where the problem is still there, fix it in this turn, else say in your end report that it is gone:`,
+      ...notices.map((n) => `- [${n.paragraph_id ?? "?"}] ${n.text.replace(/\s+/g, " ").trim()}`),
+      "",
+    );
+  }
   const overview = reviewOverview(others, comment.ref);
   if (overview.lines.length) lines.push(...overview.lines, "");
   if (paragraphs.length) {

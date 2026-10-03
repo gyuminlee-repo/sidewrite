@@ -156,7 +156,7 @@ async function view(page) {
         // What the reviewer asks, one row per request: the id and the text of each,
         // as the old line "Requirements: q1 text; q2 text" said them.
         reqs_line: (() => {
-          const rows = q(".review-req", c);
+          const rows = q(".review-req:not([data-req-part])", c);
           return rows.length
             ? `Requirements: ${rows
                 .map((r) => `${r.getAttribute("data-req-id")} ${r.getAttribute("data-req-text")}`)

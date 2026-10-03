@@ -283,6 +283,51 @@ test("a part Word refuses stops the rewrite: what is in the document is on recor
   }
 });
 
+test("a rewrite stopped part way is recorded on its comment, shown on the card and kept by a comment-list save", async () => {
+  const t = await world({ failAt: 3 });
+  try {
+    const r = await applyTrackedRewrite(t.deps, ARGS, TURN);
+    assert.equal(r.code, "RewriteStopped");
+    const c = (await t.rev()).comments[0];
+    assert.equal(c.rewrites_stopped.length, 1);
+    const w = c.rewrites_stopped[0];
+    assert.deepEqual(
+      [w.paragraph_index, w.paragraph_id, w.applied, w.parts, w.code],
+      [1, "p1", 2, 3, "NotFound"],
+    );
+    assert.deepEqual(w.change_ids, r.change_ids);
+    assert.match(w.rewrite_id, /^R1\.1-w/);
+    // The log line the replay parses is as it was.
+    assert.ok(
+      t.lines.includes("[review] rewrite R1.1 paragraph=1 parts=3 applied=2 stopped=NotFound"),
+    );
+    const notes = view.commentNotices(c, null);
+    assert.deepEqual(
+      notes.map((n) => [n.kind, n.paragraph_index]),
+      [["rewrite_stopped", 1]],
+    );
+    assert.match(notes[0].text, /stopped after 2 of 3 parts/);
+    assert.ok(view.doneBlockers(c, []).includes("the rewrite of paragraph p1 stopped part way"));
+    // A save of the comment list rebuilds each comment field by field.
+    await t.ask("review_save_comments", { comments: [COMMENT] });
+    assert.deepEqual((await t.rev()).comments[0].rewrites_stopped, c.rewrites_stopped);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a rewrite Word refuses at its first part, or one that goes in whole, records no stop", async () => {
+  for (const failAt of [1, null]) {
+    const t = await world({ failAt });
+    try {
+      await applyTrackedRewrite(t.deps, ARGS, TURN);
+      assert.equal((await t.rev()).comments[0].rewrites_stopped, undefined);
+    } finally {
+      await t.cleanup();
+    }
+  }
+});
+
 test("a paragraph that is not plain text, and a task pane that cannot do it: nothing is changed", async () => {
   let t = await world({ notPlain: true });
   try {

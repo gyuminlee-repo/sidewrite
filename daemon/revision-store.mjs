@@ -324,9 +324,38 @@ const Comment = z.object({
   same_term_at: z.array(z.string()).default([]),
   // Requests the model said cannot be handled in this file (review-tools.mjs
   // requirementOutside): one note per request id.
+  // part: what of the request belongs to another file when the rest of it
+  // is changed here (a request that spans this file and another one); the
+  // card shows that part as a row of its own. Optional, no default: a file
+  // from before it saves as it was loaded.
   requirements_outside: z
-    .array(z.object({ id: z.string(), why: z.string().default(""), at: z.string() }))
+    .array(
+      z.object({
+        id: z.string(),
+        why: z.string().default(""),
+        part: z.string().optional(),
+        at: z.string(),
+      }),
+    )
     .default([]),
+  // Rewrites of a paragraph (office_tracked_rewrite) that Word stopped after
+  // some of their parts went in: the paragraph may read with seams. The
+  // record is kept, not undone (review-tools.mjs applyTrackedRewrite).
+  // Optional, no default, like `part` above.
+  rewrites_stopped: z
+    .array(
+      z.object({
+        rewrite_id: z.string(),
+        paragraph_index: z.number().int().nullable(),
+        paragraph_id: z.string().nullish(),
+        applied: z.number().int().nonnegative(),
+        parts: z.number().int().nonnegative(),
+        code: z.string(),
+        change_ids: z.array(z.string()).default([]),
+        at: z.string(),
+      }),
+    )
+    .optional(),
   // The answer in the response letter, and the author's decision not to
   // change anything for this comment.
   response: Response.nullable().default(null),
@@ -733,6 +762,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       questions: old ? clone(old.questions ?? []) : [],
       requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
       same_term_at: old ? clone(old.same_term_at ?? []) : [],
+      ...(old?.rewrites_stopped ? { rewrites_stopped: clone(old.rewrites_stopped) } : {}),
       named_terms: Array.isArray(c.named_terms)
         ? c.named_terms.filter((t) => typeof t === "string")
         : clone(old?.named_terms ?? []),
@@ -916,14 +946,37 @@ export function answerQuestion(rev, ref, id, answer, now = new Date()) {
 }
 
 // A listed request the model said belongs to another file.
-export function setRequirementOutside(rev, ref, { id, why = "" }, now = new Date()) {
+// part: what of the request belongs to the other file, when the rest of it
+// is changed here.
+export function setRequirementOutside(rev, ref, { id, why = "", part = "" }, now = new Date()) {
   const next = clone(rev);
   const c = requireComment(next, ref);
   if (!c.requirements.some((r) => r.id === id))
     throw new Error(`No requirement ${id} under ${ref}`);
+  const p = String(part ?? "").trim();
   c.requirements_outside = [
     ...(c.requirements_outside ?? []).filter((n) => n.id !== id),
-    { id, why: String(why ?? "").trim(), at: now.toISOString() },
+    { id, why: String(why ?? "").trim(), ...(p ? { part: p } : {}), at: now.toISOString() },
+  ];
+  return next;
+}
+
+// A rewrite Word stopped after `applied` of its `parts` went in.
+export function addRewriteStopped(rev, ref, record, now = new Date()) {
+  const next = clone(rev);
+  const c = requireComment(next, ref);
+  c.rewrites_stopped = [
+    ...(c.rewrites_stopped ?? []).filter((w) => w.rewrite_id !== record.rewrite_id),
+    {
+      rewrite_id: record.rewrite_id,
+      paragraph_index: record.paragraph_index ?? null,
+      paragraph_id: record.paragraph_id ?? null,
+      applied: record.applied,
+      parts: record.parts,
+      code: String(record.code ?? "refused"),
+      change_ids: [...(record.change_ids ?? [])],
+      at: now.toISOString(),
+    },
   ];
   return next;
 }
