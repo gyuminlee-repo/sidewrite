@@ -315,10 +315,12 @@ export function invariantReport(revision, comments) {
   );
   const changes = (revision?.comments ?? []).flatMap((c) => c.changes ?? []);
   // No comment is expected for a rejected insertion (Word removes it) or
-  // for a change whose comment the tool comment cleanup removed.
-  const expected = changes.filter(
-    (ch) => !(ch.kind === "insert" && ch.state === "rejected") && !ch.comment_cleaned_at,
-  );
+  // for a change whose comment the tool comment cleanup removed. A rejected
+  // insertion whose recorded comment is still there is counted all the
+  // same: the comment is on record, so it is no mismatch.
+  const goneOnReject = (ch) =>
+    ch.kind === "insert" && ch.state === "rejected" && !ids.has(String(ch.word_comment_id));
+  const expected = changes.filter((ch) => !goneOnReject(ch) && !ch.comment_cleaned_at);
   const recorded = new Set(changes.map((ch) => String(ch.word_comment_id)));
   // A change the task pane applied without its rationale comment
   // (comment_missing, no comment id) never had one: it is not a comment that
