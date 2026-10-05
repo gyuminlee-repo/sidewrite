@@ -70,6 +70,7 @@ import {
   restoredFromLog,
   staysFromLog,
   summaryText,
+  newWords,
   sweepSelection,
   turnFromLog,
   turnResult,
@@ -378,10 +379,28 @@ function stopOwn(pid) {
   }
 }
 
-// The last step of a run: a WINWORD that started after the run began, is not
-// in the list taken at its start and is not kept on purpose (sweepSelection)
-// is asked to close its main window, as a click on its close button does.
-// Nothing is stopped by force: a Word with unsaved changes asks and stays.
+// A Word step of the run, with the WINWORD processes listed right before and
+// after it. One that came up and is not the step's own Word (own(result)) is
+// recorded in record.word.strays with the step: only those can be closed by
+// the sweep.
+function withStrays(step, run, own = () => null) {
+  const before = wordProcesses();
+  let result;
+  try {
+    result = run();
+  } finally {
+    const found = newWords(before, wordProcesses(), own(result)).map((p) => ({ ...p, step }));
+    (record.word.strays ??= []).push(...found);
+    if (result && typeof result === "object") result.strays = found;
+  }
+  return result;
+}
+
+// The last step of a run: a WINWORD that came up around a Word step of the
+// run (withStrays) and shows no document of the user, and is not kept on
+// purpose (sweepSelection), is asked to close its main window, as a click on
+// its close button does. Nothing is stopped by force. Every other Word,
+// also one the user opened during the run, is left open and only listed.
 // The Words this run started were quit through their own COM before
 // (quitWord, QuitOwnWord of replay-open.ps1); a Word the run has no handle on
 // is not reached over COM, which could bind to another Word.
@@ -392,7 +411,12 @@ function sweepWord() {
   const keep = [record.cleanup.kept?.word_pid, record.cleanup.left_running?.pid].filter(Boolean);
   let sel;
   try {
-    sel = sweepSelection({ processes: wordProcesses(), runStart: started, preexisting, keep });
+    sel = sweepSelection({
+      processes: wordProcesses(),
+      strays: record.word.strays ?? [],
+      preexisting,
+      keep,
+    });
   } catch (e) {
     record.cleanup.sweep = { error: e.message };
     console.error(`replay: the Word processes could not be listed: ${e.message}`);
@@ -401,6 +425,8 @@ function sweepWord() {
   const closed = sel.close.map((p) => ({ ...p, ...closeWordWindow(p) }));
   record.cleanup.sweep = { closed, skipped: sel.skip };
   if (!closed.length) console.log("sweep: no Word left from this run");
+  for (const s of sel.skip.filter((x) => x.reason.startsWith("left open")))
+    console.log(`sweep: Word ${s.pid} ("${s.title}") ${s.reason}`);
   for (const c of closed) {
     const what = `Word ${c.pid} ("${c.title}", started ${c.started})`;
     if (c.gone) console.log(`sweep: ${what} had exited already`);
@@ -447,31 +473,34 @@ function wordOpens(file, repairTo = null) {
   const pidFile = path.join(RUN, `open-check-${++checks}-pid.json`);
   if (!fs.existsSync(anchor))
     fs.copyFileSync(path.join(REPO, "tests/fixtures/spike_manuscript.docx"), anchor);
-  const before = wordPids();
-  let r;
-  try {
-    r = powershell(
-      "replay-open.ps1",
-      [
-        ...["-File", winPath(file), "-Anchor", winPath(anchor)],
-        ...["-AllowDir", winPath(RUN), "-PidFile", winPath(pidFile)],
-        ...(repairTo ? ["-RepairTo", winPath(repairTo)] : []),
-      ],
-      5 * 60_000,
-    );
-  } catch (e) {
-    r = { ok: false, error: e.message };
-  }
-  const pid =
-    r.pid ??
+  const ownPid = (r) =>
+    r?.pid ??
     (fs.existsSync(pidFile)
       ? JSON.parse(fs.readFileSync(pidFile, "utf8").replace(/^\uFEFF/, "")).pid
       : null);
-  const after = wordPids();
-  if (pid && after.includes(pid)) r.stopped = stopOwn(pid);
-  // A Word that came up during the check and is not the one it started:
-  // recorded with the check it came from; the sweep at the end closes it.
-  r.strays = after.filter((x) => x !== pid && !before.includes(x));
+  // A Word that came up during the check and is not the one it started is
+  // recorded in r.strays, with the check it came from.
+  const r = withStrays(
+    `open check ${checks}`,
+    () => {
+      try {
+        return powershell(
+          "replay-open.ps1",
+          [
+            ...["-File", winPath(file), "-Anchor", winPath(anchor)],
+            ...["-AllowDir", winPath(RUN), "-PidFile", winPath(pidFile)],
+            ...(repairTo ? ["-RepairTo", winPath(repairTo)] : []),
+          ],
+          5 * 60_000,
+        );
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    },
+    ownPid,
+  );
+  const pid = ownPid(r);
+  if (pid && wordPids().includes(pid)) r.stopped = stopOwn(pid);
   (record.word.open_checks ??= []).push({ file: path.basename(file), repair: !!repairTo, ...r });
   save();
   return r;
@@ -534,14 +563,19 @@ async function setup() {
   save();
   console.log(`ok    open check: ${record.source}`);
   await startDaemon();
-  const launch = powershell("word-launch.ps1", [
-    "-DocPath",
-    winPath(DOC),
-    "-Port",
-    opt["cdp-port"],
-    "-UserDataFolder",
-    winPath(path.join(RUN, "webview2")),
-  ]);
+  const launch = withStrays(
+    "word launch",
+    () =>
+      powershell("word-launch.ps1", [
+        "-DocPath",
+        winPath(DOC),
+        "-Port",
+        opt["cdp-port"],
+        "-UserDataFolder",
+        winPath(path.join(RUN, "webview2")),
+      ]),
+    (r) => r?.pid ?? null,
+  );
   if (launch.exited || record.word.preexisting.includes(launch.pid))
     throw new Error(`Word launch failed: ${JSON.stringify(launch)}`);
   record.word.launch = launch;
@@ -672,7 +706,9 @@ async function main() {
   // Our copy: it is saved as it is, tracked changes and comments in it.
   const done = note(
     "save copy",
-    powershell("replay-save.ps1", ["-Doc", winPath(DOC), "-AllowDir", winPath(RUN)]),
+    withStrays("save copy", () =>
+      powershell("replay-save.ps1", ["-Doc", winPath(DOC), "-AllowDir", winPath(RUN)]),
+    ),
   );
   saved = done.ok === true;
   writeReports(headings);

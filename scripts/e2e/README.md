@@ -1060,13 +1060,16 @@ result of "Check revised paragraphs", run once after the last turn),
 `daemon.log`. The screen shows step names and counts, never text of the
 manuscript. One review turn per comment, in order; a turn that fails or runs
 longer than `--turn-minutes` is recorded and the next comment goes on. Word
-and the resident daemon are handled as in the acceptance run. Each open
-check records in `open_checks[].strays` a Word that came up during it and is
-not the one it started. At the end a sweep lists every WINWORD: one that
-started after the run began, is not in `word.preexisting` and is not kept on
-purpose (`--keep-on-fail`, a refused quit) is asked to close its main window
-(`CloseMainWindow`, never stopped by force); `cleanup.sweep` and the screen
-say which. The Word scripts find a document only in the Running Object Table
+and the resident daemon are handled as in the acceptance run. Each Word step
+of the run (the open checks, the Word launch, the save of the copy) lists the
+WINWORD processes right before and after it and records a new one that is
+not the step's own Word in `word.strays` (and `open_checks[].strays`). At the
+end a sweep asks a recorded stray to close its main window
+(`CloseMainWindow`, never stopped by force) only when it is still the same
+process, shows no document (a blank "Document1 - Word" or no window), is not
+in `word.preexisting` and is not kept on purpose (`--keep-on-fail`, a refused
+quit). Every other Word, also one the user opened during the run, is left
+open and listed as "left open" in `cleanup.sweep` and on the screen. The Word scripts find a document only in the Running Object Table
 (`word-rot.ps1`): a bind by path would start a Word of its own when the
 document is not registered yet.
 

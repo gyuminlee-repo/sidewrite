@@ -24,6 +24,8 @@ import {
   ruleLines,
   summaryText,
   sweepSelection,
+  newWords,
+  blankWordTitle,
   turnFromLog,
   turnResult,
 } from "../scripts/e2e/replay-lib.mjs";
@@ -1045,27 +1047,14 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
     assert.doesNotMatch(src, /\/mnt\/[a-z]\/|[A-Z]:\\\\(?!Program Files)/);
 });
 
-// The sweep at the end of a run. Times are invented; runStart is 10:00 UTC.
-const RUN_START = Date.parse("2026-10-05T10:00:00Z");
+// The sweep at the end of a run. Pids, times and titles are invented.
 const word = (pid, started, title = "Document1 - Word") => ({ pid, started, title });
+const T = "2026-10-05T10:05:00.1234567Z";
 
-test("sweep: a Word that ran before the run is never closed, also when its start reads as later", () => {
+test("sweep: a blank Word recorded as a stray of a run step is closed", () => {
   const { close, skip } = sweepSelection({
-    processes: [word(4172, "2026-10-05T10:05:00Z", "thesis.docx - Word")],
-    runStart: RUN_START,
-    preexisting: [4172],
-  });
-  assert.deepEqual(close, []);
-  assert.deepEqual(
-    skip.map((p) => [p.pid, p.reason]),
-    [[4172, "ran before the run"]],
-  );
-});
-
-test("sweep: a Word that started after the run began and is not preexisting is closed", () => {
-  const { close, skip } = sweepSelection({
-    processes: [word(4172, "2026-10-05T10:05:00.1234567Z"), word(900, "2026-10-05T09:00:00Z")],
-    runStart: RUN_START,
+    processes: [word(4172, T), word(900, "2026-10-05T09:00:00Z", "thesis.docx - Word")],
+    strays: [{ ...word(4172, T), step: "open check 2" }],
     preexisting: [900],
   });
   assert.deepEqual(
@@ -1073,21 +1062,69 @@ test("sweep: a Word that started after the run began and is not preexisting is c
     [4172],
   );
   assert.deepEqual(
-    skip.map((p) => p.pid),
-    [900],
+    skip.map((p) => [p.pid, p.reason]),
+    [[900, "ran before the run"]],
+  );
+  // Korean Word, and a stray with no window at all.
+  assert.equal(
+    sweepSelection({ processes: [word(5, T, "문서1 - Word")], strays: [word(5, T)] }).close.length,
+    1,
+  );
+  assert.equal(
+    sweepSelection({ processes: [word(6, T, "")], strays: [word(6, T)] }).close.length,
+    1,
   );
 });
 
-test("sweep: kept, earlier or unknown start is left alone", () => {
+test("sweep: a Word that ran before the run is never closed, also when it is a stray", () => {
   const { close, skip } = sweepSelection({
-    processes: [
-      word(1, "2026-10-05T10:01:00Z"),
-      word(2, "2026-10-05T09:59:59Z"),
-      word(3, null),
-      word(4, "not a time"),
-    ],
-    runStart: RUN_START,
+    processes: [word(4172, T)],
+    strays: [word(4172, T)],
+    preexisting: [4172],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => p.reason),
+    ["ran before the run"],
+  );
+});
+
+test("sweep: a Word that started during the run but is no recorded stray is left open", () => {
+  // The user opened Word during the run, also a blank one: not the run's.
+  const { close, skip } = sweepSelection({
+    processes: [word(7, T), word(8, T, "notes.docx - Word")],
+    strays: [],
     preexisting: [],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [
+      [7, "left open: not started by this run"],
+      [8, "left open: not started by this run"],
+    ],
+  );
+});
+
+test("sweep: a stray whose title names a real document is left open", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(9, T, "thesis.docx - Word"), word(10, T, "Document1 notes - Word")],
+    strays: [word(9, T), word(10, T)],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [
+      [9, "left open: it shows a document"],
+      [10, "left open: it shows a document"],
+    ],
+  );
+});
+
+test("sweep: kept, a reused pid or an unknown start time is left open", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(1, T), word(2, "2026-10-05T11:00:00Z"), word(3, null)],
+    strays: [word(1, T), word(2, T), word(3, null)],
     keep: [1],
   });
   assert.deepEqual(close, []);
@@ -1095,19 +1132,25 @@ test("sweep: kept, earlier or unknown start is left alone", () => {
     skip.map((p) => [p.pid, p.reason]),
     [
       [1, "kept by the run"],
-      [2, "started before the run"],
-      [3, "start time unknown"],
-      [4, "start time unknown"],
+      [2, "left open: not started by this run"],
+      [3, "left open: not started by this run"],
     ],
-  );
-  // No run start known: nothing is provably the run's.
-  assert.deepEqual(
-    sweepSelection({ processes: [word(5, "2026-10-05T10:01:00Z")], runStart: undefined }).close,
-    [],
   );
 });
 
-test("replay: the sweep runs last, closes by window only, and every check records its strays", () => {
+test("sweep: new Words of a step are the ones not listed before it, without the step's own", () => {
+  const before = [word(900, "2026-10-05T09:00:00Z", "thesis.docx - Word")];
+  const after = [...before, word(21400, T, "anchor.docx - Word"), word(4172, T)];
+  assert.deepEqual(
+    newWords(before, after, 21400).map((p) => p.pid),
+    [4172],
+  );
+  assert.deepEqual(newWords(before, before), []);
+  assert.ok(blankWordTitle("Document12 - Word"));
+  assert.ok(!blankWordTitle("thesis.docx - Word"));
+});
+
+test("replay: the sweep runs last, closes by window only, and the Word steps record their strays", () => {
   const runner = read("../scripts/e2e/replay.mjs");
   const sweep = runner.slice(
     runner.indexOf("function sweepWord()"),
@@ -1115,22 +1158,23 @@ test("replay: the sweep runs last, closes by window only, and every check record
   );
   assert.match(sweep, /CloseMainWindow\(\)/);
   assert.doesNotMatch(sweep, /Stop-Process|-Force|\.Kill\(|taskkill/);
-  assert.match(
-    sweep,
-    /sweepSelection\(\{ processes: wordProcesses\(\), runStart: started, preexisting, keep \}\)/,
-  );
+  assert.match(sweep, /strays: record\.word\.strays \?\? \[\]/);
   // The Word kept by --keep-on-fail and one left for a refused quit stay.
   assert.match(sweep, /record\.cleanup\.kept\?\.word_pid, record\.cleanup\.left_running\?\.pid/);
   const last = runner.lastIndexOf("sweepWord();");
   assert.ok(last > runner.lastIndexOf("quitWord(record.word.launch?.pid)"));
   assert.ok(last < runner.indexOf("record.finished_at ="));
+  // Every step that starts or binds Word is listed around.
+  assert.match(runner, /withStrays\(\s*`open check \$\{checks\}`/);
+  assert.match(runner, /withStrays\(\s*"word launch"/);
+  assert.match(runner, /withStrays\(\s*"save copy"/);
+  assert.equal((runner.match(/withStrays\(/g) ?? []).length, 4);
   const opens = runner.slice(
     runner.indexOf("function wordOpens("),
     runner.indexOf("const embed ="),
   );
-  assert.ok(opens.indexOf("const before = wordPids()") < opens.indexOf('"replay-open.ps1"'));
-  assert.match(opens, /r\.strays = after\.filter\(\(x\) => x !== pid && !before\.includes\(x\)\)/);
-  assert.ok(opens.indexOf("r.strays =") < opens.indexOf("open_checks ??= []"));
+  assert.ok(opens.indexOf("withStrays(") < opens.indexOf('"replay-open.ps1"'));
+  assert.ok(opens.indexOf("withStrays(") < opens.indexOf("open_checks ??= []"));
 });
 
 // The leak of an open check: BindToMoniker on a document that Word has not

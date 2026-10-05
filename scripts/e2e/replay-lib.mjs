@@ -485,26 +485,39 @@ export function summaryText(
   return `${lines.join("\n")}\n`;
 }
 
+// A Word window that shows no document of the user: a new blank document
+// ("Document1 - Word", "문서1 - Word") or no window at all.
+export const blankWordTitle = (title) =>
+  !String(title ?? "").trim() || /^(?:Document|문서)\s*\d+ - Word$/.test(String(title).trim());
+
+// New WINWORD processes after one step of the run: in after, not in before
+// (both { pid, started, title } lists taken right around the step), and not
+// the process the step itself started and quits (own).
+export const newWords = (before, after, own = null) =>
+  after.filter((p) => p.pid !== own && !before.some((b) => b.pid === p.pid));
+
 // The Word processes the sweep at the end of a run closes. processes: every
 // WINWORD running now, { pid, started (ISO time, null when Windows did not
-// give it), title }; runStart: ms of the run's start; preexisting: the pids
-// that ran when the run began; keep: pids the run leaves on purpose (the Word
-// of --keep-on-fail, or one whose quit was refused because a document outside
-// the run folder is open in it). A process is closed only when it provably
-// started after the run began and is none of these.
-export function sweepSelection({ processes = [], runStart, preexisting = [], keep = [] }) {
+// give it), title }; strays: the processes that came up around a Word step of
+// the run (newWords), as recorded then; preexisting: the pids that ran when
+// the run began; keep: pids the run leaves on purpose (the Word of
+// --keep-on-fail, or one whose quit was refused). Closed is only a recorded
+// stray that is still the same process (pid and start time) and shows no
+// document of the user (blankWordTitle). Any other Word is left open: the
+// user's Word windows are never closed.
+export function sweepSelection({ processes = [], strays = [], preexisting = [], keep = [] }) {
   const close = [];
   const skip = [];
   for (const p of processes) {
-    const at = p.started ? Date.parse(p.started) : NaN;
+    const stray = strays.some((s) => s.pid === p.pid && s.started && s.started === p.started);
     const why = preexisting.includes(p.pid)
       ? "ran before the run"
       : keep.includes(p.pid)
         ? "kept by the run"
-        : !Number.isFinite(at) || !Number.isFinite(runStart)
-          ? "start time unknown"
-          : at < runStart
-            ? "started before the run"
+        : !stray
+          ? "left open: not started by this run"
+          : !blankWordTitle(p.title)
+            ? "left open: it shows a document"
             : null;
     if (why) skip.push({ ...p, reason: why });
     else close.push(p);
