@@ -40,6 +40,10 @@ class FakeEl {
 function fakeDocument() {
   const byId = new Map();
   return {
+    listeners: {},
+    addEventListener(ev, fn) {
+      (this.listeners[ev] ??= []).push(fn);
+    },
     getElementById(id) {
       if (!byId.has(id)) byId.set(id, new FakeEl("div", id));
       return byId.get(id);
@@ -1985,6 +1989,51 @@ test("Propose all waits for the stored provider to be confirmed before its first
 // The pane says how long it waits for the answer of review_propose, and
 // waits exactly that long: the daemon starts no turn for a request the pane
 // has given up (review-service.mjs).
+// Acceptance run of 2026-10-05, stage 3: with Word minimized, the edits of a
+// turn went in without their rationale comments. Where the pane can tell
+// (its page is hidden), it says to keep Word open; nothing is blocked.
+test("Word hidden: Propose changes says to keep Word open and still sends the request", async () => {
+  const t = await proposeAllSetup();
+  try {
+    document.hidden = true;
+    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    assert.match(t.$("review-message").textContent, /^Keep Word open \(not minimized\)/);
+    assert.equal(t.sent.filter(([type]) => type === "review_propose").length, 1);
+    t.endTurn("R1.1");
+    await t.wait();
+  } finally {
+    delete document.hidden;
+    await t.pane.reload();
+  }
+});
+
+test("Word hidden while a turn runs: shown again, the pane says so; shown all along, it says nothing", async () => {
+  const t = await proposeAllSetup();
+  const fire = (hidden) => {
+    document.hidden = hidden;
+    for (const fn of document.listeners.visibilitychange ?? []) fn();
+  };
+  try {
+    let [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+    await first.click();
+    assert.doesNotMatch(t.$("review-message").textContent, /Keep Word open/);
+    fire(true);
+    fire(false);
+    assert.match(t.$("review-message").textContent, /^Keep Word open.*hidden while a turn ran/);
+    t.endTurn("R1.1");
+    await t.wait();
+    // Hidden with no turn running: nothing to say.
+    t.$("review-message").textContent = "KEEP";
+    fire(true);
+    fire(false);
+    assert.equal(t.$("review-message").textContent, "KEEP");
+  } finally {
+    delete document.hidden;
+    await t.pane.reload();
+  }
+});
+
 test("review_propose carries the time the pane waits for its answer", async () => {
   const t = await proposeAllSetup();
   try {

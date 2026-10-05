@@ -9,7 +9,7 @@ import {
   trackedRuns,
   isToolComment,
   planBackupDelete,
-  wordsAround,
+  anchorQueries,
 } from "./review-view.js";
 import {
   FIELD_REFUSAL,
@@ -1941,16 +1941,21 @@ export async function toolTrackedEdit({
           // left to find (replays of 2026-10-05: every change that lost its
           // comment this way had its find nowhere in the paragraph). The
           // comment then goes on what stands: the new words of a replace,
-          // or the words around the place of a deletion (the first of 1, 2,
-          // 3 words on each side found once in the paragraph).
+          // or for a deletion the first of anchorQueries found once in the
+          // paragraph (words around its place, then on one side, then the
+          // first words of the paragraph), all searched in one sync. When
+          // none is: the paragraph itself, so that a deletion always has its
+          // comment somewhere in its paragraph.
           if (!anchor && editReplace) anchor = inserted ?? undefined;
-          for (let k = 1; !anchor && !editReplace && k <= 3; k++) {
-            const q = wordsAround(before, find, editFind, k);
-            if (!q || q.length > 255) break;
-            const near = para.search(q, { matchCase: true });
-            near.load("items");
-            await context.sync();
-            if (near.items.length === 1) anchor = near.items[0];
+          if (!anchor && !editReplace) {
+            const near = anchorQueries(before, find, editFind).map((q) => {
+              const found = para.search(q, { matchCase: true });
+              found.load("items");
+              return found;
+            });
+            if (near.length) await context.sync();
+            anchor = near.find((n) => n.items.length === 1)?.items[0];
+            anchor ??= para.getRange("Whole");
           }
         }
         return anchor;
@@ -2114,15 +2119,45 @@ async function existingComment(context, para, comment_text, places, taken) {
 // What goes to the daemon log about a failed comment step: the step, the
 // Office error code and place, and the message of the error. Word's errors
 // name no text of the document; the statement lists of debugInfo, which can
-// (a search string, the comment text), are left out.
+// (a search string, the comment text), are left out. debug_message and
+// inner: debugInfo.message and the code of debugInfo.innerError, when Word
+// gives them and they say more than code and message. hidden: whether the
+// task pane was hidden when the step threw (paneHidden). Word minimized while
+// a turn ran lost the comments of its edits (acceptance run of 2026-10-05,
+// stage 3); this tells the next run whether that was so.
 function commentError(e, step) {
-  return {
+  const d = e?.debugInfo ?? {};
+  const message = String(e?.message ?? e).slice(0, 200);
+  const out = {
     step,
-    code: e?.code ?? e?.debugInfo?.code ?? null,
-    location: e?.debugInfo?.errorLocation ?? null,
-    message: String(e?.message ?? e).slice(0, 200),
+    code: e?.code ?? d.code ?? null,
+    location: d.errorLocation ?? null,
+    message,
   };
+  if (typeof d.message === "string" && d.message && d.message !== message)
+    out.debug_message = d.message.slice(0, 200);
+  const inner = d.innerError?.code ?? d.innerError?.message;
+  if (inner) out.inner = String(inner).slice(0, 100);
+  const hidden = paneHidden();
+  if (hidden !== null) out.hidden = hidden;
+  return out;
 }
+
+// Whether the task pane is hidden (true), shown (false), or this cannot be
+// told (null: no document, as in Node). Office.js has no API that says
+// whether the Word window is minimized (none in WordApi up to 1.9 or in
+// Office.context); the pane's own page visibility is the nearest sign. That
+// the WebView of the pane reports hidden while Word is minimized is an
+// assumption, not yet measured in Word.
+export function paneHidden(doc = globalThis.document) {
+  const v = doc?.visibilityState;
+  if (typeof v === "string") return v === "hidden";
+  return typeof doc?.hidden === "boolean" ? doc.hidden : null;
+}
+
+// The pauses before the second and the third try of a comment step (ms).
+const COMMENT_RETRY_WAITS = [300, 1000];
+const pause = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
 
 // The steps after a tracked edit is in the document (anchor search, comment
 // insert and its sync). step(at) returns { ok, ... } without the edit fields
@@ -2131,20 +2166,26 @@ function commentError(e, step) {
 // records the change from.
 // Word's comment insert fails now and then on an edit it accepts the next
 // time (the s25 acceptance run: the same edit, one run without its comment,
-// the next with it). So a step that threw is tried once more. Before the
-// second try found() looks for the comment in the document: a sync can
+// the next with it). So a step that threw is tried again after a pause
+// (waits), up to three tries in all, each with a fresh anchor search. Before
+// each later try found() looks for the comment in the document: a sync can
 // throw after Word did the insert, and a second insert would then leave two
-// comments on one change. Two throws become the partial result
+// comments on one change. When every try threw: the partial result
 // CommentInsertFailed, applied:true, like CommentAnchorMissing. Each throw is
 // described in comment_errors (commentError), with comment_attempts, also
-// when the second try worked: the daemon logs them.
-export async function afterEditApplied(applied, found, step) {
+// when a later try worked: the daemon logs them and keeps the last one on
+// the change (comment_error).
+export async function afterEditApplied(applied, found, step, waits = COMMENT_RETRY_WAITS) {
   const errors = [];
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  const tries = waits.length + 1;
+  for (let attempt = 1; attempt <= tries; attempt++) {
     let where = "anchor_search";
     try {
-      if (attempt === 2) where = "find_existing";
-      const there = attempt === 2 ? await found() : null;
+      if (attempt > 1) {
+        await pause(waits[attempt - 2]);
+        where = "find_existing";
+      }
+      const there = attempt > 1 ? await found() : null;
       where = "anchor_search";
       const r = there ?? (await step((name) => (where = name)));
       return {
@@ -2161,7 +2202,7 @@ export async function afterEditApplied(applied, found, step) {
     code: "CommentInsertFailed",
     applied: true,
     message: `Edit applied but the rationale comment could not be added: ${errors.at(-1).message}`,
-    comment_attempts: 2,
+    comment_attempts: tries,
     comment_errors: errors,
     ...applied,
   };

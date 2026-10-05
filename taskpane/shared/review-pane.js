@@ -57,6 +57,8 @@ import {
   partOfText,
   editedInText,
   changesElsewhere,
+  KEEP_WORD_OPEN,
+  MINIMIZED_IN_TURN,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
@@ -156,6 +158,7 @@ export function initReviewPane({
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
     reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
+    hiddenInTurn: false, // the page was hidden (Word minimized?) while a review turn was open
     openRef: null, // the comment whose card is open (one at a time)
     pasteOpen: false, // the paste box is shown although a review is split
     results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
@@ -1398,6 +1401,7 @@ export function initReviewPane({
   // extra: more fields of the request (rewrite_paragraph for a rewrite turn).
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
+    state.hiddenInTurn = false;
     state.results.delete(ref);
     state.notices.delete(ref);
     // The card shows the work from the click on, not from the answer of the daemon.
@@ -1408,6 +1412,10 @@ export function initReviewPane({
       // (L4) and the new words of the turn are checked against it (L2).
       await refresh();
       state.turnStart.set(ref, onRecord(ref));
+      // Word minimized: its edits went in without their comments (stage 3
+      // of the acceptance run of 2026-10-05). Said after the refresh, which
+      // writes the message line; the turn is not held back.
+      if (document.hidden === true) say(KEEP_WORD_OPEN, true);
       const done = state.turnsDone;
       // wait_ms: how long this pane waits for the answer. The daemon starts
       // no turn for a request that waited longer at its gate.
@@ -1986,7 +1994,15 @@ export function initReviewPane({
     window.addEventListener?.("focus", () => auto.trigger("focus"));
   }
   document.addEventListener?.("visibilitychange", () => {
-    if (!document.hidden) auto.trigger("focus");
+    if (document.hidden) {
+      if (state.reviewTurnOpen) state.hiddenInTurn = true;
+      return;
+    }
+    if (state.hiddenInTurn) {
+      state.hiddenInTurn = false;
+      say(MINIMIZED_IN_TURN, true);
+    }
+    auto.trigger("focus");
   });
 
   render(); // loaded on "welcome" (taskpane.js calls reload once connected)
