@@ -798,6 +798,90 @@ test("comment errors of the task pane are logged: a failed comment, and one adde
   assert.equal(d.lines.filter((l) => l.startsWith("[review] comment error")).length, 1);
 });
 
+// Run e2e-20261005-151048: Word minimized refused the comment insert with
+// AccessDenied. The change is recorded as waiting (the task pane adds the
+// comment later) and the model is told so, not that it has no comment.
+test("a change whose comment waits for Word: recorded with its error, the model told it waits", async () => {
+  const d = deps({
+    ok: false,
+    code: "CommentWaitingForWord",
+    applied: true,
+    message: "Edit applied; Word refused its rationale comment (AccessDenied).",
+    comment_attempts: 1,
+    comment_errors: [
+      {
+        step: "insert_comment",
+        code: "AccessDenied",
+        location: "Range.insertComment",
+        message: "AccessDenied",
+        hidden: false,
+      },
+    ],
+  });
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.deepEqual([r.ok, r.applied, r.comment_missing], [true, true, "CommentWaitingForWord"]);
+  assert.equal(
+    d.edits[0][1].comment_error,
+    "step=insert_comment word=AccessDenied at=Range.insertComment msg=AccessDenied hidden=0",
+  );
+  assert.match(r.warning, /waiting for the Word window to be opened/);
+  assert.doesNotMatch(r.warning, /no rationale comment could be anchored/);
+});
+
+// Acceptance run of 2026-10-05, stage 3 (Word minimized): changes were
+// recorded without their comment and the review file did not say why. The
+// last error of the task pane is kept on the change (comment_error), and the
+// log line carries what debugInfo added and whether the task pane was hidden.
+test("a change applied without its comment keeps Word's last answer; the log says more", async () => {
+  const errors = [
+    {
+      step: "insert_comment",
+      code: "GeneralException",
+      location: null,
+      message: "GeneralException",
+    },
+    {
+      step: "insert_comment",
+      code: "GeneralException",
+      location: "Range.insertComment",
+      message: "GeneralException",
+      debug_message: "The window is\nnot available.",
+      inner: "AccessDenied",
+      hidden: true,
+    },
+  ];
+  let d = deps({
+    ok: false,
+    code: "CommentInsertFailed",
+    applied: true,
+    message: "Edit applied but the rationale comment could not be added: GeneralException",
+    comment_attempts: 3,
+    comment_errors: errors,
+  });
+  await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  const last =
+    "step=insert_comment word=GeneralException at=Range.insertComment msg=GeneralException" +
+    " debug=The window is not available. inner=AccessDenied hidden=1";
+  assert.equal(d.edits[0][1].comment_error, last);
+  assert.ok(d.lines.includes(`[review] comment error R1.1-1 try=2 ${last}`));
+  // A comment added on a later try: nothing is missing, nothing kept.
+  d = deps({ comment_attempts: 2, comment_errors: errors.slice(0, 1) });
+  await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.equal("comment_error" in d.edits[0][1], false);
+});
+
 test("the comment ids on record go out with a tracked edit, so the task pane reuses none of them", async () => {
   const d = deps({ target_checked: true });
   d.getReviewContext = async () => ({ comment_ids: ["11", "12"] });

@@ -216,7 +216,7 @@ test("the comment sync fails once: one more try adds the comment, and the result
   assert.equal(s.mode, "Off");
 });
 
-test("the comment sync keeps failing: applied without its comment, with both errors and no second edit", async () => {
+test("the comment sync keeps failing: applied without its comment, with every error and no second edit", async () => {
   let edits = 0;
   const s = fakeWord({
     fail: ({ kinds }) => (kinds.includes("edit") && edits++, kinds.includes("comment")),
@@ -230,11 +230,60 @@ test("the comment sync keeps failing: applied without its comment, with both err
     [
       ["insert_comment", "GeneralException", null],
       ["insert_comment", "GeneralException", null],
+      ["insert_comment", "GeneralException", null],
     ],
   );
+  assert.equal(r.comment_attempts, 3);
   assert.match(r.message, /applied.*GeneralException/i);
   // Nothing of the manuscript is in what goes to the log.
   assert.doesNotMatch(JSON.stringify(r.comment_errors), /degrees|Cells were held/);
+});
+
+// Run e2e-20261005-151048: with the Word window minimized every
+// Range.insertComment failed with AccessDenied, the tracked edit applied.
+// More tries at once only delay the turn: one try, and the change is
+// recorded as waiting for Word (the Review tab adds the comment later).
+test("AccessDenied on the comment insert: one try only, applied and waiting for Word", async () => {
+  let edits = 0;
+  let inserts = 0;
+  const s = fakeWord({
+    fail: ({ kinds }) => (
+      kinds.includes("edit") && edits++,
+      kinds.includes("comment") && ++inserts > 0
+    ),
+    error: () =>
+      Object.assign(new Error("AccessDenied"), {
+        code: "AccessDenied",
+        debugInfo: { code: "AccessDenied", errorLocation: "Range.insertComment" },
+      }),
+  });
+  const r = await toolTrackedEdit(REPLACE);
+  assert.deepEqual(partial(r), [false, true, "CommentWaitingForWord", 0, "P1", false]);
+  assert.deepEqual([s.comments.length, edits, inserts], [0, 1, 1]);
+  assert.equal(r.comment_attempts, 1);
+  assert.deepEqual(
+    r.comment_errors.map((e) => [e.step, e.code, e.location]),
+    [["insert_comment", "AccessDenied", "Range.insertComment"]],
+  );
+  assert.match(r.message, /minimized or not ready/);
+});
+
+test("AccessDenied outside the insert step keeps the bounded retry", async () => {
+  const { afterEditApplied } = await import("../taskpane/shared/tools-word.js");
+  let n = 0;
+  const denied = Object.assign(new Error("AccessDenied"), { code: "AccessDenied" });
+  const r = await afterEditApplied(
+    { paragraph_index: 0 },
+    async () => null,
+    async (at) => {
+      n += 1;
+      at("anchor_search");
+      throw denied;
+    },
+    [0, 0],
+  );
+  assert.equal(n, 3);
+  assert.equal(r.code, "CommentInsertFailed");
 });
 
 test("the comment went in although its sync threw: the second try finds it and adds no second one", async () => {
@@ -244,6 +293,63 @@ test("the comment went in although its sync threw: the second try finds it and a
   assert.deepEqual([r.ok, s.comments.length], [true, 1]);
   assert.equal(r.word_comment_id, s.comments[0].id);
   assert.equal(r.comment_attempts, 2);
+});
+
+// Acceptance run of 2026-10-05, stage 3: with Word minimized the comment
+// step failed on every try. A third try, after a pause and a fresh anchor
+// search, is the bounded retry; the result says what Word answered each
+// time, with what debugInfo adds and whether the task pane was hidden.
+test("the comment sync fails twice: the third try adds the comment", async () => {
+  let n = 0;
+  const s = fakeWord({ fail: ({ kinds }) => kinds.includes("comment") && ++n <= 2 });
+  const r = await toolTrackedEdit(REPLACE);
+  assert.deepEqual([r.ok, r.applied, s.comments.length], [true, undefined, 1]);
+  assert.equal(r.word_comment_id, s.comments[0].id);
+  assert.equal(r.comment_attempts, 3);
+  assert.equal(r.comment_errors.length, 2);
+});
+
+test("a failed comment step records debugInfo.message, the inner error and the hidden pane", async () => {
+  globalThis.document = { visibilityState: "hidden", hidden: true };
+  try {
+    fakeWord({
+      fail: ({ kinds }) => kinds.includes("comment"),
+      error: () =>
+        Object.assign(new Error("GeneralException"), {
+          code: "GeneralException",
+          debugInfo: {
+            code: "GeneralException",
+            message: "The window is not available.",
+            errorLocation: "Range.insertComment",
+            innerError: { code: "AccessDenied" },
+            statements: "body.search('Cells were held')",
+          },
+        }),
+    });
+    const r = await toolTrackedEdit(REPLACE);
+    assert.equal(r.code, "CommentInsertFailed");
+    assert.deepEqual(r.comment_errors[0], {
+      step: "insert_comment",
+      code: "GeneralException",
+      location: "Range.insertComment",
+      message: "GeneralException",
+      debug_message: "The window is not available.",
+      inner: "AccessDenied",
+      hidden: true,
+    });
+    assert.doesNotMatch(JSON.stringify(r.comment_errors), /Cells were held/);
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+test("paneHidden: the page visibility of the task pane, or null where there is none", async () => {
+  const { paneHidden } = await import("../taskpane/shared/tools-word.js");
+  assert.equal(paneHidden({ visibilityState: "hidden" }), true);
+  assert.equal(paneHidden({ visibilityState: "visible", hidden: false }), false);
+  assert.equal(paneHidden({ hidden: true }), true);
+  assert.equal(paneHidden(undefined), null);
+  assert.equal(paneHidden({}), null);
 });
 
 test("the happy path says nothing about tries", async () => {

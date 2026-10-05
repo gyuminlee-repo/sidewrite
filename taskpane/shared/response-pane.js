@@ -43,6 +43,10 @@ export function initResponsePane({
   // (role) => what the last request of that kind of work really ran on
   // ("Claude · Opus 5.5"), or null when the pane does not know (taskpane.js).
   usedLabel = () => null,
+  // () => a promise that ends when the rationale comments waiting for Word
+  // were tried (review-pane.js addWaitingComments): before an export, so the
+  // letter is made from a document that has them where Word takes them.
+  beforeExport = async () => {},
 }) {
   const root = document.getElementById("response-root");
   if (!root) return { onEvent() {}, reload: async () => {} }; // Excel pane: no Response tab
@@ -529,6 +533,11 @@ export function initResponsePane({
     // Asked for on purpose: the last check failed and the button said so.
     const force = (state.summary?.fail ?? 0) > 0;
     say("Exporting...");
+    try {
+      await beforeExport();
+    } catch {
+      /* a comment still waiting is said in the Review tab */
+    }
     const r = await askJob("response_export", { ...(await docNow()), format, force });
     state.summary = r.summary;
     state.checks = r.checks;

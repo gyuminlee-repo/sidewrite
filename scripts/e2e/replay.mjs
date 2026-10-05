@@ -477,6 +477,7 @@ async function setup() {
     "word-launch.ps1",
     "word-own.ps1",
     "word-rot.ps1",
+    "word-back.ps1",
     "replay-open.ps1",
     "replay-save.ps1",
   ])

@@ -6,7 +6,7 @@
 //   review_load, review_split, review_save_comments, review_set_status,
 //   review_set_requirements, review_question_answer, review_check_paragraphs, review_preview, review_propose, review_refresh,
 //   review_external_dismiss, review_comments_cleaned, review_override,
-//   review_comment_text, review_comment_set,
+//   review_comment_text, review_comment_set, review_comment_retry,
 //   ledger_add, ledger_update, ledger_remove, ledger_check, ledger_export,
 //   ledger_import, ledger_suggest, comments_backup,
 //   review_link_candidates, review_link_join, review_link_leave
@@ -1516,6 +1516,22 @@ export function createReviewService({
       );
       log(`[review] comment added later ${msg.change_id} comment=${msg.word_comment_id}`);
       return { revision };
+    },
+    // One try of the task pane at a rationale comment waiting for Word
+    // (review-pane.js addWaitingComments, or its button): which change, what
+    // started it (timer, focus, visibility, refresh, export, button), and
+    // what came of it (added, AccessDenied, skipped_busy, or the code and
+    // message of another failure). Only logged; nothing is stored.
+    async review_comment_retry(msg) {
+      const field = (v, n) =>
+        String(v ?? "-")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, n) || "-";
+      log(
+        `[review] comment retry ${field(msg.change_id, 40)} trigger=${field(msg.trigger, 20)} outcome=${field(msg.outcome, 200)}`,
+      );
+      return {};
     },
     async review_override(msg, key) {
       const d = at(key);

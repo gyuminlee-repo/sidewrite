@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import path from "node:path";
 import { cleanupDecision } from "../scripts/e2e/judge.mjs";
+import { execWithInteropRetry } from "../scripts/e2e/wsl-interop.mjs";
 import {
   changesReport,
   extractBatchesFromLog,
@@ -1270,11 +1271,47 @@ test("Word scripts find a document in the Running Object Table only, never by a 
     assert.match(read(`../scripts/e2e/${runner}`), /"word-rot\.ps1"/, runner);
 });
 
+// The Word of a run is sent behind the user's windows without the focus and
+// is never minimized: with Word minimized the edits of a turn lost their
+// rationale comments (acceptance run of 2026-10-05, stage 3). Only the
+// process the run started is touched, by its id.
+test("the Word windows a run starts go to the back of the z-order, never minimized", () => {
+  const code = (src) => src.replace(/^\s*#.*$/gm, "");
+  const back = code(read("../scripts/e2e/word-back.ps1"));
+  // HWND_BOTTOM (1), SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE (0x13).
+  assert.match(back, /SetWindowPos\(\$h, \[System\.IntPtr\]1, 0, 0, 0, 0, 0x13\)/);
+  assert.doesNotMatch(back, /ShowWindow|CloseMainWindow|Stop-Process|SW_MIN|SetForegroundWindow/i);
+  // No list of every Word: one process, by the id it was given.
+  assert.doesNotMatch(back, /Get-Process\s+WINWORD/i);
+  assert.match(back, /Get-Process -Id \$WatchProcessId/);
+  for (const name of ["word-launch.ps1", "word-own.ps1"]) {
+    const src = code(read(`../scripts/e2e/${name}`));
+    assert.match(src, /\. \(Join-Path \$PSScriptRoot "word-back\.ps1"\)/, name);
+    assert.match(src, /SendWordToBack \$p\.Id/, name);
+    assert.match(src, /StartWordBackWatch \$p\.Id/, name);
+  }
+  // Only once this run's own Word is known: not a Word that ran before.
+  assert.match(
+    code(read("../scripts/e2e/word-launch.ps1")),
+    /if \(-not \$p\.HasExited -and \$before -notcontains \$p\.Id\) \{\s*\. \(Join-Path/,
+  );
+  for (const runner of [
+    "replay.mjs",
+    "run-acceptance.mjs",
+    "marked-diff-word-check.mjs",
+    "word-math-probe.mjs",
+  ])
+    assert.match(read(`../scripts/e2e/${runner}`), /"word-back\.ps1"/, runner);
+});
+
 // Parse check of the changed PowerShell scripts. No Word: the parser only
 // reads the files. Runs where powershell.exe is reachable (WSL on Windows).
 const winPs = (() => {
   try {
-    execFileSync("powershell.exe", ["-NoProfile", "-Command", "exit 0"], { stdio: "ignore" });
+    execWithInteropRetry(
+      () => execFileSync("powershell.exe", ["-NoProfile", "-Command", "exit 0"], { stdio: "pipe" }),
+      { what: "powershell.exe", log: () => {} },
+    );
     return true;
   } catch {
     return false;
@@ -1284,35 +1321,36 @@ test(
   "the changed PowerShell scripts parse",
   { skip: !winPs && "powershell.exe not reachable" },
   () => {
-    for (const name of ["word-rot.ps1", "word-own.ps1", "word-com.ps1", "replay-save.ps1"]) {
-      const file = execFileSync(
+    // powershell.exe started from WSL can fail to start under load
+    // (UtilAcceptVsock accept4 failed 110): tried once more (wsl-interop.mjs).
+    const ps = (command) =>
+      execWithInteropRetry(
+        () =>
+          execFileSync("powershell.exe", ["-NoProfile", "-Command", command], { encoding: "utf8" }),
+        { what: "powershell.exe", log: () => {} },
+      ).trim();
+    const win = (name) =>
+      execFileSync(
         "wslpath",
         ["-w", fileURLToPath(new URL(`../scripts/e2e/${name}`, import.meta.url))],
         { encoding: "utf8" },
       ).trim();
-      const out = execFileSync(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-Command",
-          `$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('${file}', [ref]$null, [ref]$e); ($e | ForEach-Object { $_.Message }) -join '; '`,
-        ],
-        { encoding: "utf8" },
-      ).trim();
+    for (const name of [
+      "word-rot.ps1",
+      "word-own.ps1",
+      "word-com.ps1",
+      "replay-save.ps1",
+      "word-back.ps1",
+      "word-launch.ps1",
+    ]) {
+      const out = ps(
+        `$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('${win(name)}', [ref]$null, [ref]$e); ($e | ForEach-Object { $_.Message }) -join '; '`,
+      );
       assert.equal(out, "", `${name}: ${out}`);
     }
-    // The C# of word-rot.ps1 compiles. Dot-sourcing it only adds the type:
-    // Find is not called, nothing is started.
-    const rot = execFileSync(
-      "wslpath",
-      ["-w", fileURLToPath(new URL("../scripts/e2e/word-rot.ps1", import.meta.url))],
-      { encoding: "utf8" },
-    ).trim();
-    const typed = execFileSync(
-      "powershell.exe",
-      ["-NoProfile", "-Command", `. '${rot}'; [bool]('SwRot' -as [type])`],
-      { encoding: "utf8" },
-    ).trim();
-    assert.equal(typed, "True");
+    // The C# of word-rot.ps1 and word-back.ps1 compiles. Dot-sourcing them
+    // only adds the types: nothing is called, no window or Word is touched.
+    assert.equal(ps(`. '${win("word-rot.ps1")}'; [bool]('SwRot' -as [type])`), "True");
+    assert.equal(ps(`. '${win("word-back.ps1")}'; [bool]('SwBack.User32' -as [type])`), "True");
   },
 );

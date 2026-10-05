@@ -686,6 +686,7 @@ async function setup() {
     "word-com.ps1",
     "word-own.ps1",
     "word-rot.ps1",
+    "word-back.ps1",
     "word-launch.ps1",
     "word-shot.ps1",
   ])

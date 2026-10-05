@@ -321,6 +321,43 @@ test("invariantReport: one comment per change, rejected insertions excepted", ()
   );
 });
 
+// A change whose comment Word refused while minimized (CommentWaitingForWord)
+// waits for Word; the Review tab adds it. Not a mismatch, named apart.
+test("invariantReport: a comment waiting for Word is named apart and is no MISMATCH", () => {
+  const rev = {
+    comments: [
+      {
+        ref: "R2.1",
+        changes: [
+          { id: "R2.1-1", kind: "replace", state: "pending", word_comment_id: "8" },
+          {
+            id: "R2.1-2",
+            kind: "insert",
+            state: "pending",
+            word_comment_id: null,
+            comment_missing: "CommentWaitingForWord",
+          },
+        ],
+      },
+    ],
+  };
+  const r = view.invariantReport(rev, [{ id: "8", content: "[R2.1] beacon / b / c" }]);
+  assert.deepEqual(
+    [r.ok, r.expected_comments, r.uncommented, r.waiting, r.missing_comment],
+    [true, 1, [], ["R2.1-2"], []],
+  );
+  assert.equal(view.invariantText(r), " (rationale comment waiting for Word on R2.1-2).");
+  assert.deepEqual(
+    view.waitingForWord(rev).map((ch) => ch.id),
+    ["R2.1-2"],
+  );
+  assert.equal(
+    view.waitingNotice(3),
+    "Word is minimized or not ready: 3 rationale comments are waiting. Open the Word window and they will be added.",
+  );
+  assert.equal(view.waitingNotice(0), "");
+});
+
 test("ledgerItemFromForm builds regex and llm items and rejects bad input", () => {
   assert.deepEqual(
     view.ledgerItemFromForm({

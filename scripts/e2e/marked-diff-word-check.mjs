@@ -158,7 +158,7 @@ const anchor = path.join(RUN, "anchor.docx");
 fs.copyFileSync(path.join(made[0].dir, "clean.docx"), anchor);
 const ps1 = path.join(RUN, "tools", "marked-diff-word.ps1");
 fs.copyFileSync(path.join(HERE, "marked-diff-word.ps1"), ps1);
-for (const f of ["word-own.ps1", "word-rot.ps1"])
+for (const f of ["word-own.ps1", "word-rot.ps1", "word-back.ps1"])
   fs.copyFileSync(path.join(HERE, f), path.join(RUN, "tools", f));
 const jobsFile = path.join(RUN, "jobs.json");
 const outFile = path.join(RUN, "word.json");

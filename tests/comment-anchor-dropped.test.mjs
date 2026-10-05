@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { paragraphHash } from "../daemon/doc-diff.mjs";
-import { wordsAround } from "../taskpane/shared/review-view.js";
+import { anchorQueries, wordsAround } from "../taskpane/shared/review-view.js";
 
 // A fake Word paragraph list whose text changes with an edit. pending:
 // [start, end) of the paragraph text that is a pending tracked insertion.
@@ -37,8 +37,10 @@ function fakeDoc(paras, { pending = null } = {}) {
         ),
       ),
     insertText(s) {
-      const inside = pending && start >= pending[0] && start + q.length <= pending[1];
-      const kept = inside ? "" : q;
+      // The part of the old words inside the pending insertion is dropped;
+      // the rest stays (tracked deleted).
+      const out = (n) => !pending || start + n < pending[0] || start + n >= pending[1];
+      const kept = [...q].filter((_, n) => out(n)).join("");
       p.text = p.text.slice(0, start) + s + kept + p.text.slice(start + q.length);
       return range(p, start, s);
     },
@@ -151,13 +153,77 @@ test("controls: words around the place found more than once give no comment, as 
     expected_before_hash: paragraphHash(twice),
   });
   assert.deepEqual([r.ok, state.comments.map((c) => c.on)], [true, ["bearings with steel plates"]]);
-  // Up to three words on each side are there twice: no comment somewhere else.
+  // Up to three words on each side, joined, are there twice: the words on
+  // one side that are there once take it (five words before the place,
+  // from the end of the first sentence), never a place that is there twice.
   const first = "Crews fitted it with steel plates there. ";
   const same = `${first}Crews fitted it with thick steel plates there.`;
   ({ state } = fakeDoc(["Title", same], { pending: [first.length, same.length] }));
   r = await toolTrackedEdit({ ...edit("thick ", ""), expected_before_hash: paragraphHash(same) });
   assert.deepEqual(
-    [r.ok, r.code, r.applied, state.comments.length],
-    [false, "CommentAnchorMissing", true, 0],
+    [r.ok, state.comments.map((c) => c.on)],
+    [true, ["there. Crews fitted it with"]],
+  );
+});
+
+// Replay of 2026-10-05, change R6.5-11: a deletion that took a sibling's
+// pending insertion and the words before it. Word dropped the inserted
+// words and kept the others as tracked deleted text, so the words on the two
+// sides of the place were not next to each other and no joined text was
+// found: CommentAnchorMissing. The words on one side are. Invented text.
+const LEAD = "Spans were checked (Fig. 2A). ";
+const OLD = "This repair ";
+const NEW = "keeps the deck level";
+const TAIL = "restores the load path. Loads were logged (Fig. 2A).";
+const SHAPE = LEAD + OLD + NEW + TAIL;
+const NEW_AT = [LEAD.length + OLD.length, LEAD.length + OLD.length + NEW.length];
+
+test("anchorQueries: joined words first, then one side, then the first words of the paragraph", () => {
+  const q = anchorQueries(SHAPE, OLD + NEW, OLD + NEW);
+  assert.deepEqual(q.slice(0, 5), [
+    "2A). restores",
+    "(Fig. 2A). restores the",
+    "checked (Fig. 2A). restores the load",
+    "2A).",
+    "restores",
+  ]);
+  assert.equal(q.at(-1), "Spans were checked (Fig. 2A). This repair keeps");
+  assert.equal(new Set(q).size, q.length);
+  assert.ok(q.every((t) => t && t.length <= 255));
+  assert.deepEqual(anchorQueries(SHAPE, "absent", "absent"), []);
+});
+
+test("a deletion of kept words and a pending insertion gets its comment on one side of its place", async () => {
+  const { state, items } = fakeDoc(["Title", SHAPE], { pending: NEW_AT });
+  const r = await toolTrackedEdit({
+    ...edit(OLD + NEW, ""),
+    expected_before_hash: paragraphHash(SHAPE),
+  });
+  assert.equal(items[1].text, LEAD + OLD + TAIL, "Word dropped the inserted words, kept the rest");
+  // "2A)." is there twice; the first word after the place is there once.
+  assert.deepEqual([r.ok, r.code, r.word_comment_id], [true, undefined, "C1"]);
+  assert.deepEqual(
+    state.comments.map((c) => [c.content, c.on]),
+    [[COMMENT, "restores"]],
+  );
+});
+
+test("a deletion with no words of its paragraph there once gets its comment on the paragraph", async () => {
+  // Two sentences the same once the dropped word is gone; six words on
+  // either side of the place and the first eight words of the paragraph
+  // stay inside one of them.
+  const first =
+    "Crews fitted it with new and very good steel plates near the old pier on the north side. ";
+  const same = `${first}Crews fitted it with new and very good steel thick plates near the old pier on the north side.`;
+  const { state } = fakeDoc(["Title", same], { pending: [first.length, same.length] });
+  const r = await toolTrackedEdit({
+    ...edit("thick ", ""),
+    expected_before_hash: paragraphHash(same),
+  });
+  assert.deepEqual([r.ok, r.word_comment_id], [true, "C1"]);
+  assert.deepEqual(
+    state.comments.map((c) => c.on),
+    [null],
+    "on the paragraph range",
   );
 });

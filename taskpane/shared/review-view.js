@@ -49,6 +49,32 @@ export function computeAfterText(before, find, { replace, insert_after } = {}) {
   return { error: "give replace or insert_after" };
 }
 
+// What Word answers on Range.insertComment while its window is minimized or
+// not ready (run e2e-20261005-151048: every comment of a minimized Word, the
+// tracked edit itself applied). Tried again at once it fails the same way.
+export const COMMENT_ACCESS_DENIED = "AccessDenied";
+// The code of a change applied whose comment Word refused that way: the
+// Review tab keeps it waiting and adds it once Word takes comments again
+// (review-pane.js addWaitingComments).
+export const COMMENT_WAITING = "CommentWaitingForWord";
+// A thrown error of a comment step, or the error as commentError described
+// it, is Word refusing the comment insert with AccessDenied.
+export const isCommentAccessDenied = (e) =>
+  (e?.code ?? e?.debugInfo?.code) === COMMENT_ACCESS_DENIED;
+
+// The changes of a revision whose rationale comment waits for Word (applied,
+// no comment id, COMMENT_WAITING).
+export const waitingForWord = (revision) =>
+  (revision?.comments ?? [])
+    .flatMap((c) => c.changes ?? [])
+    .filter((ch) => ch.word_comment_id == null && ch.comment_missing === COMMENT_WAITING);
+
+// The notice of the Review tab while such comments wait ("" when none).
+export const waitingNotice = (n) =>
+  n > 0
+    ? `Word is minimized or not ready: ${n} rationale comment${n === 1 ? " is" : "s are"} waiting. Open the Word window and they will be added.`
+    : "";
+
 // The words around the place of a deletion, as the paragraph reads once it
 // is made: up to k words before it and k words after it, joined (the
 // rationale comment of a deletion whose words Word dropped goes on them,
@@ -57,6 +83,14 @@ export function computeAfterText(before, find, { replace, insert_after } = {}) {
 // that was deleted (find itself, or the narrowed find). "" when find or cut
 // is not found, or nothing stands around the place.
 export function wordsAround(before, find, cut, k) {
+  const s = sidesOf(before, find, cut);
+  return s ? (s.left.slice(-k).join("") + s.right.slice(0, k).join("")).trim() : "";
+}
+
+// The words of the paragraph before the place of a deletion and after it
+// (left: "word " pieces, right: " word" pieces), or null when find or cut
+// is not found.
+function sidesOf(before, find, cut) {
   const b = normalizeParaText(before);
   const one = (s) =>
     String(s ?? "")
@@ -66,10 +100,42 @@ export function wordsAround(before, find, cut, k) {
   const c = one(cut);
   const i = f.trim() ? b.indexOf(f) : -1;
   const j = c.trim() ? f.indexOf(c) : -1;
-  if (i === -1 || j === -1) return "";
-  const left = (b.slice(0, i + j).match(/\S+\s*/g) ?? []).slice(-k).join("");
-  const right = (b.slice(i + j + c.length).match(/\s*\S+/g) ?? []).slice(0, k).join("");
-  return (left + right).trim();
+  if (i === -1 || j === -1) return null;
+  return {
+    b,
+    left: b.slice(0, i + j).match(/\S+\s*/g) ?? [],
+    right: b.slice(i + j + c.length).match(/\s*\S+/g) ?? [],
+  };
+}
+
+// Where the rationale comment of a deletion whose old words are not found
+// may go, in the order tried: the texts to search for in the paragraph
+// (tools-word.js toolTrackedEdit takes the first one found exactly once).
+//   1. 1 to 3 words on each side of the place, joined (wordsAround).
+//   2. 1 to 6 words on one side only, before the place first. Joined
+//      neighbours are not next to each other when only part of the deletion
+//      was dropped: the words of it outside the pending insertion stay as
+//      tracked deleted text between them (replay of 2026-10-05, change
+//      R6.5-11: a deletion that took a sibling's pending insertion and the
+//      words before it).
+//   3. The first 2 to 8 words of the paragraph.
+// Each text at most 255 characters (Word search), none twice.
+export function anchorQueries(before, find, cut) {
+  const s = sidesOf(before, find, cut);
+  if (!s) return [];
+  const out = [];
+  const add = (q) => {
+    const t = q.trim();
+    if (t && t.length <= 255 && !out.includes(t)) out.push(t);
+  };
+  for (let k = 1; k <= 3; k++) add(s.left.slice(-k).join("") + s.right.slice(0, k).join(""));
+  for (let k = 1; k <= 6; k++) {
+    if (k <= s.left.length) add(s.left.slice(-k).join(""));
+    if (k <= s.right.length) add(s.right.slice(0, k).join(""));
+  }
+  const words = s.b.match(/\S+\s*/g) ?? [];
+  for (let k = 2; k <= Math.min(8, words.length); k++) add(words.slice(0, k).join(""));
+  return out;
 }
 
 // `[\s>/]` after the name excludes w:instrText, w:delText, w:delInstrText.
@@ -349,8 +415,12 @@ export function invariantReport(revision, comments) {
   // (comment_missing, no comment id) never had one: it is not a comment that
   // went missing, and it is named apart. It is not ok either: every change
   // needs its rationale comment.
+  // One whose comment Word refused while minimized or not ready
+  // (COMMENT_WAITING) is waiting, not missing: the Review tab adds it when
+  // Word takes comments again. It is named apart and expects no comment yet.
   const bare = (ch) => ch.word_comment_id == null && !!ch.comment_missing;
-  const uncommented = expected.filter(bare);
+  const waits = (ch) => bare(ch) && ch.comment_missing === COMMENT_WAITING;
+  const uncommented = expected.filter((ch) => bare(ch) && !waits(ch));
   const missing = expected.filter((ch) => !bare(ch) && !ids.has(String(ch.word_comment_id)));
   const orphans = [...ids].filter((id) => !recorded.has(id));
   // The parts of a rewritten paragraph share one comment: comments are
@@ -364,6 +434,7 @@ export function invariantReport(revision, comments) {
     tool_comments: ids.size,
     missing_comment: missing.map((ch) => ch.id),
     uncommented: uncommented.map((ch) => ch.id),
+    waiting: expected.filter(waits).map((ch) => ch.id),
     unrecorded_comment_ids: orphans,
     ok:
       wanted === ids.size &&
@@ -377,7 +448,10 @@ export function invariantReport(revision, comments) {
 // what does not match. The word MISMATCH stays in every such line (the
 // acceptance judge reads it).
 export function invariantText(inv) {
-  if (inv.ok) return ".";
+  const waiting = inv.waiting?.length
+    ? `rationale comment waiting for Word on ${inv.waiting.join(",")}`
+    : "";
+  if (inv.ok) return waiting ? ` (${waiting}).` : ".";
   const parts = [];
   if (inv.missing_comment.length || inv.unrecorded_comment_ids.length || !inv.uncommented.length) {
     parts.push(
@@ -389,7 +463,7 @@ export function invariantText(inv) {
       `no rationale comment on ${inv.uncommented.join(",")}: applied in Word, the comment could not be added`,
     );
   }
-  return ` (MISMATCH: ${parts.join("; ")})`;
+  return ` (MISMATCH: ${parts.join("; ")})${waiting ? ` (${waiting})` : ""}`;
 }
 
 // What the author should do next, after a status refresh, in one sentence.

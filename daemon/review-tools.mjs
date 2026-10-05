@@ -589,7 +589,10 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     if (!r) return fail("empty result from the task pane", { code: "EmptyResult" });
     // applied:true with ok:false: the task pane changed the document but could
     // not add the rationale comment (CommentAnchorMissing: no range to anchor
-    // it; CommentInsertFailed: a step after the edit threw). The change is
+    // it; CommentInsertFailed: a step after the edit threw;
+    // CommentWaitingForWord: Word refused the comment insert with
+    // AccessDenied, minimized or not ready, and the task pane adds it when
+    // Word takes it). The change is
     // still recorded, with no comment id, so the change list and the
     // "changes == rationale comments" check show it instead of losing it.
     const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
@@ -1140,6 +1143,20 @@ const hasTwin = (texts, before) => {
   return !!b && (texts ?? []).filter((t) => normalizeParaText(t) === b).length > 1;
 };
 
+// One failed comment step of the task pane (tools-word.js commentError) as
+// the words of a log line: step, Word's code and place, message, and what
+// Word said more (debugInfo message, inner error) and whether the task pane
+// was hidden, when the task pane sent them. No text of the manuscript.
+export function commentErrorWords(e) {
+  const one = (v, n) => String(v).replace(/\s+/g, " ").slice(0, n);
+  return (
+    `step=${e?.step ?? "-"} word=${e?.code ?? "-"} at=${e?.location ?? "-"} msg=${one(e?.message ?? "-", 200)}` +
+    (e?.debug_message ? ` debug=${one(e.debug_message, 200)}` : "") +
+    (e?.inner ? ` inner=${one(e.inner, 100)}` : "") +
+    (typeof e?.hidden === "boolean" ? ` hidden=${e.hidden ? 1 : 0}` : "")
+  );
+}
+
 // Record a result the task pane reported as applied (ok, or applied without
 // its rationale comment) and build the tool answer.
 async function recordApplied(
@@ -1191,6 +1208,11 @@ async function recordApplied(
     from_review: fromReview,
     narrowed_from: narrowed ? { find: find, text: newText } : null,
     comment_missing: commentMissing,
+    // Why it is missing, when Word said: the last failed try of the task
+    // pane (commentErrorWords), so the review file tells it too.
+    ...(commentMissing && Array.isArray(r.comment_errors) && r.comment_errors.length
+      ? { comment_error: commentErrorWords(r.comment_errors.at(-1)) }
+      : {}),
     duplicate_before: hasTwin(texts, r.before),
     // Words around the range the task pane changed (revision-classify.mjs).
     context: changeContext(r.before, find, {
@@ -1239,13 +1261,12 @@ async function recordApplied(
     );
   }
   // What Word answered when the comment step failed (tools-word.js
-  // afterEditApplied): logged only. Without it nothing says why a change has
-  // no rationale comment. One line per failed try, no text of the manuscript.
+  // afterEditApplied): one line per failed try, no text of the manuscript;
+  // the last one also on the change (comment_error) when no try worked.
+  // Without it nothing says why a change has no rationale comment.
   const commentErrors = Array.isArray(r.comment_errors) ? r.comment_errors : [];
   commentErrors.forEach((e, n) =>
-    deps.log?.(
-      `[review] comment error ${id} try=${n + 1} step=${e?.step ?? "-"} word=${e?.code ?? "-"} at=${e?.location ?? "-"} msg=${String(e?.message ?? "-").slice(0, 200)}`,
-    ),
+    deps.log?.(`[review] comment error ${id} try=${n + 1} ${commentErrorWords(e)}`),
   );
   if (!commentMissing && commentErrors.length) {
     deps.log?.(`[review] comment added on try ${r.comment_attempts ?? "?"} ${id}`);
@@ -1266,11 +1287,15 @@ async function recordApplied(
       ? [
           `The change is in the document, but it did not leave a citation or another field of its paragraph whole (${r.detail ?? "field changed"}) and Word could not take it back. Do not repeat it and do not try to repair it with another edit; tell the author to reject change ${id} in Word. It has no rationale comment.`,
         ]
-      : commentMissing
+      : commentMissing === "CommentWaitingForWord"
         ? [
-            `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,
+            `The change was applied; Word could not take its rationale comment now (the Word window is minimized or not ready). The task pane adds it when the Word window is open. Do not repeat this edit; tell the author that the rationale comment of change ${id} is waiting for the Word window to be opened.`,
           ]
-        : []),
+        : commentMissing
+          ? [
+              `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,
+            ]
+          : []),
     ...(unsourced.length
       ? [
           `Not in the manuscript or the comment: ${unsourced.join(", ")}. Name them in your answer so the author can check where they come from.`,

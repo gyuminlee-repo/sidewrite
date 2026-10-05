@@ -8,7 +8,11 @@
 # environment variable is written. A separate user data folder keeps the pane
 # out of the WebView2 browser process of any Word that is already running.
 # /n starts a new Word instance even when Word is already open.
-# Prints one JSON line: { pid, preexisting, exe, port, user_data_folder }.
+# Once its window is there, the window of this Word (only this process) is
+# sent behind the user's windows without taking the focus, and kept there
+# by a hidden watch until it exits (word-back.ps1). It is never minimized.
+# Prints one JSON line: { pid, preexisting, exe, port, user_data_folder,
+# back (sent to the back once), back_watch (pid of the watch, 0 if none) }.
 param(
   [Parameter(Mandatory = $true)][string]$DocPath,
   [Parameter(Mandatory = $true)][int]$Port,
@@ -31,6 +35,13 @@ while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
   Start-Sleep -Milliseconds 500
   $p.Refresh()
 }
+$back = $false
+$watch = 0
+if (-not $p.HasExited -and $before -notcontains $p.Id) {
+  . (Join-Path $PSScriptRoot "word-back.ps1")
+  $back = SendWordToBack $p.Id
+  $watch = StartWordBackWatch $p.Id
+}
 $out = [ordered]@{
   pid = $p.Id
   exited = $p.HasExited
@@ -38,5 +49,7 @@ $out = [ordered]@{
   exe = $exe
   port = $Port
   user_data_folder = $UserDataFolder
+  back = [bool]$back
+  back_watch = $watch
 }
 $out | ConvertTo-Json -Compress
