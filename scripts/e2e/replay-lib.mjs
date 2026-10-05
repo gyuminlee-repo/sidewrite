@@ -484,3 +484,33 @@ export function summaryText(
   if (responses !== null) lines.push(`responses drafted: ${responses}`);
   return `${lines.join("\n")}\n`;
 }
+
+// A Word window that shows no document of the user: a new blank document
+// ("Document1 - Word", "문서1 - Word") or no window at all.
+export const blankWordTitle = (title) =>
+  !String(title ?? "").trim() || /^(?:Document|문서)\s*\d+ - Word$/.test(String(title).trim());
+
+// New WINWORD processes after one step of the run: in after, not in before
+// (both { pid, started, title } lists taken right around the step), and not
+// the process the step itself started and quits (own).
+export const newWords = (before, after, own = null) =>
+  after.filter((p) => p.pid !== own && !before.some((b) => b.pid === p.pid));
+
+// PID deltas, start times and window titles cannot prove ownership. Strays
+// are report-only, including a user-created blank Word opened during a step.
+export function sweepSelection({ processes = [], strays = [], preexisting = [], keep = [] }) {
+  const close = [];
+  const skip = [];
+  for (const p of processes) {
+    const stray = strays.some((s) => s.pid === p.pid && s.started && s.started === p.started);
+    const why = preexisting.includes(p.pid)
+      ? "ran before the run"
+      : keep.includes(p.pid)
+        ? "kept by the run"
+        : !stray
+          ? "left open: not started by this run"
+          : "left open: ownership unproven";
+    skip.push({ ...p, reason: why });
+  }
+  return { close, skip };
+}

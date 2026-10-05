@@ -67,7 +67,7 @@ function wordPids(when) {
 }
 
 // 1. Word.
-for (const name of ["word-math-probe.ps1", "word-own.ps1"]) {
+for (const name of ["word-math-probe.ps1", "word-own.ps1", "word-rot.ps1"]) {
   fs.copyFileSync(path.join(HERE, name), path.join(RUN, "tools", name));
 }
 const anchor = path.join(RUN, "anchor.docx");

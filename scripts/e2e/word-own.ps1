@@ -3,11 +3,13 @@
 #
 # StartOwnWord starts Word (/n: a new instance even when Word is already
 # open) on one anchor document of the run folder and finds that document
-# through the Running Object Table by its full path (as word-com.ps1 does).
+# in the Running Object Table by its full path (word-rot.ps1).
 # A Word that was already open, and its documents, are never touched:
 # AssertOwnWord lets the Application be used only when it is the process
 # this run started and every document open in it is under $AllowDir, and
 # QuitOwnWord quits Word only under the same two conditions.
+
+. (Join-Path $PSScriptRoot "word-rot.ps1")
 
 function Line($o) { $o | ConvertTo-Json -Depth 10 -Compress }
 function Under([string]$path) {
@@ -30,7 +32,9 @@ function OpenReadOnly($app, [string]$path) {
 }
 
 # The process that owns a Word Application, from its window. 0 when it cannot be read.
-Add-Type -Namespace MdwNative -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);'
+if (-not ("MdwNative.User32" -as [type])) {
+  Add-Type -Namespace MdwNative -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);'
+}
 function AppProcessId($app) {
   try {
     [uint32]$owner = 0
@@ -65,11 +69,14 @@ function StartOwnWord([string]$Anchor, [string]$PidFile, [int]$WaitSeconds) {
   # The window is there before the document is registered: give it a moment.
   Start-Sleep -Seconds 3
 
+  # Read from the Running Object Table only (word-rot.ps1): a bind by path
+  # that runs before this Word has registered the anchor starts a Word of
+  # its own, which nothing here would track or quit.
   $d = $null
   while (-not $d -and (Get-Date) -lt $deadline) {
     try {
-      $d = [System.Runtime.InteropServices.Marshal]::BindToMoniker($Anchor)
-      if ([string]$d.FullName -ne $Anchor) { $d = $null }
+      $d = [SwRot]::Find($Anchor)
+      if ($d -and [string]$d.FullName -ne $Anchor) { $d = $null }
     } catch { $d = $null }
     if (-not $d) { Start-Sleep -Milliseconds 500 }
   }
@@ -80,7 +87,7 @@ function StartOwnWord([string]$Anchor, [string]$PidFile, [int]$WaitSeconds) {
 # Throws unless the Application is the Word this run started and holds only documents of the run folder.
 function AssertOwnWord($app, $p) {
   $owner = AppProcessId $app
-  if ($owner -ne 0 -and $owner -ne $p.Id) { throw "the anchor document is open in another Word (process $owner), not in the one this run started ($($p.Id))" }
+  if ($owner -le 0 -or $p.Id -le 0 -or $owner -ne $p.Id) { throw "the anchor document ownership is unknown or mismatched (process $owner), expected ($($p.Id))" }
   $outside = @((OpenNames $app) | Where-Object { -not (Under $_) })
   if ($outside.Count -gt 0) { throw "the Word this run reached has other documents open" }
 }
@@ -90,6 +97,10 @@ function AssertOwnWord($app, $p) {
 # Returns what happened: { ok, documents, pid, exited } or { ok = false, ... }.
 function QuitOwnWord($app, $d, $p, [bool]$ours) {
   try {
+    $owner = AppProcessId $app
+    if ($owner -le 0 -or $p.Id -le 0 -or $owner -ne $p.Id) {
+      return [ordered]@{ ok = $false; refused = "ownership_unproven"; pid = $p.Id; actual_pid = $owner }
+    }
     $names = OpenNames $app
     $outside = @($names | Where-Object { -not (Under $_) })
     if (-not $ours -or $outside.Count -gt 0) {

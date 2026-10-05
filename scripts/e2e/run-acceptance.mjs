@@ -665,11 +665,18 @@ async function propose(ref, label) {
 // Both flows: the run folder, the daemon, a Word of its own on the copy.
 async function setup() {
   fs.mkdirSync(TOOLS, { recursive: true });
-  for (const f of ["pane-driver.cjs", "word-com.ps1", "word-launch.ps1", "word-shot.ps1"])
+  for (const f of [
+    "pane-driver.cjs",
+    "word-com.ps1",
+    "word-own.ps1",
+    "word-rot.ps1",
+    "word-launch.ps1",
+    "word-shot.ps1",
+  ])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   // Stage cite: a Word of its own for accept-all and reject-all.
   if (STAGE === "cite")
-    for (const f of ["word-own.ps1", "marked-diff-word.ps1"])
+    for (const f of ["marked-diff-word.ps1"])
       fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   if (opt["figures-button"])
     fs.copyFileSync(
@@ -2381,8 +2388,8 @@ async function mainParts() {
   // The supplement as saved with its changes still pending. Word cannot
   // reject a change it has accepted, so row l puts this file back first.
   const pendingCopy = path.join(partsDir, "SI.pending.docx");
-  // word-com.ps1 finds a document by BindToMoniker, which would load a
-  // closed file: nothing is asked of the supplement while it is closed.
+  // word-com.ps1 finds only a document that is open (word-rot.ps1) and
+  // refuses a closed one: nothing is asked of the supplement while it is closed.
   // open-edit and close-other are asked of the manuscript, which stays open.
   const NOT_OPEN = { ok: false, error: `not tried: ${names.si} is not open in Word` };
   const openSi = () => tryCom("open-edit", ["-Other", winPath(SI_DOC), "-AllowDir", winPath(RUN)]);

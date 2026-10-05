@@ -4,6 +4,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
+import path from "node:path";
+import { cleanupDecision } from "../scripts/e2e/judge.mjs";
 import {
   changesReport,
   extractBatchesFromLog,
@@ -21,12 +26,73 @@ import {
   responsesReport,
   ruleLines,
   summaryText,
+  sweepSelection,
+  newWords,
+  blankWordTitle,
   turnFromLog,
   turnResult,
 } from "../scripts/e2e/replay-lib.mjs";
 import { LedgerItemSchema } from "../daemon/revision-store.mjs";
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+
+test("replay: refused, unknown and lingering quits never terminate Word", () => {
+  const runner = read("../scripts/e2e/replay.mjs");
+  const source = runner.slice(
+    runner.indexOf("function quitWord("),
+    runner.indexOf("function withStrays("),
+  );
+  for (const quit of [
+    { ok: false, refused: "foreign_documents", outside: ["C:\\user\\notes.docx"] },
+    { ok: false, refused: "ownership_unproven" },
+    { ok: false, error: "COM timeout" },
+    { ok: true, documents: ["C:\\run\\anchor.docx"], exited: false },
+    { ok: true, documents: ["C:\\run\\anchor.docx"], exited: true },
+  ]) {
+    const record = { word: { preexisting: [] }, cleanup: {} };
+    runInNewContext(`${source}; quitWord(42);`, {
+      record,
+      cleanupDecision,
+      DOC: "anchor.docx",
+      RUN: "C:\\run",
+      winPath: (p) => p,
+      powershell: () => quit,
+      wordPids: () => (quit.exited ? [] : [42]),
+      execFileSync: () => assert.fail("process termination attempted"),
+      console: { error() {} },
+    });
+    assert.equal(!!record.cleanup.failed, !quit.exited);
+    assert.equal(record.cleanup.left_running?.pid, quit.exited ? undefined : 42);
+    assert.equal(record.cleanup.quit, quit);
+  }
+});
+
+test("replay: an open-check quit refusal survives without a stop fallback", () => {
+  const runner = read("../scripts/e2e/replay.mjs");
+  const source = runner.slice(
+    runner.indexOf("function wordOpens("),
+    runner.indexOf("const embed ="),
+  );
+  const refused = { ok: true, pid: 42, quit: { ok: false, refused: "foreign_documents" } };
+  const record = { word: {}, cleanup: {} };
+  runInNewContext(`let checks = 0; ${source}; wordOpens("copy.docx");`, {
+    record,
+    RUN: "run",
+    REPO: "repo",
+    path,
+    fs: { existsSync: () => true },
+    winPath: (p) => p,
+    withStrays: (_step, run) => run(),
+    powershell: () => refused,
+    wordPids: () => [42],
+    save() {},
+    console: { error() {} },
+    stopOwn: () => assert.fail("refusal overridden"),
+  });
+  assert.equal(record.cleanup.failed, true);
+  assert.equal(record.word.open_checks[0].quit.refused, "foreign_documents");
+  assert.equal(record.word.open_checks[0].left_running.pid, 42);
+});
 
 test("--only: a list of refs, or nothing; anything else is refused", () => {
   assert.deepEqual(parseOnly(undefined), []);
@@ -962,7 +1028,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // The copy is saved only by the script that checks the folder, and Word is
   // closed only through the quit of word-com.ps1.
   const save = read("../scripts/e2e/replay-save.ps1");
-  assert.match(save, /BindToMoniker/);
+  assert.match(save, /\$d = \[SwRot\]::Find\(\$Doc\)/);
   assert.match(save, /StartsWith\(\$allow/);
   assert.ok(save.indexOf("StartsWith($allow") < save.indexOf("$d.Save()"));
   // eslint-disable-next-line no-control-regex
@@ -1041,3 +1107,212 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   for (const src of [runner, extra, save, read("../scripts/e2e/replay-compare.py")])
     assert.doesNotMatch(src, /\/mnt\/[a-z]\/|[A-Z]:\\\\(?!Program Files)/);
 });
+
+// The sweep at the end of a run. Pids, times and titles are invented.
+const word = (pid, started, title = "Document1 - Word") => ({ pid, started, title });
+const T = "2026-10-05T10:05:00.1234567Z";
+
+test("sweep: a concurrent user-created blank Word recorded as a stray survives", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(4172, T), word(900, "2026-10-05T09:00:00Z", "thesis.docx - Word")],
+    strays: newWords([word(900, T)], [word(900, T), word(4172, T)]),
+    preexisting: [900],
+  });
+  assert.deepEqual(
+    close.map((p) => p.pid),
+    [],
+  );
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [
+      [4172, "left open: ownership unproven"],
+      [900, "ran before the run"],
+    ],
+  );
+  // Korean Word, and a stray with no window at all.
+  assert.equal(
+    sweepSelection({ processes: [word(5, T, "문서1 - Word")], strays: [word(5, T)] }).close.length,
+    0,
+  );
+  assert.equal(
+    sweepSelection({ processes: [word(6, T, "")], strays: [word(6, T)] }).close.length,
+    0,
+  );
+});
+
+test("sweep: a Word that ran before the run is never closed, also when it is a stray", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(4172, T)],
+    strays: [word(4172, T)],
+    preexisting: [4172],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => p.reason),
+    ["ran before the run"],
+  );
+});
+
+test("sweep: a Word that started during the run but is no recorded stray is left open", () => {
+  // The user opened Word during the run, also a blank one: not the run's.
+  const { close, skip } = sweepSelection({
+    processes: [word(7, T), word(8, T, "notes.docx - Word")],
+    strays: [],
+    preexisting: [],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [
+      [7, "left open: not started by this run"],
+      [8, "left open: not started by this run"],
+    ],
+  );
+});
+
+test("sweep: a stray whose title names a real document is left open", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(9, T, "thesis.docx - Word"), word(10, T, "Document1 notes - Word")],
+    strays: [word(9, T), word(10, T)],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [
+      [9, "left open: ownership unproven"],
+      [10, "left open: ownership unproven"],
+    ],
+  );
+});
+
+test("sweep: kept, a reused pid or an unknown start time is left open", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(1, T), word(2, "2026-10-05T11:00:00Z"), word(3, null)],
+    strays: [word(1, T), word(2, T), word(3, null)],
+    keep: [1],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [
+      [1, "kept by the run"],
+      [2, "left open: not started by this run"],
+      [3, "left open: not started by this run"],
+    ],
+  );
+});
+
+test("sweep: new Words of a step are the ones not listed before it, without the step's own", () => {
+  const before = [word(900, "2026-10-05T09:00:00Z", "thesis.docx - Word")];
+  const after = [...before, word(21400, T, "anchor.docx - Word"), word(4172, T)];
+  assert.deepEqual(
+    newWords(before, after, 21400).map((p) => p.pid),
+    [4172],
+  );
+  assert.deepEqual(newWords(before, before), []);
+  assert.ok(blankWordTitle("Document12 - Word"));
+  assert.ok(!blankWordTitle("thesis.docx - Word"));
+});
+
+test("replay: the sweep runs last, reports only, and the Word steps record their strays", () => {
+  const runner = read("../scripts/e2e/replay.mjs");
+  const sweep = runner.slice(
+    runner.indexOf("function sweepWord()"),
+    runner.indexOf("// One run of replay-open.ps1"),
+  );
+  assert.doesNotMatch(runner, /CloseMainWindow|Stop-Process|stopOwn/);
+  assert.doesNotMatch(sweep, /Stop-Process|-Force|\.Kill\(|taskkill/);
+  assert.match(sweep, /strays: record\.word\.strays \?\? \[\]/);
+  // The Word kept by --keep-on-fail and one left for a refused quit stay.
+  assert.match(sweep, /record\.cleanup\.kept\?\.word_pid, record\.cleanup\.left_running\?\.pid/);
+  const last = runner.lastIndexOf("sweepWord();");
+  assert.ok(last > runner.lastIndexOf("quitWord(record.word.launch?.pid)"));
+  assert.ok(last < runner.indexOf("record.finished_at ="));
+  // Every step that starts or binds Word is listed around.
+  assert.match(runner, /withStrays\(\s*`open check \$\{checks\}`/);
+  assert.match(runner, /withStrays\(\s*"word launch"/);
+  assert.match(runner, /withStrays\(\s*"save copy"/);
+  assert.equal((runner.match(/withStrays\(/g) ?? []).length, 4);
+  const opens = runner.slice(
+    runner.indexOf("function wordOpens("),
+    runner.indexOf("const embed ="),
+  );
+  assert.ok(opens.indexOf("withStrays(") < opens.indexOf('"replay-open.ps1"'));
+  assert.ok(opens.indexOf("withStrays(") < opens.indexOf("open_checks ??= []"));
+});
+
+// The leak of an open check: BindToMoniker on a document that Word has not
+// registered yet starts a WINWORD of its own. The Word scripts look in the
+// Running Object Table only.
+test("Word scripts find a document in the Running Object Table only, never by a bind that starts Word", () => {
+  const code = (src) => src.replace(/^\s*#.*$/gm, "");
+  for (const name of ["word-own.ps1", "word-com.ps1", "replay-save.ps1"]) {
+    const src = read(`../scripts/e2e/${name}`);
+    assert.doesNotMatch(
+      code(src),
+      /BindToMoniker|GetActiveObject|New-Object\s+-ComObject|CreateObject/i,
+      name,
+    );
+    assert.match(src, /\. \(Join-Path \$PSScriptRoot "word-rot\.ps1"\)/, name);
+    assert.match(code(src), /\[SwRot\]::Find\(/, name);
+  }
+  const rot = read("../scripts/e2e/word-rot.ps1");
+  assert.match(rot, /rot\.EnumRunning/);
+  assert.match(rot, /rot\.GetObject\(/);
+  assert.doesNotMatch(code(rot), /BindToMoniker|CoCreateInstance|BindToObject/);
+  // Every runner that copies a script dot-sourcing word-rot.ps1 copies it too.
+  for (const runner of [
+    "replay.mjs",
+    "run-acceptance.mjs",
+    "marked-diff-word-check.mjs",
+    "word-math-probe.mjs",
+  ])
+    assert.match(read(`../scripts/e2e/${runner}`), /"word-rot\.ps1"/, runner);
+});
+
+// Parse check of the changed PowerShell scripts. No Word: the parser only
+// reads the files. Runs where powershell.exe is reachable (WSL on Windows).
+const winPs = (() => {
+  try {
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", "exit 0"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+test(
+  "the changed PowerShell scripts parse",
+  { skip: !winPs && "powershell.exe not reachable" },
+  () => {
+    for (const name of ["word-rot.ps1", "word-own.ps1", "word-com.ps1", "replay-save.ps1"]) {
+      const file = execFileSync(
+        "wslpath",
+        ["-w", fileURLToPath(new URL(`../scripts/e2e/${name}`, import.meta.url))],
+        { encoding: "utf8" },
+      ).trim();
+      const out = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          `$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('${file}', [ref]$null, [ref]$e); ($e | ForEach-Object { $_.Message }) -join '; '`,
+        ],
+        { encoding: "utf8" },
+      ).trim();
+      assert.equal(out, "", `${name}: ${out}`);
+    }
+    // The C# of word-rot.ps1 compiles. Dot-sourcing it only adds the type:
+    // Find is not called, nothing is started.
+    const rot = execFileSync(
+      "wslpath",
+      ["-w", fileURLToPath(new URL("../scripts/e2e/word-rot.ps1", import.meta.url))],
+      { encoding: "utf8" },
+    ).trim();
+    const typed = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-Command", `. '${rot}'; [bool]('SwRot' -as [type])`],
+      { encoding: "utf8" },
+    ).trim();
+    assert.equal(typed, "True");
+  },
+);

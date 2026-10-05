@@ -70,6 +70,8 @@ import {
   restoredFromLog,
   staysFromLog,
   summaryText,
+  newWords,
+  sweepSelection,
   turnFromLog,
   turnResult,
 } from "./replay-lib.mjs";
@@ -188,6 +190,20 @@ const psList = (cmd) =>
     .map(Number);
 const wordPids = () =>
   psList("(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','");
+// Every WINWORD running now: { pid, started (UTC, ISO; null when Windows does
+// not give it), title }.
+const wordProcesses = () =>
+  JSON.parse(
+    execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        "ConvertTo-Json -Compress -InputObject @(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object { $s = $null; try { $s = $_.StartTime.ToUniversalTime().ToString('o') } catch { $s = $null }; [ordered]@{ pid = $_.Id; started = $s; title = [string]$_.MainWindowTitle } })",
+      ],
+      { encoding: "utf8" },
+    ).trim() || "[]",
+  );
 
 let stepNo = 0;
 function pane(step, args = {}, timeoutMs = 30 * 60_000) {
@@ -281,9 +297,8 @@ async function startDaemon() {
   );
 }
 
-// Close the Word this run started. It is stopped by force only when quit ran
-// and the process stayed; a refused quit (a document outside the run folder
-// is open in it) leaves Word alone (judge.mjs cleanupDecision).
+// Quit through COM with current ownership checks. A failed or refused quit
+// leaves Word running; an old PID does not authorize process termination.
 function quitWord(pid) {
   if (!pid) return;
   let quit;
@@ -317,54 +332,57 @@ function quitWord(pid) {
     runDir: winPath(RUN),
     alive,
   });
-  if (d.action === "kill") {
-    try {
-      execFileSync("powershell.exe", [
-        "-NoProfile",
-        "-Command",
-        `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
-      ]);
-      record.cleanup.stopped_pid = pid;
-    } catch (e) {
-      record.cleanup.stop_error = e.message;
-      console.error(`replay: Word ${pid} could not be stopped: ${e.message}`);
-    }
+  if (d.action === "leave" || (d.action === "kill" && alive)) {
+    record.cleanup.left_running = { pid, reason: d.reason };
+    record.cleanup.failed = true;
+    console.error(`replay: ${d.reason}`);
+  } else {
+    record.cleanup.failed ||= d.fail;
   }
-  if (d.action === "leave" && !quit?.refused) {
-    // Word did not answer the quit at all (a dialog holds it, or COM refused
-    // the call). It is the process this run started, on the copy of this
-    // run: it is stopped, or it would stay behind with the copy locked.
-    record.cleanup.forced = stopOwn(pid);
-    record.cleanup.failed = !record.cleanup.forced;
+}
+
+// A Word step of the run, with the WINWORD processes listed right before and
+// after it. One that came up and is not the step's own Word (own(result)) is
+// recorded in record.word.strays with the step for reporting only.
+function withStrays(step, run, own = () => null) {
+  const before = wordProcesses();
+  let result;
+  try {
+    result = run();
+  } finally {
+    const found = newWords(before, wordProcesses(), own(result)).map((p) => ({ ...p, step }));
+    (record.word.strays ??= []).push(...found);
+    if (result && typeof result === "object") result.strays = found;
+  }
+  return result;
+}
+
+// Report remaining Word processes without closing any unproven stray.
+function sweepWord() {
+  const preexisting = record.word.preexisting;
+  // Without the list of the run's start nothing is provably the run's.
+  if (!Array.isArray(preexisting)) return;
+  const keep = [record.cleanup.kept?.word_pid, record.cleanup.left_running?.pid].filter(Boolean);
+  let sel;
+  try {
+    sel = sweepSelection({
+      processes: wordProcesses(),
+      strays: record.word.strays ?? [],
+      preexisting,
+      keep,
+    });
+  } catch (e) {
+    record.cleanup.sweep = { error: e.message };
+    console.error(`replay: the Word processes could not be listed: ${e.message}`);
     return;
   }
-  if (d.action === "leave") {
-    record.cleanup.left_running = { pid, reason: d.reason };
-    console.error(`replay: ${d.reason}`);
-  }
-  record.cleanup.failed = d.fail;
+  record.cleanup.sweep = { closed: [], skipped: sel.skip };
+  for (const s of sel.skip.filter((x) => x.reason.startsWith("left open")))
+    console.log(`sweep: Word ${s.pid} ("${s.title}") ${s.reason}`);
 }
 
-// Stop a Word process this run started (never one that ran before it).
-function stopOwn(pid) {
-  if (!pid || (record.word.preexisting ?? []).includes(pid)) return false;
-  try {
-    execFileSync("powershell.exe", [
-      "-NoProfile",
-      "-Command",
-      `Stop-Process -Id ${Number(pid)} -Force -ErrorAction SilentlyContinue`,
-    ]);
-    console.error(`replay: Word ${pid} of this run did not answer and was stopped`);
-    return true;
-  } catch (e) {
-    record.cleanup.stop_error = e.message;
-    console.error(`replay: Word ${pid} could not be stopped: ${e.message}`);
-    return false;
-  }
-}
-
-// One run of replay-open.ps1 in a Word of its own, which is gone afterwards
-// whatever happened in it. file: what is opened; repairTo: with it, the file
+// One run of replay-open.ps1 in a Word of its own. Cleanup failures remain
+// visible and never trigger a process kill. file: what is opened; repairTo: the file
 // is opened with Open and Repair and saved under that name.
 let checks = 0;
 function wordOpens(file, repairTo = null) {
@@ -372,27 +390,43 @@ function wordOpens(file, repairTo = null) {
   const pidFile = path.join(RUN, `open-check-${++checks}-pid.json`);
   if (!fs.existsSync(anchor))
     fs.copyFileSync(path.join(REPO, "tests/fixtures/spike_manuscript.docx"), anchor);
-  let r;
-  try {
-    r = powershell(
-      "replay-open.ps1",
-      [
-        ...["-File", winPath(file), "-Anchor", winPath(anchor)],
-        ...["-AllowDir", winPath(RUN), "-PidFile", winPath(pidFile)],
-        ...(repairTo ? ["-RepairTo", winPath(repairTo)] : []),
-      ],
-      5 * 60_000,
-    );
-  } catch (e) {
-    r = { ok: false, error: e.message };
-  }
-  (record.word.open_checks ??= []).push({ file: path.basename(file), repair: !!repairTo, ...r });
-  const pid =
-    r.pid ??
+  const ownPid = (r) =>
+    r?.pid ??
     (fs.existsSync(pidFile)
       ? JSON.parse(fs.readFileSync(pidFile, "utf8").replace(/^\uFEFF/, "")).pid
       : null);
-  if (pid && wordPids().includes(pid)) r.stopped = stopOwn(pid);
+  // A Word that came up during the check and is not the one it started is
+  // recorded in r.strays, with the check it came from.
+  const r = withStrays(
+    `open check ${checks}`,
+    () => {
+      try {
+        return powershell(
+          "replay-open.ps1",
+          [
+            ...["-File", winPath(file), "-Anchor", winPath(anchor)],
+            ...["-AllowDir", winPath(RUN), "-PidFile", winPath(pidFile)],
+            ...(repairTo ? ["-RepairTo", winPath(repairTo)] : []),
+          ],
+          5 * 60_000,
+        );
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    },
+    ownPid,
+  );
+  const pid = ownPid(r);
+  if (pid && wordPids().includes(pid)) {
+    r.left_running = {
+      pid,
+      reason: r.quit?.refused ?? r.quit?.error ?? "Word still running after open check",
+    };
+    record.cleanup.left_running = r.left_running;
+    record.cleanup.failed = true;
+    console.error(`replay: Word ${pid} left running: ${r.left_running.reason}`);
+  }
+  (record.word.open_checks ??= []).push({ file: path.basename(file), repair: !!repairTo, ...r });
   save();
   return r;
 }
@@ -434,6 +468,7 @@ async function setup() {
     "word-com.ps1",
     "word-launch.ps1",
     "word-own.ps1",
+    "word-rot.ps1",
     "replay-open.ps1",
     "replay-save.ps1",
   ])
@@ -453,14 +488,19 @@ async function setup() {
   save();
   console.log(`ok    open check: ${record.source}`);
   await startDaemon();
-  const launch = powershell("word-launch.ps1", [
-    "-DocPath",
-    winPath(DOC),
-    "-Port",
-    opt["cdp-port"],
-    "-UserDataFolder",
-    winPath(path.join(RUN, "webview2")),
-  ]);
+  const launch = withStrays(
+    "word launch",
+    () =>
+      powershell("word-launch.ps1", [
+        "-DocPath",
+        winPath(DOC),
+        "-Port",
+        opt["cdp-port"],
+        "-UserDataFolder",
+        winPath(path.join(RUN, "webview2")),
+      ]),
+    (r) => r?.pid ?? null,
+  );
   if (launch.exited || record.word.preexisting.includes(launch.pid))
     throw new Error(`Word launch failed: ${JSON.stringify(launch)}`);
   record.word.launch = launch;
@@ -591,7 +631,9 @@ async function main() {
   // Our copy: it is saved as it is, tracked changes and comments in it.
   const done = note(
     "save copy",
-    powershell("replay-save.ps1", ["-Doc", winPath(DOC), "-AllowDir", winPath(RUN)]),
+    withStrays("save copy", () =>
+      powershell("replay-save.ps1", ["-Doc", winPath(DOC), "-AllowDir", winPath(RUN)]),
+    ),
   );
   saved = done.ok === true;
   writeReports(headings);
@@ -665,6 +707,7 @@ if (failed && opt["keep-on-fail"]) {
   quitWord(record.word.launch?.pid);
   await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
 }
+sweepWord();
 record.finished_at = new Date().toISOString();
 if (fs.existsSync(RUN)) save();
 const summary = path.join(RUN, "summary.txt");

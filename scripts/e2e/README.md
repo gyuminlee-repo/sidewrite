@@ -928,7 +928,8 @@ paragraph text`, files under `special/`): `make_tracked_special.py` builds
   with `visibility="1"`, so the pane opens with the document.
 - `word-com.ps1` reaches the document through the Running Object Table by its
   full path, so documents in any other Word are not touched. `quit` closes
-  without saving and only when every open document is in the run folder; the
+  without saving and only when its current Application PID matches a positive
+  `ExpectPid` and every open document is in the run folder; the
   runner then checks that the started process id is gone and that every Word
   process that was running before is still there.
 - When `quit` refuses (a document outside the run folder is open in the Word
@@ -1060,7 +1061,21 @@ result of "Check revised paragraphs", run once after the last turn),
 `daemon.log`. The screen shows step names and counts, never text of the
 manuscript. One review turn per comment, in order; a turn that fails or runs
 longer than `--turn-minutes` is recorded and the next comment goes on. Word
-and the resident daemon are handled as in the acceptance run.
+and the resident daemon are handled as in the acceptance run. Each Word step
+of the run (the open checks, the Word launch, the save of the copy) lists the
+WINWORD processes right before and after it and records a new one that is
+not the step's own Word in `word.strays` (and `open_checks[].strays`). The final
+sweep reports these processes in `cleanup.sweep` without closing them. A PID
+delta, start time or blank window title cannot prove ownership: a user may
+have opened Word during the step. Replay never stops Word by process ID after
+a failed, refused or timed-out COM quit. A remaining owned process is recorded
+in `cleanup.left_running` (also `open_checks[].left_running` for an open check)
+and makes cleanup fail. `word-own.ps1` refuses unknown or mismatched ownership
+both before use and again before quit. Normal cleanup still quits through COM
+when the current PID matches and all documents are in the run folder.
+The Word scripts find a document only in the Running Object Table
+(`word-rot.ps1`): a bind by path would start a Word of its own when the
+document is not registered yet.
 
 `node scripts/e2e/term-family-count.mjs <run folder>` counts again, with the
 code of this checkout, where the terms the reviewers named stand in the

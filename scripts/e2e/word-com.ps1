@@ -1,6 +1,6 @@
 # Word COM steps of the acceptance run, on one document opened in a Word
 # process that the runner started (word-launch.ps1). The document is found
-# through the Running Object Table by its full path (BindToMoniker), so a
+# in the Running Object Table by its full path (word-rot.ps1), so a
 # Word that was already open with other documents is never touched.
 # Every action prints one JSON object.
 #
@@ -54,7 +54,11 @@ function Norm([string]$s) {
 }
 function Out($o) { $o | ConvertTo-Json -Depth 8 -Compress }
 
-$d = [System.Runtime.InteropServices.Marshal]::BindToMoniker($Doc)
+. (Join-Path $PSScriptRoot "word-rot.ps1")
+# Only a document that is open already: a bind by path would start a Word
+# that loads it (word-rot.ps1), and no step of the run quits that one.
+$d = [SwRot]::Find($Doc)
+if (-not $d) { throw "$Doc is not open in a running Word" }
 if ((Norm $d.FullName) -ne (Norm $Doc)) { throw "bound to $($d.FullName), expected $Doc" }
 
 function RevList() {
@@ -287,6 +291,9 @@ switch ($Action) {
   }
   "quit" {
     $app = $d.Application
+    . (Join-Path $PSScriptRoot "word-own.ps1")
+    $owner = AppProcessId $app
+    if ($ExpectPid -le 0 -or $owner -le 0 -or $owner -ne $ExpectPid) { Out ([ordered]@{ ok = $false; refused = "ownership_unproven"; pid = $ExpectPid; actual_pid = $owner }); break }
     $names = @()
     foreach ($x in $app.Documents) { $names += $x.FullName }
     $allow = (Norm $AllowDir).TrimEnd("\") + "\"
