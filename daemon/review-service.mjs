@@ -171,7 +171,11 @@ export function resolveUnknownOverrides(rev, snapshot) {
           ...form,
           word_comment_id: comment ? String(comment.id) : (form.word_comment_id ?? null),
         };
-        const row = classifyChange(change, snapshot);
+        const row = classifyChange(
+          change,
+          snapshot,
+          rev.comments.flatMap((x) => x.changes),
+        );
         const p = paras.find((x) => x.index === row.paragraph_index);
         // Plain containment: Word joins pending inserted and deleted text with
         // no space, so a word-bounded match would miss it.
