@@ -16,12 +16,32 @@ import { anchorQueries, wordsAround } from "../taskpane/shared/review-view.js";
 // A replace inside it drops the old words (Word's behaviour); elsewhere the
 // old words stay as tracked deleted text, after the new ones.
 // denied: how many Range.insertComment calls fail first with AccessDenied
-// (the Word window minimized). state.tracked: the types of the tracked
-// changes a paragraph's getTrackedChanges() gives (a pending insertion when
-// pending is set); a test empties it when the author accepts everything.
+// (the Word window minimized). state.tracked: the tracked changes of the
+// last paragraph, [{ type, start, end }] in its text as it reads now (a
+// pending insertion when pending is set, shortened by what an edit dropped
+// from it); a test sets it when the author accepts changes. state.api16:
+// whether the host has WordApi 1.6 (Range.getTrackedChanges).
 function fakeDoc(paras, { pending = null, denied = 0 } = {}) {
-  const state = { comments: [], denied, tracked: pending ? ["Added"] : [] };
+  const state = {
+    comments: [],
+    denied,
+    tracked: pending ? [{ type: "Added", start: pending[0], end: pending[1] }] : [],
+    api16: true,
+  };
   const coll = (items) => ({ items, load() {} });
+  // Where [s, e) lies against another range of the paragraph.
+  const relation = (s, e, o) => {
+    const os = o.start;
+    const oe = o.text == null ? Infinity : o.start + o.text.length;
+    if (e < os) return "Before";
+    if (e === os) return "AdjacentBefore";
+    if (s > oe) return "After";
+    if (s === oe) return "AdjacentAfter";
+    if (s === os && e === oe) return "Equal";
+    if (s <= os && e >= oe) return "Contains";
+    if (s >= os && e <= oe) return "Inside";
+    return s < os ? "OverlapsBefore" : "OverlapsAfter";
+  };
   const hits = (text, q) => {
     const out = [];
     for (let i = text.indexOf(q); i !== -1; i = text.indexOf(q, i + q.length)) out.push(i);
@@ -46,6 +66,8 @@ function fakeDoc(paras, { pending = null, denied = 0 } = {}) {
       const out = (n) => !pending || start + n < pending[0] || start + n >= pending[1];
       const kept = [...q].filter((_, n) => out(n)).join("");
       p.text = p.text.slice(0, start) + s + kept + p.text.slice(start + q.length);
+      const gone = q.length - kept.length;
+      for (const c of state.tracked) if (c.end > start) c.end -= gone;
       return range(p, start, s);
     },
     insertComment(content) {
@@ -75,7 +97,15 @@ function fakeDoc(paras, { pending = null, denied = 0 } = {}) {
     p.getRange = () => range(p, 0, null);
     p.search = (q) => coll(hits(p.text, q).map((i) => range(p, i, q)));
     p.getComments = () => coll(state.comments);
-    p.getTrackedChanges = () => coll(state.tracked.map((type) => ({ type })));
+    p.getTrackedChanges = () =>
+      coll(
+        state.tracked.map((c) => ({
+          type: c.type,
+          getRange: () => ({
+            compareLocationWith: (o) => ({ value: relation(c.start, c.end, o) }),
+          }),
+        })),
+      );
     return p;
   });
   const document = {
@@ -85,6 +115,11 @@ function fakeDoc(paras, { pending = null, denied = 0 } = {}) {
     body: {
       paragraphs: coll(items),
       search: (q) => coll(items.flatMap((p) => hits(p.text, q).map((i) => range(p, i, q)))),
+    },
+  };
+  globalThis.Office = {
+    context: {
+      requirements: { isSetSupported: (set, v) => set === "WordApi" && v === "1.6" && state.api16 },
     },
   };
   globalThis.Word = {
@@ -311,16 +346,16 @@ test("a narrowed deletion inside a pending insertion: the later comment the same
   );
 });
 
-test("a later comment with no words of its paragraph there once goes on the paragraph", async () => {
+test("a later comment whose place is not known gets none", async () => {
   // A recorded change without the text before the edit (an older daemon)
-  // has no words around its place to look for: the paragraph takes it.
+  // has no words around its place to look for: nothing shows a tracked
+  // change still stands there, so no comment on the paragraph.
   const { state } = fakeDoc(["Title", TEXT], { pending: INSERTION, denied: 1 });
   await toolTrackedEdit(edit("thick ", ""));
   const later = await addChangeComment(recorded({ before: undefined }));
-  assert.deepEqual([later.ok, later.word_comment_id], [true, "C1"]);
   assert.deepEqual(
-    state.comments.map((c) => c.on),
-    [null],
+    [later.ok, later.code, state.comments.length],
+    [false, "CommentAnchorMissing", 0],
   );
 });
 
@@ -348,12 +383,56 @@ test("controls: a waiting deletion the author accepted before Word took comments
   assert.deepEqual([later.ok, later.code], [false, "CommentAnchorMissing"]);
   // An accepted deletion that was not in an insertion: the same, with a
   // tracked deletion elsewhere in the paragraph proving nothing.
-  state.tracked = ["Deleted"];
+  state.tracked = [{ type: "Deleted", start: 0, end: 5 }];
   const plain = await addChangeComment(
     recorded({ find: "old ", before: TEXT.replace("north", "old north") }),
   );
   assert.deepEqual([plain.ok, plain.code], [false, "CommentAnchorMissing"]);
   assert.equal(state.comments.length, 0);
+});
+
+test("controls: a waiting deletion accepted alone, a sibling insertion pending elsewhere, gets none", async () => {
+  // The deletion was not in an insertion: its old words stayed tracked
+  // deleted. The author accepts only it; an unrelated insertion at the
+  // start of the paragraph is still pending. Nothing tracked stands at the
+  // place of the deletion.
+  const { state, items } = fakeDoc(["Title", TEXT], { denied: 1 });
+  const r = await toolTrackedEdit(edit("thick ", ""));
+  assert.equal(r.code, "CommentWaitingForWord");
+  items[1].text = TEXT.replace("thick ", "");
+  state.tracked = [{ type: "Added", start: 0, end: "Crews".length }];
+  const later = await addChangeComment(recorded());
+  assert.deepEqual(
+    [later.ok, later.code, state.comments.length],
+    [false, "CommentAnchorMissing", 0],
+  );
+});
+
+test("a waiting deletion of kept words and a pending insertion gets its comment next to the kept words", async () => {
+  // Replay R6.5-11 shape: the inserted words were dropped, the kept words
+  // stay tracked deleted right before the place.
+  const { state, items } = fakeDoc(["Title", SHAPE], { pending: NEW_AT, denied: 1 });
+  const r = await toolTrackedEdit({
+    ...edit(OLD + NEW, ""),
+    expected_before_hash: paragraphHash(SHAPE),
+  });
+  assert.equal(r.code, "CommentWaitingForWord");
+  assert.equal(items[1].text, LEAD + OLD + TAIL);
+  state.tracked = [{ type: "Deleted", start: LEAD.length, end: LEAD.length + OLD.length }];
+  const later = await addChangeComment(recorded({ find: OLD + NEW, before: SHAPE }));
+  assert.deepEqual([later.ok, state.comments.map((c) => c.on)], [true, ["restores"]]);
+});
+
+test("a host without WordApi 1.6 says so instead of guessing", async () => {
+  const { state } = fakeDoc(["Title", TEXT], { pending: INSERTION, denied: 1 });
+  await toolTrackedEdit(edit("thick ", ""));
+  state.api16 = false;
+  const later = await addChangeComment(recorded());
+  assert.deepEqual(
+    [later.ok, later.code, state.comments.length],
+    [false, "CommentAnchorMissing", 0],
+  );
+  assert.match(later.message, /WordApi 1\.6/);
 });
 
 test("controls: a waiting deletion too long to search keeps the old rule", async () => {
