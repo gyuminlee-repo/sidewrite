@@ -1060,7 +1060,15 @@ result of "Check revised paragraphs", run once after the last turn),
 `daemon.log`. The screen shows step names and counts, never text of the
 manuscript. One review turn per comment, in order; a turn that fails or runs
 longer than `--turn-minutes` is recorded and the next comment goes on. Word
-and the resident daemon are handled as in the acceptance run.
+and the resident daemon are handled as in the acceptance run. Each open
+check records in `open_checks[].strays` a Word that came up during it and is
+not the one it started. At the end a sweep lists every WINWORD: one that
+started after the run began, is not in `word.preexisting` and is not kept on
+purpose (`--keep-on-fail`, a refused quit) is asked to close its main window
+(`CloseMainWindow`, never stopped by force); `cleanup.sweep` and the screen
+say which. The Word scripts find a document only in the Running Object Table
+(`word-rot.ps1`): a bind by path would start a Word of its own when the
+document is not registered yet.
 
 `node scripts/e2e/term-family-count.mjs <run folder>` counts again, with the
 code of this checkout, where the terms the reviewers named stand in the

@@ -4,6 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   changesReport,
   extractBatchesFromLog,
@@ -21,6 +23,7 @@ import {
   responsesReport,
   ruleLines,
   summaryText,
+  sweepSelection,
   turnFromLog,
   turnResult,
 } from "../scripts/e2e/replay-lib.mjs";
@@ -962,7 +965,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // The copy is saved only by the script that checks the folder, and Word is
   // closed only through the quit of word-com.ps1.
   const save = read("../scripts/e2e/replay-save.ps1");
-  assert.match(save, /BindToMoniker/);
+  assert.match(save, /\$d = \[SwRot\]::Find\(\$Doc\)/);
   assert.match(save, /StartsWith\(\$allow/);
   assert.ok(save.indexOf("StartsWith($allow") < save.indexOf("$d.Save()"));
   // eslint-disable-next-line no-control-regex
@@ -1041,3 +1044,167 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   for (const src of [runner, extra, save, read("../scripts/e2e/replay-compare.py")])
     assert.doesNotMatch(src, /\/mnt\/[a-z]\/|[A-Z]:\\\\(?!Program Files)/);
 });
+
+// The sweep at the end of a run. Times are invented; runStart is 10:00 UTC.
+const RUN_START = Date.parse("2026-10-05T10:00:00Z");
+const word = (pid, started, title = "Document1 - Word") => ({ pid, started, title });
+
+test("sweep: a Word that ran before the run is never closed, also when its start reads as later", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(4172, "2026-10-05T10:05:00Z", "thesis.docx - Word")],
+    runStart: RUN_START,
+    preexisting: [4172],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [[4172, "ran before the run"]],
+  );
+});
+
+test("sweep: a Word that started after the run began and is not preexisting is closed", () => {
+  const { close, skip } = sweepSelection({
+    processes: [word(4172, "2026-10-05T10:05:00.1234567Z"), word(900, "2026-10-05T09:00:00Z")],
+    runStart: RUN_START,
+    preexisting: [900],
+  });
+  assert.deepEqual(
+    close.map((p) => p.pid),
+    [4172],
+  );
+  assert.deepEqual(
+    skip.map((p) => p.pid),
+    [900],
+  );
+});
+
+test("sweep: kept, earlier or unknown start is left alone", () => {
+  const { close, skip } = sweepSelection({
+    processes: [
+      word(1, "2026-10-05T10:01:00Z"),
+      word(2, "2026-10-05T09:59:59Z"),
+      word(3, null),
+      word(4, "not a time"),
+    ],
+    runStart: RUN_START,
+    preexisting: [],
+    keep: [1],
+  });
+  assert.deepEqual(close, []);
+  assert.deepEqual(
+    skip.map((p) => [p.pid, p.reason]),
+    [
+      [1, "kept by the run"],
+      [2, "started before the run"],
+      [3, "start time unknown"],
+      [4, "start time unknown"],
+    ],
+  );
+  // No run start known: nothing is provably the run's.
+  assert.deepEqual(
+    sweepSelection({ processes: [word(5, "2026-10-05T10:01:00Z")], runStart: undefined }).close,
+    [],
+  );
+});
+
+test("replay: the sweep runs last, closes by window only, and every check records its strays", () => {
+  const runner = read("../scripts/e2e/replay.mjs");
+  const sweep = runner.slice(
+    runner.indexOf("function sweepWord()"),
+    runner.indexOf("// One run of replay-open.ps1"),
+  );
+  assert.match(sweep, /CloseMainWindow\(\)/);
+  assert.doesNotMatch(sweep, /Stop-Process|-Force|\.Kill\(|taskkill/);
+  assert.match(
+    sweep,
+    /sweepSelection\(\{ processes: wordProcesses\(\), runStart: started, preexisting, keep \}\)/,
+  );
+  // The Word kept by --keep-on-fail and one left for a refused quit stay.
+  assert.match(sweep, /record\.cleanup\.kept\?\.word_pid, record\.cleanup\.left_running\?\.pid/);
+  const last = runner.lastIndexOf("sweepWord();");
+  assert.ok(last > runner.lastIndexOf("quitWord(record.word.launch?.pid)"));
+  assert.ok(last < runner.indexOf("record.finished_at ="));
+  const opens = runner.slice(
+    runner.indexOf("function wordOpens("),
+    runner.indexOf("const embed ="),
+  );
+  assert.ok(opens.indexOf("const before = wordPids()") < opens.indexOf('"replay-open.ps1"'));
+  assert.match(opens, /r\.strays = after\.filter\(\(x\) => x !== pid && !before\.includes\(x\)\)/);
+  assert.ok(opens.indexOf("r.strays =") < opens.indexOf("open_checks ??= []"));
+});
+
+// The leak of an open check: BindToMoniker on a document that Word has not
+// registered yet starts a WINWORD of its own. The Word scripts look in the
+// Running Object Table only.
+test("Word scripts find a document in the Running Object Table only, never by a bind that starts Word", () => {
+  const code = (src) => src.replace(/^\s*#.*$/gm, "");
+  for (const name of ["word-own.ps1", "word-com.ps1", "replay-save.ps1"]) {
+    const src = read(`../scripts/e2e/${name}`);
+    assert.doesNotMatch(
+      code(src),
+      /BindToMoniker|GetActiveObject|New-Object\s+-ComObject|CreateObject/i,
+      name,
+    );
+    assert.match(src, /\. \(Join-Path \$PSScriptRoot "word-rot\.ps1"\)/, name);
+    assert.match(code(src), /\[SwRot\]::Find\(/, name);
+  }
+  const rot = read("../scripts/e2e/word-rot.ps1");
+  assert.match(rot, /rot\.EnumRunning/);
+  assert.match(rot, /rot\.GetObject\(/);
+  assert.doesNotMatch(code(rot), /BindToMoniker|CoCreateInstance|BindToObject/);
+  // Every runner that copies a script dot-sourcing word-rot.ps1 copies it too.
+  for (const runner of [
+    "replay.mjs",
+    "run-acceptance.mjs",
+    "marked-diff-word-check.mjs",
+    "word-math-probe.mjs",
+  ])
+    assert.match(read(`../scripts/e2e/${runner}`), /"word-rot\.ps1"/, runner);
+});
+
+// Parse check of the changed PowerShell scripts. No Word: the parser only
+// reads the files. Runs where powershell.exe is reachable (WSL on Windows).
+const winPs = (() => {
+  try {
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", "exit 0"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+test(
+  "the changed PowerShell scripts parse",
+  { skip: !winPs && "powershell.exe not reachable" },
+  () => {
+    for (const name of ["word-rot.ps1", "word-own.ps1", "word-com.ps1", "replay-save.ps1"]) {
+      const file = execFileSync(
+        "wslpath",
+        ["-w", fileURLToPath(new URL(`../scripts/e2e/${name}`, import.meta.url))],
+        { encoding: "utf8" },
+      ).trim();
+      const out = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          `$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('${file}', [ref]$null, [ref]$e); ($e | ForEach-Object { $_.Message }) -join '; '`,
+        ],
+        { encoding: "utf8" },
+      ).trim();
+      assert.equal(out, "", `${name}: ${out}`);
+    }
+    // The C# of word-rot.ps1 compiles. Dot-sourcing it only adds the type:
+    // Find is not called, nothing is started.
+    const rot = execFileSync(
+      "wslpath",
+      ["-w", fileURLToPath(new URL("../scripts/e2e/word-rot.ps1", import.meta.url))],
+      { encoding: "utf8" },
+    ).trim();
+    const typed = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-Command", `. '${rot}'; [bool]('SwRot' -as [type])`],
+      { encoding: "utf8" },
+    ).trim();
+    assert.equal(typed, "True");
+  },
+);

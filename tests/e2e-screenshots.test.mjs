@@ -181,7 +181,7 @@ test("the runner: nothing of it happens without --screenshots, and nothing of it
     order,
     [...order].sort((a, b) => a - b),
   );
-  assert.match(runner, /"word-launch\.ps1", "word-shot\.ps1"\]/);
+  assert.match(runner, /"word-launch\.ps1",\s*"word-shot\.ps1",?\s*\]/);
 });
 
 test("word-shot.ps1 only reads the window of the process it is given", () => {

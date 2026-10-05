@@ -1,7 +1,8 @@
 # Save the copy of the manuscript that replay.mjs opened, with its tracked
 # changes and comments as they are. The document is found through the Running
-# Object Table by its full path (BindToMoniker), as word-com.ps1 does, so a
-# Word that is open with other documents is never touched. Nothing is saved
+# Object Table by its full path (word-rot.ps1), as word-com.ps1 does, so a
+# Word that is open with other documents is never touched, and a document
+# that is not open is not loaded into a Word nobody quits. Nothing is saved
 # unless the document lies under -AllowDir (the run folder).
 # Prints one JSON object: { ok, saved, path, revisions, comments }.
 param(
@@ -13,7 +14,9 @@ $ErrorActionPreference = "Stop"
 
 function Out($o) { $o | ConvertTo-Json -Depth 4 -Compress }
 
-$d = [System.Runtime.InteropServices.Marshal]::BindToMoniker($Doc)
+. (Join-Path $PSScriptRoot "word-rot.ps1")
+$d = [SwRot]::Find($Doc)
+if (-not $d) { throw "$Doc is not open in a running Word" }
 $full = [string]$d.FullName
 if ($full -ne $Doc) { throw "bound to $full, expected $Doc" }
 $allow = $AllowDir.TrimEnd("\") + "\"

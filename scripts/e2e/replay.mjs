@@ -70,6 +70,7 @@ import {
   restoredFromLog,
   staysFromLog,
   summaryText,
+  sweepSelection,
   turnFromLog,
   turnResult,
 } from "./replay-lib.mjs";
@@ -188,6 +189,20 @@ const psList = (cmd) =>
     .map(Number);
 const wordPids = () =>
   psList("(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object Id) -join ','");
+// Every WINWORD running now: { pid, started (UTC, ISO; null when Windows does
+// not give it), title }.
+const wordProcesses = () =>
+  JSON.parse(
+    execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        "ConvertTo-Json -Compress -InputObject @(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object { $s = $null; try { $s = $_.StartTime.ToUniversalTime().ToString('o') } catch { $s = $null }; [ordered]@{ pid = $_.Id; started = $s; title = [string]$_.MainWindowTitle } })",
+      ],
+      { encoding: "utf8" },
+    ).trim() || "[]",
+  );
 
 let stepNo = 0;
 function pane(step, args = {}, timeoutMs = 30 * 60_000) {
@@ -363,6 +378,66 @@ function stopOwn(pid) {
   }
 }
 
+// The last step of a run: a WINWORD that started after the run began, is not
+// in the list taken at its start and is not kept on purpose (sweepSelection)
+// is asked to close its main window, as a click on its close button does.
+// Nothing is stopped by force: a Word with unsaved changes asks and stays.
+// The Words this run started were quit through their own COM before
+// (quitWord, QuitOwnWord of replay-open.ps1); a Word the run has no handle on
+// is not reached over COM, which could bind to another Word.
+function sweepWord() {
+  const preexisting = record.word.preexisting;
+  // Without the list of the run's start nothing is provably the run's.
+  if (!Array.isArray(preexisting)) return;
+  const keep = [record.cleanup.kept?.word_pid, record.cleanup.left_running?.pid].filter(Boolean);
+  let sel;
+  try {
+    sel = sweepSelection({ processes: wordProcesses(), runStart: started, preexisting, keep });
+  } catch (e) {
+    record.cleanup.sweep = { error: e.message };
+    console.error(`replay: the Word processes could not be listed: ${e.message}`);
+    return;
+  }
+  const closed = sel.close.map((p) => ({ ...p, ...closeWordWindow(p) }));
+  record.cleanup.sweep = { closed, skipped: sel.skip };
+  if (!closed.length) console.log("sweep: no Word left from this run");
+  for (const c of closed) {
+    const what = `Word ${c.pid} ("${c.title}", started ${c.started})`;
+    if (c.gone) console.log(`sweep: ${what} had exited already`);
+    else if (c.exited) console.log(`sweep: closed ${what}, which the run had not quit`);
+    else {
+      record.cleanup.failed = true;
+      console.error(
+        `replay: sweep: ${what} is still running (${c.error ?? (c.had_window ? "asked to close; a dialog may hold it" : "it has no window")})`,
+      );
+    }
+  }
+}
+
+// CloseMainWindow of one WINWORD, only while it is the very process listed
+// (same name and start time: a pid is not reused for it).
+function closeWordWindow(p) {
+  const started = String(p.started).replace(/'/g, "");
+  try {
+    return JSON.parse(
+      execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          `$p = Get-Process -Id ${Number(p.pid)} -ErrorAction SilentlyContinue; ` +
+            `if (-not $p -or $p.ProcessName -ne 'WINWORD' -or $p.StartTime.ToUniversalTime().ToString('o') -ne '${started}') { $o = [ordered]@{ gone = $true } } ` +
+            `else { $had = $p.MainWindowHandle -ne 0; $sent = $p.CloseMainWindow(); $o = [ordered]@{ gone = $false; had_window = $had; sent = $sent; exited = $p.WaitForExit(20000) } }; ` +
+            `$o | ConvertTo-Json -Compress`,
+        ],
+        { encoding: "utf8" },
+      ).trim(),
+    );
+  } catch (e) {
+    return { gone: false, exited: false, error: e.message };
+  }
+}
+
 // One run of replay-open.ps1 in a Word of its own, which is gone afterwards
 // whatever happened in it. file: what is opened; repairTo: with it, the file
 // is opened with Open and Repair and saved under that name.
@@ -372,6 +447,7 @@ function wordOpens(file, repairTo = null) {
   const pidFile = path.join(RUN, `open-check-${++checks}-pid.json`);
   if (!fs.existsSync(anchor))
     fs.copyFileSync(path.join(REPO, "tests/fixtures/spike_manuscript.docx"), anchor);
+  const before = wordPids();
   let r;
   try {
     r = powershell(
@@ -386,13 +462,17 @@ function wordOpens(file, repairTo = null) {
   } catch (e) {
     r = { ok: false, error: e.message };
   }
-  (record.word.open_checks ??= []).push({ file: path.basename(file), repair: !!repairTo, ...r });
   const pid =
     r.pid ??
     (fs.existsSync(pidFile)
       ? JSON.parse(fs.readFileSync(pidFile, "utf8").replace(/^\uFEFF/, "")).pid
       : null);
-  if (pid && wordPids().includes(pid)) r.stopped = stopOwn(pid);
+  const after = wordPids();
+  if (pid && after.includes(pid)) r.stopped = stopOwn(pid);
+  // A Word that came up during the check and is not the one it started:
+  // recorded with the check it came from; the sweep at the end closes it.
+  r.strays = after.filter((x) => x !== pid && !before.includes(x));
+  (record.word.open_checks ??= []).push({ file: path.basename(file), repair: !!repairTo, ...r });
   save();
   return r;
 }
@@ -434,6 +514,7 @@ async function setup() {
     "word-com.ps1",
     "word-launch.ps1",
     "word-own.ps1",
+    "word-rot.ps1",
     "replay-open.ps1",
     "replay-save.ps1",
   ])
@@ -665,6 +746,7 @@ if (failed && opt["keep-on-fail"]) {
   quitWord(record.word.launch?.pid);
   await stopDaemon().catch((e) => (record.cleanup.daemon_error = e.message));
 }
+sweepWord();
 record.finished_at = new Date().toISOString();
 if (fs.existsSync(RUN)) save();
 const summary = path.join(RUN, "summary.txt");

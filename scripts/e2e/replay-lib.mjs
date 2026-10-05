@@ -484,3 +484,30 @@ export function summaryText(
   if (responses !== null) lines.push(`responses drafted: ${responses}`);
   return `${lines.join("\n")}\n`;
 }
+
+// The Word processes the sweep at the end of a run closes. processes: every
+// WINWORD running now, { pid, started (ISO time, null when Windows did not
+// give it), title }; runStart: ms of the run's start; preexisting: the pids
+// that ran when the run began; keep: pids the run leaves on purpose (the Word
+// of --keep-on-fail, or one whose quit was refused because a document outside
+// the run folder is open in it). A process is closed only when it provably
+// started after the run began and is none of these.
+export function sweepSelection({ processes = [], runStart, preexisting = [], keep = [] }) {
+  const close = [];
+  const skip = [];
+  for (const p of processes) {
+    const at = p.started ? Date.parse(p.started) : NaN;
+    const why = preexisting.includes(p.pid)
+      ? "ran before the run"
+      : keep.includes(p.pid)
+        ? "kept by the run"
+        : !Number.isFinite(at) || !Number.isFinite(runStart)
+          ? "start time unknown"
+          : at < runStart
+            ? "started before the run"
+            : null;
+    if (why) skip.push({ ...p, reason: why });
+    else close.push(p);
+  }
+  return { close, skip };
+}

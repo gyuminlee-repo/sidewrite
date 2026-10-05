@@ -3,11 +3,13 @@
 #
 # StartOwnWord starts Word (/n: a new instance even when Word is already
 # open) on one anchor document of the run folder and finds that document
-# through the Running Object Table by its full path (as word-com.ps1 does).
+# in the Running Object Table by its full path (word-rot.ps1).
 # A Word that was already open, and its documents, are never touched:
 # AssertOwnWord lets the Application be used only when it is the process
 # this run started and every document open in it is under $AllowDir, and
 # QuitOwnWord quits Word only under the same two conditions.
+
+. (Join-Path $PSScriptRoot "word-rot.ps1")
 
 function Line($o) { $o | ConvertTo-Json -Depth 10 -Compress }
 function Under([string]$path) {
@@ -65,11 +67,14 @@ function StartOwnWord([string]$Anchor, [string]$PidFile, [int]$WaitSeconds) {
   # The window is there before the document is registered: give it a moment.
   Start-Sleep -Seconds 3
 
+  # Read from the Running Object Table only (word-rot.ps1): a bind by path
+  # that runs before this Word has registered the anchor starts a Word of
+  # its own, which nothing here would track or quit.
   $d = $null
   while (-not $d -and (Get-Date) -lt $deadline) {
     try {
-      $d = [System.Runtime.InteropServices.Marshal]::BindToMoniker($Anchor)
-      if ([string]$d.FullName -ne $Anchor) { $d = $null }
+      $d = [SwRot]::Find($Anchor)
+      if ($d -and [string]$d.FullName -ne $Anchor) { $d = $null }
     } catch { $d = $null }
     if (-not $d) { Start-Sleep -Milliseconds 500 }
   }
