@@ -268,3 +268,47 @@ test("the Response tab is read as the pane shows it", async () => {
     ["", false, "", []],
   );
 });
+
+// "Refresh status" and "Check revised paragraphs" are read once their button
+// is enabled again: an error line of an earlier action that is still running
+// is not their answer (the replay of 2026-10-05 took the line of a refresh
+// still running for the paragraph check's and went on before the check ran).
+test("refresh and the paragraph check wait for their own handler to end", () => {
+  const [check] = only('"review-check-paragraphs"');
+  const onCheck = (disabled, msg, error = false) =>
+    !!bind(
+      check,
+      fakeDocument({
+        "review-check-paragraphs": el("", { disabled }),
+        "review-message": el(msg, { classList: { contains: () => error } }),
+      }),
+    )();
+  assert.deepEqual(
+    [
+      onCheck(true, "The changes on record and the comments in Word do not match.", true),
+      onCheck(true, "Checked 3 revised paragraphs: 0 problems."),
+      onCheck(false, "Checking the revised paragraphs..."),
+      onCheck(false, "Checked 3 revised paragraphs: 0 problems."),
+      onCheck(false, "No paragraph holds two or more changes."),
+      onCheck(false, "The check failed.", true),
+    ],
+    [false, false, false, true, true, true],
+  );
+  const [refresh] = only('"review-refresh"');
+  const onRefresh = (disabled, msg) =>
+    !!bind(
+      refresh,
+      fakeDocument({
+        "review-refresh": el("", { disabled }),
+        "review-message": el(msg),
+      }),
+    )();
+  assert.deepEqual(
+    [
+      onRefresh(true, "The turn for R1.1 ran and its record is saved, but"),
+      onRefresh(false, ""),
+      onRefresh(false, "2 changes are waiting for your decision in Word."),
+    ],
+    [false, false, true],
+  );
+});

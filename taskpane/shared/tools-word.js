@@ -9,6 +9,7 @@ import {
   trackedRuns,
   isToolComment,
   planBackupDelete,
+  wordsAround,
 } from "./review-view.js";
 import {
   FIELD_REFUSAL,
@@ -1934,6 +1935,22 @@ export async function toolTrackedEdit({
             );
           } else {
             anchor = again.items[0];
+          }
+          // The old words were inside a pending insertion (of a sibling
+          // change): Word drops inserted text outright, so nothing of them is
+          // left to find (replays of 2026-10-05: every change that lost its
+          // comment this way had its find nowhere in the paragraph). The
+          // comment then goes on what stands: the new words of a replace,
+          // or the words around the place of a deletion (the first of 1, 2,
+          // 3 words on each side found once in the paragraph).
+          if (!anchor && editReplace) anchor = inserted ?? undefined;
+          for (let k = 1; !anchor && !editReplace && k <= 3; k++) {
+            const q = wordsAround(before, find, editFind, k);
+            if (!q || q.length > 255) break;
+            const near = para.search(q, { matchCase: true });
+            near.load("items");
+            await context.sync();
+            if (near.items.length === 1) anchor = near.items[0];
           }
         }
         return anchor;
