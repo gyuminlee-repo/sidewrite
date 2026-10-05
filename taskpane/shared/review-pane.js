@@ -369,21 +369,53 @@ export function initReviewPane({
   // comment of this change already there instead of adding a second), and
   // the daemon records its id (which clears comment_missing and
   // comment_error). Throws what Word threw, or an Error when Word had no
-  // place for it.
-  async function addRationale(ch) {
-    const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
-    const t = await ask("review_comment_text", { ref, change_id: ch.id });
-    const r = await word.addChangeComment({
-      ...t.change,
-      comment_text: t.comment_text,
-      known_comment_ids: t.known_comment_ids,
-    });
-    if (!r.ok) throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
-    await ask("review_comment_set", {
-      ref,
-      change_id: ch.id,
-      word_comment_id: r.word_comment_id,
-    });
+  // place for it. trigger: what started the try (timer, focus, visibility,
+  // refresh, export, button); each try is logged by the daemon
+  // (logRetry).
+  async function addRationale(ch, trigger) {
+    try {
+      const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
+      const t = await ask("review_comment_text", { ref, change_id: ch.id });
+      const r = await word.addChangeComment({
+        ...t.change,
+        comment_text: t.comment_text,
+        known_comment_ids: t.known_comment_ids,
+      });
+      if (!r.ok) {
+        throw Object.assign(
+          new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`),
+          { resultCode: r.code },
+        );
+      }
+      await ask("review_comment_set", {
+        ref,
+        change_id: ch.id,
+        word_comment_id: r.word_comment_id,
+      });
+      logRetry(ch.id, trigger, "added");
+    } catch (e) {
+      logRetry(ch.id, trigger, retryOutcome(e));
+      throw e;
+    }
+  }
+  // What came of one try, for the daemon log: AccessDenied, or the code and
+  // message of any other failure.
+  function retryOutcome(e) {
+    if (isCommentAccessDenied(e)) return "AccessDenied";
+    const code = e?.code ?? e?.debugInfo?.code ?? e?.resultCode ?? "Error";
+    return `${code}: ${String(e?.message ?? e)}`;
+  }
+  // One line in the daemon log per try of a waiting comment (review-service.mjs
+  // review_comment_retry). Never awaited and never throws: the log does not
+  // change the try.
+  function logRetry(change_id, trigger, outcome) {
+    try {
+      Promise.resolve(
+        sendRequest("review_comment_retry", { change_id, trigger: trigger ?? "-", outcome }),
+      ).catch(() => {});
+    } catch {
+      /* not logged */
+    }
   }
 
   // ---- rationale comments waiting for Word ------------------------------------
@@ -403,33 +435,44 @@ export function initReviewPane({
   let addingWaiting = null;
   let retryTimer = null;
   let paneClosed = false;
-  function addWaitingComments() {
+  // trigger: timer, focus, visibility, refresh or export (logged per try).
+  function addWaitingComments(trigger) {
     if (paneClosed) return Promise.resolve();
-    addingWaiting ??= (async () => {
-      let added = 0;
-      try {
-        for (const ch of waiting()) {
-          // The button of the change runs under the same key: never both.
-          const key = `rationale ${ch.id}`;
-          if (writing.has(key)) continue;
-          writing.add(key);
-          try {
-            await addRationale(ch);
-            added += 1;
-          } catch (e) {
-            if (isCommentAccessDenied(e)) break;
-            state.commentsGivenUp.add(ch.id);
-          } finally {
-            writing.delete(key);
-          }
-        }
-      } finally {
-        addingWaiting = null;
-        if (added) render();
-        else showWaiting();
-      }
-    })();
+    if (addingWaiting) return addingWaiting;
+    // Cleared after it is stored: a try with nothing to await (none waiting,
+    // or all busy) ends before the assignment, and clearing it inside left
+    // the ended promise stored for good, so no try ever ran again.
+    const run = tryWaiting(trigger);
+    addingWaiting = run.finally(() => {
+      addingWaiting = null;
+    });
     return addingWaiting;
+  }
+  async function tryWaiting(trigger) {
+    let added = 0;
+    try {
+      for (const ch of waiting()) {
+        // The button of the change runs under the same key: never both.
+        const key = `rationale ${ch.id}`;
+        if (writing.has(key)) {
+          logRetry(ch.id, trigger, "skipped_busy");
+          continue;
+        }
+        writing.add(key);
+        try {
+          await addRationale(ch, trigger);
+          added += 1;
+        } catch (e) {
+          if (isCommentAccessDenied(e)) break;
+          state.commentsGivenUp.add(ch.id);
+        } finally {
+          writing.delete(key);
+        }
+      }
+    } finally {
+      if (added) render();
+      else showWaiting();
+    }
   }
   // The notice and the timer follow the record: called on every render.
   function showWaiting() {
@@ -438,7 +481,7 @@ export function initReviewPane({
     box.textContent = waitingNotice(n);
     box.hidden = n === 0;
     if (n > 0 && retryTimer == null) {
-      retryTimer = setInterval(() => addWaitingComments(), commentRetryMs);
+      retryTimer = setInterval(() => addWaitingComments("timer"), commentRetryMs);
       retryTimer?.unref?.(); // Node (tests): the timer does not hold the process
     } else if (n === 0 && retryTimer != null) {
       clearInterval(retryTimer);
@@ -483,7 +526,7 @@ export function initReviewPane({
         once(
           key,
           guard(async () => {
-            await addRationale(ch);
+            await addRationale(ch, "button");
             say(`${ch.id}: rationale comment added.`);
           }),
           () => rationaleButtons.get(ch.id),
@@ -1626,7 +1669,7 @@ export function initReviewPane({
   async function refreshWith(report) {
     // Rationale comments that wait for Word go in first, so the counts
     // below include them.
-    await addWaitingComments();
+    await addWaitingComments("refresh");
     // Has Word unsaved changes of the document (null: it did not say). The
     // daemon keeps it with the state of the document at this refresh.
     const saved = await documentSaved();
@@ -2064,7 +2107,7 @@ export function initReviewPane({
   });
   if (typeof window !== "undefined") {
     window.addEventListener?.("focus", () => {
-      addWaitingComments();
+      addWaitingComments("focus");
       auto.trigger("focus");
     });
     window.addEventListener?.("pagehide", () => {
@@ -2074,7 +2117,7 @@ export function initReviewPane({
   }
   document.addEventListener?.("visibilitychange", () => {
     if (document.hidden) return;
-    addWaitingComments();
+    addWaitingComments("visibility");
     auto.trigger("focus");
   });
 
@@ -2233,7 +2276,7 @@ export function initReviewPane({
     onAnyTurnEnded: () => auto.trigger("turn"),
     // Tries the rationale comments waiting for Word (the Response tab, before
     // a letter export).
-    addWaitingComments,
+    addWaitingComments: () => addWaitingComments("export"),
     // A new connection (welcome) means no turn of this pane is running any
     // more: a daemon restart never sends turn_done, so clear the progress line.
     // Jobs of the old connection are ended with an error first, and so is a

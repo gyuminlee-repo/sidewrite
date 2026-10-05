@@ -1522,6 +1522,27 @@ test("an edit whose comment is gone restores the comment: ref only, or the text 
   }
 });
 
+test("review_comment_retry logs one line per try of a waiting comment and stores nothing", async () => {
+  const t = await setup();
+  try {
+    const r = await t.ask("review_comment_retry", {
+      change_id: "R1.2-1",
+      trigger: "timer",
+      outcome: "GeneralException: R1.2-1:\n the paragraph\twas busy",
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.revision, undefined);
+    assert.deepEqual(
+      t.lines.filter((l) => l.includes("comment retry")),
+      [
+        "[review] comment retry R1.2-1 trigger=timer outcome=GeneralException: R1.2-1: the paragraph was busy",
+      ],
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
+
 test("review_comments_cleaned marks the change; refresh then keeps it and reports no missing comment", async () => {
   const { invariantReport } = await import("../taskpane/shared/review-view.js");
   const t = await setup();

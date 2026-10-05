@@ -2366,6 +2366,106 @@ test("comments not waiting for Word (CommentInsertFailed) get no notice and no a
   assert.equal(w.word.calls.length, 0);
 });
 
+// Run e2e-20261005-154136: the first refresh of the session found nothing
+// waiting, and that try, ending without an await, left its finished promise
+// stored for good: no later trigger tried the five comments Word refused
+// while minimized, also after Word was restored.
+test("comments waiting for Word: a try with nothing waiting does not stop later tries", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1"], code: null });
+  const t = await setup({
+    revision: w.revision,
+    respond: w.respond,
+    word: { addChangeComment: w.addChangeComment },
+    options: { commentRetryMs: 1e6 },
+  });
+  try {
+    showVisible(); // nothing waits yet
+    await pauseMs(5);
+    assert.equal(w.word.calls.length, 0);
+    // A later turn: Word refused this comment while minimized.
+    w.changes[0].comment_missing = "CommentWaitingForWord";
+    w.word.denied = false;
+    showVisible();
+    await waitFor(() => w.word.calls.length === 1);
+    await waitFor(() => t.requests.some((r) => r.type === "review_comment_set"));
+    assert.equal(w.changes[0].word_comment_id, "70");
+  } finally {
+    delete document.hidden;
+  }
+});
+
+// Each try at a waiting comment goes to the daemon log: which change, what
+// started it, what came of it.
+test("comments waiting for Word: every try is logged with its trigger and outcome", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1", "R1.1-2"] });
+  const t = await setup({
+    revision: w.revision,
+    respond: w.respond,
+    word: { addChangeComment: w.addChangeComment },
+    options: { commentRetryMs: 1e6 },
+  });
+  const logged = () =>
+    t.requests
+      .filter((r) => r.type === "review_comment_retry")
+      .map((r) => [r.payload.change_id, r.payload.trigger, r.payload.outcome]);
+  try {
+    // Still refused: one try, stopped at the first AccessDenied.
+    showVisible();
+    await waitFor(() => logged().length === 1);
+    assert.deepEqual(logged(), [["R1.1-1", "visibility", "AccessDenied"]]);
+    // The button of the first holds its key: the next try skips it.
+    w.word.denied = false;
+    let open;
+    w.word.gate = new Promise((r) => (open = r));
+    const [button] = findAll(
+      t.$("review-comments"),
+      (n) => n.textContent === "Add rationale comment",
+    );
+    const pressed = button.click();
+    await pauseMs(5);
+    w.word.gate = null; // the try below goes through at once
+    await t.pane.addWaitingComments(); // as before a letter export
+    open();
+    await pressed;
+    await waitFor(() => logged().length === 4);
+    assert.deepEqual(logged().slice(1), [
+      ["R1.1-1", "export", "skipped_busy"],
+      ["R1.1-2", "export", "added"],
+      ["R1.1-1", "button", "added"],
+    ]);
+    // An idle tick logs nothing.
+    const n = logged().length;
+    showVisible();
+    await pauseMs(5);
+    assert.equal(logged().length, n);
+  } finally {
+    delete document.hidden;
+  }
+});
+
+test("a waiting comment that fails for another reason is logged with its code and message", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1"] });
+  const t = await setup({
+    revision: w.revision,
+    respond: w.respond,
+    word: {
+      addChangeComment: async () => ({
+        ok: false,
+        code: "CommentAnchorMissing",
+        message: "no place for the comment",
+      }),
+    },
+    options: { commentRetryMs: 10 },
+  });
+  await waitFor(() => t.requests.some((r) => r.type === "review_comment_retry"));
+  const r = t.requests.find((x) => x.type === "review_comment_retry");
+  assert.deepEqual(r.payload, {
+    change_id: "R1.1-1",
+    trigger: "timer",
+    outcome: "CommentAnchorMissing: R1.1-1: no place for the comment",
+  });
+});
+
 test("turn_done with a comment waiting for Word: the card says it waits, the turn is not unchecked", async () => {
   const w = waitingWorld({ ids: ["R1.1-1"] });
   const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 1, unlocated: 0 };
