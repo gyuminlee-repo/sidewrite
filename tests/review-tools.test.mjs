@@ -798,6 +798,40 @@ test("comment errors of the task pane are logged: a failed comment, and one adde
   assert.equal(d.lines.filter((l) => l.startsWith("[review] comment error")).length, 1);
 });
 
+// Run e2e-20261005-151048: Word minimized refused the comment insert with
+// AccessDenied. The change is recorded as waiting (the task pane adds the
+// comment later) and the model is told so, not that it has no comment.
+test("a change whose comment waits for Word: recorded with its error, the model told it waits", async () => {
+  const d = deps({
+    ok: false,
+    code: "CommentWaitingForWord",
+    applied: true,
+    message: "Edit applied; Word refused its rationale comment (AccessDenied).",
+    comment_attempts: 1,
+    comment_errors: [
+      {
+        step: "insert_comment",
+        code: "AccessDenied",
+        location: "Range.insertComment",
+        message: "AccessDenied",
+        hidden: false,
+      },
+    ],
+  });
+  const r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
+    { ref: "R1.1" },
+  );
+  assert.deepEqual([r.ok, r.applied, r.comment_missing], [true, true, "CommentWaitingForWord"]);
+  assert.equal(
+    d.edits[0][1].comment_error,
+    "step=insert_comment word=AccessDenied at=Range.insertComment msg=AccessDenied hidden=0",
+  );
+  assert.match(r.warning, /waiting for the Word window to be opened/);
+  assert.doesNotMatch(r.warning, /no rationale comment could be anchored/);
+});
+
 // Acceptance run of 2026-10-05, stage 3 (Word minimized): changes were
 // recorded without their comment and the review file did not say why. The
 // last error of the task pane is kept on the change (comment_error), and the

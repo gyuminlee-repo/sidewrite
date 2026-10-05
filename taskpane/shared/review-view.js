@@ -49,12 +49,31 @@ export function computeAfterText(before, find, { replace, insert_after } = {}) {
   return { error: "give replace or insert_after" };
 }
 
-// The notice the Review tab shows when its page is hidden (Word minimized,
-// as far as the pane can tell: review-pane.js) before or during a turn. Word
-// minimized while a turn ran applied the edits without their rationale
-// comments (acceptance run of 2026-10-05, stage 3). Nothing is blocked.
-export const KEEP_WORD_OPEN = "Keep Word open (not minimized) while Sidewrite works.";
-export const MINIMIZED_IN_TURN = `${KEEP_WORD_OPEN} Word was hidden while a turn ran: a change made then may have no rationale comment (its card then offers Add rationale comment).`;
+// What Word answers on Range.insertComment while its window is minimized or
+// not ready (run e2e-20261005-151048: every comment of a minimized Word, the
+// tracked edit itself applied). Tried again at once it fails the same way.
+export const COMMENT_ACCESS_DENIED = "AccessDenied";
+// The code of a change applied whose comment Word refused that way: the
+// Review tab keeps it waiting and adds it once Word takes comments again
+// (review-pane.js addWaitingComments).
+export const COMMENT_WAITING = "CommentWaitingForWord";
+// A thrown error of a comment step, or the error as commentError described
+// it, is Word refusing the comment insert with AccessDenied.
+export const isCommentAccessDenied = (e) =>
+  (e?.code ?? e?.debugInfo?.code) === COMMENT_ACCESS_DENIED;
+
+// The changes of a revision whose rationale comment waits for Word (applied,
+// no comment id, COMMENT_WAITING).
+export const waitingForWord = (revision) =>
+  (revision?.comments ?? [])
+    .flatMap((c) => c.changes ?? [])
+    .filter((ch) => ch.word_comment_id == null && ch.comment_missing === COMMENT_WAITING);
+
+// The notice of the Review tab while such comments wait ("" when none).
+export const waitingNotice = (n) =>
+  n > 0
+    ? `Word is minimized or not ready: ${n} rationale comment${n === 1 ? " is" : "s are"} waiting. Open the Word window and they will be added.`
+    : "";
 
 // The words around the place of a deletion, as the paragraph reads once it
 // is made: up to k words before it and k words after it, joined (the
@@ -396,8 +415,12 @@ export function invariantReport(revision, comments) {
   // (comment_missing, no comment id) never had one: it is not a comment that
   // went missing, and it is named apart. It is not ok either: every change
   // needs its rationale comment.
+  // One whose comment Word refused while minimized or not ready
+  // (COMMENT_WAITING) is waiting, not missing: the Review tab adds it when
+  // Word takes comments again. It is named apart and expects no comment yet.
   const bare = (ch) => ch.word_comment_id == null && !!ch.comment_missing;
-  const uncommented = expected.filter(bare);
+  const waits = (ch) => bare(ch) && ch.comment_missing === COMMENT_WAITING;
+  const uncommented = expected.filter((ch) => bare(ch) && !waits(ch));
   const missing = expected.filter((ch) => !bare(ch) && !ids.has(String(ch.word_comment_id)));
   const orphans = [...ids].filter((id) => !recorded.has(id));
   // The parts of a rewritten paragraph share one comment: comments are
@@ -411,6 +434,7 @@ export function invariantReport(revision, comments) {
     tool_comments: ids.size,
     missing_comment: missing.map((ch) => ch.id),
     uncommented: uncommented.map((ch) => ch.id),
+    waiting: expected.filter(waits).map((ch) => ch.id),
     unrecorded_comment_ids: orphans,
     ok:
       wanted === ids.size &&
@@ -424,7 +448,10 @@ export function invariantReport(revision, comments) {
 // what does not match. The word MISMATCH stays in every such line (the
 // acceptance judge reads it).
 export function invariantText(inv) {
-  if (inv.ok) return ".";
+  const waiting = inv.waiting?.length
+    ? `rationale comment waiting for Word on ${inv.waiting.join(",")}`
+    : "";
+  if (inv.ok) return waiting ? ` (${waiting}).` : ".";
   const parts = [];
   if (inv.missing_comment.length || inv.unrecorded_comment_ids.length || !inv.uncommented.length) {
     parts.push(
@@ -436,7 +463,7 @@ export function invariantText(inv) {
       `no rationale comment on ${inv.uncommented.join(",")}: applied in Word, the comment could not be added`,
     );
   }
-  return ` (MISMATCH: ${parts.join("; ")})`;
+  return ` (MISMATCH: ${parts.join("; ")})${waiting ? ` (${waiting})` : ""}`;
 }
 
 // What the author should do next, after a status refresh, in one sentence.

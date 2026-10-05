@@ -141,6 +141,7 @@ async function setup({
   hold = [],
   missing = [],
   usedLabel,
+  beforeExport,
 } = {}) {
   globalThis.document = fakeDocument(missing);
   const { initResponsePane } = await import("../taskpane/shared/response-pane.js");
@@ -169,6 +170,7 @@ async function setup({
     sendRequest,
     providersReady,
     usedLabel,
+    beforeExport,
     word: {
       collectReviewSnapshot: async () => (wordCalls.push("snapshot"), SNAPSHOT),
       collectHeadings: async () => (wordCalls.push("headings"), HEADINGS),
@@ -446,6 +448,22 @@ test("Run checks shows the summary and the rows; a later edit takes the old resu
   assert.equal(t.$("response-summary").textContent, "");
   assert.deepEqual(t.$("response-checks").children, []);
   assert.equal(t.$("response-export").textContent, "Export letter (.docx)");
+});
+
+test("Export: the rationale comments waiting for Word are tried first", async () => {
+  const order = [];
+  const t = await setup({
+    respond: {
+      response_export: () => (
+        order.push("export"),
+        { ok: true, exported: true, path: "/m/a.docx", checks: [], summary: { fail: 0, warn: 0 } }
+      ),
+    },
+    beforeExport: async () => order.push("comments"),
+  });
+  await t.$("response-export").click();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(order, ["comments", "export"]);
 });
 
 test("Export: held while a check fails, the rows are shown, and the button then offers to export anyway", async () => {

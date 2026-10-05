@@ -93,7 +93,9 @@ export const ChangeSchema = z.object({
   // (revision-classify.mjs locateParagraph).
   duplicate_before: z.boolean().default(false),
   // The edit was applied but its rationale comment was not anchored: the
-  // task pane error code (CommentAnchorMissing or CommentInsertFailed).
+  // task pane error code (CommentAnchorMissing, CommentInsertFailed, or
+  // CommentWaitingForWord: Word refused the insert with AccessDenied while
+  // minimized or not ready, and the task pane adds it when Word takes it).
   // word_comment_id is then null.
   comment_missing: z.string().nullable().default(null),
   // What Word answered on the last failed try of the comment step, as the

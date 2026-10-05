@@ -589,7 +589,10 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     if (!r) return fail("empty result from the task pane", { code: "EmptyResult" });
     // applied:true with ok:false: the task pane changed the document but could
     // not add the rationale comment (CommentAnchorMissing: no range to anchor
-    // it; CommentInsertFailed: a step after the edit threw). The change is
+    // it; CommentInsertFailed: a step after the edit threw;
+    // CommentWaitingForWord: Word refused the comment insert with
+    // AccessDenied, minimized or not ready, and the task pane adds it when
+    // Word takes it). The change is
     // still recorded, with no comment id, so the change list and the
     // "changes == rationale comments" check show it instead of losing it.
     const commentMissing = r.ok === false && r.applied === true ? (r.code ?? "applied") : null;
@@ -1284,11 +1287,15 @@ async function recordApplied(
       ? [
           `The change is in the document, but it did not leave a citation or another field of its paragraph whole (${r.detail ?? "field changed"}) and Word could not take it back. Do not repeat it and do not try to repair it with another edit; tell the author to reject change ${id} in Word. It has no rationale comment.`,
         ]
-      : commentMissing
+      : commentMissing === "CommentWaitingForWord"
         ? [
-            `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,
+            `The change was applied; Word could not take its rationale comment now (the Word window is minimized or not ready). The task pane adds it when the Word window is open. Do not repeat this edit; tell the author that the rationale comment of change ${id} is waiting for the Word window to be opened.`,
           ]
-        : []),
+        : commentMissing
+          ? [
+              `The change was applied but no rationale comment could be anchored on it (${commentMissing}). Do not repeat this edit; tell the author that change ${id} has no rationale comment.`,
+            ]
+          : []),
     ...(unsourced.length
       ? [
           `Not in the manuscript or the comment: ${unsourced.join(", ")}. Name them in your answer so the author can check where they come from.`,

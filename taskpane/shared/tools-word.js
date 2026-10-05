@@ -10,6 +10,8 @@ import {
   isToolComment,
   planBackupDelete,
   anchorQueries,
+  COMMENT_WAITING,
+  isCommentAccessDenied,
 } from "./review-view.js";
 import {
   FIELD_REFUSAL,
@@ -2146,9 +2148,11 @@ function commentError(e, step) {
 // Whether the task pane is hidden (true), shown (false), or this cannot be
 // told (null: no document, as in Node). Office.js has no API that says
 // whether the Word window is minimized (none in WordApi up to 1.9 or in
-// Office.context); the pane's own page visibility is the nearest sign. That
-// the WebView of the pane reports hidden while Word is minimized is an
-// assumption, not yet measured in Word.
+// Office.context); the pane's own page visibility was the nearest sign. It
+// is not one: in Word the pane stays "visible" while Word is minimized (run
+// e2e-20261005-151048: hidden=0 on every AccessDenied). Kept as a recorded
+// field of the error only; the pane's notice of comments waiting for Word
+// (review-pane.js) does not use it.
 export function paneHidden(doc = globalThis.document) {
   const v = doc?.visibilityState;
   if (typeof v === "string") return v === "hidden";
@@ -2175,6 +2179,10 @@ const pause = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : Promise.
 // described in comment_errors (commentError), with comment_attempts, also
 // when a later try worked: the daemon logs them and keeps the last one on
 // the change (comment_error).
+// Not tried again: AccessDenied on the insert (COMMENT_ACCESS_DENIED), which
+// Word answers while it is minimized or not ready; more tries only delay the
+// turn. The result is then COMMENT_WAITING, applied:true, and the Review tab
+// adds the comment when Word takes it.
 export async function afterEditApplied(applied, found, step, waits = COMMENT_RETRY_WAITS) {
   const errors = [];
   const tries = waits.length + 1;
@@ -2195,6 +2203,18 @@ export async function afterEditApplied(applied, found, step, waits = COMMENT_RET
       };
     } catch (e) {
       errors.push(commentError(e, where));
+      if (where === "insert_comment" && isCommentAccessDenied(errors.at(-1))) {
+        return {
+          ok: false,
+          code: COMMENT_WAITING,
+          applied: true,
+          message:
+            "Edit applied; Word refused its rationale comment (AccessDenied: Word is minimized or not ready). The Review tab adds it when the Word window is open.",
+          comment_attempts: attempt,
+          comment_errors: errors,
+          ...applied,
+        };
+      }
     }
   }
   return {

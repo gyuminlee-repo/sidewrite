@@ -58,7 +58,7 @@ function findAll(node, pred, out = []) {
   return out;
 }
 
-async function setup({ revision, word = {}, respond = {}, providersReady }) {
+async function setup({ revision, word = {}, respond = {}, providersReady, options = {} }) {
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
   const requests = [];
@@ -73,6 +73,7 @@ async function setup({ revision, word = {}, respond = {}, providersReady }) {
     onTurnStarted() {},
     isTurnInFlight: () => false,
     providersReady,
+    ...options,
   });
   await pane.reload();
   return { pane, requests, $: (id) => document.getElementById(id) };
@@ -1989,51 +1990,6 @@ test("Propose all waits for the stored provider to be confirmed before its first
 // The pane says how long it waits for the answer of review_propose, and
 // waits exactly that long: the daemon starts no turn for a request the pane
 // has given up (review-service.mjs).
-// Acceptance run of 2026-10-05, stage 3: with Word minimized, the edits of a
-// turn went in without their rationale comments. Where the pane can tell
-// (its page is hidden), it says to keep Word open; nothing is blocked.
-test("Word hidden: Propose changes says to keep Word open and still sends the request", async () => {
-  const t = await proposeAllSetup();
-  try {
-    document.hidden = true;
-    const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
-    await first.click();
-    assert.match(t.$("review-message").textContent, /^Keep Word open \(not minimized\)/);
-    assert.equal(t.sent.filter(([type]) => type === "review_propose").length, 1);
-    t.endTurn("R1.1");
-    await t.wait();
-  } finally {
-    delete document.hidden;
-    await t.pane.reload();
-  }
-});
-
-test("Word hidden while a turn runs: shown again, the pane says so; shown all along, it says nothing", async () => {
-  const t = await proposeAllSetup();
-  const fire = (hidden) => {
-    document.hidden = hidden;
-    for (const fn of document.listeners.visibilitychange ?? []) fn();
-  };
-  try {
-    let [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
-    await first.click();
-    assert.doesNotMatch(t.$("review-message").textContent, /Keep Word open/);
-    fire(true);
-    fire(false);
-    assert.match(t.$("review-message").textContent, /^Keep Word open.*hidden while a turn ran/);
-    t.endTurn("R1.1");
-    await t.wait();
-    // Hidden with no turn running: nothing to say.
-    t.$("review-message").textContent = "KEEP";
-    fire(true);
-    fire(false);
-    assert.equal(t.$("review-message").textContent, "KEEP");
-  } finally {
-    delete document.hidden;
-    await t.pane.reload();
-  }
-});
-
 test("review_propose carries the time the pane waits for its answer", async () => {
   const t = await proposeAllSetup();
   try {
@@ -2175,6 +2131,272 @@ test("Add rationale comment: the text comes from the daemon, Word gets the comme
   ]);
   assert.equal(t.$("review-message").textContent, "R1.1-1: rationale comment added.");
   assert.equal(buttons().length, 0, "the change has its comment now");
+});
+
+// Run e2e-20261005-151048: with the Word window minimized, Word applied the
+// tracked edits and refused every rationale comment with AccessDenied; the
+// pane's page stayed visible, so nothing told the author. Such a change is
+// recorded as CommentWaitingForWord; the pane says how many wait and adds
+// them itself once Word takes them (on a timer, on focus, before a refresh).
+// Fixture: an invented manual of a lighthouse keeper's logbook.
+function waitingWorld({ ids = ["R1.1-1", "R1.1-2"], code = "CommentWaitingForWord" } = {}) {
+  const changes = ids.map((id) => ({
+    id,
+    kind: "replace",
+    state: "pending",
+    find: `lamp ${id}`,
+    text: `lantern ${id}`,
+    paragraph_index: 2,
+    word_comment_id: null,
+    comment_missing: code,
+    comment_error: "step=insert_comment word=AccessDenied at=Range.insertComment msg=AccessDenied",
+    rationale: { what: "w", why: "y", addresses: "a" },
+  }));
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "Name the light by its trade word.",
+        requirements: [],
+        status: "in_progress",
+        changes,
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  const word = { calls: [], denied: true, allow: Infinity, nextId: 70, gate: null };
+  const accessDenied = () =>
+    Object.assign(new Error("AccessDenied"), {
+      code: "AccessDenied",
+      debugInfo: { code: "AccessDenied", errorLocation: "Range.insertComment" },
+    });
+  const respond = {
+    review_comment_text: (p) => ({
+      ok: true,
+      change_id: p.change_id,
+      comment_text: `[R1.1] ${p.change_id}`,
+      known_comment_ids: [],
+      change: { kind: "replace", find: `lamp ${p.change_id}`, paragraph_index: 2 },
+    }),
+    // As the daemon does (revision-store.mjs setChangeComment).
+    review_comment_set: (p) => {
+      const ch = changes.find((c) => c.id === p.change_id);
+      if (ch.word_comment_id != null) return { ok: false, error: `${ch.id} has its comment` };
+      Object.assign(ch, {
+        word_comment_id: p.word_comment_id,
+        comment_missing: null,
+        comment_error: null,
+      });
+      return { ok: true, revision };
+    },
+  };
+  const addChangeComment = async (a) => {
+    word.calls.push(a.comment_text);
+    if (word.gate) await word.gate;
+    if (word.denied || word.allow <= 0) throw accessDenied();
+    word.allow -= 1;
+    return { ok: true, word_comment_id: String(word.nextId++), existed: false };
+  };
+  return { revision, changes, word, respond, addChangeComment };
+}
+const waitFor = async (cond, ms = 2000) => {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+const showVisible = () => {
+  document.hidden = false;
+  for (const fn of document.listeners.visibilitychange ?? []) fn();
+};
+const pauseMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("comments waiting for Word: the notice counts them, a timer adds them once Word takes them, then it goes", async () => {
+  const w = waitingWorld();
+  const t = await setup({
+    revision: w.revision,
+    respond: w.respond,
+    word: { addChangeComment: w.addChangeComment },
+    options: { commentRetryMs: 15 },
+  });
+  const notice = t.$("review-comments-waiting");
+  const sets = () => t.requests.filter((r) => r.type === "review_comment_set").length;
+  assert.equal(notice.hidden, false);
+  assert.equal(
+    notice.textContent,
+    "Word is minimized or not ready: 2 rationale comments are waiting. Open the Word window and they will be added.",
+  );
+  // Word still refuses: the timer tries, one comment per try (it stops at the
+  // first AccessDenied), and nothing is recorded.
+  await waitFor(() => w.word.calls.length >= 3);
+  assert.equal(sets(), 0);
+  assert.ok(w.word.calls.every((c) => c === "[R1.1] R1.1-1"));
+  assert.match(notice.textContent, /: 2 rationale comments are waiting/);
+  // Word takes one comment, then refuses again: the count goes down by one.
+  w.word.allow = 1;
+  w.word.denied = false;
+  await waitFor(() => sets() === 1);
+  await waitFor(() => /: 1 rationale comment is waiting/.test(notice.textContent));
+  assert.equal(w.changes[0].word_comment_id, "70");
+  assert.equal(w.changes[0].comment_error, null);
+  // Word takes comments again: the last one goes in and the notice is gone.
+  w.word.allow = Infinity;
+  await waitFor(() => notice.hidden === true);
+  assert.equal(notice.textContent, "");
+  assert.equal(sets(), 2);
+  assert.deepEqual(
+    w.changes.map((c) => [c.word_comment_id, c.comment_missing]),
+    [
+      ["70", null],
+      ["71", null],
+    ],
+  );
+  // Nothing waits: the timer has stopped and Word is asked nothing more.
+  const n = w.word.calls.length;
+  await pauseMs(60);
+  assert.equal(w.word.calls.length, n);
+});
+
+test("comments waiting for Word: the pane shown again adds them at once; a try never runs twice at once", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1"] });
+  const t = await setup({
+    revision: w.revision,
+    respond: w.respond,
+    word: { addChangeComment: w.addChangeComment },
+    options: { commentRetryMs: 1e6 },
+  });
+  const notice = t.$("review-comments-waiting");
+  try {
+    showVisible();
+    await waitFor(() => w.word.calls.length === 1);
+    await pauseMs(5);
+    assert.equal(notice.hidden, false, "still refused: still waiting");
+    // Word takes it; triggers while Word is adding it make one call.
+    w.word.denied = false;
+    let open;
+    w.word.gate = new Promise((r) => (open = r));
+    showVisible();
+    showVisible();
+    await pauseMs(5);
+    const [button] = findAll(
+      t.$("review-comments"),
+      (n) => n.textContent === "Add rationale comment",
+    );
+    await button.click(); // the button runs under the same key: refused
+    assert.equal(w.word.calls.length, 2);
+    open();
+    w.word.gate = null;
+    await waitFor(() => notice.hidden === true);
+    assert.equal(t.requests.filter((r) => r.type === "review_comment_set").length, 1);
+    assert.equal(w.word.calls.length, 2);
+    showVisible();
+    await pauseMs(5);
+    assert.equal(w.word.calls.length, 2, "nothing waits any more");
+  } finally {
+    delete document.hidden;
+  }
+});
+
+test("comments waiting for Word: Refresh status adds them before it counts", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1"] });
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 1, unlocated: 0 };
+  const order = [];
+  const t = await setup({
+    revision: w.revision,
+    respond: {
+      ...w.respond,
+      review_refresh: () => (
+        order.push("refresh"),
+        { ok: true, rows: [], counts, external: [], revision: w.revision }
+      ),
+    },
+    word: {
+      addChangeComment: async (a) => (order.push("comment"), w.addChangeComment(a)),
+      collectReviewSnapshot: async () => ({
+        paragraphs: [],
+        comments: [{ id: "70", content: "[R1.1] R1.1-1" }],
+      }),
+    },
+    options: { commentRetryMs: 1e6 },
+  });
+  w.word.denied = false;
+  await t.$("review-refresh").click();
+  assert.deepEqual(order, ["comment", "refresh"]);
+  assert.equal(t.$("review-comments-waiting").hidden, true);
+  assert.doesNotMatch(t.$("review-message-details").textContent, /MISMATCH|waiting/);
+});
+
+test("a waiting comment that fails for another reason is left to its button; no notice for it", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1"] });
+  let calls = 0;
+  const t = await setup({
+    revision: w.revision,
+    respond: w.respond,
+    word: {
+      addChangeComment: async () => (
+        calls++,
+        { ok: false, code: "CommentAnchorMissing", message: "no place for the comment" }
+      ),
+    },
+    options: { commentRetryMs: 10 },
+  });
+  await waitFor(() => calls === 1);
+  await waitFor(() => t.$("review-comments-waiting").hidden === true);
+  await pauseMs(50);
+  assert.equal(calls, 1, "not tried again by the pane");
+  assert.equal(
+    findAll(t.$("review-comments"), (n) => n.textContent === "Add rationale comment").length,
+    1,
+  );
+});
+
+test("comments not waiting for Word (CommentInsertFailed) get no notice and no automatic try", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1"], code: "CommentInsertFailed" });
+  const t = await setup({
+    revision: w.revision,
+    respond: w.respond,
+    word: { addChangeComment: w.addChangeComment },
+    options: { commentRetryMs: 10 },
+  });
+  await pauseMs(50);
+  assert.equal(t.$("review-comments-waiting").hidden, true);
+  assert.equal(w.word.calls.length, 0);
+});
+
+test("turn_done with a comment waiting for Word: the card says it waits, the turn is not unchecked", async () => {
+  const w = waitingWorld({ ids: ["R1.1-1"] });
+  const counts = { accepted: 0, rejected: 0, user_edited: 0, pending: 1, unlocated: 0 };
+  const t = await setup({
+    revision: w.revision,
+    respond: {
+      ...w.respond,
+      review_refresh: () => ({ ok: true, rows: [], counts, external: [], revision: w.revision }),
+      review_propose: () => ({ ok: true, revision: w.revision }),
+    },
+    word: {
+      addChangeComment: w.addChangeComment,
+      collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }),
+    },
+    options: { commentRetryMs: 1e6 },
+  });
+  const [propose] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
+  await propose.click();
+  t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.1", ok: true });
+  await settle();
+  await pauseMs(5);
+  const texts = findAll(t.$("review-comments"), (n) =>
+    /waiting for the Word window to be opened/.test(n.textContent),
+  );
+  assert.equal(texts.length, 1);
+  assert.match(
+    texts[0].textContent,
+    /The rationale comment of R1\.1-1 is waiting for the Word window to be opened; it will be added then\./,
+  );
+  assert.doesNotMatch(t.$("review-message").textContent, /could not be added|press Add rationale/);
+  assert.doesNotMatch(t.$("review-message-details").textContent, /MISMATCH/);
 });
 
 // Codex review (P2): "Add rationale comment" pressed twice quickly ran twice

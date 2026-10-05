@@ -239,6 +239,53 @@ test("the comment sync keeps failing: applied without its comment, with every er
   assert.doesNotMatch(JSON.stringify(r.comment_errors), /degrees|Cells were held/);
 });
 
+// Run e2e-20261005-151048: with the Word window minimized every
+// Range.insertComment failed with AccessDenied, the tracked edit applied.
+// More tries at once only delay the turn: one try, and the change is
+// recorded as waiting for Word (the Review tab adds the comment later).
+test("AccessDenied on the comment insert: one try only, applied and waiting for Word", async () => {
+  let edits = 0;
+  let inserts = 0;
+  const s = fakeWord({
+    fail: ({ kinds }) => (
+      kinds.includes("edit") && edits++,
+      kinds.includes("comment") && ++inserts > 0
+    ),
+    error: () =>
+      Object.assign(new Error("AccessDenied"), {
+        code: "AccessDenied",
+        debugInfo: { code: "AccessDenied", errorLocation: "Range.insertComment" },
+      }),
+  });
+  const r = await toolTrackedEdit(REPLACE);
+  assert.deepEqual(partial(r), [false, true, "CommentWaitingForWord", 0, "P1", false]);
+  assert.deepEqual([s.comments.length, edits, inserts], [0, 1, 1]);
+  assert.equal(r.comment_attempts, 1);
+  assert.deepEqual(
+    r.comment_errors.map((e) => [e.step, e.code, e.location]),
+    [["insert_comment", "AccessDenied", "Range.insertComment"]],
+  );
+  assert.match(r.message, /minimized or not ready/);
+});
+
+test("AccessDenied outside the insert step keeps the bounded retry", async () => {
+  const { afterEditApplied } = await import("../taskpane/shared/tools-word.js");
+  let n = 0;
+  const denied = Object.assign(new Error("AccessDenied"), { code: "AccessDenied" });
+  const r = await afterEditApplied(
+    { paragraph_index: 0 },
+    async () => null,
+    async (at) => {
+      n += 1;
+      at("anchor_search");
+      throw denied;
+    },
+    [0, 0],
+  );
+  assert.equal(n, 3);
+  assert.equal(r.code, "CommentInsertFailed");
+});
+
 test("the comment went in although its sync threw: the second try finds it and adds no second one", async () => {
   let n = 0;
   const s = fakeWord({ failAfter: ({ kinds }) => kinds.includes("comment") && ++n === 1 });

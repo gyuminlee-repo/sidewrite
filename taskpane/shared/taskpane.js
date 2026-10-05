@@ -1407,6 +1407,7 @@ Office.onReady((info) => {
       sendRequest,
       usedLabel,
       providersReady: () => providersPane?.whenRestored() ?? null,
+      beforeExport: () => reviewPane?.addWaitingComments?.(),
       word: { collectReviewSnapshot, collectHeadings, exportRenderPdf },
     });
     // Tools tab: it reads Word and never writes to it.

@@ -57,8 +57,9 @@ import {
   partOfText,
   editedInText,
   changesElsewhere,
-  KEEP_WORD_OPEN,
-  MINIMIZED_IN_TURN,
+  waitingForWord,
+  waitingNotice,
+  isCommentAccessDenied,
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
@@ -130,6 +131,9 @@ export function initReviewPane({
   // () => called after a refresh in a supplementary file wrote what the
   // letter cites from it (taskpane.js: the Response tab reads it again).
   onPartRefreshed = () => {},
+  // How often the pane tries again to add the rationale comments Word
+  // refused while minimized or not ready (addWaitingComments), in ms.
+  commentRetryMs = 5000,
 }) {
   const root = document.getElementById("review-root");
   if (!root) return { onEvent() {}, setTurnBusy() {} }; // Excel pane: no Review tab
@@ -158,7 +162,7 @@ export function initReviewPane({
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
     reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
-    hiddenInTurn: false, // the page was hidden (Word minimized?) while a review turn was open
+    commentsGivenUp: new Set(), // ids of waiting comments that failed for another reason (left to the button)
     openRef: null, // the comment whose card is open (one at a time)
     pasteOpen: false, // the paste box is shown although a review is split
     results: new Map(), // ref -> { text, bad, noChange, reason } of its last turn in this session
@@ -360,6 +364,88 @@ export function initReviewPane({
     $("ledger-expect").value = f.expect;
   }
 
+  // The rationale comment of a change applied without one: its text from the
+  // daemon, Word anchors it (tools-word.js addChangeComment, which returns a
+  // comment of this change already there instead of adding a second), and
+  // the daemon records its id (which clears comment_missing and
+  // comment_error). Throws what Word threw, or an Error when Word had no
+  // place for it.
+  async function addRationale(ch) {
+    const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
+    const t = await ask("review_comment_text", { ref, change_id: ch.id });
+    const r = await word.addChangeComment({
+      ...t.change,
+      comment_text: t.comment_text,
+      known_comment_ids: t.known_comment_ids,
+    });
+    if (!r.ok) throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
+    await ask("review_comment_set", {
+      ref,
+      change_id: ch.id,
+      word_comment_id: r.word_comment_id,
+    });
+  }
+
+  // ---- rationale comments waiting for Word ------------------------------------
+  // Word refuses Range.insertComment with AccessDenied while its window is
+  // minimized or not ready, and applies the tracked edit all the same (run
+  // e2e-20261005-151048). Such a change is recorded with COMMENT_WAITING
+  // (tools-word.js afterEditApplied). While any waits, the pane says so and
+  // tries again every commentRetryMs, on focus and on becoming visible, and
+  // before a refresh and a letter export; one try at a time, in the order
+  // of the record, and a try stops at the first AccessDenied (Word still
+  // cannot take them). A change that fails for another reason is left to
+  // its "Add rationale comment" button. The waiting list is read from the
+  // record, so a pane opened again finds it; nothing is tried once the pane
+  // is closed (pagehide).
+  const waiting = () =>
+    waitingForWord(state.revision).filter((ch) => !state.commentsGivenUp.has(ch.id));
+  let addingWaiting = null;
+  let retryTimer = null;
+  let paneClosed = false;
+  function addWaitingComments() {
+    if (paneClosed) return Promise.resolve();
+    addingWaiting ??= (async () => {
+      let added = 0;
+      try {
+        for (const ch of waiting()) {
+          // The button of the change runs under the same key: never both.
+          const key = `rationale ${ch.id}`;
+          if (writing.has(key)) continue;
+          writing.add(key);
+          try {
+            await addRationale(ch);
+            added += 1;
+          } catch (e) {
+            if (isCommentAccessDenied(e)) break;
+            state.commentsGivenUp.add(ch.id);
+          } finally {
+            writing.delete(key);
+          }
+        }
+      } finally {
+        addingWaiting = null;
+        if (added) render();
+        else showWaiting();
+      }
+    })();
+    return addingWaiting;
+  }
+  // The notice and the timer follow the record: called on every render.
+  function showWaiting() {
+    const n = paneClosed ? 0 : waiting().length;
+    const box = $("review-comments-waiting");
+    box.textContent = waitingNotice(n);
+    box.hidden = n === 0;
+    if (n > 0 && retryTimer == null) {
+      retryTimer = setInterval(() => addWaitingComments(), commentRetryMs);
+      retryTimer?.unref?.(); // Node (tests): the timer does not hold the process
+    } else if (n === 0 && retryTimer != null) {
+      clearInterval(retryTimer);
+      retryTimer = null;
+    }
+  }
+
   function changeRow(ch) {
     const row = el(
       "button",
@@ -397,20 +483,7 @@ export function initReviewPane({
         once(
           key,
           guard(async () => {
-            const ref = ch.id.slice(0, ch.id.lastIndexOf("-"));
-            const t = await ask("review_comment_text", { ref, change_id: ch.id });
-            const r = await word.addChangeComment({
-              ...t.change,
-              comment_text: t.comment_text,
-              known_comment_ids: t.known_comment_ids,
-            });
-            if (!r.ok)
-              throw new Error(`${ch.id}: ${r.message || r.code || "the comment was not added"}`);
-            await ask("review_comment_set", {
-              ref,
-              change_id: ch.id,
-              word_comment_id: r.word_comment_id,
-            });
+            await addRationale(ch);
             say(`${ch.id}: rationale comment added.`);
           }),
           () => rationaleButtons.get(ch.id),
@@ -1360,6 +1433,7 @@ export function initReviewPane({
     $("review-figures-all").replaceChildren(...(partOf() ? [] : [figuresLink()]));
     showProgress();
     $("review-file").textContent = state.path ? `Review file: ${state.path}` : "";
+    showWaiting();
     if (root.scrollTop !== keep) root.scrollTop = keep;
   }
 
@@ -1401,7 +1475,6 @@ export function initReviewPane({
   // extra: more fields of the request (rewrite_paragraph for a rewrite turn).
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
-    state.hiddenInTurn = false;
     state.results.delete(ref);
     state.notices.delete(ref);
     // The card shows the work from the click on, not from the answer of the daemon.
@@ -1412,10 +1485,6 @@ export function initReviewPane({
       // (L4) and the new words of the turn are checked against it (L2).
       await refresh();
       state.turnStart.set(ref, onRecord(ref));
-      // Word minimized: its edits went in without their comments (stage 3
-      // of the acceptance run of 2026-10-05). Said after the refresh, which
-      // writes the message line; the turn is not held back.
-      if (document.hidden === true) say(KEEP_WORD_OPEN, true);
       const done = state.turnsDone;
       // wait_ms: how long this pane waits for the answer. The daemon starts
       // no turn for a request that waited longer at its gate.
@@ -1555,6 +1624,9 @@ export function initReviewPane({
   // the author or a turn asked for, the small line for an automatic one.
   // Returns the invariant report (review-view.js invariantReport).
   async function refreshWith(report) {
+    // Rationale comments that wait for Word go in first, so the counts
+    // below include them.
+    await addWaitingComments();
     // Has Word unsaved changes of the document (null: it did not say). The
     // daemon keeps it with the state of the document at this refresh.
     const saved = await documentSaved();
@@ -1991,17 +2063,18 @@ export function initReviewPane({
     onError: (e) => autoNote(`Auto-refresh failed: ${e?.message ?? e}`, true),
   });
   if (typeof window !== "undefined") {
-    window.addEventListener?.("focus", () => auto.trigger("focus"));
+    window.addEventListener?.("focus", () => {
+      addWaitingComments();
+      auto.trigger("focus");
+    });
+    window.addEventListener?.("pagehide", () => {
+      paneClosed = true;
+      showWaiting();
+    });
   }
   document.addEventListener?.("visibilitychange", () => {
-    if (document.hidden) {
-      if (state.reviewTurnOpen) state.hiddenInTurn = true;
-      return;
-    }
-    if (state.hiddenInTurn) {
-      state.hiddenInTurn = false;
-      say(MINIMIZED_IN_TURN, true);
-    }
+    if (document.hidden) return;
+    addWaitingComments();
     auto.trigger("focus");
   });
 
@@ -2042,9 +2115,15 @@ export function initReviewPane({
               }
               // What came of the turn goes into its card.
               const line = proposedLine(msg.ref);
+              // Changes whose rationale comment waits for Word: the turn is
+              // not held back by them (the pane adds the comments later and
+              // its notice counts them). Said in the card of the turn.
+              const waits = inv.waiting?.length
+                ? ` The rationale comment of ${inv.waiting.join(", ")} is waiting for the Word window to be opened; it will be added then.`
+                : "";
               if (line) {
                 state.results.set(msg.ref, {
-                  text: line.text,
+                  text: line.text + waits,
                   noChange: line.noChange,
                   ...(line.noChange ? { reason: lastReply() } : {}),
                 });
@@ -2152,6 +2231,9 @@ export function initReviewPane({
     },
     // Any turn of the pane ended (taskpane.js, TURN_END_EVENTS).
     onAnyTurnEnded: () => auto.trigger("turn"),
+    // Tries the rationale comments waiting for Word (the Response tab, before
+    // a letter export).
+    addWaitingComments,
     // A new connection (welcome) means no turn of this pane is running any
     // more: a daemon restart never sends turn_done, so clear the progress line.
     // Jobs of the old connection are ended with an error first, and so is a
