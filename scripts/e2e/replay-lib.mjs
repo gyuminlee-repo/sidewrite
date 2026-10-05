@@ -496,15 +496,8 @@ export const blankWordTitle = (title) =>
 export const newWords = (before, after, own = null) =>
   after.filter((p) => p.pid !== own && !before.some((b) => b.pid === p.pid));
 
-// The Word processes the sweep at the end of a run closes. processes: every
-// WINWORD running now, { pid, started (ISO time, null when Windows did not
-// give it), title }; strays: the processes that came up around a Word step of
-// the run (newWords), as recorded then; preexisting: the pids that ran when
-// the run began; keep: pids the run leaves on purpose (the Word of
-// --keep-on-fail, or one whose quit was refused). Closed is only a recorded
-// stray that is still the same process (pid and start time) and shows no
-// document of the user (blankWordTitle). Any other Word is left open: the
-// user's Word windows are never closed.
+// PID deltas, start times and window titles cannot prove ownership. Strays
+// are report-only, including a user-created blank Word opened during a step.
 export function sweepSelection({ processes = [], strays = [], preexisting = [], keep = [] }) {
   const close = [];
   const skip = [];
@@ -516,11 +509,8 @@ export function sweepSelection({ processes = [], strays = [], preexisting = [], 
         ? "kept by the run"
         : !stray
           ? "left open: not started by this run"
-          : !blankWordTitle(p.title)
-            ? "left open: it shows a document"
-            : null;
-    if (why) skip.push({ ...p, reason: why });
-    else close.push(p);
+          : "left open: ownership unproven";
+    skip.push({ ...p, reason: why });
   }
   return { close, skip };
 }

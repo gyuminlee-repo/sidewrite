@@ -32,7 +32,9 @@ function OpenReadOnly($app, [string]$path) {
 }
 
 # The process that owns a Word Application, from its window. 0 when it cannot be read.
-Add-Type -Namespace MdwNative -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);'
+if (-not ("MdwNative.User32" -as [type])) {
+  Add-Type -Namespace MdwNative -Name User32 -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint processId);'
+}
 function AppProcessId($app) {
   try {
     [uint32]$owner = 0
@@ -85,7 +87,7 @@ function StartOwnWord([string]$Anchor, [string]$PidFile, [int]$WaitSeconds) {
 # Throws unless the Application is the Word this run started and holds only documents of the run folder.
 function AssertOwnWord($app, $p) {
   $owner = AppProcessId $app
-  if ($owner -ne 0 -and $owner -ne $p.Id) { throw "the anchor document is open in another Word (process $owner), not in the one this run started ($($p.Id))" }
+  if ($owner -le 0 -or $p.Id -le 0 -or $owner -ne $p.Id) { throw "the anchor document ownership is unknown or mismatched (process $owner), expected ($($p.Id))" }
   $outside = @((OpenNames $app) | Where-Object { -not (Under $_) })
   if ($outside.Count -gt 0) { throw "the Word this run reached has other documents open" }
 }
@@ -95,6 +97,10 @@ function AssertOwnWord($app, $p) {
 # Returns what happened: { ok, documents, pid, exited } or { ok = false, ... }.
 function QuitOwnWord($app, $d, $p, [bool]$ours) {
   try {
+    $owner = AppProcessId $app
+    if ($owner -le 0 -or $p.Id -le 0 -or $owner -ne $p.Id) {
+      return [ordered]@{ ok = $false; refused = "ownership_unproven"; pid = $p.Id; actual_pid = $owner }
+    }
     $names = OpenNames $app
     $outside = @($names | Where-Object { -not (Under $_) })
     if (-not $ours -or $outside.Count -gt 0) {

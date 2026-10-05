@@ -6,6 +6,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
+import path from "node:path";
+import { cleanupDecision } from "../scripts/e2e/judge.mjs";
 import {
   changesReport,
   extractBatchesFromLog,
@@ -32,6 +35,64 @@ import {
 import { LedgerItemSchema } from "../daemon/revision-store.mjs";
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+
+test("replay: refused, unknown and lingering quits never terminate Word", () => {
+  const runner = read("../scripts/e2e/replay.mjs");
+  const source = runner.slice(
+    runner.indexOf("function quitWord("),
+    runner.indexOf("function withStrays("),
+  );
+  for (const quit of [
+    { ok: false, refused: "foreign_documents", outside: ["C:\\user\\notes.docx"] },
+    { ok: false, refused: "ownership_unproven" },
+    { ok: false, error: "COM timeout" },
+    { ok: true, documents: ["C:\\run\\anchor.docx"], exited: false },
+    { ok: true, documents: ["C:\\run\\anchor.docx"], exited: true },
+  ]) {
+    const record = { word: { preexisting: [] }, cleanup: {} };
+    runInNewContext(`${source}; quitWord(42);`, {
+      record,
+      cleanupDecision,
+      DOC: "anchor.docx",
+      RUN: "C:\\run",
+      winPath: (p) => p,
+      powershell: () => quit,
+      wordPids: () => (quit.exited ? [] : [42]),
+      execFileSync: () => assert.fail("process termination attempted"),
+      console: { error() {} },
+    });
+    assert.equal(!!record.cleanup.failed, !quit.exited);
+    assert.equal(record.cleanup.left_running?.pid, quit.exited ? undefined : 42);
+    assert.equal(record.cleanup.quit, quit);
+  }
+});
+
+test("replay: an open-check quit refusal survives without a stop fallback", () => {
+  const runner = read("../scripts/e2e/replay.mjs");
+  const source = runner.slice(
+    runner.indexOf("function wordOpens("),
+    runner.indexOf("const embed ="),
+  );
+  const refused = { ok: true, pid: 42, quit: { ok: false, refused: "foreign_documents" } };
+  const record = { word: {}, cleanup: {} };
+  runInNewContext(`let checks = 0; ${source}; wordOpens("copy.docx");`, {
+    record,
+    RUN: "run",
+    REPO: "repo",
+    path,
+    fs: { existsSync: () => true },
+    winPath: (p) => p,
+    withStrays: (_step, run) => run(),
+    powershell: () => refused,
+    wordPids: () => [42],
+    save() {},
+    console: { error() {} },
+    stopOwn: () => assert.fail("refusal overridden"),
+  });
+  assert.equal(record.cleanup.failed, true);
+  assert.equal(record.word.open_checks[0].quit.refused, "foreign_documents");
+  assert.equal(record.word.open_checks[0].left_running.pid, 42);
+});
 
 test("--only: a list of refs, or nothing; anything else is refused", () => {
   assert.deepEqual(parseOnly(undefined), []);
@@ -1051,28 +1112,31 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
 const word = (pid, started, title = "Document1 - Word") => ({ pid, started, title });
 const T = "2026-10-05T10:05:00.1234567Z";
 
-test("sweep: a blank Word recorded as a stray of a run step is closed", () => {
+test("sweep: a concurrent user-created blank Word recorded as a stray survives", () => {
   const { close, skip } = sweepSelection({
     processes: [word(4172, T), word(900, "2026-10-05T09:00:00Z", "thesis.docx - Word")],
-    strays: [{ ...word(4172, T), step: "open check 2" }],
+    strays: newWords([word(900, T)], [word(900, T), word(4172, T)]),
     preexisting: [900],
   });
   assert.deepEqual(
     close.map((p) => p.pid),
-    [4172],
+    [],
   );
   assert.deepEqual(
     skip.map((p) => [p.pid, p.reason]),
-    [[900, "ran before the run"]],
+    [
+      [4172, "left open: ownership unproven"],
+      [900, "ran before the run"],
+    ],
   );
   // Korean Word, and a stray with no window at all.
   assert.equal(
     sweepSelection({ processes: [word(5, T, "문서1 - Word")], strays: [word(5, T)] }).close.length,
-    1,
+    0,
   );
   assert.equal(
     sweepSelection({ processes: [word(6, T, "")], strays: [word(6, T)] }).close.length,
-    1,
+    0,
   );
 });
 
@@ -1115,8 +1179,8 @@ test("sweep: a stray whose title names a real document is left open", () => {
   assert.deepEqual(
     skip.map((p) => [p.pid, p.reason]),
     [
-      [9, "left open: it shows a document"],
-      [10, "left open: it shows a document"],
+      [9, "left open: ownership unproven"],
+      [10, "left open: ownership unproven"],
     ],
   );
 });
@@ -1150,13 +1214,13 @@ test("sweep: new Words of a step are the ones not listed before it, without the 
   assert.ok(!blankWordTitle("thesis.docx - Word"));
 });
 
-test("replay: the sweep runs last, closes by window only, and the Word steps record their strays", () => {
+test("replay: the sweep runs last, reports only, and the Word steps record their strays", () => {
   const runner = read("../scripts/e2e/replay.mjs");
   const sweep = runner.slice(
     runner.indexOf("function sweepWord()"),
     runner.indexOf("// One run of replay-open.ps1"),
   );
-  assert.match(sweep, /CloseMainWindow\(\)/);
+  assert.doesNotMatch(runner, /CloseMainWindow|Stop-Process|stopOwn/);
   assert.doesNotMatch(sweep, /Stop-Process|-Force|\.Kill\(|taskkill/);
   assert.match(sweep, /strays: record\.word\.strays \?\? \[\]/);
   // The Word kept by --keep-on-fail and one left for a refused quit stay.

@@ -297,9 +297,8 @@ async function startDaemon() {
   );
 }
 
-// Close the Word this run started. It is stopped by force only when quit ran
-// and the process stayed; a refused quit (a document outside the run folder
-// is open in it) leaves Word alone (judge.mjs cleanupDecision).
+// Quit through COM with current ownership checks. A failed or refused quit
+// leaves Word running; an old PID does not authorize process termination.
 function quitWord(pid) {
   if (!pid) return;
   let quit;
@@ -333,56 +332,18 @@ function quitWord(pid) {
     runDir: winPath(RUN),
     alive,
   });
-  if (d.action === "kill") {
-    try {
-      execFileSync("powershell.exe", [
-        "-NoProfile",
-        "-Command",
-        `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
-      ]);
-      record.cleanup.stopped_pid = pid;
-    } catch (e) {
-      record.cleanup.stop_error = e.message;
-      console.error(`replay: Word ${pid} could not be stopped: ${e.message}`);
-    }
-  }
-  if (d.action === "leave" && !quit?.refused) {
-    // Word did not answer the quit at all (a dialog holds it, or COM refused
-    // the call). It is the process this run started, on the copy of this
-    // run: it is stopped, or it would stay behind with the copy locked.
-    record.cleanup.forced = stopOwn(pid);
-    record.cleanup.failed = !record.cleanup.forced;
-    return;
-  }
-  if (d.action === "leave") {
+  if (d.action === "leave" || (d.action === "kill" && alive)) {
     record.cleanup.left_running = { pid, reason: d.reason };
+    record.cleanup.failed = true;
     console.error(`replay: ${d.reason}`);
-  }
-  record.cleanup.failed = d.fail;
-}
-
-// Stop a Word process this run started (never one that ran before it).
-function stopOwn(pid) {
-  if (!pid || (record.word.preexisting ?? []).includes(pid)) return false;
-  try {
-    execFileSync("powershell.exe", [
-      "-NoProfile",
-      "-Command",
-      `Stop-Process -Id ${Number(pid)} -Force -ErrorAction SilentlyContinue`,
-    ]);
-    console.error(`replay: Word ${pid} of this run did not answer and was stopped`);
-    return true;
-  } catch (e) {
-    record.cleanup.stop_error = e.message;
-    console.error(`replay: Word ${pid} could not be stopped: ${e.message}`);
-    return false;
+  } else {
+    record.cleanup.failed ||= d.fail;
   }
 }
 
 // A Word step of the run, with the WINWORD processes listed right before and
 // after it. One that came up and is not the step's own Word (own(result)) is
-// recorded in record.word.strays with the step: only those can be closed by
-// the sweep.
+// recorded in record.word.strays with the step for reporting only.
 function withStrays(step, run, own = () => null) {
   const before = wordProcesses();
   let result;
@@ -396,14 +357,7 @@ function withStrays(step, run, own = () => null) {
   return result;
 }
 
-// The last step of a run: a WINWORD that came up around a Word step of the
-// run (withStrays) and shows no document of the user, and is not kept on
-// purpose (sweepSelection), is asked to close its main window, as a click on
-// its close button does. Nothing is stopped by force. Every other Word,
-// also one the user opened during the run, is left open and only listed.
-// The Words this run started were quit through their own COM before
-// (quitWord, QuitOwnWord of replay-open.ps1); a Word the run has no handle on
-// is not reached over COM, which could bind to another Word.
+// Report remaining Word processes without closing any unproven stray.
 function sweepWord() {
   const preexisting = record.word.preexisting;
   // Without the list of the run's start nothing is provably the run's.
@@ -422,50 +376,13 @@ function sweepWord() {
     console.error(`replay: the Word processes could not be listed: ${e.message}`);
     return;
   }
-  const closed = sel.close.map((p) => ({ ...p, ...closeWordWindow(p) }));
-  record.cleanup.sweep = { closed, skipped: sel.skip };
-  if (!closed.length) console.log("sweep: no Word left from this run");
+  record.cleanup.sweep = { closed: [], skipped: sel.skip };
   for (const s of sel.skip.filter((x) => x.reason.startsWith("left open")))
     console.log(`sweep: Word ${s.pid} ("${s.title}") ${s.reason}`);
-  for (const c of closed) {
-    const what = `Word ${c.pid} ("${c.title}", started ${c.started})`;
-    if (c.gone) console.log(`sweep: ${what} had exited already`);
-    else if (c.exited) console.log(`sweep: closed ${what}, which the run had not quit`);
-    else {
-      record.cleanup.failed = true;
-      console.error(
-        `replay: sweep: ${what} is still running (${c.error ?? (c.had_window ? "asked to close; a dialog may hold it" : "it has no window")})`,
-      );
-    }
-  }
 }
 
-// CloseMainWindow of one WINWORD, only while it is the very process listed
-// (same name and start time: a pid is not reused for it).
-function closeWordWindow(p) {
-  const started = String(p.started).replace(/'/g, "");
-  try {
-    return JSON.parse(
-      execFileSync(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-Command",
-          `$p = Get-Process -Id ${Number(p.pid)} -ErrorAction SilentlyContinue; ` +
-            `if (-not $p -or $p.ProcessName -ne 'WINWORD' -or $p.StartTime.ToUniversalTime().ToString('o') -ne '${started}') { $o = [ordered]@{ gone = $true } } ` +
-            `else { $had = $p.MainWindowHandle -ne 0; $sent = $p.CloseMainWindow(); $o = [ordered]@{ gone = $false; had_window = $had; sent = $sent; exited = $p.WaitForExit(20000) } }; ` +
-            `$o | ConvertTo-Json -Compress`,
-        ],
-        { encoding: "utf8" },
-      ).trim(),
-    );
-  } catch (e) {
-    return { gone: false, exited: false, error: e.message };
-  }
-}
-
-// One run of replay-open.ps1 in a Word of its own, which is gone afterwards
-// whatever happened in it. file: what is opened; repairTo: with it, the file
+// One run of replay-open.ps1 in a Word of its own. Cleanup failures remain
+// visible and never trigger a process kill. file: what is opened; repairTo: the file
 // is opened with Open and Repair and saved under that name.
 let checks = 0;
 function wordOpens(file, repairTo = null) {
@@ -500,7 +417,15 @@ function wordOpens(file, repairTo = null) {
     ownPid,
   );
   const pid = ownPid(r);
-  if (pid && wordPids().includes(pid)) r.stopped = stopOwn(pid);
+  if (pid && wordPids().includes(pid)) {
+    r.left_running = {
+      pid,
+      reason: r.quit?.refused ?? r.quit?.error ?? "Word still running after open check",
+    };
+    record.cleanup.left_running = r.left_running;
+    record.cleanup.failed = true;
+    console.error(`replay: Word ${pid} left running: ${r.left_running.reason}`);
+  }
   (record.word.open_checks ??= []).push({ file: path.basename(file), repair: !!repairTo, ...r });
   save();
   return r;

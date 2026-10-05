@@ -291,6 +291,9 @@ switch ($Action) {
   }
   "quit" {
     $app = $d.Application
+    . (Join-Path $PSScriptRoot "word-own.ps1")
+    $owner = AppProcessId $app
+    if ($ExpectPid -le 0 -or $owner -le 0 -or $owner -ne $ExpectPid) { Out ([ordered]@{ ok = $false; refused = "ownership_unproven"; pid = $ExpectPid; actual_pid = $owner }); break }
     $names = @()
     foreach ($x in $app.Documents) { $names += $x.FullName }
     $allow = (Norm $AllowDir).TrimEnd("\") + "\"
