@@ -845,7 +845,7 @@ test("a change applied without its comment keeps Word's last answer; the log say
     { comment_ref: "R1.1", find: "30 degrees", replace: "30 °C", rationale: R },
     { ref: "R1.1" },
   );
-  assert.equal(d.edits[0][1].comment_error, null);
+  assert.equal("comment_error" in d.edits[0][1], false);
 });
 
 test("the comment ids on record go out with a tracked edit, so the task pane reuses none of them", async () => {

@@ -1207,10 +1207,9 @@ async function recordApplied(
     comment_missing: commentMissing,
     // Why it is missing, when Word said: the last failed try of the task
     // pane (commentErrorWords), so the review file tells it too.
-    comment_error:
-      commentMissing && Array.isArray(r.comment_errors) && r.comment_errors.length
-        ? commentErrorWords(r.comment_errors.at(-1))
-        : null,
+    ...(commentMissing && Array.isArray(r.comment_errors) && r.comment_errors.length
+      ? { comment_error: commentErrorWords(r.comment_errors.at(-1)) }
+      : {}),
     duplicate_before: hasTwin(texts, r.before),
     // Words around the range the task pane changed (revision-classify.mjs).
     context: changeContext(r.before, find, {

@@ -97,8 +97,10 @@ export const ChangeSchema = z.object({
   // word_comment_id is then null.
   comment_missing: z.string().nullable().default(null),
   // What Word answered on the last failed try of the comment step, as the
-  // daemon logged it (review-tools.mjs commentErrorWords), or null.
-  comment_error: z.string().nullable().default(null),
+  // daemon logged it (review-tools.mjs commentErrorWords). Only on a change
+  // whose comment is missing for that reason: a file without it saves as it
+  // was read.
+  comment_error: z.string().optional(),
   // When the task pane's comment cleanup (tool comments or Delete ALL)
   // removed the rationale comment: its absence is then no sign of a reject
   // and no missing comment (Codex review 7).
@@ -1121,7 +1123,7 @@ export function setChangeComment(rev, ref, changeId, wordCommentId) {
   }
   ch.word_comment_id = id;
   ch.comment_missing = null;
-  ch.comment_error = null;
+  delete ch.comment_error;
   return next;
 }
 
