@@ -302,6 +302,36 @@ test("an accepted deletion between two independent insertions reads accepted", (
   assert.equal(state(del, p, [a, del, b, c]), "accepted");
 });
 
+// A narrowed sibling is recorded with the form Word applied (find, text)
+// and the full call under narrowed_from (review-tools.mjs recordApplied).
+// Word's tracked runs follow the applied form, so that is the one to match.
+test("a deletion at the end of a narrowed sibling replace's inserted words stays pending", () => {
+  const p = para(TAIL_NOW, [
+    ["ins", "is the likely main"],
+    ["del", SIB_D],
+  ]);
+  const narrowed = {
+    ...SIB,
+    narrowed_from: {
+      find: "loose deck may explain the sway",
+      text: "loose deck is the likely main cause may explain the sway",
+    },
+  };
+  assert.equal(state(TAIL, p, [narrowed, TAIL]), "pending");
+});
+
+test("a deletion where two runs of a narrowed sibling's insertion meet stays pending", () => {
+  const p = para(`${HEAD}${I1_NOW}`, [
+    ["ins", "New bearings with"],
+    ["ins", "steel plates were fitted."],
+  ]);
+  const sib = {
+    ...change("insert", HEAD, "daily.", ` ${I1}`, "R3.1-1"),
+    narrowed_from: { find: "span daily.", text: "span weekly." },
+  };
+  assert.equal(state(DEL, p, [sib, DEL]), "pending");
+});
+
 test("classifyRevision gives every change its siblings", () => {
   const p = para(TAIL_NOW, [
     ["ins", "is the likely main"],

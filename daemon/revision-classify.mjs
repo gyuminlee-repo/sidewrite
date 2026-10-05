@@ -288,11 +288,13 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
     s.id !== change.id &&
     ((s.paragraph_id != null && s.paragraph_id === change.paragraph_id) ||
       s.paragraph_index === change.paragraph_index);
-  const newWords = (s) => normalizeParaText(s.narrowed_from?.text ?? s.text);
+  // The form Word applied (find, text), which its tracked runs follow; a
+  // narrowed sibling keeps the full call under narrowed_from, not matched.
+  const newWords = (s) => normalizeParaText(s.text);
   const inserted = (s) =>
     (s.kind === "insert" || s.kind === "replace") && newWords(s).includes(own);
   const replacedBefore = (s, j) => {
-    const old = normalizeParaText(s.narrowed_from?.find ?? s.find).trim();
+    const old = normalizeParaText(s.find).trim();
     return (
       s.kind === "replace" && !!old && newWords(s).trimEnd().endsWith(own) && t.startsWith(old, j)
     );

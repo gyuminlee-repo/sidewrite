@@ -174,7 +174,8 @@ export function resolveUnknownOverrides(rev, snapshot) {
         const row = classifyChange(
           change,
           snapshot,
-          rev.comments.flatMap((x) => x.changes),
+          // With the changes resolved earlier in this loop.
+          next.comments.flatMap((x) => x.changes),
         );
         const p = paras.find((x) => x.index === row.paragraph_index);
         // Plain containment: Word joins pending inserted and deleted text with
