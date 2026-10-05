@@ -687,6 +687,7 @@ async function setup() {
     "word-own.ps1",
     "word-rot.ps1",
     "word-launch.ps1",
+    "word-back.ps1",
     "word-shot.ps1",
   ])
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));

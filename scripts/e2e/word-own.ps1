@@ -10,6 +10,8 @@
 # QuitOwnWord quits Word only under the same two conditions.
 
 . (Join-Path $PSScriptRoot "word-rot.ps1")
+# Its window goes behind the user's windows, never minimized (word-back.ps1).
+. (Join-Path $PSScriptRoot "word-back.ps1")
 
 function Line($o) { $o | ConvertTo-Json -Depth 10 -Compress }
 function Under([string]$path) {
@@ -66,6 +68,9 @@ function StartOwnWord([string]$Anchor, [string]$PidFile, [int]$WaitSeconds) {
     $p.Refresh()
   }
   if ($p.HasExited -or $before -contains $p.Id) { throw "the Word process for this run did not start" }
+  # Behind the user's windows, without the focus, and kept there until it exits.
+  [void](SendWordToBack $p.Id)
+  [void](StartWordBackWatch $p.Id)
   # The window is there before the document is registered: give it a moment.
   Start-Sleep -Seconds 3
 
