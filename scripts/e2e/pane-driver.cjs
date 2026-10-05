@@ -756,10 +756,19 @@ const steps = {
     };
   },
 
+  // Read once the button is enabled again (see check-paragraphs).
   async refresh(page) {
     await clearMessage(page);
     await page.click("#review-refresh");
-    await waitMessage(page, 120_000);
+    await page.waitForFunction(
+      () => {
+        const b = document.getElementById("review-refresh");
+        const t = document.getElementById("review-message")?.textContent.trim() ?? "";
+        return !!b && !b.disabled && t !== "";
+      },
+      null,
+      { timeout: 120_000, polling: 200 },
+    );
     return view(page);
   },
 
@@ -1079,14 +1088,27 @@ const steps = {
 
   // "Check revised paragraphs": a status refresh, then the check of the
   // paragraphs that hold two or more changes (one model request or more).
+  // The button is disabled while its handler runs (review-pane.js once), and
+  // the step reads the line only once it is enabled again: an error line of
+  // an earlier action that is still running (the status refresh after a
+  // turn, a refresh step that ended on an older line) is not this check's
+  // answer. The replay of 2026-10-05 took such a line for the check's and
+  // went on while the check had not run.
   async "check-paragraphs"(page) {
     await openFold(page, "review-more");
     await clearMessage(page);
     await page.click("#review-check-paragraphs");
-    await waitMessage(
-      page,
-      20 * 60_000,
-      "^(Checked \\d+ revised paragraph|No paragraph holds two or more changes)",
+    await page.waitForFunction(
+      () => {
+        const b = document.getElementById("review-check-paragraphs");
+        const m = document.getElementById("review-message");
+        const t = m?.textContent.trim() ?? "";
+        if (!b || b.disabled || t === "") return false;
+        if (m.classList.contains("form-error")) return true;
+        return /^(Checked \d+ revised paragraph|No paragraph holds two or more changes)/.test(t);
+      },
+      null,
+      { timeout: 20 * 60_000, polling: 200 },
     );
     return view(page);
   },

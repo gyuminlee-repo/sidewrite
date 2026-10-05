@@ -49,6 +49,29 @@ export function computeAfterText(before, find, { replace, insert_after } = {}) {
   return { error: "give replace or insert_after" };
 }
 
+// The words around the place of a deletion, as the paragraph reads once it
+// is made: up to k words before it and k words after it, joined (the
+// rationale comment of a deletion whose words Word dropped goes on them,
+// tools-word.js toolTrackedEdit). before: the paragraph text before the
+// edit; find: the find of the call (once in before); cut: the part of find
+// that was deleted (find itself, or the narrowed find). "" when find or cut
+// is not found, or nothing stands around the place.
+export function wordsAround(before, find, cut, k) {
+  const b = normalizeParaText(before);
+  const one = (s) =>
+    String(s ?? "")
+      .replace(/\u0005/g, "")
+      .replace(/\s+/g, " ");
+  const f = one(find);
+  const c = one(cut);
+  const i = f.trim() ? b.indexOf(f) : -1;
+  const j = c.trim() ? f.indexOf(c) : -1;
+  if (i === -1 || j === -1) return "";
+  const left = (b.slice(0, i + j).match(/\S+\s*/g) ?? []).slice(-k).join("");
+  const right = (b.slice(i + j + c.length).match(/\s*\S+/g) ?? []).slice(0, k).join("");
+  return (left + right).trim();
+}
+
 // `[\s>/]` after the name excludes w:instrText, w:delText, w:delInstrText.
 const W_INS = /<w:ins[\s>/]/g;
 const W_DEL = /<w:del[\s>/]/g;
