@@ -296,6 +296,10 @@ test("an accepted deletion between two independent insertions reads accepted", (
   );
   assert.equal(state(del, p, [a, del, b]), "accepted");
   assert.equal(state(del, p), "accepted");
+  // A sibling whose new words hold the dropped words but not the text of
+  // the two runs is not the insertion they are part of.
+  const c = change("insert", before, "today", ", yesterday and the day before", "R4.1-4");
+  assert.equal(state(del, p, [a, del, b, c]), "accepted");
 });
 
 test("classifyRevision gives every change its siblings", () => {

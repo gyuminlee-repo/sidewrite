@@ -306,8 +306,15 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
     if (i < 0 || j >= t.length || !own || !inRun("ins", i)) return false;
     const mates = siblings.filter(sameParagraph);
     if (inRun("ins", j)) {
-      const oneRun = placed.runs.some((r) => r.kind === "ins" && r.start <= i && j < r.end);
-      return oneRun || mates.some(inserted);
+      if (placed.runs.some((r) => r.kind === "ins" && r.start <= i && j < r.end)) return true;
+      // Two runs: a sibling whose new words hold the dropped words and the
+      // text of both runs (a short dropped word alone is in many).
+      const runAt = (k) => {
+        const r = placed.runs.find((x) => x.kind === "ins" && x.start <= k && k < x.end);
+        return t.slice(r.start, r.end);
+      };
+      const sides = [runAt(i), runAt(j)];
+      return mates.some((s) => inserted(s) && sides.every((x) => newWords(s).includes(x)));
     }
     return inRun("del", j) && mates.some((s) => replacedBefore(s, j));
   };
