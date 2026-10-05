@@ -110,6 +110,7 @@ import { createHash } from "node:crypto";
 import { pauseResident } from "./resident-unit.mjs";
 import { HEALTH_URL, unitName } from "../install/unit.mjs";
 import { refusalsFromLog, rewritesFromLog } from "./replay-lib.mjs";
+import { execWithInteropRetry, isWslInteropLaunchFailure } from "./wsl-interop.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
@@ -327,8 +328,12 @@ function note(step, result, extra = {}) {
 }
 
 // ---- Windows calls -------------------------------------------------------
+// Every start of a Windows program goes through winExec: it is tried once
+// more when WSL itself could not start it (wsl-interop.mjs).
+const winExec = (file, argv, options, what = path.basename(file)) =>
+  execWithInteropRetry(() => execFileSync(file, argv, options), { what });
 function powershell(script, args, timeoutMs = 300_000) {
-  const out = execFileSync(
+  const out = winExec(
     "powershell.exe",
     [
       "-NoProfile",
@@ -339,6 +344,7 @@ function powershell(script, args, timeoutMs = 300_000) {
       ...args,
     ],
     { cwd: RUN, encoding: "utf8", timeout: timeoutMs, maxBuffer: 64 << 20 },
+    `powershell.exe ${script} ${args.join(" ")}`,
   );
   const line = out.replace(/\r/g, "").trim().split("\n").filter(Boolean).pop();
   return JSON.parse(line);
@@ -347,7 +353,7 @@ function com(action, extra = [], doc = DOC) {
   return powershell("word-com.ps1", ["-Doc", winPath(doc), "-Action", action, ...extra]);
 }
 const psList = (cmd) =>
-  execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" })
+  winExec("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" }, "powershell.exe")
     .replace(/\r/g, "")
     .trim()
     .split(",")
@@ -403,13 +409,23 @@ const driverAnswer = (out) =>
 function paneAsync(step, args = {}, doc = null) {
   const call = driverCall(step, args, doc, null);
   return new Promise((resolve) => {
-    execFile(call.file, call.argv, call.options, (err, stdout) => {
-      try {
-        resolve(driverAnswer(stdout || JSON.stringify({ ok: false, error: err?.message })));
-      } catch (e) {
-        resolve({ ok: false, error: `no answer of the driver: ${err?.message ?? e.message}` });
-      }
-    });
+    const run = (retried) =>
+      execFile(call.file, call.argv, call.options, (err, stdout, stderr) => {
+        // As winExec: once more when WSL could not start the driver.
+        if (err && !retried && isWslInteropLaunchFailure(Object.assign(err, { stdout, stderr }))) {
+          console.log(
+            `NOTE  WSL could not start pane-driver ${step} (UtilAcceptVsock accept4 failed); trying once more in 3 s`,
+          );
+          setTimeout(() => run(true), 3000);
+          return;
+        }
+        try {
+          resolve(driverAnswer(stdout || JSON.stringify({ ok: false, error: err?.message })));
+        } catch (e) {
+          resolve({ ok: false, error: `no answer of the driver: ${err?.message ?? e.message}` });
+        }
+      });
+    run(false);
   });
 }
 let pane = (step, args = {}, doc = null) => {
@@ -421,7 +437,7 @@ let pane = (step, args = {}, doc = null) => {
   const t0 = Date.now();
   let out;
   try {
-    out = execFileSync(call.file, call.argv, call.options);
+    out = winExec(call.file, call.argv, call.options, `pane-driver ${step}`);
   } catch (e) {
     out = e.stdout || JSON.stringify({ ok: false, error: e.message });
   }
@@ -2682,7 +2698,7 @@ function citeJudge() {
     });
     if (d.action === "kill") {
       try {
-        execFileSync("powershell.exe", [
+        winExec("powershell.exe", [
           "-NoProfile",
           "-Command",
           `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
@@ -2765,7 +2781,7 @@ function quitWord(pid, doc, key = "quit") {
   });
   if (d.action === "kill") {
     try {
-      execFileSync("powershell.exe", [
+      winExec("powershell.exe", [
         "-NoProfile",
         "-Command",
         `Stop-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
