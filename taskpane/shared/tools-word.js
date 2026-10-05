@@ -2003,6 +2003,20 @@ async function droppedDeletionAnchor(context, para, before, find, cut) {
   return near.find((n) => n.items.length === 1)?.items[0] ?? para.getRange("Whole");
 }
 
+// Does the paragraph still hold a tracked insertion (Range.getTrackedChanges,
+// WordApi 1.6; only the type is read, office-js#5188 empties the text of a
+// deletion)? false when Word cannot say.
+async function holdsTrackedInsertion(context, para) {
+  try {
+    const changes = para.getTrackedChanges();
+    changes.load("items/type");
+    await context.sync();
+    return changes.items.some((c) => c.type === "Added");
+  } catch {
+    return false;
+  }
+}
+
 // Review tab, "Add rationale comment": the comment of a change that was
 // applied without one (the comment step of toolTrackedEdit failed twice).
 // kind, find, text, paragraph_id, paragraph_index: the change as the daemon
@@ -2019,8 +2033,9 @@ async function droppedDeletionAnchor(context, para, before, find, cut) {
 // second press adds no second comment. Nothing of the document text is
 // changed.
 // A deletion whose comment waits for Word (comment_missing
-// CommentWaitingForWord) and whose old words are not in the paragraph had
-// them dropped by Word: the comment goes where toolTrackedEdit would have
+// CommentWaitingForWord), whose old words were searched and are not in the
+// paragraph, and whose paragraph still holds a tracked insertion had them
+// dropped by Word: the comment goes where toolTrackedEdit would have
 // put it (droppedDeletionAnchor, from before, the paragraph text before the
 // edit, and narrowed_from, the full call of a narrowed edit). Any other
 // deletion whose words are gone (accepted, or rewritten) gets no comment
@@ -2055,8 +2070,10 @@ export async function addChangeComment({
     }
     const para = paragraphs.items[k];
 
+    // Word searches at most 255 characters: a longer text is not looked for.
+    const searchable = (q) => typeof q === "string" && !!q.trim() && q.length <= 255;
     const hitsOf = async (q) => {
-      if (typeof q !== "string" || !q.trim() || q.length > 255) return [];
+      if (!searchable(q)) return [];
       const found = para.search(q, { matchCase: true });
       found.load("items");
       await context.sync();
@@ -2075,7 +2092,17 @@ export async function addChangeComment({
     }
     let anchor =
       olds.length === 1 ? olds[0] : olds.length === 0 && news.length === 1 ? news[0] : null;
-    if (!anchor && kind === "delete" && olds.length === 0 && comment_missing === COMMENT_WAITING) {
+    // Old words looked for and not found are dropped only while the
+    // insertion they were in is still tracked; once the author accepted it
+    // (or the deletion itself), nothing marks the place any more.
+    if (
+      !anchor &&
+      kind === "delete" &&
+      olds.length === 0 &&
+      comment_missing === COMMENT_WAITING &&
+      searchable(find) &&
+      (await holdsTrackedInsertion(context, para))
+    ) {
       anchor = await droppedDeletionAnchor(
         context,
         para,

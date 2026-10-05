@@ -16,9 +16,11 @@ import { anchorQueries, wordsAround } from "../taskpane/shared/review-view.js";
 // A replace inside it drops the old words (Word's behaviour); elsewhere the
 // old words stay as tracked deleted text, after the new ones.
 // denied: how many Range.insertComment calls fail first with AccessDenied
-// (the Word window minimized).
+// (the Word window minimized). state.tracked: the types of the tracked
+// changes a paragraph's getTrackedChanges() gives (a pending insertion when
+// pending is set); a test empties it when the author accepts everything.
 function fakeDoc(paras, { pending = null, denied = 0 } = {}) {
-  const state = { comments: [], denied };
+  const state = { comments: [], denied, tracked: pending ? ["Added"] : [] };
   const coll = (items) => ({ items, load() {} });
   const hits = (text, q) => {
     const out = [];
@@ -73,6 +75,7 @@ function fakeDoc(paras, { pending = null, denied = 0 } = {}) {
     p.getRange = () => range(p, 0, null);
     p.search = (q) => coll(hits(p.text, q).map((i) => range(p, i, q)));
     p.getComments = () => coll(state.comments);
+    p.getTrackedChanges = () => coll(state.tracked.map((type) => ({ type })));
     return p;
   });
   const document = {
@@ -331,4 +334,34 @@ test("controls: a deletion whose words are gone and whose comment does not wait 
     assert.deepEqual([r.ok, r.code], [false, "CommentAnchorMissing"]);
   }
   assert.equal(state.comments.length, 0);
+});
+
+test("controls: a waiting deletion the author accepted before Word took comments gets none", async () => {
+  // Word minimized, the comment waits; the author accepts the changes of
+  // the paragraph in Word. Nothing tracked is left where the words went:
+  // no comment on the words around the place, or on the paragraph.
+  const { state } = fakeDoc(["Title", TEXT], { pending: INSERTION, denied: 1 });
+  const r = await toolTrackedEdit(edit("thick ", ""));
+  assert.equal(r.code, "CommentWaitingForWord");
+  state.tracked = [];
+  const later = await addChangeComment(recorded());
+  assert.deepEqual([later.ok, later.code], [false, "CommentAnchorMissing"]);
+  // An accepted deletion that was not in an insertion: the same, with a
+  // tracked deletion elsewhere in the paragraph proving nothing.
+  state.tracked = ["Deleted"];
+  const plain = await addChangeComment(
+    recorded({ find: "old ", before: TEXT.replace("north", "old north") }),
+  );
+  assert.deepEqual([plain.ok, plain.code], [false, "CommentAnchorMissing"]);
+  assert.equal(state.comments.length, 0);
+});
+
+test("controls: a waiting deletion too long to search keeps the old rule", async () => {
+  // Word cannot search more than 255 characters: the old words were not
+  // looked for, so nothing says they are gone. No comment elsewhere.
+  const long = `${"Crews checked every span of the bridge with care. ".repeat(6)}End.`;
+  const { state } = fakeDoc(["Title", long], { pending: [0, long.length] });
+  const find = long.slice(0, 280);
+  const r = await addChangeComment(recorded({ find, before: long }));
+  assert.deepEqual([r.ok, r.code, state.comments.length], [false, "CommentAnchorMissing", 0]);
 });
