@@ -234,15 +234,49 @@ function classifyByContext(change, t, revisions, placed = null) {
     if (!placed) return revisions > 0;
     if (placed.short[kind]) return true;
     const form = normalizeParaText(L + own + R);
-    const at = boundedMatches(t, form)[0];
-    const a = at + collapse(L).trimStart().length;
-    const b = at + form.length - collapse(R).trimEnd().length;
+    const { a, b } = spanOf(L, own, R);
     const noContext = !collapse(L).trim() && !collapse(R).trim();
     return placed.runs.some(
       (r) =>
         r.kind === kind &&
         ((r.start < b && r.end > a) || (noContext && t.slice(r.start, r.end).includes(form))),
     );
+  };
+  // Where the own part of the form L + own + R (found once) lies in t.
+  const spanOf = (L, own, R) => {
+    const form = normalizeParaText(L + own + R);
+    const at = boundedMatches(t, form)[0];
+    return {
+      a: at + collapse(L).trimStart().length,
+      b: at + form.length - collapse(R).trimEnd().length,
+    };
+  };
+  const inRun = (kind, i) => placed.runs.some((r) => r.kind === kind && r.start <= i && i < r.end);
+  // Is every letter of the own part of L + own + R in a tracked run of
+  // `kind`? A rejected replace has its old words back as plain text; old
+  // words that are all still a tracked deletion are no reject, wherever the
+  // context went (a sibling rewrote this change's new words, so only the old
+  // words are left to match). All of them: a narrowed edit tracks only part
+  // of the full find, and the rest of it stands plain (edit-attempt.test.mjs,
+  // the narrowed edit after a restart, must still read the full form rejected).
+  const allTracked = (kind, L, own, R) => {
+    const { a, b } = spanOf(L, own, R);
+    for (let i = a; i < b; i++) if (t[i] !== " " && !inRun(kind, i)) return false;
+    return a < b;
+  };
+  // Is the place where L meets R inside a tracked insertion, the text on
+  // both sides of it still tracked inserted? A deletion inside a sibling's
+  // pending insertion leaves no deleted text: Word drops inserted text
+  // outright. The paragraph then reads L + R as an accepted deletion would.
+  // Text tracked on one side only is an accepted deletion next to a pending
+  // insertion and decides nothing here.
+  const inInsertion = (L, R) => {
+    const { a } = spanOf(L, "", R);
+    let i = a - 1;
+    while (i >= 0 && t[i] === " ") i--;
+    let j = a;
+    while (j < t.length && t[j] === " ") j++;
+    return i >= 0 && j < t.length && inRun("ins", i) && inRun("ins", j);
   };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
@@ -261,7 +295,7 @@ function classifyByContext(change, t, revisions, placed = null) {
       // drops deleted text of a pending insertion outright. The form then
       // reads accepted while its text is still a tracked insertion.
       if (a && !b) return placed && ownTracked("ins", L, I, R) ? "pending" : "accepted";
-      if (b && !a) return "rejected";
+      if (b && !a) return placed && allTracked("del", L, D, R) ? "pending" : "rejected";
     } else if (change.kind === "insert") {
       const a = has(L + I + R);
       const b = has(L + R);
@@ -278,7 +312,7 @@ function classifyByContext(change, t, revisions, placed = null) {
       const a = has(L + R);
       const b = has(L + D + R);
       if (b && !a) return ownTracked("del", L, D, R) ? "pending" : "rejected";
-      if (a && !b) return "accepted";
+      if (a && !b) return placed && inInsertion(L, R) ? "pending" : "accepted";
     }
   }
   return null;
