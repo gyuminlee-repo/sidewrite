@@ -58,6 +58,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { cleanupDecision } from "./judge.mjs";
 import { pauseResident } from "./resident-unit.mjs";
+import { execWithInteropRetry } from "./wsl-interop.mjs";
 import { consistencyLines } from "../../taskpane/shared/review-view.js";
 import {
   changesReport,
@@ -166,8 +167,12 @@ function note(step, result) {
 }
 
 // ---- Windows calls (as run-acceptance.mjs) ---------------------------------
+// Every start of a Windows program goes through winExec: it is tried once
+// more when WSL itself could not start it (wsl-interop.mjs).
+const winExec = (file, argv, options, what = path.basename(file)) =>
+  execWithInteropRetry(() => execFileSync(file, argv, options), { what });
 function powershell(script, args, timeoutMs = 300_000) {
-  const out = execFileSync(
+  const out = winExec(
     "powershell.exe",
     [
       "-NoProfile",
@@ -178,11 +183,12 @@ function powershell(script, args, timeoutMs = 300_000) {
       ...args,
     ],
     { cwd: RUN, encoding: "utf8", timeout: timeoutMs, maxBuffer: 64 << 20 },
+    `powershell.exe ${script} ${args.join(" ")}`,
   );
   return JSON.parse(out.replace(/\r/g, "").trim().split("\n").filter(Boolean).pop());
 }
 const psList = (cmd) =>
-  execFileSync("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" })
+  winExec("powershell.exe", ["-NoProfile", "-Command", cmd], { encoding: "utf8" }, "powershell.exe")
     .replace(/\r/g, "")
     .trim()
     .split(",")
@@ -194,7 +200,7 @@ const wordPids = () =>
 // not give it), title }.
 const wordProcesses = () =>
   JSON.parse(
-    execFileSync(
+    winExec(
       "powershell.exe",
       [
         "-NoProfile",
@@ -202,6 +208,7 @@ const wordProcesses = () =>
         "ConvertTo-Json -Compress -InputObject @(Get-Process WINWORD -ErrorAction SilentlyContinue | ForEach-Object { $s = $null; try { $s = $_.StartTime.ToUniversalTime().ToString('o') } catch { $s = $null }; [ordered]@{ pid = $_.Id; started = $s; title = [string]$_.MainWindowTitle } })",
       ],
       { encoding: "utf8" },
+      "powershell.exe",
     ).trim() || "[]",
   );
 
@@ -211,7 +218,7 @@ function pane(step, args = {}, timeoutMs = 30 * 60_000) {
   fs.writeFileSync(argsFile, JSON.stringify(args));
   let out;
   try {
-    out = execFileSync(
+    out = winExec(
       unixPath(opt["win-node"]),
       [winPath(path.join(TOOLS, "replay-driver.cjs")), step, winPath(argsFile)],
       {
@@ -229,6 +236,7 @@ function pane(step, args = {}, timeoutMs = 30 * 60_000) {
             .join(":"),
         },
       },
+      `replay-driver ${step}`,
     );
   } catch (e) {
     // The driver prints its own failure as a JSON line before it exits.
