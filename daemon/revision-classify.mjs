@@ -268,7 +268,11 @@ function classifyByContext(change, t, revisions, placed = null) {
   // both sides of it still tracked inserted? A deletion inside a sibling's
   // pending insertion leaves no deleted text: Word drops inserted text
   // outright. The paragraph then reads L + R as an accepted deletion would.
-  // Text tracked on one side only is an accepted deletion next to a pending
+  // A deletion at the end of a sibling replace's inserted words reads a
+  // tracked insertion on the left and a tracked deletion on the right: Word
+  // shows a pending replace as its inserted words right before its deleted
+  // words, with nothing between them, so only dropped text can have stood
+  // there. Plain text on one side is an accepted deletion next to a pending
   // insertion and decides nothing here.
   const inInsertion = (L, R) => {
     const { a } = spanOf(L, "", R);
@@ -276,7 +280,7 @@ function classifyByContext(change, t, revisions, placed = null) {
     while (i >= 0 && t[i] === " ") i--;
     let j = a;
     while (j < t.length && t[j] === " ") j++;
-    return i >= 0 && j < t.length && inRun("ins", i) && inRun("ins", j);
+    return i >= 0 && j < t.length && inRun("ins", i) && (inRun("ins", j) || inRun("del", j));
   };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
