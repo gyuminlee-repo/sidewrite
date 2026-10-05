@@ -668,6 +668,7 @@ async function setup() {
   for (const f of [
     "pane-driver.cjs",
     "word-com.ps1",
+    "word-own.ps1",
     "word-rot.ps1",
     "word-launch.ps1",
     "word-shot.ps1",
@@ -675,7 +676,7 @@ async function setup() {
     fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   // Stage cite: a Word of its own for accept-all and reject-all.
   if (STAGE === "cite")
-    for (const f of ["word-own.ps1", "marked-diff-word.ps1"])
+    for (const f of ["marked-diff-word.ps1"])
       fs.copyFileSync(path.join(HERE, f), path.join(TOOLS, f));
   if (opt["figures-button"])
     fs.copyFileSync(
