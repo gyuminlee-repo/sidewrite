@@ -213,7 +213,9 @@ export function placedRuns(p, t) {
 // short for its kind (then nothing proves it is not); without it the
 // paragraph's revision mark total decides (revisions), which reads an
 // accepted change pending while any sibling is (Codex review 16).
-function classifyByContext(change, t, revisions, placed = null) {
+// siblings: the other changes of the revision, the only record of which
+// tracked runs are one change (inInsertion).
+function classifyByContext(change, t, revisions, placed = null, siblings = []) {
   const { left, right } = change.context;
   const I = collapse(change.text);
   const D = collapse(change.find);
@@ -274,13 +276,49 @@ function classifyByContext(change, t, revisions, placed = null) {
   // words, with nothing between them, so only dropped text can have stood
   // there. Plain text on one side is an accepted deletion next to a pending
   // insertion and decides nothing here.
+  // Tracked text on both sides is no proof by itself: an accepted deletion
+  // between an insertion and an independent deletion, or between two
+  // independent insertions, leaves the same shape (Codex review of #30).
+  // The two sides are one change when one insertion run spans the place, or
+  // when a sibling of the same paragraph inserted the dropped words: for a
+  // deletion on the right, a replace whose new words end with them and
+  // whose old words stand right of the place.
+  const own = normalizeParaText(change.find).trim();
+  const sameParagraph = (s) =>
+    s.id !== change.id &&
+    ((s.paragraph_id != null && s.paragraph_id === change.paragraph_id) ||
+      s.paragraph_index === change.paragraph_index);
+  // The form Word applied (find, text), which its tracked runs follow; a
+  // narrowed sibling keeps the full call under narrowed_from, not matched.
+  const newWords = (s) => normalizeParaText(s.text);
+  const inserted = (s) =>
+    (s.kind === "insert" || s.kind === "replace") && newWords(s).includes(own);
+  const replacedBefore = (s, j) => {
+    const old = normalizeParaText(s.find).trim();
+    return (
+      s.kind === "replace" && !!old && newWords(s).trimEnd().endsWith(own) && t.startsWith(old, j)
+    );
+  };
   const inInsertion = (L, R) => {
     const { a } = spanOf(L, "", R);
     let i = a - 1;
     while (i >= 0 && t[i] === " ") i--;
     let j = a;
     while (j < t.length && t[j] === " ") j++;
-    return i >= 0 && j < t.length && inRun("ins", i) && (inRun("ins", j) || inRun("del", j));
+    if (i < 0 || j >= t.length || !own || !inRun("ins", i)) return false;
+    const mates = siblings.filter(sameParagraph);
+    if (inRun("ins", j)) {
+      if (placed.runs.some((r) => r.kind === "ins" && r.start <= i && j < r.end)) return true;
+      // Two runs: a sibling whose new words hold the dropped words and the
+      // text of both runs (a short dropped word alone is in many).
+      const runAt = (k) => {
+        const r = placed.runs.find((x) => x.kind === "ins" && x.start <= k && k < x.end);
+        return t.slice(r.start, r.end);
+      };
+      const sides = [runAt(i), runAt(j)];
+      return mates.some((s) => inserted(s) && sides.every((x) => newWords(s).includes(x)));
+    }
+    return inRun("del", j) && mates.some((s) => replacedBefore(s, j));
   };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
@@ -322,7 +360,9 @@ function classifyByContext(change, t, revisions, placed = null) {
   return null;
 }
 
-export function classifyChange(change, snapshot) {
+// siblings: the other changes of the revision (classifyRevision passes every
+// change; the change itself among them is skipped).
+export function classifyChange(change, snapshot, siblings = []) {
   const loc = locateParagraph(change, snapshot);
   const commentIds = new Set((snapshot.comments ?? []).map((c) => String(c.id)));
   // Word removes the comment on a rejected inserted range, but the comment
@@ -366,7 +406,7 @@ export function classifyChange(change, snapshot) {
   // recorded before context existed, or no single form matched, fall
   // through to the whole-paragraph rule below.
   if (change.context) {
-    const state = classifyByContext(change, t, revisions, placedRuns(p, t));
+    const state = classifyByContext(change, t, revisions, placedRuns(p, t), siblings);
     if (state) return out(state);
   }
   if (revisions > 0) {
@@ -383,9 +423,10 @@ export function classifyChange(change, snapshot) {
 // Classify every change in a revision. Returns rows the store can apply.
 export function classifyRevision(revision, snapshot) {
   const rows = [];
+  const all = (revision.comments ?? []).flatMap((c) => c.changes ?? []);
   for (const c of revision.comments ?? []) {
     for (const ch of c.changes ?? []) {
-      rows.push({ ref: c.ref, change_id: ch.id, ...classifyChange(ch, snapshot) });
+      rows.push({ ref: c.ref, change_id: ch.id, ...classifyChange(ch, snapshot, all) });
     }
   }
   return rows;

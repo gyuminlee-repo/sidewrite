@@ -120,6 +120,9 @@ function sidesOf(before, find, cut) {
 //      words before it).
 //   3. The first 2 to 8 words of the paragraph.
 // Each text at most 255 characters (Word search), none twice.
+// The texts of 1 and 2 touch the place of the deletion; the count of them
+// is anchorQueries.near (tools-word.js droppedDeletionAnchor tells a hit at
+// the place from one that is not).
 export function anchorQueries(before, find, cut) {
   const s = sidesOf(before, find, cut);
   if (!s) return [];
@@ -133,6 +136,7 @@ export function anchorQueries(before, find, cut) {
     if (k <= s.left.length) add(s.left.slice(-k).join(""));
     if (k <= s.right.length) add(s.right.slice(0, k).join(""));
   }
+  Object.defineProperty(out, "near", { value: out.length });
   const words = s.b.match(/\S+\s*/g) ?? [];
   for (let k = 2; k <= Math.min(8, words.length); k++) add(words.slice(0, k).join(""));
   return out;

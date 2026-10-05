@@ -1943,21 +1943,11 @@ export async function toolTrackedEdit({
           // left to find (replays of 2026-10-05: every change that lost its
           // comment this way had its find nowhere in the paragraph). The
           // comment then goes on what stands: the new words of a replace,
-          // or for a deletion the first of anchorQueries found once in the
-          // paragraph (words around its place, then on one side, then the
-          // first words of the paragraph), all searched in one sync. When
-          // none is: the paragraph itself, so that a deletion always has its
-          // comment somewhere in its paragraph.
+          // or for a deletion droppedDeletionAnchor (the words around its
+          // place, or the paragraph itself).
           if (!anchor && editReplace) anchor = inserted ?? undefined;
           if (!anchor && !editReplace) {
-            const near = anchorQueries(before, find, editFind).map((q) => {
-              const found = para.search(q, { matchCase: true });
-              found.load("items");
-              return found;
-            });
-            if (near.length) await context.sync();
-            anchor = near.find((n) => n.items.length === 1)?.items[0];
-            anchor ??= para.getRange("Whole");
+            ({ anchor } = await droppedDeletionAnchor(context, para, before, find, editFind));
           }
         }
         return anchor;
@@ -1992,6 +1982,59 @@ export async function toolTrackedEdit({
   });
 }
 
+// Where the comment of a deletion goes when its old words are nowhere in
+// its paragraph (Word dropped them: they were inside a sibling's pending
+// insertion): the first of anchorQueries found exactly once in the
+// paragraph (words around its place, then on one side, then the first
+// words of the paragraph), all searched in one sync. When none is: the
+// paragraph itself, so that a deletion always has its comment somewhere in
+// its paragraph. toolTrackedEdit and addChangeComment (the same comment
+// added later, Word having refused it while minimized) both take it, so the
+// two put the comment in one place and a comment already there is found.
+// before: the paragraph text before the edit; find: the full find of the
+// call; cut: the range Word applied (find unless the edit was narrowed).
+// Returns { anchor, place }: place is the anchor when it touches the place
+// of the deletion (words around it or on one side, anchorQueries.near),
+// else null (the first words of the paragraph, or the paragraph).
+async function droppedDeletionAnchor(context, para, before, find, cut) {
+  const queries = anchorQueries(before, find, cut);
+  const found = queries.map((q) => {
+    const hits = para.search(q, { matchCase: true });
+    hits.load("items");
+    return hits;
+  });
+  if (found.length) await context.sync();
+  const k = found.findIndex((n) => n.items.length === 1);
+  if (k === -1) return { anchor: para.getRange("Whole"), place: null };
+  const anchor = found[k].items[0];
+  return { anchor, place: k < queries.near ? anchor : null };
+}
+
+// Is a tracked change still at the place of a deletion whose old words are
+// gone: a tracked insertion or deletion of the paragraph whose range meets
+// place (inside, around, overlapping or right next to it)? The inserted
+// words around dropped old words are such an insertion; old words outside
+// the insertion stay a tracked deletion next to the place. An accepted
+// deletion leaves nothing tracked there, whatever is pending elsewhere in
+// the paragraph. Range.getTrackedChanges is WordApi 1.6; only types and
+// ranges are read (office-js#5188 empties the text of a deletion). false
+// when Word cannot say.
+async function trackedAt(context, para, place) {
+  try {
+    const changes = para.getTrackedChanges();
+    changes.load("items/type");
+    await context.sync();
+    const where = changes.items
+      .filter((c) => c.type === "Added" || c.type === "Deleted")
+      .map((c) => c.getRange().compareLocationWith(place));
+    if (!where.length) return false;
+    await context.sync();
+    return where.some((w) => !["Before", "After", "Unrelated"].includes(w.value));
+  } catch {
+    return false;
+  }
+}
+
 // Review tab, "Add rationale comment": the comment of a change that was
 // applied without one (the comment step of toolTrackedEdit failed twice).
 // kind, find, text, paragraph_id, paragraph_index: the change as the daemon
@@ -2007,6 +2050,14 @@ export async function toolTrackedEdit({
 // change (existingComment), is returned as it is (existed: true), so a
 // second press adds no second comment. Nothing of the document text is
 // changed.
+// A deletion whose comment waits for Word (comment_missing
+// CommentWaitingForWord), whose old words were searched and are not in the
+// paragraph, and at whose place a tracked change still stands (trackedAt)
+// had them dropped by Word: the comment goes on the words at its place, as
+// toolTrackedEdit put it (droppedDeletionAnchor, from before, the paragraph
+// text before the edit, and narrowed_from, the full call of a narrowed
+// edit). Any other deletion whose words are gone (accepted, or rewritten),
+// or whose place is not found, gets no comment somewhere else, as above.
 export async function addChangeComment({
   kind,
   find,
@@ -2015,6 +2066,9 @@ export async function addChangeComment({
   paragraph_index,
   comment_text,
   known_comment_ids,
+  before = "",
+  narrowed_from = null,
+  comment_missing = null,
 }) {
   if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
   return await Word.run(async (context) => {
@@ -2034,8 +2088,10 @@ export async function addChangeComment({
     }
     const para = paragraphs.items[k];
 
+    // Word searches at most 255 characters: a longer text is not looked for.
+    const searchable = (q) => typeof q === "string" && !!q.trim() && q.length <= 255;
     const hitsOf = async (q) => {
-      if (typeof q !== "string" || !q.trim() || q.length > 255) return [];
+      if (!searchable(q)) return [];
       const found = para.search(q, { matchCase: true });
       found.load("items");
       await context.sync();
@@ -2052,8 +2108,37 @@ export async function addChangeComment({
         (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
       );
     }
-    const anchor =
+    let anchor =
       olds.length === 1 ? olds[0] : olds.length === 0 && news.length === 1 ? news[0] : null;
+    // Old words looked for and not found were dropped only while a tracked
+    // change still stands at their place (trackedAt); once the author
+    // accepted the deletion, nothing marks it. Without a place (no words
+    // around it found once) or without WordApi 1.6 nothing can tell.
+    if (
+      !anchor &&
+      kind === "delete" &&
+      olds.length === 0 &&
+      comment_missing === COMMENT_WAITING &&
+      searchable(find)
+    ) {
+      // canReject: the same requirement set, WordApi 1.6.
+      if (!canReject()) {
+        return {
+          ok: false,
+          code: "CommentAnchorMissing",
+          message:
+            "The old words of the deletion are gone, and this Word lacks WordApi 1.6 (Range.getTrackedChanges) to tell whether the deletion is still pending; no comment was added",
+        };
+      }
+      const { place } = await droppedDeletionAnchor(
+        context,
+        para,
+        before,
+        narrowed_from?.find ?? find,
+        find,
+      );
+      if (place && (await trackedAt(context, para, place))) anchor = place;
+    }
     if (!anchor) {
       return {
         ok: false,

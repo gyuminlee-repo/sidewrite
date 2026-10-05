@@ -171,7 +171,12 @@ export function resolveUnknownOverrides(rev, snapshot) {
           ...form,
           word_comment_id: comment ? String(comment.id) : (form.word_comment_id ?? null),
         };
-        const row = classifyChange(change, snapshot);
+        const row = classifyChange(
+          change,
+          snapshot,
+          // With the changes resolved earlier in this loop.
+          next.comments.flatMap((x) => x.changes),
+        );
         const p = paras.find((x) => x.index === row.paragraph_index);
         // Plain containment: Word joins pending inserted and deleted text with
         // no space, so a word-bounded match would miss it.
@@ -1506,6 +1511,11 @@ export function createReviewService({
           text: ch.text,
           paragraph_id: ch.paragraph_id,
           paragraph_index: ch.paragraph_index,
+          // For a deletion whose old words Word dropped: where the comment
+          // of the edit would have gone (tools-word.js droppedDeletionAnchor).
+          before: ch.before,
+          narrowed_from: ch.narrowed_from,
+          comment_missing: ch.comment_missing,
         },
       };
     },

@@ -14,7 +14,12 @@
 // works).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyChange, changeContext, normalizeParaText } from "../daemon/revision-classify.mjs";
+import {
+  classifyChange,
+  classifyRevision,
+  changeContext,
+  normalizeParaText,
+} from "../daemon/revision-classify.mjs";
 
 // A snapshot paragraph whose tracked runs are given by their text; start is
 // where the text stands in the normalized paragraph text.
@@ -35,10 +40,11 @@ function para(text, runs) {
   };
 }
 const snap = (p) => ({ paragraphs: [p], comments: [] });
-const state = (change, p) => classifyChange(change, snap(p)).state;
+// siblings: the other changes of the revision (classifyRevision passes them).
+const state = (change, p, siblings = []) => classifyChange(change, snap(p), siblings).state;
 
-const change = (kind, before, find, text) => ({
-  id: "R3.1-2",
+const change = (kind, before, find, text, id = "R3.1-2") => ({
+  id,
   kind,
   paragraph_index: 4,
   paragraph_id: "P4",
@@ -65,12 +71,15 @@ test("a deletion inside a sibling's pending insertion stays pending", () => {
 });
 
 test("a deletion where two runs of a sibling's pending insertion meet stays pending", () => {
-  // Word may split the insertion at the place of the dropped text.
+  // Word may split the insertion at the place of the dropped text. Two runs
+  // that meet are one insertion only when a sibling inserted the dropped
+  // words: the insertion of I1 is in the revision.
   const p = para(`${HEAD}${I1_NOW}`, [
     ["ins", "New bearings with"],
     ["ins", "steel plates were fitted."],
   ]);
-  assert.equal(state(DEL, p), "pending");
+  const sib = change("insert", HEAD, "daily.", ` ${I1}`, "R3.1-1");
+  assert.equal(state(DEL, p, [sib, DEL]), "pending");
 });
 
 test("controls: a deletion that is decided still reads decided", () => {
@@ -160,13 +169,17 @@ const BEFORE_J = `Inspectors agree the loose deck ${SIB_I} ${SIB_D} the sway not
 const TAIL = change("delete", BEFORE_J, " cause", "");
 const TAIL_NOW = BEFORE_J.replace(" cause", "");
 
+// The sibling replace, as the revision recorded it: its new words, then its
+// old words (Word's pending replace).
+const SIB = change("replace", BEFORE_J.replace(`${SIB_I} `, ""), SIB_D, SIB_I + " ", "R2.1-1");
+
 test("a deletion at the end of a sibling replace's inserted words stays pending", () => {
   assert.deepEqual(TAIL.context, { left: "the likely main", right: " may explain the" });
   const p = para(TAIL_NOW, [
     ["ins", "is the likely main"],
     ["del", SIB_D],
   ]);
-  assert.equal(state(TAIL, p), "pending");
+  assert.equal(state(TAIL, p, [SIB, TAIL]), "pending");
 });
 
 test("the same with the sibling's deleted words opening with a comma", () => {
@@ -178,7 +191,14 @@ test("the same with the sibling's deleted words opening with a comma", () => {
     ["ins", "were retensioned in spring"],
     ["del", ", combined with new dampers"],
   ]);
-  assert.equal(state(del, p), "pending");
+  const sib = change(
+    "replace",
+    "The cables, combined with new dampers.",
+    ", combined with new dampers",
+    " were retensioned in spring rather than in autumn",
+    "R2.1-1",
+  );
+  assert.equal(state(del, p, [sib, del]), "pending");
 });
 
 test("a deletion over a sibling's inserted words and one original word stays pending", () => {
@@ -212,4 +232,117 @@ test("controls: a deletion next to a sibling's tracked deletion still reads deci
   ]);
   assert.equal(state(TAIL, own), "pending");
   assert.equal(state(TAIL, para(BEFORE_J, [])), "rejected");
+});
+
+// ---- an accepted deletion between independent tracked changes ----
+// Tracked text on both sides of the place says the deletion is pending only
+// when the two sides are one change: one insertion run, or a sibling of the
+// revision that inserted the dropped words (and, with deleted words on the
+// right, a replace whose old words stand there). An insertion next to an
+// independent deletion, or two independent insertions, leave the same
+// shape when the deletion between them is accepted (Codex review of #30).
+
+const BEFORE_X = "Crews installed new bearings yesterday beside the pier.";
+const GAP = change("delete", BEFORE_X, " yesterday", "", "R4.1-2");
+const X_NOW = "Crews installed new bearings beside the pier.";
+const X_INS = change(
+  "insert",
+  "Crews installed bearings yesterday beside the pier.",
+  "installed",
+  " new",
+  "R4.1-1",
+);
+const X_DEL = change("delete", BEFORE_X, " beside the pier", "", "R4.1-3");
+
+test("an accepted deletion between an independent insertion and an independent deletion reads accepted", () => {
+  const p = para(X_NOW, [
+    ["ins", "new bearings"],
+    ["del", "beside"],
+  ]);
+  assert.equal(state(GAP, p, [X_INS, GAP, X_DEL]), "accepted");
+  assert.equal(state(GAP, p), "accepted");
+  // A sibling replace whose new words do not end with the dropped words, or
+  // whose old words do not stand right of the place, proves nothing.
+  const other = change(
+    "replace",
+    "Crews installed old bearings beside the pier.",
+    "old",
+    "new",
+    "R4.1-4",
+  );
+  assert.equal(state(GAP, p, [other, GAP]), "accepted");
+});
+
+test("an accepted deletion between two independent insertions reads accepted", () => {
+  const before = "Crews installed new bearings yesterday and fresh plates today.";
+  const del = change("delete", before, " yesterday and", "", "R4.1-2");
+  const p = para("Crews installed new bearings fresh plates today.", [
+    ["ins", "new bearings"],
+    ["ins", "fresh plates"],
+  ]);
+  const a = change(
+    "insert",
+    "Crews installed yesterday and today.",
+    "installed",
+    " new bearings",
+    "R4.1-1",
+  );
+  const b = change(
+    "insert",
+    "Crews installed yesterday and today.",
+    "and",
+    " fresh plates",
+    "R4.1-3",
+  );
+  assert.equal(state(del, p, [a, del, b]), "accepted");
+  assert.equal(state(del, p), "accepted");
+  // A sibling whose new words hold the dropped words but not the text of
+  // the two runs is not the insertion they are part of.
+  const c = change("insert", before, "today", ", yesterday and the day before", "R4.1-4");
+  assert.equal(state(del, p, [a, del, b, c]), "accepted");
+});
+
+// A narrowed sibling is recorded with the form Word applied (find, text)
+// and the full call under narrowed_from (review-tools.mjs recordApplied).
+// Word's tracked runs follow the applied form, so that is the one to match.
+test("a deletion at the end of a narrowed sibling replace's inserted words stays pending", () => {
+  const p = para(TAIL_NOW, [
+    ["ins", "is the likely main"],
+    ["del", SIB_D],
+  ]);
+  const narrowed = {
+    ...SIB,
+    narrowed_from: {
+      find: "loose deck may explain the sway",
+      text: "loose deck is the likely main cause may explain the sway",
+    },
+  };
+  assert.equal(state(TAIL, p, [narrowed, TAIL]), "pending");
+});
+
+test("a deletion where two runs of a narrowed sibling's insertion meet stays pending", () => {
+  const p = para(`${HEAD}${I1_NOW}`, [
+    ["ins", "New bearings with"],
+    ["ins", "steel plates were fitted."],
+  ]);
+  const sib = {
+    ...change("insert", HEAD, "daily.", ` ${I1}`, "R3.1-1"),
+    narrowed_from: { find: "span daily.", text: "span weekly." },
+  };
+  assert.equal(state(DEL, p, [sib, DEL]), "pending");
+});
+
+test("classifyRevision gives every change its siblings", () => {
+  const p = para(TAIL_NOW, [
+    ["ins", "is the likely main"],
+    ["del", SIB_D],
+  ]);
+  const rev = {
+    comments: [
+      { ref: "R2.1", changes: [SIB] },
+      { ref: "R3.1", changes: [TAIL] },
+    ],
+  };
+  const row = classifyRevision(rev, snap(p)).find((r) => r.change_id === TAIL.id);
+  assert.equal(row.state, "pending");
 });

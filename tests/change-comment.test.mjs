@@ -255,6 +255,12 @@ test("service: the comment text of a change is the one its edit would have carri
       ],
       ["replace", "held at 30 degrees for 5 days", "kept warm", "U1", 1],
     );
+    // What the task pane needs to anchor a deletion whose old words Word
+    // dropped where the edit would have (droppedDeletionAnchor).
+    assert.deepEqual(
+      [t.change.before, t.change.narrowed_from, t.change.comment_missing],
+      ["It was held at 30 degrees for 5 days.", null, "CommentInsertFailed"],
+    );
 
     const set = await ask("review_comment_set", {
       ref: "R1.1",
