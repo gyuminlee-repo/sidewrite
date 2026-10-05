@@ -1943,21 +1943,11 @@ export async function toolTrackedEdit({
           // left to find (replays of 2026-10-05: every change that lost its
           // comment this way had its find nowhere in the paragraph). The
           // comment then goes on what stands: the new words of a replace,
-          // or for a deletion the first of anchorQueries found once in the
-          // paragraph (words around its place, then on one side, then the
-          // first words of the paragraph), all searched in one sync. When
-          // none is: the paragraph itself, so that a deletion always has its
-          // comment somewhere in its paragraph.
+          // or for a deletion droppedDeletionAnchor (the words around its
+          // place, or the paragraph itself).
           if (!anchor && editReplace) anchor = inserted ?? undefined;
           if (!anchor && !editReplace) {
-            const near = anchorQueries(before, find, editFind).map((q) => {
-              const found = para.search(q, { matchCase: true });
-              found.load("items");
-              return found;
-            });
-            if (near.length) await context.sync();
-            anchor = near.find((n) => n.items.length === 1)?.items[0];
-            anchor ??= para.getRange("Whole");
+            anchor = await droppedDeletionAnchor(context, para, before, find, editFind);
           }
         }
         return anchor;
@@ -1992,6 +1982,27 @@ export async function toolTrackedEdit({
   });
 }
 
+// Where the comment of a deletion goes when its old words are nowhere in
+// its paragraph (Word dropped them: they were inside a sibling's pending
+// insertion): the first of anchorQueries found exactly once in the
+// paragraph (words around its place, then on one side, then the first
+// words of the paragraph), all searched in one sync. When none is: the
+// paragraph itself, so that a deletion always has its comment somewhere in
+// its paragraph. toolTrackedEdit and addChangeComment (the same comment
+// added later, Word having refused it while minimized) both take it, so the
+// two put the comment in one place and a comment already there is found.
+// before: the paragraph text before the edit; find: the full find of the
+// call; cut: the range Word applied (find unless the edit was narrowed).
+async function droppedDeletionAnchor(context, para, before, find, cut) {
+  const near = anchorQueries(before, find, cut).map((q) => {
+    const found = para.search(q, { matchCase: true });
+    found.load("items");
+    return found;
+  });
+  if (near.length) await context.sync();
+  return near.find((n) => n.items.length === 1)?.items[0] ?? para.getRange("Whole");
+}
+
 // Review tab, "Add rationale comment": the comment of a change that was
 // applied without one (the comment step of toolTrackedEdit failed twice).
 // kind, find, text, paragraph_id, paragraph_index: the change as the daemon
@@ -2007,6 +2018,13 @@ export async function toolTrackedEdit({
 // change (existingComment), is returned as it is (existed: true), so a
 // second press adds no second comment. Nothing of the document text is
 // changed.
+// A deletion whose comment waits for Word (comment_missing
+// CommentWaitingForWord) and whose old words are not in the paragraph had
+// them dropped by Word: the comment goes where toolTrackedEdit would have
+// put it (droppedDeletionAnchor, from before, the paragraph text before the
+// edit, and narrowed_from, the full call of a narrowed edit). Any other
+// deletion whose words are gone (accepted, or rewritten) gets no comment
+// somewhere else, as above.
 export async function addChangeComment({
   kind,
   find,
@@ -2015,6 +2033,9 @@ export async function addChangeComment({
   paragraph_index,
   comment_text,
   known_comment_ids,
+  before = "",
+  narrowed_from = null,
+  comment_missing = null,
 }) {
   if (!isToolComment(comment_text)) throw new Error("comment_text must start with [R<n>.<m>]");
   return await Word.run(async (context) => {
@@ -2052,8 +2073,17 @@ export async function addChangeComment({
         (r, i) => !["Inside", "Equal", "InsideStart", "InsideEnd"].includes(where[i].value),
       );
     }
-    const anchor =
+    let anchor =
       olds.length === 1 ? olds[0] : olds.length === 0 && news.length === 1 ? news[0] : null;
+    if (!anchor && kind === "delete" && olds.length === 0 && comment_missing === COMMENT_WAITING) {
+      anchor = await droppedDeletionAnchor(
+        context,
+        para,
+        before,
+        narrowed_from?.find ?? find,
+        find,
+      );
+    }
     if (!anchor) {
       return {
         ok: false,

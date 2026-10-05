@@ -1510,6 +1510,11 @@ export function createReviewService({
           text: ch.text,
           paragraph_id: ch.paragraph_id,
           paragraph_index: ch.paragraph_index,
+          // For a deletion whose old words Word dropped: where the comment
+          // of the edit would have gone (tools-word.js droppedDeletionAnchor).
+          before: ch.before,
+          narrowed_from: ch.narrowed_from,
+          comment_missing: ch.comment_missing,
         },
       };
     },
