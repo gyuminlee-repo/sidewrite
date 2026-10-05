@@ -146,3 +146,70 @@ test("controls: a replace that is decided still reads decided", () => {
     "accepted",
   );
 });
+
+// ---- a deletion at the end of a sibling replace's inserted words ----
+// Word shows a pending replace as its inserted words right before its
+// deleted words. A deletion of the last inserted words is dropped outright,
+// and its place then reads a tracked insertion on the left and the sibling's
+// tracked deletion on the right (replay of 2026-10-05, two deletions of
+// different comments on one paragraph).
+
+const SIB_I = "is the likely main cause";
+const SIB_D = "may explain";
+const BEFORE_J = `Inspectors agree the loose deck ${SIB_I} ${SIB_D} the sway noted in May.`;
+const TAIL = change("delete", BEFORE_J, " cause", "");
+const TAIL_NOW = BEFORE_J.replace(" cause", "");
+
+test("a deletion at the end of a sibling replace's inserted words stays pending", () => {
+  assert.deepEqual(TAIL.context, { left: "the likely main", right: " may explain the" });
+  const p = para(TAIL_NOW, [
+    ["ins", "is the likely main"],
+    ["del", SIB_D],
+  ]);
+  assert.equal(state(TAIL, p), "pending");
+});
+
+test("the same with the sibling's deleted words opening with a comma", () => {
+  const before =
+    "The cables were retensioned in spring rather than in autumn, combined with new dampers.";
+  const del = change("delete", before, " rather than in autumn", "");
+  assert.deepEqual(del.context, { left: "retensioned in spring", right: ", combined with" });
+  const p = para("The cables were retensioned in spring, combined with new dampers.", [
+    ["ins", "were retensioned in spring"],
+    ["del", ", combined with new dampers"],
+  ]);
+  assert.equal(state(del, p), "pending");
+});
+
+test("a deletion over a sibling's inserted words and one original word stays pending", () => {
+  // Word drops the inserted words and tracks the original one as deleted.
+  const before = "Inspectors agree the loose deck is the likely main cause of the sway.";
+  const del = change("delete", before, " main cause", "");
+  const p = para("Inspectors agree the loose deck is the likely cause of the sway.", [
+    ["ins", "is the likely"],
+    ["del", "cause"],
+  ]);
+  assert.equal(state(del, p), "pending");
+});
+
+test("controls: a deletion next to a sibling's tracked deletion still reads decided", () => {
+  // Accepted: the words left of the place are plain, the sibling's deleted
+  // words on the right are still tracked.
+  assert.equal(state(TAIL, para(TAIL_NOW, [["del", SIB_D]])), "accepted");
+  // Accepted between two tracked deletions: no insertion at the place.
+  const delLeft = para(TAIL_NOW, [
+    ["del", "is the likely main"],
+    ["del", SIB_D],
+  ]);
+  assert.equal(state(TAIL, delLeft), "accepted");
+  // Everything accepted: nothing tracked.
+  assert.equal(state(TAIL, para(TAIL_NOW, [])), "accepted");
+  // Pending as a tracked deletion of its own, and rejected.
+  const own = para(BEFORE_J, [
+    ["ins", "is the likely main"],
+    ["del", "cause"],
+    ["del", SIB_D],
+  ]);
+  assert.equal(state(TAIL, own), "pending");
+  assert.equal(state(TAIL, para(BEFORE_J, [])), "rejected");
+});
