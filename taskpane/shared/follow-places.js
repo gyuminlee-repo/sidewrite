@@ -19,7 +19,8 @@
 //            its answer goes into (review-tools.mjs askAuthor), once the
 //            author has answered it. The only place that is listed also
 //            when it holds no word or the author rejected a change of this
-//            comment there: the answer came after.
+//            comment there: the answer came after. Not in the reference
+//            list. Such a place carries the id of its question (`answer`).
 //   heading  the nearest heading above each changed paragraph
 //   legend   the captions of the figures, tables and schemes named in the
 //            comment or in the text a change took out or put in, then those
@@ -70,7 +71,8 @@
 // At most MAX_PLACES paragraphs and MAX_CHARS characters of text. A
 // paragraph that does not fit into what is left of the characters is passed
 // over; when none fits, the first is listed alone. A comment without a
-// change that is in the document (not rejected, not unlocated) has no places.
+// change that is in the document (not rejected, not unlocated) has only the
+// places its answered questions name.
 // Assumed: English; paragraphKinds tells headings, captions and methods.
 
 import { paragraphKinds, termPlaces } from "./named-terms.js";
@@ -188,7 +190,6 @@ export function followPlaces(
 ) {
   const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
   const changed = changedIndexes(comment, ids, texts.length);
-  if (!changed.length) return [];
   const kinds = paragraphKinds(texts);
   const changes = liveChanges(comment);
   const words = texts.map((t) => /\p{L}{2}/u.test(t));
@@ -202,11 +203,13 @@ export function followPlaces(
       texts.length,
     ),
   ]);
+  const references = new Set();
   let inList = false;
   texts.forEach((t, i) => {
     if (kinds[i] === "caption") inList = false;
     else if (heading(i) && REFERENCE_LIST.test(t.trim())) inList = true;
     else if (heading(i) && !/[\d.]/.test(t) && t.trim().split(/\s+/).length <= 4) inList = false;
+    if (inList) references.add(i);
     if (inList || !words[i]) skip.add(i);
   });
 
@@ -217,12 +220,36 @@ export function followPlaces(
     return true;
   };
 
+  // The cut of the list, at its end and when there is nothing but answers.
+  const answers = new Map();
+  const listed = () => {
+    const out = [];
+    let chars = 0;
+    const place = ([index, why]) => ({
+      index,
+      id: ids?.[index] ?? `p${index}`,
+      kind: kinds[index],
+      why,
+      ...(answers.has(index) ? { answer: answers.get(index) } : {}),
+    });
+    for (const row of found) {
+      if (out.length >= maxPlaces) break;
+      if (chars + texts[row[0]].length > maxChars) continue;
+      chars += texts[row[0]].length;
+      out.push(place(row));
+    }
+    if (!out.length && found.size) out.push(place([...found][0]));
+    return out;
+  };
+
   for (const q of comment?.questions ?? []) {
     if (!q.answer || q.paragraph_id == null) continue;
     const i = placeIndex(q.paragraph_id, ids, texts.length);
-    if (i !== -1 && !changed.includes(i) && !found.has(i))
-      found.set(i, `the author's answer to ${q.id} goes here`);
+    if (i === -1 || changed.includes(i) || references.has(i) || found.has(i)) continue;
+    found.set(i, `the author's answer to ${q.id} goes here`);
+    answers.set(i, q.id);
   }
+  if (!changed.length) return listed();
 
   // A changed heading is the heading of its own section.
   const headOf = (i) => {
@@ -324,34 +351,25 @@ export function followPlaces(
     for (let i = h + 1; i < texts.length && !heading(i); i++)
       if (kinds[i] !== "caption") add(i, "same section as a changed paragraph");
 
-  const out = [];
-  let chars = 0;
-  const place = ([index, why]) => ({
-    index,
-    id: ids?.[index] ?? `p${index}`,
-    kind: kinds[index],
-    why,
-  });
-  for (const row of found) {
-    if (out.length >= maxPlaces) break;
-    if (chars + texts[row[0]].length > maxChars) continue;
-    chars += texts[row[0]].length;
-    out.push(place(row));
-  }
-  if (!out.length && found.size) out.push(place([...found][0]));
-  return out;
+  return listed();
 }
 
 // What the card of a comment shows of this. snapshot: revision.snapshot.
 // { offer, line }: offer is the number of places for the button "Check other
 // places (N)", or null when there is nothing to check or the check ran and
-// the comment got no change since (comment.follow_through.seen_change_ids);
+// the comment got since neither a change (follow_through.seen_change_ids)
+// nor an answer that names a place (follow_through.seen_answer_ids);
 // line is what the last check did, or null when none ran.
 export function followState(comment, snapshot) {
   const ran = comment?.follow_through;
   const seen = new Set(ran?.seen_change_ids ?? []);
-  const fresh = !ran || liveChanges(comment).some((ch) => !seen.has(ch.id));
-  const n = fresh ? followPlaces(comment, snapshot?.paragraphs, snapshot?.ids).length : 0;
+  const places = followPlaces(comment, snapshot?.paragraphs, snapshot?.ids);
+  const answers = new Set(ran?.seen_answer_ids ?? []);
+  const fresh =
+    !ran ||
+    liveChanges(comment).some((ch) => !seen.has(ch.id)) ||
+    places.some((p) => p.answer && !answers.has(p.answer));
+  const n = fresh ? places.length : 0;
   const count = (k, word) => `${k} ${word}${k === 1 ? "" : "s"}`;
   const did = !ran
     ? ""

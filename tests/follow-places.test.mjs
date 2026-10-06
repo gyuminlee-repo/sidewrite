@@ -598,8 +598,60 @@ test("followPlaces: the paragraph an answered question names comes first", () =>
     questions: [q("a1", "k9", "It held for one winter.")],
   };
   assert.equal(followPlaces(rejected, PARAGRAPHS, IDS)[0].index, 9);
-  // No change in the document: no places, as before.
-  assert.deepEqual(followPlaces({ ...c, changes: [] }, PARAGRAPHS, IDS), []);
+  // No change in the document: the places the answers name are the only
+  // ones (k8 is no changed paragraph then), nothing else is looked for.
+  assert.deepEqual(
+    followPlaces({ ...c, changes: [] }, PARAGRAPHS, IDS).map((p) => [p.index, p.why, p.answer]),
+    [
+      [11, "the author's answer to a1 goes here", "a1"],
+      [8, "the author's answer to a3 goes here", "a3"],
+    ],
+  );
+  assert.deepEqual(got[0].answer, "a1");
+  assert.ok(!("answer" in got[1]));
+  // An answer does not go into the reference list; a heading or a legend
+  // is a place like any other.
+  const list = {
+    ...COMMENT,
+    changes: [],
+    questions: [q("a1", "k19", "Okafor 2019."), q("a2", "k7", "Rust."), q("a3", "k13", "Cover.")],
+  };
+  assert.deepEqual(indexes(followPlaces(list, PARAGRAPHS, IDS)), [7, 13]);
+  assert.ok(
+    !indexes(followPlaces({ ...list, changes: COMMENT.changes }, PARAGRAPHS, IDS)).includes(19),
+  );
+});
+
+test("followState: an answer that names a place offers the check, also without a change and after a check", () => {
+  const snapshot = { paragraphs: PARAGRAPHS, ids: IDS };
+  const q = (id, paragraph_id, answer) => ({ id, question: "?", why: "w", answer, paragraph_id });
+  const bare = { ...COMMENT, changes: [] };
+  assert.equal(followState({ ...bare, questions: [q("a1", "k11", "")] }, snapshot).offer, null);
+  assert.equal(followState({ ...bare, questions: [q("a1", "k11", "Two.")] }, snapshot).offer, 1);
+  // The check ran for the changes there are, and saw the answer a1.
+  const ran = {
+    ...COMMENT,
+    questions: [q("a1", "k11", "Two.")],
+    follow_through: {
+      at: "2026-01-02T03:04:05.000Z",
+      candidate_ids: ["k11", "k7"],
+      change_ids: [],
+      questions: 0,
+      seen_change_ids: ["R1.1-1"],
+      seen_answer_ids: ["a1"],
+    },
+  };
+  assert.equal(followState(ran, snapshot).offer, null);
+  // A new answer with a place: offered again. One whose place this comment
+  // changed, or that names none, is nothing new.
+  const more = (x) => followState({ ...ran, questions: [...ran.questions, x] }, snapshot).offer;
+  assert.ok(more(q("a2", "k9", "One winter.")) > 0);
+  assert.equal(more(q("a2", "k8", "Yes.")), null);
+  assert.equal(more(q("a2", "k19", "Okafor 2019.")), null);
+  assert.equal(more({ id: "a2", question: "?", why: "w", answer: "Yes." }), null);
+  // A check from before the field saw no answer.
+  const { seen_answer_ids, ...old } = ran.follow_through;
+  assert.ok(followState({ ...ran, follow_through: old }, snapshot).offer > 0);
 });
 
 test("followPlaces: no live change, no places; changed paragraphs are never places", () => {

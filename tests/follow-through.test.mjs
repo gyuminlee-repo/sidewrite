@@ -8,6 +8,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { followNote, followPlan } from "../daemon/paragraph-check.mjs";
+import { followState } from "../taskpane/shared/follow-places.js";
 import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit, applyTrackedRewrite, askAuthor } from "../daemon/review-tools.mjs";
 import {
@@ -134,6 +135,55 @@ test("followNote: the instruction a follow-through turn carries", () => {
     () => followNote(REV, "R1.2", "F1"),
     /R1\.2 has no change in the document, so there is no other place to check/,
   );
+  // No change in the document, and the author answered a question that
+  // names its place: the note is about that place alone.
+  const answered = structuredClone(REV);
+  answered.comments[1].questions = [
+    {
+      id: "a1",
+      question: "Who supplied the paint?",
+      why: "w",
+      answer: "Harbour Coatings.",
+      paragraph_id: "k2",
+    },
+    { id: "a2", question: "Which batch?", why: "w", answer: "", paragraph_id: "k5" },
+  ];
+  assert.deepEqual(followPlan(answered, "R1.2").candidates, [
+    {
+      index: 2,
+      id: "k2",
+      kind: "body",
+      why: "the author's answer to a1 goes here",
+      answer: "a1",
+      text: PARAGRAPHS[2],
+    },
+  ]);
+  assert.equal(
+    followNote(answered, "R1.2", "F1"),
+    [
+      "[Other places of R1.2]",
+      "This turn does one thing. No change made for R1.2 is in the document. The place below is given as [paragraph id] (what it is; why it is listed) and its text as it stands now.",
+      'The author answered question a1 of this comment (the answer stands under "Author answers" above), and the answer goes into [k2]. Write it in there as far as the comment asks for it: office_tracked_edit or office_tracked_rewrite, comment_ref "R1.2". Where the place already says it, leave it.',
+      "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
+      "<<<F1",
+      "[k2] (body; the author's answer to a1 goes here) The coating held through the winter.",
+      ">>>F1",
+    ].join("\n"),
+  );
+  // With changes: the line of the answer stands after the changes.
+  const both = structuredClone(REV);
+  both.comments[0].questions = [answered.comments[1].questions[0]];
+  both.comments[0].questions[0].paragraph_id = "k5";
+  const withBoth = followNote(both, "R1.1", "F1").split("\n");
+  assert.match(
+    withBoth[3],
+    /^The author answered question a1 of this comment .* goes into \[k5\]\./,
+  );
+  assert.match(withBoth[4], /^The 3 places below were not changed by them\./);
+  assert.equal(
+    withBoth[7],
+    "[k5] (body; the author's answer to a1 goes here) Tension stayed within limits.",
+  );
   const alone = structuredClone(REV);
   alone.snapshot = { taken_at: T0, paragraphs: [PARAGRAPHS[1]], ids: ["k1"] };
   assert.throws(
@@ -162,6 +212,12 @@ test("the field of the review file: old files load, a comment-list save keeps it
   assert.deepEqual(rev.comments[0].follow_through, record);
   assert.equal(setFollowThrough(rev, "R9.9", record), null);
   assert.deepEqual(RevisionSchema.parse(JSON.parse(JSON.stringify(rev))), rev);
+  // The answers a check saw: optional, no default (a record from before it
+  // has no such field and saves as it was loaded).
+  assert.ok(!("seen_answer_ids" in rev.comments[0].follow_through));
+  const seen = setFollowThrough(rev, "R1.1", { ...record, seen_answer_ids: ["a1"] });
+  assert.deepEqual(RevisionSchema.parse(JSON.parse(JSON.stringify(seen))), seen);
+  assert.deepEqual(seen.comments[0].follow_through.seen_answer_ids, ["a1"]);
   const saved = replaceComments(rev, [{ ref: "R1.1", reviewer: 1, text: "c edited" }]);
   assert.deepEqual(saved.comments[0].follow_through, record);
 });
@@ -289,6 +345,70 @@ test("review_propose with follow_through: the turn is given the other places of 
     await t.ask("review_propose", { ref: "R1.1", paragraphs: [] });
     assert.deepEqual(t.pushed.at(-1).turn, { ref: "R1.1" });
     assert.ok(!t.pushed.at(-1).text.includes("[Other places of"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("review_propose with follow_through: an answer that names its place is enough, without a change", async () => {
+  const t = await setup();
+  try {
+    const asked = await askAuthor(
+      t.deps,
+      {
+        comment_ref: "R1.1",
+        question: "On how many spans was rust left?",
+        why: "The report gives no count.",
+        paragraph_id: "p2",
+      },
+      { ref: "R1.1" },
+    );
+    assert.equal(asked.ok, true, asked.message);
+    // Not answered yet: no turn.
+    const open = await t.ask("review_propose", {
+      ref: "R1.1",
+      paragraphs: [],
+      follow_through: true,
+    });
+    assert.match(open.error, /R1\.1 has no change in the document/);
+    const a = await t.ask("review_question_answer", {
+      ref: "R1.1",
+      id: "a1",
+      answer: "On 3 spans.",
+    });
+    assert.equal(a.ok, true, a.error);
+    assert.equal(followState(a.revision.comments[0], a.revision.snapshot).offer, 1);
+
+    const r = await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    assert.equal(r.ok, true, r.error);
+    const { text, turn } = t.pushed.at(-1);
+    assert.ok(
+      text.includes("- [R1.1 a1] (for [p2]) On how many spans was rust left? Answer: On 3 spans."),
+    );
+    assert.ok(
+      text.includes(
+        "\n\n[Other places of R1.1]\nThis turn does one thing. No change made for R1.1 is in the document.",
+      ),
+    );
+    assert.ok(text.includes("[p2] (body; the author's answer to a1 goes here) The coating held"));
+    assert.deepEqual(turn.follow.candidate_ids, ["p2"]);
+    assert.deepEqual(turn.follow.sources, []);
+    // Only that place may be changed, and the number of the answer may be written there.
+    const other = await t.edit("Tension stayed", "Tension held", turn);
+    assert.equal(other.code, "NotAFollowPlace");
+    t.word.paragraph_index = 2;
+    const put = await t.edit("The coating held", "On 3 spans the coating held", turn);
+    assert.equal(put.ok, true, put.message);
+    await t.turnDone(turn, { ok: true, text: "Written in." });
+    const c = (await t.load()).comments[0];
+    assert.deepEqual(
+      [
+        c.follow_through.candidate_ids,
+        c.follow_through.change_ids,
+        c.follow_through.seen_answer_ids,
+      ],
+      [["p2"], ["R1.1-1"], ["a1"]],
+    );
   } finally {
     await t.cleanup();
   }
@@ -502,6 +622,8 @@ test("the end of a follow-through turn: one log line, and the comment says the c
       ],
       [["p0", "p3", "p2"], ["R1.1-2"], 1, ["R1.1-1", "R1.1-2"]],
     );
+    // No answer named a place: the record has no list of answers.
+    assert.ok(!("seen_answer_ids" in c.follow_through));
     assert.match(c.follow_through.at, /^\d{4}-\d\d-\d\dT/);
     // An ordinary turn leaves the record as it is and logs no such line.
     const n = t.lines.filter((l) => l.startsWith("[review] follow ")).length;

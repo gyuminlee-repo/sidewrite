@@ -351,6 +351,9 @@ const Comment = z.object({
       change_ids: z.array(z.string()).default([]),
       questions: z.number().int().nonnegative().default(0),
       seen_change_ids: z.array(z.string()).default([]),
+      // The answered questions whose place it was given (follow-places.js).
+      // Optional, no default: a record from before it saves as it was.
+      seen_answer_ids: z.array(z.string()).optional(),
     })
     .optional(),
   // Requests the model said cannot be handled in this file (review-tools.mjs

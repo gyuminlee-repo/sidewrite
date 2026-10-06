@@ -171,7 +171,8 @@ export function rewriteNote(rev, index, ref, fence) {
 // (taskpane/shared/follow-places.js), each with its text as it reads now
 // (as paragraphsToCheck reads it).
 // { ref, changes: [{ id, kind, before, after, requirement_ids }],
-//   changed: [{ index, id, text }], candidates: [{ index, id, kind, why, text }] }
+//   changed: [{ index, id, text }],
+//   candidates: [{ index, id, kind, why, text, answer? }] }
 export function followPlan(rev, ref) {
   const snap = rev?.snapshot;
   const comment = (rev?.comments ?? []).find((c) => c.ref === ref);
@@ -219,18 +220,39 @@ function followChangeLine(ch) {
 }
 
 // The instruction of a follow-through turn. It goes after the prompt of the
-// turn of that comment, like rewriteNote. Throws when the comment has no
-// change in the document or no other place was found.
+// turn of that comment, like rewriteNote. Throws when no place was found:
+// the comment has no change in the document and no answered question that
+// names its place, or its changes left no other place.
+// A place an answered question names (candidates[].answer) has a line of
+// its own; without a change in the document those are the only places.
 export function followNote(rev, ref, fence, plan = followPlan(rev, ref)) {
-  if (!plan.changes.length)
-    throw new Error(`${ref} has no change in the document, so there is no other place to check.`);
   const n = plan.candidates.length;
+  if (!n && !plan.changes.length)
+    throw new Error(`${ref} has no change in the document, so there is no other place to check.`);
   if (!n) throw new Error(`No other place was found for the changes of ${ref}; nothing to check.`);
   const f = fence ?? commentFence(plan.candidates.map((p) => p.text).join("\n"));
+  const answered = plan.candidates
+    .filter((p) => p.answer)
+    .map(
+      (p) =>
+        `The author answered question ${p.answer} of this comment (the answer stands under "Author answers" above), and the answer goes into [${p.id}]. Write it in there as far as the comment asks for it: office_tracked_edit or office_tracked_rewrite, comment_ref "${ref}". Where the place already says it, leave it.`,
+    );
+  if (!plan.changes.length) {
+    return [
+      `[Other places of ${ref}]`,
+      `This turn does one thing. No change made for ${ref} is in the document. The place${n === 1 ? "" : "s"} below ${n === 1 ? "is" : "are"} given as [paragraph id] (what it is; why it is listed) and its text as it stands now.`,
+      ...answered,
+      "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
+      `<<<${f}`,
+      ...plan.candidates.map((p) => `[${p.id}] (${p.kind}; ${p.why}) ${one(p.text)}`),
+      `>>>${f}`,
+    ].join("\n");
+  }
   return [
     `[Other places of ${ref}]`,
     `This turn does one thing. The changes made for ${ref} so far:`,
     ...plan.changes.map(followChangeLine),
+    ...answered,
     `The ${n} place${n === 1 ? "" : "s"} below ${n === 1 ? "was" : "were"} not changed by them. Each is given as [paragraph id] (what it is; why it is listed) and its text as it stands now. Most listed places need no change: a place is listed for where it stands, which is no sign of a problem. For each place decide whether it still states what these changes withdrew, weakened or made conditional, or still uses the name of a quantity or a method that they changed. Where it does, change it so that it agrees with them: office_tracked_edit or office_tracked_rewrite, comment_ref "${ref}", with the requirement_ids of the change it follows. Where agreeing takes data, a number, an analysis or a citation the manuscript does not have, ask with office_ask_author and name the place. Where it already agrees, leave it.`,
     "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
     `<<<${f}`,
