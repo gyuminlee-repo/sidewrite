@@ -271,9 +271,10 @@ def said_instead(report):
             out.append("")
         if questions:
             out.append(table(
-                ["Question", "Request", "Asked", "Why", "Answer"],
+                ["Question", "Request", "Asked", "Why", "Answered"],
                 [[str(q.get("id")), str(q.get("requirement_id") or "(none)"), cell(q.get("question") or ""),
-                  cell(q.get("why") or ""), cell(q.get("answer") or "")] for q in questions]))
+                  cell(q.get("why") or ""),
+                  cell(q.get("answer") or ("yes" if q.get("answered") else ""))] for q in questions]))
             out.append("")
         if outside:
             out.append(table(

@@ -11,6 +11,11 @@ import path from "node:path";
 import { cleanupDecision } from "../scripts/e2e/judge.mjs";
 import { execWithInteropRetry } from "../scripts/e2e/wsl-interop.mjs";
 import {
+  answeredOf,
+  answerPlan,
+  parseAnswers,
+  replyRow,
+  REPLY_KINDS,
   changesReport,
   extractBatchesFromLog,
   fallbacksFromLog,
@@ -632,7 +637,7 @@ test("changes.json: per comment its changes with heading and rationale, and the 
       requirement_id: "q2",
       question: "Which unit did the reading have?",
       why: "the text gives none",
-      answer: "",
+      answered: false,
     },
   ]);
   assert.deepEqual(a.outside, [{ requirement_id: "q3", why: "a supplementary file" }]);
@@ -860,6 +865,8 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "requests by state: changed 1, needs_author 1, outside_this_file 1, open 1",
       "requirements no change names: 3",
       "questions for the author: 1",
+      "questions answered from the answers file: 0 in 0 comments",
+      "turns run after answers: 0",
       "requests declared outside this file: 1",
       "terms still present elsewhere: 0",
       "terms the reviewers named: 0 in 0 comments; still in the text: 0",
@@ -1152,6 +1159,125 @@ test("changes.json and summary.txt: what the follow-through turns did", () => {
   assert.ok(off.includes("\nfollow-through: changes 0 in 0 paragraphs, questions 0\n"));
 });
 
+// --answers: the author's answers the replay gives. Every text is invented.
+test("--answers: an object of ref and answer text; anything else is refused", () => {
+  assert.deepEqual(parseAnswers({ "R1.1": " Twelve spans. ", "E.2": "Yes." }), {
+    "R1.1": "Twelve spans.",
+    "E.2": "Yes.",
+  });
+  for (const bad of [null, [], "x", { "R1.1": "" }, { "R1.1": 3 }, { q1: "x" }, {}])
+    assert.throws(() => parseAnswers(bad), /--answers/);
+  // What is wrong is said without the answer itself.
+  assert.throws(
+    () => parseAnswers({ "R1.1": "Twelve spans.", nine: "The deck was recoated." }),
+    (e) => /nine/.test(e.message) && !/recoated|Twelve/.test(e.message),
+  );
+});
+
+test("--answers: the comments with an open question get the answer; the others are named and skipped", () => {
+  const q = (id, answer = "") => ({ id, question: "Which span?", why: "Not said.", answer });
+  const revision = {
+    comments: [
+      { ref: "R1.1", questions: [q("a1"), q("a2", "Span 4."), q("a3")] },
+      { ref: "R1.2", questions: [q("a1", "Yes.")] },
+      { ref: "R1.3", questions: [] },
+      { ref: "R2.1", questions: [q("a1")] },
+    ],
+  };
+  const answers = { "R2.1": "x", "R1.2": "x", "R1.1": "x", "R1.3": "x", "R9.9": "x", "R1.4": "x" };
+  assert.deepEqual(answerPlan(revision, answers, ["R1.1", "R1.2", "R1.3", "R2.1", "R1.4"]), {
+    // In the order of the run.
+    due: [
+      { ref: "R1.1", open: ["a1", "a3"] },
+      { ref: "R2.1", open: ["a1"] },
+    ],
+    skipped: [
+      { ref: "R1.2", reason: "no open question" },
+      { ref: "R1.3", reason: "no open question" },
+      { ref: "R1.4", reason: "no open question" },
+      { ref: "R9.9", reason: "not a comment of this run" },
+    ],
+  });
+  // After the pane step: how many of those the review file has an answer to.
+  const after = structuredClone(revision);
+  after.comments[0].questions[2].answer = "Span 6.";
+  assert.equal(answeredOf(after, "R1.1", ["a1", "a3"]), 1);
+  assert.equal(answeredOf(revision, "R1.1", ["a1", "a3"]), 0);
+  assert.equal(answeredOf(null, "R1.1", ["a1"]), 0);
+  assert.deepEqual(answerPlan(null, { "R1.1": "x" }, ["R1.1"]), {
+    due: [],
+    skipped: [{ ref: "R1.1", reason: "no open question" }],
+  });
+});
+
+test("changes.json and summary.txt: the answers given and the turns after them, never an answer text", () => {
+  const revision = {
+    comments: [
+      {
+        ...FOLLOWED.comments[0],
+        questions: [
+          { id: "a1", question: "Which span?", why: "Not said.", answer: "The fourth span only." },
+          { id: "a2", question: "Which year?", why: "Not said.", answer: "" },
+        ],
+      },
+      FOLLOWED.comments[1],
+    ],
+  };
+  const turn = { outcome: "ok", seconds: 25, refused: { ForbidBlocked: 2 } };
+  const report = changesReport(revision, [], { "R1.1": { outcome: "ok", seconds: 30 } }, [], [], {
+    answered: { "R1.1": 1 },
+    turns: { "R1.1": turn },
+  });
+  assert.deepEqual([report[0].answered, report[0].answer_turn], [1, turn]);
+  assert.deepEqual([report[1].answered, report[1].answer_turn], [0, null]);
+  // A question says whether it has an answer, not what the answer is.
+  assert.deepEqual(
+    report[0].questions.map((x) => [x.id, x.answered, "answer" in x]),
+    [
+      ["a1", true, false],
+      ["a2", false, false],
+    ],
+  );
+  const text = summaryText(report, { seconds: 90, saved: true, models: { asked: {}, line: "" } });
+  for (const line of [
+    "questions answered from the answers file: 1 in 1 comments",
+    "turns run after answers: 1",
+    "edits a guard refused: ForbidBlocked 2",
+    "turns that did not end well: 0",
+    "turn time: 55 s",
+  ])
+    assert.ok(text.includes(`\n${line}\n`), `${line}\n${text}`);
+  assert.doesNotMatch(JSON.stringify(report) + text, /fourth span/);
+  // A turn after answers that did not end well, or was run again, is named.
+  const bad = changesReport(revision, [], {}, [], [], {
+    answered: { "R1.1": 1 },
+    turns: { "R1.1": { outcome: "failed", seconds: 5, attempts: [{}, {}] } },
+  });
+  const badText = summaryText(bad, { seconds: 1, saved: true, models: {} });
+  assert.ok(badText.includes("\nturns that did not end well: 1 (R1.1 after answers failed)\n"));
+  assert.ok(badText.includes("\nturns run again after an API error: 1 (R1.1 after answers)\n"));
+  // A run without the file.
+  const off = summaryText(changesReport(revision), { seconds: 1, saved: true, models: {} });
+  assert.ok(off.includes("\nquestions answered from the answers file: 0 in 0 comments\n"));
+  assert.ok(off.includes("\nturns run after answers: 0\n"));
+});
+
+test("replies.json: the answer of the model in each turn, as the pane step gave it", () => {
+  assert.deepEqual(
+    replyRow("R1.1", "ordinary", { ok: true, reply: "Changed the deck sentence." }),
+    {
+      ref: "R1.1",
+      kind: "ordinary",
+      text: "Changed the deck sentence.",
+    },
+  );
+  // A step that failed, or a turn that said nothing: an empty text.
+  for (const step of [{ ok: false, error: "x" }, { ok: true }, null, { reply: 3 }])
+    assert.deepEqual(replyRow("R1.2", "rewrite", step), { ref: "R1.2", kind: "rewrite", text: "" });
+  assert.deepEqual(REPLY_KINDS, ["ordinary", "answer", "follow-through", "rewrite"]);
+  assert.throws(() => replyRow("R1.1", "other", {}), /kind/);
+});
+
 test("replay.mjs asks only for pane steps and Windows scripts that exist, and names no path of its own", () => {
   const runner = read("../scripts/e2e/replay.mjs");
   const base = read("../scripts/e2e/pane-driver.cjs");
@@ -1187,12 +1313,60 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   assert.match(between, /followState\(/);
   assert.match(between, /pane\("refresh"\)/);
   assert.match(base, /"Check other places"/);
-  assert.match(runner, /changesReport\(revision, headings, turns, rewriteTurns, followTurns\)/);
+  assert.match(
+    runner,
+    /changesReport\(revision, headings, turns, rewriteTurns, followTurns, \{\s*answered,\s*turns: answerTurns,?\s*\}\)/,
+  );
+  // --answers: off unless a file is given. After the turns of the comments
+  // and their refresh, and before the follow-through turns (which then get
+  // the places the answered questions name): the open questions of a
+  // comment are answered through the pane, then the comment gets its turn
+  // again, and a refresh follows. The step is given the file, not the text.
+  assert.match(runner, /\n    answers: \{ type: "string" \},/);
+  const answersAt = runner.indexOf("if (ANSWERS) {");
+  assert.ok(runner.indexOf('pane("refresh")') < answersAt);
+  assert.ok(answersAt < runner.indexOf('pane("answer-questions", {'));
+  assert.ok(runner.indexOf('pane("answer-questions"') < runner.lastIndexOf('pane("propose"'));
+  assert.ok(runner.lastIndexOf('pane("propose"') < follow);
+  assert.equal((runner.match(/pane\("propose"/g) ?? []).length, 2);
+  assert.equal((runner.match(/pane\("answer-questions"/g) ?? []).length, 1);
+  const answering = runner.slice(answersAt, follow);
+  assert.match(answering, /answerPlan\(readRevision\(\), ANSWERS, refs\)/);
+  assert.match(answering, /answered\[ref\] = answeredOf\(readRevision\(\), ref, open\);/);
+  assert.match(answering, /answers_file: winPath\(path\.resolve\(opt\.answers\)\)/);
+  assert.match(answering, /pane\("refresh"\)/);
+  assert.doesNotMatch(answering, /ANSWERS\[/);
+  // The file is read in one place, and an answer is never printed.
+  assert.equal((runner.match(/readFileSync\(opt\.answers/g) ?? []).length, 1);
+  assert.match(base, /"Save answer"/);
+  assert.match(read("../taskpane/shared/review-pane.js"), /text: "Save answer"/);
+  // replies.json: the answer of the model in every turn (the turns of the
+  // comments, those after answers, follow-through and rewrite), written
+  // beside the reports and into none of them. Each turn step gives it.
+  assert.match(runner, /out\("replies\.json", JSON\.stringify\(replies, null, 2\)\)/);
+  assert.match(runner, /replies\.push\(replyRow\(ref, kind, done\)\)/);
+  for (const [call, kind] of [
+    ["proposeTurn(ref, `propose ${ref}`", "ordinary"],
+    ["proposeTurn(ref, `propose ${ref} (after answers)`", "answer"],
+    ["proposeTurn(ref, `follow-through ${ref}`", "follow-through"],
+    ["runTurn(ref, `rewrite ${ref} p${line.paragraph_index}`", "rewrite"],
+  ]) {
+    assert.ok(runner.includes(`${call}, "${kind}", () =>`), `${call}: ${kind}`);
+  }
+  for (const s of ["propose", "follow-through", "rewrite-paragraph"]) {
+    const at = base.indexOf(`  async ${/-/.test(s) ? `"${s}"` : s}(page`);
+    assert.ok(at !== -1, s);
+    const body = base.slice(at, base.indexOf("\n  },\n", at));
+    assert.ok(body.indexOf("await markReply(page)") !== -1, `${s} marks the chat`);
+    assert.ok(body.indexOf("await markReply(page)") < body.indexOf(".click()"), s);
+    assert.match(body, /reply: await readReply\(page\)/, s);
+  }
   // A turn of a comment or a follow-through turn that failed on an API error
   // is run once more after a minute (replay-lib.mjs retryTurn); both go
   // through the same function, and a rewrite turn does not.
   assert.match(runner, /while \(retryTurn\(attempts\)\) \{\s*\n\s*await sleep\(60_000\);/);
-  assert.equal((runner.match(/await proposeTurn\(/g) ?? []).length, 2);
+  assert.equal((runner.match(/await proposeTurn\(/g) ?? []).length, 3);
+  assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\} \(after answers\)`/);
   assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\}`/);
   assert.match(runner, /await proposeTurn\(ref, `follow-through \$\{ref\}`/);
   // The exit code follows the pane's line (modelFailures), nothing else.
@@ -1200,7 +1374,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
     runner,
     /const otherModel = \(\) => modelFailures\(modelsLine, lastTurn\)\.length > 0;/,
   );
-  assert.ok(runner.lastIndexOf('pane("propose"') < runner.indexOf('pane("refresh")'));
+  assert.ok(runner.indexOf('pane("propose"') < runner.indexOf('pane("refresh")'));
   assert.ok(runner.indexOf('pane("refresh")') < runner.indexOf('pane("check-paragraphs"'));
   assert.match(runner, /"paragraph_check\.json"/);
   assert.match(runner, /paragraphCheck: revision\.consistency/);

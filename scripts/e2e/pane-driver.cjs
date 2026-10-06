@@ -211,6 +211,23 @@ async function view(page) {
   });
 }
 
+// The answer of the model in the turn a step runs: the last answer in the
+// chat when the turn put one there. markReply before the turn is started
+// notes the answer that is last then; readReply after it gives the text of
+// the last one when it is another, else "" (a turn that ended without a
+// word must not be given the answer of the turn before).
+const markReply = (page) =>
+  page.evaluate(() => {
+    const all = document.querySelectorAll("#messages .msg.assistant");
+    window.__e2eReplyMark = all.length ? all[all.length - 1] : null;
+  });
+const readReply = (page) =>
+  page.evaluate(() => {
+    const all = document.querySelectorAll("#messages .msg.assistant");
+    const last = all.length ? all[all.length - 1] : null;
+    return last && last !== window.__e2eReplyMark ? last.textContent.trim() : "";
+  });
+
 // ---- Response tab (ids from taskpane/word/index.html, classes from
 // taskpane/shared/response-pane.js) ----
 async function clearResponse(page) {
@@ -730,6 +747,7 @@ const steps = {
     if (await turnBusy(page)) throw new Error("a turn is already running");
     await openCard(page, a.ref);
     const btn = card(page, a.ref).locator("button", { hasText: "Propose changes" });
+    await markReply(page);
     await btn.click();
     await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
       timeout: 30_000,
@@ -752,6 +770,7 @@ const steps = {
       progress_samples: samples,
       seconds: Math.round((Date.now() - started) / 1000),
       assistant,
+      reply: await readReply(page),
       ...(await view(page)),
     };
   },
@@ -1122,6 +1141,7 @@ const steps = {
     const btn = page
       .locator("#review-consistency button", { hasText: "Rewrite this paragraph" })
       .nth(a.nth ?? 0);
+    await markReply(page);
     await btn.click();
     await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
       timeout: 30_000,
@@ -1133,7 +1153,11 @@ const steps = {
       await sleep(1000);
     }
     await sleep(4000);
-    return { seconds: Math.round((Date.now() - started) / 1000), ...(await view(page)) };
+    return {
+      seconds: Math.round((Date.now() - started) / 1000),
+      reply: await readReply(page),
+      ...(await view(page)),
+    };
   },
 
   // "Check other places (N)" on the card of comment a.ref: a second turn of
@@ -1142,6 +1166,7 @@ const steps = {
   async "follow-through"(page, a) {
     if (await turnBusy(page)) throw new Error("a turn is already running");
     await openCard(page, a.ref);
+    await markReply(page);
     await card(page, a.ref).locator("button", { hasText: "Check other places" }).click();
     await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
       timeout: 30_000,
@@ -1153,7 +1178,45 @@ const steps = {
       await sleep(1000);
     }
     await sleep(4000);
-    return { seconds: Math.round((Date.now() - started) / 1000), ...(await view(page)) };
+    return {
+      seconds: Math.round((Date.now() - started) / 1000),
+      reply: await readReply(page),
+      ...(await view(page)),
+    };
+  },
+
+  // The author's answer to every open question on the card of comment
+  // a.ref: each answer box that is empty is filled and its "Save answer"
+  // pressed. The answer is a.text, or the text of a.ref in the JSON file
+  // a.answers_file ({ "<ref>": "<answer text>" }; the replay gives the file,
+  // so that the answer is in no file of the run but the review file).
+  // Gives counts only: { answered, questions }.
+  async "answer-questions"(page, a) {
+    const answer = String(
+      a.text ?? JSON.parse(fs.readFileSync(a.answers_file, "utf8"))[a.ref] ?? "",
+    ).trim();
+    if (!answer) throw new Error(`no answer text for ${a.ref}`);
+    await openCard(page, a.ref);
+    const boxes = card(page, a.ref).locator("textarea.review-answer");
+    const questions = await boxes.count();
+    let answered = 0;
+    for (let i = 0; i < questions; i++) {
+      const box = boxes.nth(i);
+      if ((await box.inputValue()).trim()) continue;
+      await clearMessage(page);
+      await box.fill(answer);
+      const before = await box.elementHandle();
+      await box.locator("xpath=following-sibling::button[1]", { hasText: "Save answer" }).click();
+      // The card is drawn again once the daemon has saved the answer.
+      await page.waitForFunction((n) => n?.isConnected === false, before, {
+        timeout: 60_000,
+        polling: 200,
+      });
+      if ((await view(page)).message_error)
+        throw new Error(`the answer to a question of ${a.ref} was not saved`);
+      answered++;
+    }
+    return { answered, questions };
   },
 
   // "Allow exception" of a blocked edit, pressed and confirmed: the row of

@@ -199,7 +199,7 @@ class EndToEnd(unittest.TestCase):
                                   {"id": "q2", "text": "b", "state": "needs_author"},
                                   {"id": "q3", "text": "c", "state": "outside_this_file"}],
                  "questions": [{"id": "a1", "requirement_id": "q2", "question": "Which reader | which day?",
-                                "why": "the text names none", "answer": ""}],
+                                "why": "the text names none", "answered": False}],
                  "outside": [{"requirement_id": "q3", "why": "a supplementary file"}]},
                 {"ref": "R1.2", "changes": [], "requirements": [{"id": "q1", "text": "d", "state": "open"}],
                  "questions": [], "outside": []},

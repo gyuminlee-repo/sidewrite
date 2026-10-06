@@ -1037,7 +1037,7 @@ node scripts/e2e/replay.mjs \
   [--model opus] [--writing-model opus] [--judgment-model haiku] \
   [--only R1.1,R2.3] [--instructions rules.txt] [--forbid forbid.txt] \
   [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked] \
-  [--follow-through]
+  [--follow-through] [--answers answers.json]
 
 python3 scripts/e2e/replay-compare.py \
   --before /path/to/before.docx --after /path/to/submitted.docx \
@@ -1058,8 +1058,13 @@ guard refused by code, the changes with the paragraph before and after,
 rationale, state, the id of their rewrite and the words that come from the
 review, how the turn ended, its time and model), `paragraph_check.json` (the
 result of "Check revised paragraphs", run once after the last turn),
-`responses.json` with `--draft-responses`, `summary.txt`, `result.json` and
-`daemon.log`. The screen shows step names and counts, never text of the
+`responses.json` with `--draft-responses`, `replies.json` (the answer of the
+model in each turn: `{ref, kind, text}` with `kind` `ordinary`, `answer`,
+`follow-through` or `rewrite`, read from the chat of the pane when the turn
+put an answer there, else an empty text; a turn that was run again has a row
+for each try), `summary.txt`, `result.json` and `daemon.log`. A question in
+`changes.json` says whether it has an answer (`answered`); the answer itself
+is in `manuscript.revision.json` only. The screen shows step names and counts, never text of the
 manuscript. One review turn per comment, in order; a turn that fails or runs
 longer than `--turn-minutes` is recorded and the next comment goes on. Word
 and the resident daemon are handled as in the acceptance run. Each Word step
@@ -1118,6 +1123,26 @@ under `follow_turns`, and `follow` of a comment holds the places the turn was
 given (paragraph indexes), the changes it added and the number of its
 questions; the changes themselves stand among the changes of the comment.
 `summary.txt` counts them in the two "follow-through" lines. Off by default.
+
+With `--answers <file.json>` the run answers the questions the turns asked,
+as the author would. The file is `{ "<ref>": "<answer text>", ... }`: one
+answer per comment, given to every open question of that comment. After the
+turns of the comments and their refresh, and before the follow-through
+turns, each comment of the file that has an open question gets its answer
+boxes filled and saved on its card (`answer-questions`), then its "Propose
+changes" turn once more (run again once after an API error, like the first),
+then the status is refreshed. A ref of the file without an open question, or
+one that is no comment of the run, is named on the screen and passed over
+(`answers.skipped` in `result.json`). The follow-through turns that come
+after are also given the paragraph an answered question names as the place
+of its answer. `changes.json` has per comment `answered` (the questions the
+review file got an answer to) and `answer_turn` (that second turn, like
+`turn`); `summary.txt` has the lines "questions answered from the answers
+file: n in m comments" and "turns run after answers: n". The file is only
+read, by the run to check it and by the pane step for the text: an answer
+goes into the review file through the pane and into no report, log or
+argument file of the run. A file that is not such an object ends the run
+before it starts (exit code 2), with a message that names a ref at most.
 
 `summary.txt` lists the batches of the request extraction as the daemon
 logged them (labelled, unlabelled refs, or FAILED with the error).
