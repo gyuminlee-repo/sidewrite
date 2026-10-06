@@ -13,6 +13,7 @@ import { applyTrackedEdit, applyTrackedRewrite, askAuthor } from "../daemon/revi
 import {
   RevisionSchema,
   loadRevision,
+  saveRevision,
   replaceComments,
   setFollowThrough,
 } from "../daemon/revision-store.mjs";
@@ -165,7 +166,9 @@ test("the field of the review file: old files load, a comment-list save keeps it
   assert.deepEqual(saved.comments[0].follow_through, record);
 });
 
-async function setup() {
+const R = { what: "w", why: "y", addresses: "a" };
+
+async function setup(paragraphs = PARAGRAPHS) {
   const dir = await mkdtemp(join(tmpdir(), "follow-svc-"));
   const doc = join(dir, "paper.docx");
   const events = [];
@@ -197,7 +200,7 @@ async function setup() {
   await ask("review_save_comments", { comments: COMMENTS });
   await ask("review_refresh", {
     snapshot: {
-      paragraphs: PARAGRAPHS.map((text, index) => ({
+      paragraphs: paragraphs.map((text, index) => ({
         index,
         id: `p${index}`,
         text,
@@ -209,7 +212,6 @@ async function setup() {
     },
   });
   const deps = { ...svc.trackedEditDeps("k"), call: async () => wordResult() };
-  const R = { what: "w", why: "y", addresses: "a" };
   const edit = (find, replace, turn) =>
     applyTrackedEdit(deps, { comment_ref: "R1.1", find, replace, rationale: R }, turn);
   const turnDone = async (turn, outcome) => {
@@ -332,20 +334,47 @@ test("a follow-through turn changes the listed places only", async () => {
     const { turn } = t.pushed.at(-1);
     // A paragraph the comment changed, one that is no place, and words that
     // are in no paragraph: refused before Word is called.
-    for (const [find, replace, at] of [
-      ["after recoating", "after repainting", "1"],
-      ["within limits", "inside limits", "5"],
-      ["words the report does not have", "others", "?"],
+    for (const [find, replace, at, says] of [
+      ["after recoating", "after repainting", "1", /This paragraph is not one of them\./],
+      ["within limits", "inside limits", "5", /This paragraph is not one of them\./],
+      ["words the report does not have", "others", "?", /The words to change are in no paragraph/],
     ]) {
       const r = await t.edit(find, replace, turn);
       assert.equal(r.ok, false);
       assert.equal(r.code, "NotAFollowPlace", r.message);
+      assert.match(r.message, says);
       assert.equal(t.lines.at(-1), `[review] not a follow place R1.1 paragraph=${at}`);
     }
+    // Words that stand in several paragraphs ("Rust": the changed paragraph
+    // and the legend; "s": twice in the legend). Each refusal says what to
+    // give next, so the same call is not made again.
+    const hinted = (find, replace, paragraph_hint) =>
+      applyTrackedEdit(
+        t.deps,
+        { comment_ref: "R1.1", find, replace, paragraph_hint, rationale: R },
+        turn,
+      );
+    for (const [find, hint, says] of [
+      [
+        "Rust",
+        undefined,
+        /occur in more than one place: give paragraph_hint with the id of a listed place/,
+      ],
+      ["Rust", "p99", /paragraph_hint p99 names no paragraph/],
+      ["s", "p3", /occur more than once in p3: give more of the words around them/],
+      ["Rust", "p1", /This paragraph is not one of them\./],
+    ]) {
+      const r = await hinted(find, "Corrosion", hint);
+      assert.equal(r.code, "NotAFollowPlace", r.message);
+      assert.match(r.message, says);
+    }
+    t.word.paragraph_index = 3;
+    const byHint = await hinted("Rust", "Corrosion", "p3");
+    assert.equal(byHint.ok, true, byHint.message);
     const anew = await rewriteOf(t, "p5", "Tension stayed inside limits.", turn);
     assert.equal(anew.code, "NotAFollowPlace", anew.message);
     assert.equal(t.lines.at(-1), "[review] not a follow place R1.1 paragraph=5");
-    assert.equal((await t.load()).comments[0].changes.length, 1);
+    assert.equal((await t.load()).comments[0].changes.length, 2);
     // A listed place: both tools go through.
     t.word.paragraph_index = 2;
     const edit = await t.edit("held through", "lasted through", turn);
@@ -357,6 +386,29 @@ test("a follow-through turn changes the listed places only", async () => {
     t.word.paragraph_index = 5;
     const plain = await t.edit("within limits", "inside limits", { ref: "R1.1" });
     assert.equal(plain.ok, true, plain.message);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a listed place written anew in more than three parts goes in whole", async () => {
+  const LONG =
+    "The coating held in spring. The drains ran clear in summer. The joints stayed dry in autumn. The bearings moved freely in winter.";
+  const t = await setup(PARAGRAPHS.map((text, i) => (i === 2 ? LONG : text)));
+  try {
+    assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+    await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    const { turn } = t.pushed.at(-1);
+    t.word.paragraph_index = 2;
+    // The parts are not judged one by one against the list: the paragraph was.
+    const r = await rewriteOf(
+      t,
+      "p2",
+      "The coating lasted in spring. The drains ran free in summer. The joints stayed tight in autumn. The bearings moved well in winter.",
+      turn,
+    );
+    assert.equal(r.ok, true, r.message);
+    assert.ok(r.parts > 3 && r.change_ids.length === r.parts, JSON.stringify(r));
   } finally {
     await t.cleanup();
   }
@@ -392,6 +444,18 @@ test("an edit of a follow-through turn that a forbid rule blocked can be allowed
     assert.equal(r.applied, true, JSON.stringify(r.result));
     // No text of the manuscript went to the log with it.
     assert.ok(!t.lines.some((l) => l.includes("14 spans")));
+
+    // An item whose paragraph is not among the places on it stays refused.
+    const again = await t.edit("The coating held", "The novel coating held", turn);
+    assert.ok(again.blocked_id, again.message);
+    const file = join(t.dir, "paper.revision.json");
+    const rev = await t.load();
+    rev.comments[0].blocked.find((b) => b.id === again.blocked_id).follow.candidate_ids = ["p0"];
+    await saveRevision(file, rev);
+    const no = await t.ask("review_override", { ref: "R1.1", blocked_id: again.blocked_id });
+    assert.equal(no.applied, false);
+    assert.equal(no.result.code, "NotAFollowPlace");
+    assert.ok((await t.load()).comments[0].blocked.some((b) => b.id === again.blocked_id));
   } finally {
     await t.cleanup();
   }

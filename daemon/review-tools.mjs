@@ -356,14 +356,24 @@ function fail(message, extra = {}) {
 // run on the paragraph as a whole there; here they are not run again (a
 // number moved from one sentence to another is no new number, though the
 // part that puts it in does not hold it).
-function notAFollowPlace(deps, turn, index) {
+// The refusal of an edit a follow-through turn may not make. index: the
+// paragraph of the edit, or null when it cannot be told; then `why` is the
+// code of editTarget and `hint` the paragraph_hint that was given, and the
+// message says what to give next.
+function notAFollowPlace(deps, turn, index, why = null, hint = null) {
   deps.log?.(`[review] not a follow place ${turn.ref} paragraph=${index ?? "?"}`);
+  const what =
+    index !== null
+      ? "This paragraph is not one of them."
+      : why === "NotFound"
+        ? "The words to change are in no paragraph as they were given: copy them exactly from a listed place."
+        : why === "HintNotFound"
+          ? `paragraph_hint ${hint} names no paragraph: give the id of a listed place.`
+          : hint
+            ? `The words to change occur more than once in ${hint}: give more of the words around them.`
+            : "The words to change occur in more than one place: give paragraph_hint with the id of a listed place.";
   return fail(
-    `Not applied: this turn checks the other places of ${turn.ref} and may change only the paragraphs listed for it (${turn.follow.candidate_ids.join(", ")}). ${
-      index === null
-        ? "The text to change is not in exactly one paragraph: give paragraph_hint with the id of a listed place."
-        : "This paragraph is not one of them."
-    } Leave any other paragraph as it is.`,
+    `Not applied: this turn checks the other places of ${turn.ref} and may change only the paragraphs listed for it (${turn.follow.candidate_ids.join(", ")}). ${what} Leave any other paragraph as it is.`,
     { code: "NotAFollowPlace", paragraph_index: index },
   );
 }
@@ -401,12 +411,14 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
 
   // The paragraph Word will edit, when it can be told from here (editTarget).
   const current = currentTexts(ctx.paragraphs, ctx.recent_changes);
-  const target = editTarget(current, ctx.paragraph_ids, args.find, args.paragraph_hint).index;
+  const aim = editTarget(current, ctx.paragraph_ids, args.find, args.paragraph_hint);
+  const target = aim.index;
   // A follow-through turn changes the places it was given and no other. The
   // parts of a rewrite were judged with their paragraph (applyTrackedRewrite).
   if (turn.follow && !part) {
     const id = target === null ? null : (ctx.paragraph_ids?.[target] ?? `p${target}`);
-    if (!turn.follow.candidate_ids.includes(id)) return notAFollowPlace(deps, turn, target);
+    if (!turn.follow.candidate_ids.includes(id))
+      return notAFollowPlace(deps, turn, target, aim.code, args.paragraph_hint ?? null);
   }
   // The paragraphs as they are shown: the status refresh gives a field with
   // its instruction (field-text.js), `find` is text as Word shows it.

@@ -18,9 +18,10 @@
 //   heading  the nearest heading above each changed paragraph
 //   legend   the captions of the figures, tables and schemes named in the
 //            comment or in the text a change took out or put in, then those
-//            only the rest of a changed paragraph names, as long as fewer
-//            than LEGEND_PLACES legend paragraphs are listed: a paragraph
-//            that cites ten figures must not fill the list with legends.
+//            only the rest of a changed paragraph names, until
+//            LEGEND_PLACES legend paragraphs are listed (captions and what
+//            goes on after them): a paragraph that cites ten figures must
+//            not fill the list with legends.
 //            ("Fig. 5", "Figs. 2, 3, and 4", "Figure 5C", "Table S5";
 //            "Supplementary Figure 2" and "Supp. Fig. 2" are S2; a panel
 //            letter is not read.) With a caption go the paragraphs between
@@ -29,14 +30,16 @@
 //            body text that follows a caption.
 //   methods  the methods paragraphs that hold a term the comment names
 //            (named-terms.js), a removed word that the comment and the
-//            reason of its change both name (residue.js claimTerms), or one
-//            of at most METHOD_WORDS other removed words: six letters or
+//            reason of its change both name (residue.js claimTerms; not one
+//            that stands in more than a fifth of the body and methods
+//            paragraphs, never fewer than 3 nor more than 15, as there), or
+//            one of at most METHOD_WORDS other removed words: six letters or
 //            more, or a technical token (a digit, a hyphen or a capital
 //            inside), not a common word of reports (COMMON), and in at most
 //            2% of the body and methods paragraphs (never fewer than 2,
-//            never more than 5). Those in the fewest paragraphs first, and
-//            at most METHOD_PLACES paragraphs for one word. A judged run
-//            listed methods paragraphs for "across" and "significant".
+//            never more than 5). Those in the fewest paragraphs first. A
+//            removed word brings at most METHOD_PLACES paragraphs. A judged
+//            run listed methods paragraphs for "across" and "significant".
 //   section  the other body and methods paragraphs under the same heading
 // A paragraph is listed once, under the first of these. Left out: the
 // paragraphs the comment changed, those where the author rejected a change
@@ -215,13 +218,18 @@ export function followPlaces(
   ]) {
     texts.forEach((t, i) => {
       const k = kinds[i] === "caption" ? captionKey(t) : null;
-      if (!k || !keys.has(k) || legends >= most) return;
-      if (add(i, `legend of ${keyName(k)}`)) legends++;
+      if (!k || !keys.has(k)) return;
       const run = [];
       for (let j = i + 1; j < texts.length && kinds[j] !== "caption" && !heading(j); j++)
         if (words[j]) run.push(j);
-      if (run.length > CONTINUATION) return;
-      for (const j of run) if (add(j, `continues the legend of ${keyName(k)}`)) legends++;
+      const rows = [
+        [i, `legend of ${keyName(k)}`],
+        ...(run.length > CONTINUATION ? [] : run).map((j) => [
+          j,
+          `continues the legend of ${keyName(k)}`,
+        ]),
+      ];
+      for (const [j, why] of rows) if (legends < most && add(j, why)) legends++;
     });
   }
 
@@ -231,10 +239,15 @@ export function followPlaces(
   for (const row of termPlaces(comment, texts, ids))
     for (const p of row.places) if (p.kind === "methods") also(p.index, row.term);
   const claimed = new Set(changes.flatMap((ch) => claimTerms(ch, comment?.text)));
-  for (const word of claimed) for (const i of inMethods(wordRe(word))) also(i, word);
   const prose = texts.flatMap((t, i) =>
     words[i] && (kinds[i] === "body" || kinds[i] === "methods") ? [t] : [],
   );
+  const vocabulary = Math.min(15, Math.max(3, Math.ceil(prose.length / 5)));
+  for (const word of claimed) {
+    const re = wordRe(word);
+    if (prose.filter((t) => re.test(t)).length > vocabulary) continue;
+    for (const i of inMethods(re).slice(0, METHOD_PLACES)) also(i, word);
+  }
   const most = Math.min(5, Math.max(2, Math.ceil(prose.length * 0.02)));
   [...new Set(changes.flatMap(removedTerms))]
     .filter((w) => !claimed.has(w) && !COMMON.has(w))

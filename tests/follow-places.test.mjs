@@ -201,6 +201,28 @@ test("followPlaces: the legends a changed paragraph cites do not crowd out the r
   assert.deepEqual(indexes(followPlaces(c, texts)), [0, 12, 3, 4, 5, 6, 7, 8, 9, 2]);
 });
 
+test("followPlaces: the legends a paragraph cites stop at eight, their continuations counted", () => {
+  const texts = [
+    "Deck",
+    "Rust fell on every span (Figs. 1-6).",
+    ...Array.from({ length: 6 }, (_, i) => [
+      `Figure ${i + 1}. Span group ${i + 1}.`,
+      `Filled bars of group ${i + 1}.`,
+      `Open bars of group ${i + 1}.`,
+    ]).flat(),
+  ];
+  const c = { ref: "R1.1", text: "Too strong.", changes: [change("x", 1, "fell", "was lower")] };
+  assert.deepEqual(
+    followPlaces(c, texts)
+      .filter((p) => /legend/.test(p.why))
+      .map((p) => p.index),
+    [2, 3, 4, 5, 6, 7, 8, 9],
+  );
+  // What the comment names is not held to that.
+  const named = { ...c, text: "Figures 1-6 do not show this." };
+  assert.equal(followPlaces(named, texts).filter((p) => /legend/.test(p.why)).length, 18);
+});
+
 test("followPlaces: a paragraph without words is no heading, no boundary and no place", () => {
   const texts = [
     "Deck survey",
@@ -330,6 +352,26 @@ test("followPlaces: which removed words bring a methods paragraph", () => {
   });
   claim.text = "Nothing shows the plates were rusty.";
   assert.deepEqual(inMethods(claim), [[8, 'methods; also has "rusty"']]);
+  // Such a word too is vocabulary when it is in more than a fifth of the
+  // body and methods paragraphs (never fewer than 3), and brings at most
+  // three methods paragraphs.
+  const rusty = (n, more = []) => [
+    "Methods",
+    ...Array.from({ length: n }, (_, i) => `Plate ${i} was rusty at the weld.`),
+    "Results",
+    "Cracks were absent.",
+    ...more,
+  ];
+  const at = (n) => ({
+    ...claim,
+    changes: [{ ...claim.changes[0], paragraph_index: n + 2, paragraph_id: `k${n + 2}` }],
+  });
+  const methodsOf = (c, list) =>
+    followPlaces(c, list)
+      .filter((p) => p.kind === "methods")
+      .map((p) => p.index);
+  assert.deepEqual(methodsOf(at(5), rusty(5)), []);
+  assert.deepEqual(methodsOf(at(4), rusty(4, filler.slice(0, 20))), [1, 2, 3]);
 });
 
 test("followPlaces: no live change, no places; changed paragraphs are never places", () => {
