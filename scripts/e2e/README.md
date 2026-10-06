@@ -1127,8 +1127,9 @@ The refused edits are counted from the daemon log of each turn:
 (a forbid rule; the daemon gives this one no code), `ForbidRuleBroken`,
 `TaskPaneOutdated`, `RewriteBlocked`, `RewriteStopped` (a rewrite that
 stopped after one or more parts), the code of what stopped a rewrite before
-its first part (`ParagraphNotPlain` and others) and `Refused` (a refusal the
-replay does not know). One log line is one refused edit or rewrite.
+its first part (`ParagraphNotPlain` and others), `NotAFollowPlace` (an edit
+of a follow-through turn in a paragraph it was not given) and `Refused` (a
+refusal the replay does not know). One log line is one refused edit or rewrite.
 `RewriteNotExpressible` leaves no log line and is not counted. When no
 request was extracted in the whole run, `summary.txt` says "not measured" for
 the requirements no change names.
