@@ -241,6 +241,8 @@ test("what the guards refused, the rewrites and a model replaced after a refusal
     "[review] refused R1.1: task pane without a cap",
     "[review] refused R1.1: forbid rule(s) L4 do not compile",
     "[review] refused R1.1: something new",
+    "[review] not a follow place R1.1 paragraph=5",
+    "[review] not a follow place R1.1 paragraph=?",
     "[review] blocked R2.1 by=L2,L3",
     "[review] rewrite blocked R2.1 by=L2",
     "[review] rewrite R2.1 paragraph=12 parts=4 applied=4",
@@ -259,6 +261,7 @@ test("what the guards refused, the rewrites and a model replaced after a refusal
     ForbidRuleBroken: 1,
     TaskPaneOutdated: 1,
     Refused: 1,
+    NotAFollowPlace: 2,
   });
   // A rewrite that stopped: before its first part with the code of what
   // stopped it, after one or more parts as RewriteStopped.
@@ -352,6 +355,7 @@ test("the log lines read by the replay are the ones the daemon writes", () => {
     '`[review] rewrite blocked ${turn.ref} by=${hits.join(",")}`',
     "`[review] rewrite ${turn.ref} paragraph=${index} parts=${parts.length} applied=${applied}`",
     '`${stopped ? ` stopped=${stopped.code ?? "refused"}` : ""}`',
+    '`[review] not a follow place ${turn.ref} paragraph=${index ?? "?"}`',
   ])
     assert.ok(tools.includes(line), line);
   assert.equal((tools.match(/`\[review\] refused /g) ?? []).length, 3);
@@ -362,6 +366,7 @@ test("the log lines read by the replay are the ones the daemon writes", () => {
     "RewriteBlocked",
     "RewriteStopped",
     "RewriteNotExpressible",
+    "NotAFollowPlace",
   ])
     assert.ok(tools.includes(`code: "${code}"`), code);
   assert.ok(read("../taskpane/shared/tools-word.js").includes('code: "ParagraphNotPlain"'));

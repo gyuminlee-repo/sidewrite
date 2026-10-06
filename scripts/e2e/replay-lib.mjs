@@ -113,6 +113,7 @@ export function followFromLog(log, ref) {
 //   [review] refused <ref>: anything else                 Refused
 //   [review] field edit refused <ref> why=<reason> ...    FieldNotEditable
 //   [review] fields unread <ref> paragraph=<i> ...        FieldsUnread
+//   [review] not a follow place <ref> paragraph=<i>       NotAFollowPlace
 //   [review] rewrite <ref> ... applied=0 stopped=<code>   <code> (ParagraphNotPlain, ...)
 //   [review] rewrite <ref> ... applied=<k> stopped=...    RewriteStopped
 // A rewrite that cannot be written as tracked changes (RewriteNotExpressible)
@@ -126,6 +127,7 @@ const REFUSALS = [
   ["Refused", "refused", ": (?!forbid rule|task pane without )"],
   ["FieldNotEditable", "field edit refused", " why="],
   ["FieldsUnread", "fields unread", " paragraph="],
+  ["NotAFollowPlace", "not a follow place", " paragraph="],
 ];
 export function refusalsFromLog(log, ref) {
   const at = ref.replace(".", "\\.");

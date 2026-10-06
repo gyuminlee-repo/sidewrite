@@ -809,10 +809,10 @@ export function createReviewService({
         log(`[review] undo took more ${ref} paragraph=${paragraph_index ?? "?"}: refresh asked`);
         sendEvent(key, { type: "review_event", event: "undo_took_more", ref, paragraph_index });
       },
-      onBlocked: async ({ ref, args, blocked_by, at: d = at(key) }) => {
+      onBlocked: async ({ ref, args, blocked_by, follow, at: d = at(key) }) => {
         let saved = null;
         await update(d, (rev) => {
-          const r = addBlocked(withComment(d, rev, ref), ref, { args, blocked_by });
+          const r = addBlocked(withComment(d, rev, ref), ref, { args, blocked_by, follow });
           saved = r.blocked;
           return r.revision;
         });
@@ -899,12 +899,15 @@ export function createReviewService({
     const saves = [];
     if (turn.follow) {
       saves.push(() =>
-        followEnded(key, turn, failed).catch((e) =>
+        followEnded(turn, failed).catch((e) =>
           log(`[review] follow-through not saved ${turn.ref}: ${e?.message ?? e}`),
         ),
       );
     }
-    if (typeof outcome?.text === "string") {
+    // The answer of a follow-through turn is about the places it was given:
+    // without the line on the term it leaves the list of the turn before.
+    const noTermLine = turn.follow && !/Same term still at:/i.test(outcome?.text ?? "");
+    if (typeof outcome?.text === "string" && !noTermLine) {
       saves.push(() =>
         Promise.resolve()
           .then(() => {
@@ -923,11 +926,13 @@ export function createReviewService({
   // The end of a follow-through turn: what it added under its comment (the
   // changes and questions that were not there when it began) goes to the
   // log as counts, and the comment is marked as checked. A turn that ended
-  // with an error marks nothing, so the check can be run again.
-  async function followEnded(key, turn, failed) {
-    const { candidate_ids, had } = turn.follow;
+  // with an error marks nothing, so the check can be run again. It is saved
+  // to the document the turn began in (turn.follow.doc), whatever the pane
+  // shows by now.
+  async function followEnded(turn, failed) {
+    const { candidate_ids, had, doc } = turn.follow;
     let added = { changes: 0, questions: 0 };
-    await update(at(key), (rev) => {
+    await update(doc, (rev) => {
       const c = findComment(rev, turn.ref);
       if (!c) return null;
       const change_ids = c.changes.map((ch) => ch.id).filter((id) => !had.changes.includes(id));
@@ -1399,8 +1404,10 @@ export function createReviewService({
       // "Check other places": the turn of this comment is given the places
       // its changes did not touch (paragraph-check.mjs followNote). A comment
       // without a change or without such a place starts no turn. The turn
-      // carries what its end needs (turnEnded) and the changed paragraphs as
-      // sources of numbers (review-tools.mjs applyTrackedEdit).
+      // carries the places it may change and, as sources of numbers, what
+      // the changes of this comment put in and took out (review-tools.mjs
+      // applyTrackedEdit), and what its end needs (turnEnded): the document
+      // it began in and what was on record then.
       const plan = msg.follow_through === true ? followPlan(rev, msg.ref) : null;
       const follow = plan ? followNote(rev, msg.ref, undefined, plan) : null;
       const note = rewrite ?? follow;
@@ -1409,7 +1416,8 @@ export function createReviewService({
         ...(plan && {
           follow: {
             candidate_ids: plan.candidates.map((p) => p.id),
-            sources: plan.changed.map((p) => p.text),
+            sources: plan.changes.flatMap((ch) => [ch.after, ch.before]).filter(Boolean),
+            doc: d,
             had: {
               changes: comment.changes.map((ch) => ch.id),
               questions: (comment.questions ?? []).map((x) => x.id),
@@ -1660,10 +1668,12 @@ export function createReviewService({
         };
         let r;
         try {
+          // An edit of a follow-through turn is judged as in that turn: its
+          // places and its sources of numbers are on the item.
           r = await applyTrackedEdit(
             deps,
             blocked.args,
-            { ref: msg.ref },
+            { ref: msg.ref, ...(blocked.follow ? { follow: blocked.follow } : {}) },
             { override: { blocked_by: blocked.blocked_by } },
           );
         } catch (e) {

@@ -160,6 +160,7 @@ export function initReviewPane({
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
     candidates: [], // P15: ledger rule candidates of the last suggestion, each with `picked`
     turnStart: new Map(), // ref -> { changes, blocked } on record when its turn was asked for
+    followRefs: new Set(), // refs whose running turn checks their other places
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
     reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
@@ -1532,6 +1533,15 @@ export function initReviewPane({
       (state.revision?.comments ?? []).find((x) => x.ref === ref),
       elsewhere(ref),
     );
+    const comment = (state.revision?.comments ?? []).find((x) => x.ref === ref);
+    // A turn that checked the other places and changed none: most places
+    // need no change, so it is said as what was checked, not as a turn that
+    // proposed nothing.
+    const checked =
+      state.followRefs.delete(ref) && n <= 0 && blocked <= 0
+        ? followState(comment, state.revision?.snapshot).line
+        : null;
+    if (checked) return { text: open ? `${checked} ${open}` : checked, noChange: false };
     const line =
       n > 0
         ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
@@ -1542,6 +1552,8 @@ export function initReviewPane({
   // follow_through for a turn that checks the other places of the comment).
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
+    if (extra.follow_through) state.followRefs.add(ref);
+    else state.followRefs.delete(ref);
     state.results.delete(ref);
     state.notices.delete(ref);
     // The card shows the work from the click on, not from the answer of the daemon.

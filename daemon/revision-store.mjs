@@ -142,6 +142,10 @@ const Blocked = z.object({
   // (markStaleApplying).
   state: z.enum(["blocked", "applying", "outcome_unknown"]).default("blocked"),
   attempt: Attempt.nullable().default(null),
+  // An edit of a follow-through turn (review-tools.mjs): the places the turn
+  // was held to and its sources of numbers, so an exception allowed later is
+  // judged as the edit was. Optional, no default: any other edit has none.
+  follow: z.object({ candidate_ids: z.array(z.string()), sources: z.array(z.string()) }).optional(),
 });
 
 // L5: one thing the reviewer asks for, e.g. { id: "q1", text: "state the unit" }.
@@ -1186,12 +1190,18 @@ export function applyStates(rev, rows, now = new Date()) {
   return next;
 }
 
-export function addBlocked(rev, ref, { args, blocked_by }, now = new Date()) {
+export function addBlocked(rev, ref, { args, blocked_by, follow = null }, now = new Date()) {
   const next = clone(rev);
   const c = requireComment(next, ref);
   c.blocked_seq = blockedSeq(c) + 1;
   const id = `${ref}-b${c.blocked_seq}`;
-  const row = { id, args: clone(args), blocked_by: [...blocked_by], created_at: now.toISOString() };
+  const row = {
+    id,
+    args: clone(args),
+    blocked_by: [...blocked_by],
+    created_at: now.toISOString(),
+    ...(follow ? { follow: clone(follow) } : {}),
+  };
   c.blocked.push(row);
   return { revision: next, blocked: row };
 }

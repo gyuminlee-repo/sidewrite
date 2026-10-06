@@ -3055,6 +3055,7 @@ test("Check other places starts a follow-through turn of the comment and then sh
       rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
     },
   ];
+  t.doc.comments.push({ id: "w1", content: "[R1.3] a / b / c" });
   const buttons = () =>
     findAll(t.$("review-comments"), (n) => /^Check other places/.test(n.textContent));
   const lines = () =>
@@ -3076,20 +3077,29 @@ test("Check other places starts a follow-through turn of the comment and then sh
       at: "2026-01-02T00:00:00Z",
       candidate_ids: ["k0", "k2"],
       change_ids: [],
-      questions: 1,
+      questions: 0,
       seen_change_ids: ["R1.3-1"],
     };
     t.endTurn("R1.3");
     await t.wait();
     await t.wait();
     assert.equal(buttons().length, 0);
+    // The line of the card, and what came of the turn: not the "No change
+    // was proposed" of a turn of the comment itself.
+    // Twice: the line of the card, and what came of the turn.
     assert.deepEqual(
       lines().map((n) => n.textContent),
-      ["Other places checked: 2 (0 changes, 1 question)."],
+      Array(2).fill("Other places checked: 2 (no change needed)."),
+    );
+    assert.equal(resultOf(t, "R1.3"), "Other places checked: 2 (no change needed).");
+    assert.equal(
+      findAll(t.$("review-comments"), (n) => /No change was proposed/.test(n.textContent)).length,
+      0,
     );
   } finally {
     card.changes = [];
     delete card.follow_through;
+    t.doc.comments.length = 0;
     delete t.revision.snapshot;
     await t.pane.reload();
   }
