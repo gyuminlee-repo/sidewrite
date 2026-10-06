@@ -1136,6 +1136,26 @@ const steps = {
     return { seconds: Math.round((Date.now() - started) / 1000), ...(await view(page)) };
   },
 
+  // "Check other places (N)" on the card of comment a.ref: a second turn of
+  // that comment for the places its changes did not touch; waits as
+  // `propose` does until the turn is over.
+  async "follow-through"(page, a) {
+    if (await turnBusy(page)) throw new Error("a turn is already running");
+    await openCard(page, a.ref);
+    await card(page, a.ref).locator("button", { hasText: "Check other places" }).click();
+    await page.waitForFunction(() => document.getElementById("input")?.disabled, null, {
+      timeout: 30_000,
+    });
+    const started = Date.now();
+    while (await turnBusy(page)) {
+      if (Date.now() - started > TURN_TIMEOUT)
+        throw new Error(`follow-through turn ${a.ref} still running after ${TURN_TIMEOUT} ms`);
+      await sleep(1000);
+    }
+    await sleep(4000);
+    return { seconds: Math.round((Date.now() - started) / 1000), ...(await view(page)) };
+  },
+
   // "Allow exception" of a blocked edit, pressed and confirmed: the row of
   // comment a.ref that reads "Blocked by <a.blocked_by>:". The daemon sends
   // the stored edit through the guarded write once more; an edit that is

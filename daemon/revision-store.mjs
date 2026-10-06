@@ -142,6 +142,10 @@ const Blocked = z.object({
   // (markStaleApplying).
   state: z.enum(["blocked", "applying", "outcome_unknown"]).default("blocked"),
   attempt: Attempt.nullable().default(null),
+  // An edit of a follow-through turn (review-tools.mjs): the places the turn
+  // was held to and its sources of numbers, so an exception allowed later is
+  // judged as the edit was. Optional, no default: any other edit has none.
+  follow: z.object({ candidate_ids: z.array(z.string()), sources: z.array(z.string()) }).optional(),
 });
 
 // L5: one thing the reviewer asks for, e.g. { id: "q1", text: "state the unit" }.
@@ -329,6 +333,22 @@ const Comment = z.object({
   // Paragraph ids the last turn of this comment named as still holding the
   // term it changed (review-prompt.mjs sameTermReport).
   same_term_at: z.array(z.string()).default([]),
+  // The last "Check other places" turn of this comment that ended without an
+  // error (review-service.mjs turnEnded): the places it was given
+  // (taskpane/shared/follow-places.js), the changes and the number of
+  // questions it added, and the changes that were in the document at its
+  // end. The card offers the check again only when the comment has a change
+  // that is not among those. Absent: none ran. Optional, no default, like
+  // `part` above.
+  follow_through: z
+    .object({
+      at: z.string(),
+      candidate_ids: z.array(z.string()).default([]),
+      change_ids: z.array(z.string()).default([]),
+      questions: z.number().int().nonnegative().default(0),
+      seen_change_ids: z.array(z.string()).default([]),
+    })
+    .optional(),
   // Requests the model said cannot be handled in this file (review-tools.mjs
   // requirementOutside): one note per request id.
   // part: what of the request belongs to another file when the rest of it
@@ -769,6 +789,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       questions: old ? clone(old.questions ?? []) : [],
       requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
       same_term_at: old ? clone(old.same_term_at ?? []) : [],
+      ...(old?.follow_through ? { follow_through: clone(old.follow_through) } : {}),
       ...(old?.rewrites_stopped ? { rewrites_stopped: clone(old.rewrites_stopped) } : {}),
       named_terms: Array.isArray(c.named_terms)
         ? c.named_terms.filter((t) => typeof t === "string")
@@ -998,6 +1019,15 @@ export function setSameTerm(rev, ref, ids) {
   return next;
 }
 
+// What the last "Check other places" turn of a comment did (Comment
+// follow_through). null when the comment is gone.
+export function setFollowThrough(rev, ref, record) {
+  if (!findComment(rev, ref)) return null;
+  const next = clone(rev);
+  findComment(next, ref).follow_through = record;
+  return next;
+}
+
 // What the author answered, anywhere in the review.
 export const authorAnswers = (rev) =>
   (rev?.comments ?? []).flatMap((c) => (c.questions ?? []).map((q) => q.answer).filter(Boolean));
@@ -1160,12 +1190,18 @@ export function applyStates(rev, rows, now = new Date()) {
   return next;
 }
 
-export function addBlocked(rev, ref, { args, blocked_by }, now = new Date()) {
+export function addBlocked(rev, ref, { args, blocked_by, follow = null }, now = new Date()) {
   const next = clone(rev);
   const c = requireComment(next, ref);
   c.blocked_seq = blockedSeq(c) + 1;
   const id = `${ref}-b${c.blocked_seq}`;
-  const row = { id, args: clone(args), blocked_by: [...blocked_by], created_at: now.toISOString() };
+  const row = {
+    id,
+    args: clone(args),
+    blocked_by: [...blocked_by],
+    created_at: now.toISOString(),
+    ...(follow ? { follow: clone(follow) } : {}),
+  };
   c.blocked.push(row);
   return { revision: next, blocked: row };
 }

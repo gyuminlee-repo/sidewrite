@@ -68,6 +68,7 @@ import {
   setRequirementOutside,
   addRewriteStopped,
   setSameTerm,
+  setFollowThrough,
   byCreated,
   ruleFingerprint,
   mirrorFromMain,
@@ -105,7 +106,7 @@ import { extractRequirements, splitReview } from "./review-split.mjs";
 import { buildReviewPrompt, formatPromptLog, sameTermReport } from "./review-prompt.mjs";
 import { checkLedgerIncremental, brokenForbidRules } from "./ledger-check.mjs";
 import { suggestLedger } from "./ledger-suggest.mjs";
-import { checkParagraphs, rewriteNote } from "./paragraph-check.mjs";
+import { checkParagraphs, followNote, followPlan, rewriteNote } from "./paragraph-check.mjs";
 import { snapshotTexts, snapshotIds, snapshotRead, outsideChanges } from "./doc-diff.mjs";
 import {
   applyTrackedEdit,
@@ -808,10 +809,10 @@ export function createReviewService({
         log(`[review] undo took more ${ref} paragraph=${paragraph_index ?? "?"}: refresh asked`);
         sendEvent(key, { type: "review_event", event: "undo_took_more", ref, paragraph_index });
       },
-      onBlocked: async ({ ref, args, blocked_by, at: d = at(key) }) => {
+      onBlocked: async ({ ref, args, blocked_by, follow, at: d = at(key) }) => {
         let saved = null;
         await update(d, (rev) => {
-          const r = addBlocked(withComment(d, rev, ref), ref, { args, blocked_by });
+          const r = addBlocked(withComment(d, rev, ref), ref, { args, blocked_by, follow });
           saved = r.blocked;
           return r.revision;
         });
@@ -893,16 +894,64 @@ export function createReviewService({
     // that ended with a result). The paragraphs its last line names as
     // still holding the term are saved first, so the pane that loads on
     // turn_done has them; a save that fails only loses that list.
-    if (typeof outcome?.text !== "string") return done();
-    Promise.resolve()
-      .then(() => {
-        const d = at(key);
-        return update(d, (rev) =>
-          setSameTerm(rev, turn.ref, sameTermReport(outcome.text, rev.snapshot)),
-        );
-      })
-      .catch((e) => log(`[review] same-term list not saved ${turn.ref}: ${e?.message ?? e}`))
-      .finally(done);
+    // A follow-through turn ("Check other places") is saved before that,
+    // for the same reason.
+    const saves = [];
+    if (turn.follow) {
+      saves.push(() =>
+        followEnded(turn, failed).catch((e) =>
+          log(`[review] follow-through not saved ${turn.ref}: ${e?.message ?? e}`),
+        ),
+      );
+    }
+    // The answer of a follow-through turn is about the places it was given:
+    // without the line on the term it leaves the list of the turn before.
+    const noTermLine = turn.follow && !/Same term still at:/i.test(outcome?.text ?? "");
+    if (typeof outcome?.text === "string" && !noTermLine) {
+      saves.push(() =>
+        Promise.resolve()
+          .then(() => {
+            const d = at(key);
+            return update(d, (rev) =>
+              setSameTerm(rev, turn.ref, sameTermReport(outcome.text, rev.snapshot)),
+            );
+          })
+          .catch((e) => log(`[review] same-term list not saved ${turn.ref}: ${e?.message ?? e}`)),
+      );
+    }
+    if (!saves.length) return done();
+    saves.reduce((p, save) => p.then(save), Promise.resolve()).finally(done);
+  }
+
+  // The end of a follow-through turn: what it added under its comment (the
+  // changes and questions that were not there when it began) goes to the
+  // log as counts, and the comment is marked as checked. A turn that ended
+  // with an error marks nothing, so the check can be run again. It is saved
+  // to the document the turn began in (turn.follow.doc), whatever the pane
+  // shows by now.
+  async function followEnded(turn, failed) {
+    const { candidate_ids, had, doc } = turn.follow;
+    let added = { changes: 0, questions: 0 };
+    await update(doc, (rev) => {
+      const c = findComment(rev, turn.ref);
+      if (!c) return null;
+      const change_ids = c.changes.map((ch) => ch.id).filter((id) => !had.changes.includes(id));
+      const questions = (c.questions ?? []).filter((x) => !had.questions.includes(x.id)).length;
+      added = { changes: change_ids.length, questions };
+      if (failed) return null;
+      return setFollowThrough(rev, turn.ref, {
+        at: new Date().toISOString(),
+        candidate_ids,
+        change_ids,
+        questions,
+        seen_change_ids: c.changes
+          .filter((ch) => ch.state !== "rejected" && ch.state !== "unlocated")
+          .map((ch) => ch.id),
+      });
+    });
+    log(
+      `[review] follow ${turn.ref} candidates=${candidate_ids.length} changes=${added.changes} questions=${added.questions}`,
+    );
   }
 
   // The model of a receipt: the one the last request of the job ran on,
@@ -1336,6 +1385,11 @@ export function createReviewService({
           `Forbidden rule(s) ${broken.map((b) => b.id).join(", ")} cannot be checked (invalid regex: ${broken.map((b) => `${b.id} ${b.error}`).join("; ")}), so no change would be applied. Fix or remove the rule in the Instruction ledger, then propose again.`,
         );
       }
+      if (msg.follow_through === true && Number.isInteger(msg.rewrite_paragraph)) {
+        throw new Error(
+          "A turn either writes a paragraph anew or checks the other places of a comment, not both.",
+        );
+      }
       // "Rewrite this paragraph": the turn of this comment is told to write
       // one paragraph anew (paragraph-check.mjs rewriteNote). A paragraph
       // that does not hold two changes starts no turn.
@@ -1347,7 +1401,30 @@ export function createReviewService({
           `[review] rewrite turn ${msg.ref} paragraph=${msg.rewrite_paragraph} changes=${Number(/holds (\d+) changes/.exec(rewrite)?.[1] ?? 0)}`,
         );
       }
-      pushTurn(key, host, rewrite ? `${built.text}\n\n${rewrite}` : built.text, { ref: msg.ref });
+      // "Check other places": the turn of this comment is given the places
+      // its changes did not touch (paragraph-check.mjs followNote). A comment
+      // without a change or without such a place starts no turn. The turn
+      // carries the places it may change and, as sources of numbers, what
+      // the changes of this comment put in and took out (review-tools.mjs
+      // applyTrackedEdit), and what its end needs (turnEnded): the document
+      // it began in and what was on record then.
+      const plan = msg.follow_through === true ? followPlan(rev, msg.ref) : null;
+      const follow = plan ? followNote(rev, msg.ref, undefined, plan) : null;
+      const note = rewrite ?? follow;
+      pushTurn(key, host, note ? `${built.text}\n\n${note}` : built.text, {
+        ref: msg.ref,
+        ...(plan && {
+          follow: {
+            candidate_ids: plan.candidates.map((p) => p.id),
+            sources: plan.changes.flatMap((ch) => [ch.after, ch.before]).filter(Boolean),
+            doc: d,
+            had: {
+              changes: comment.changes.map((ch) => ch.id),
+              questions: (comment.questions ?? []).map((x) => x.id),
+            },
+          },
+        }),
+      });
       // The session of the pane has the manuscript as of this turn.
       if (built.manuscript.mode !== "none") manuscriptGiven(key, built.manuscript.hashes);
       turnHolds.get(key)?.();
@@ -1591,10 +1668,12 @@ export function createReviewService({
         };
         let r;
         try {
+          // An edit of a follow-through turn is judged as in that turn: its
+          // places and its sources of numbers are on the item.
           r = await applyTrackedEdit(
             deps,
             blocked.args,
-            { ref: msg.ref },
+            { ref: msg.ref, ...(blocked.follow ? { follow: blocked.follow } : {}) },
             { override: { blocked_by: blocked.blocked_by } },
           );
         } catch (e) {

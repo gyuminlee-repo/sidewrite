@@ -336,7 +336,16 @@ function fail(message, extra = {}) {
 // snapshot paragraphs, for paragraph_hint; recent_changes: changes recorded
 // since that snapshot, oldest first; author_texts: what the author answered
 // to questions of this review, a source of numbers like the comment).
-// turn: { ref } of the current review turn, or null.
+// turn: { ref } of the current review turn, or null. A follow-through turn
+// ("Check other places", review-service.mjs review_propose) also has
+// follow: { candidate_ids, sources }. candidate_ids: the paragraphs it was
+// given; an edit of any other paragraph is refused (NotAFollowPlace), also
+// one whose paragraph cannot be told from here. sources: what the changes
+// of this comment put in and took out. A number that stands there went in
+// through this guard or was in the manuscript, so the turn may carry it to
+// the heading, legend or methods paragraph that states the same thing; no
+// other guard reads it. An edit of such a turn that a forbid rule blocks
+// keeps both (onBlocked), for the exception the author may allow later.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
 // part: set only by applyTrackedRewrite, for one edit of a paragraph that is
@@ -347,6 +356,28 @@ function fail(message, extra = {}) {
 // run on the paragraph as a whole there; here they are not run again (a
 // number moved from one sentence to another is no new number, though the
 // part that puts it in does not hold it).
+// The refusal of an edit a follow-through turn may not make. index: the
+// paragraph of the edit, or null when it cannot be told; then `why` is the
+// code of editTarget and `hint` the paragraph_hint that was given, and the
+// message says what to give next.
+function notAFollowPlace(deps, turn, index, why = null, hint = null) {
+  deps.log?.(`[review] not a follow place ${turn.ref} paragraph=${index ?? "?"}`);
+  const what =
+    index !== null
+      ? "This paragraph is not one of them."
+      : why === "NotFound"
+        ? "The words to change are in no paragraph as they were given: copy them exactly from a listed place."
+        : why === "HintNotFound"
+          ? `paragraph_hint ${hint} names no paragraph: give the id of a listed place.`
+          : hint
+            ? `The words to change occur more than once in ${hint}: give more of the words around them.`
+            : "The words to change occur in more than one place: give paragraph_hint with the id of a listed place.";
+  return fail(
+    `Not applied: this turn checks the other places of ${turn.ref} and may change only the paragraphs listed for it (${turn.follow.candidate_ids.join(", ")}). ${what} Leave any other paragraph as it is.`,
+    { code: "NotAFollowPlace", paragraph_index: index },
+  );
+}
+
 export async function applyTrackedEdit(deps, args, turn, { override = null, part = null } = {}) {
   if (!turn)
     return fail("office_tracked_edit works only in a review turn started from the Review tab.");
@@ -380,7 +411,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
 
   // The paragraph Word will edit, when it can be told from here (editTarget).
   const current = currentTexts(ctx.paragraphs, ctx.recent_changes);
-  const target = editTarget(current, ctx.paragraph_ids, args.find, args.paragraph_hint).index;
+  const aim = editTarget(current, ctx.paragraph_ids, args.find, args.paragraph_hint);
+  const target = aim.index;
+  // A follow-through turn changes the places it was given and no other. The
+  // parts of a rewrite were judged with their paragraph (applyTrackedRewrite).
+  if (turn.follow && !part) {
+    const id = target === null ? null : (ctx.paragraph_ids?.[target] ?? `p${target}`);
+    if (!turn.follow.candidate_ids.includes(id))
+      return notAFollowPlace(deps, turn, target, aim.code, args.paragraph_hint ?? null);
+  }
   // The paragraphs as they are shown: the status refresh gives a field with
   // its instruction (field-text.js), `find` is text as Word shows it.
   const views = fieldViews(current);
@@ -443,7 +482,8 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
   }
   // A number the change adds (number-guard.mjs) must be given: by the text
   // it replaces, the paragraph it lands in, the reviewer comment, an author
-  // instruction or an author answer. Any other number is a fact only the
+  // instruction or an author answer (in a follow-through turn also by a
+  // change of the comment: turn.follow.sources). Any other number is a fact only the
   // author can confirm, so the edit is refused and the model asks. Unit
   // notation changes no number; a deletion adds none. An approved forbid
   // exception does not lift this. The log holds the count, not the number.
@@ -456,6 +496,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
         sources: [
           ctx.comment_text ?? "",
           ...(ctx.author_texts ?? []),
+          ...(turn.follow?.sources ?? []),
           ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
           ...(target === null ? [] : [current[target]]),
         ],
@@ -476,7 +517,14 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
   const excepted = override?.blocked_by ?? [];
   const open = hits.filter((id) => !excepted.includes(id));
   if (open.length) {
-    const blocked = await deps.onBlocked?.({ ref: turn.ref, args: edit, blocked_by: open, at });
+    const { candidate_ids, sources } = turn.follow ?? {};
+    const blocked = await deps.onBlocked?.({
+      ref: turn.ref,
+      args: edit,
+      blocked_by: open,
+      at,
+      ...(turn.follow ? { follow: { candidate_ids, sources } } : {}),
+    });
     deps.log?.(`[review] blocked ${turn.ref} by=${open.join(",")}`);
     return fail(
       `Not applied: the new text, alone or with the words next to it, matches forbidden rule(s) ${open.join(", ")}. Rephrase without it; the author can approve an exception in the Review tab.`,
@@ -806,6 +854,8 @@ export async function applyTrackedRewrite(deps, args, turn) {
       code: "ParagraphNotFound",
     });
   }
+  if (turn.follow && !turn.follow.candidate_ids.includes(ids[index] ?? `p${index}`))
+    return notAFollowPlace(deps, turn, index);
   // Fields, before anything is cut: a paragraph whose fields could not be
   // read (as in applyTrackedEdit), and a paragraph of a field that runs over
   // several paragraphs (a reference list). The task pane refuses a paragraph
@@ -861,6 +911,7 @@ export async function applyTrackedRewrite(deps, args, turn) {
     sources: [
       ctx.comment_text ?? "",
       ...(ctx.author_texts ?? []),
+      ...(turn.follow?.sources ?? []),
       ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
     ],
   });

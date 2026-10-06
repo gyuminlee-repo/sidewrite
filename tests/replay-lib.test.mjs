@@ -17,6 +17,9 @@ import {
   modelFailures,
   restoredFromLog,
   rewritesFromLog,
+  followFromLog,
+  mergeAttempts,
+  retryTurn,
   staysFromLog,
   refusalsFromLog,
   keepRefPattern,
@@ -240,6 +243,8 @@ test("what the guards refused, the rewrites and a model replaced after a refusal
     "[review] refused R1.1: task pane without a cap",
     "[review] refused R1.1: forbid rule(s) L4 do not compile",
     "[review] refused R1.1: something new",
+    "[review] not a follow place R1.1 paragraph=5",
+    "[review] not a follow place R1.1 paragraph=?",
     "[review] blocked R2.1 by=L2,L3",
     "[review] rewrite blocked R2.1 by=L2",
     "[review] rewrite R2.1 paragraph=12 parts=4 applied=4",
@@ -258,6 +263,7 @@ test("what the guards refused, the rewrites and a model replaced after a refusal
     ForbidRuleBroken: 1,
     TaskPaneOutdated: 1,
     Refused: 1,
+    NotAFollowPlace: 2,
   });
   // A rewrite that stopped: before its first part with the code of what
   // stopped it, after one or more parts as RewriteStopped.
@@ -351,6 +357,7 @@ test("the log lines read by the replay are the ones the daemon writes", () => {
     '`[review] rewrite blocked ${turn.ref} by=${hits.join(",")}`',
     "`[review] rewrite ${turn.ref} paragraph=${index} parts=${parts.length} applied=${applied}`",
     '`${stopped ? ` stopped=${stopped.code ?? "refused"}` : ""}`',
+    '`[review] not a follow place ${turn.ref} paragraph=${index ?? "?"}`',
   ])
     assert.ok(tools.includes(line), line);
   assert.equal((tools.match(/`\[review\] refused /g) ?? []).length, 3);
@@ -361,6 +368,7 @@ test("the log lines read by the replay are the ones the daemon writes", () => {
     "RewriteBlocked",
     "RewriteStopped",
     "RewriteNotExpressible",
+    "NotAFollowPlace",
   ])
     assert.ok(tools.includes(`code: "${code}"`), code);
   assert.ok(read("../taskpane/shared/tools-word.js").includes('code: "ParagraphNotPlain"'));
@@ -858,8 +866,11 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "changes with words from the review: 0",
       "paragraphs written anew: 0 rewrites of 0 paragraphs, 0 parts recorded; stopped: 0",
       "rewrite turns run: 0",
+      "follow-through turns run: 0",
+      "follow-through: changes 0 in 0 paragraphs, questions 0",
       "edits a guard refused: NumberNeedsAuthor 2, ForbidBlocked 1",
       "turns that did not end well: 1 (R1.2 timeout)",
+      "turns run again after an API error: 0",
       "models asked for: edits opus, writing (the pane's own), judgments haiku",
       `models that ran, as the pane says: ${LINE}`,
       "models that ran, from the daemon log: m1",
@@ -986,6 +997,161 @@ test("summary.txt: the batches of the extraction, named terms, rewrites and the 
   for (const word of ["convergent", "12 mM", "once more"]) assert.ok(!text.includes(word), word);
 });
 
+// --follow-through: a second turn of a comment for the places its changes
+// did not touch. A made-up bridge inspection report.
+const FOLLOWED = {
+  snapshot: {
+    paragraphs: [
+      "Deck survey",
+      "Rust was reduced on every span (Fig. 2).",
+      "The coating held.",
+      "Figure 2. Rust cover per span.",
+    ],
+    ids: ["k0", "k1", "k2", "k3"],
+  },
+  comments: [
+    {
+      ref: "R1.1",
+      reviewer: 1,
+      text: "Too strong.",
+      requirements: [],
+      changes: [
+        change("R1.1-1", { paragraph_index: 1 }),
+        change("R1.1-2", { paragraph_index: 3 }),
+        change("R1.1-3", { paragraph_index: 3 }),
+      ],
+      questions: [{ id: "a1", question: "Which span?", why: "Not said." }],
+      follow_through: {
+        at: "2026-01-02T00:00:00.000Z",
+        // p9: an id the snapshot does not hold is read as an index.
+        candidate_ids: ["k0", "k3", "k2", "p9", "gone"],
+        change_ids: ["R1.1-2", "R1.1-3"],
+        questions: 1,
+        seen_change_ids: ["R1.1-1", "R1.1-2", "R1.1-3"],
+      },
+    },
+    { ref: "R1.2", reviewer: 1, text: "Name the supplier.", requirements: [], changes: [] },
+  ],
+};
+const FOLLOW_TURN = {
+  ref: "R1.1",
+  outcome: "ok",
+  seconds: 40,
+  refused: { NumberNeedsAuthor: 1 },
+  follow: { candidates: 5, changes: 2, questions: 1 },
+};
+
+test("the end of a follow-through turn is read from the log of the turn, as the daemon writes it", () => {
+  const log = [
+    "[review] follow R1.1 candidates=5 changes=2 questions=1",
+    "[review] follow R1.10 candidates=9 changes=9 questions=9",
+    "[review] turn done R1.1",
+  ].join("\n");
+  assert.deepEqual(followFromLog(log, "R1.1"), { candidates: 5, changes: 2, questions: 1 });
+  assert.equal(followFromLog(log, "R1.2"), null);
+  const t = turnResult("R1.1", { step: { ok: true }, log, seconds: 40 });
+  assert.deepEqual(t.follow, { candidates: 5, changes: 2, questions: 1 });
+  // A turn that was no follow-through turn has no such key.
+  const plain = turnResult("R1.2", { step: { ok: true }, log: "[review] turn done R1.2" });
+  assert.ok(!("follow" in plain));
+  assert.ok(
+    read("../daemon/review-service.mjs").includes(
+      "`[review] follow ${turn.ref} candidates=${candidate_ids.length} changes=${added.changes} questions=${added.questions}`",
+    ),
+  );
+});
+
+test("a turn that failed on an API error is run once more; a refusal or a second failure is not", () => {
+  const api = {
+    outcome: "failed",
+    reason: "The turn ended on an API error: Failed to authenticate. API Error: 403",
+    seconds: 5,
+    model: "m",
+  };
+  const declined = {
+    outcome: "failed",
+    reason: "The model declined this request (category=x). Nothing was changed by this answer.",
+    seconds: 3,
+  };
+  const ok = { outcome: "ok", reason: null, seconds: 30, model: "m" };
+  assert.equal(retryTurn([api]), true);
+  assert.equal(retryTurn([declined]), false);
+  assert.equal(retryTurn([api, api]), false);
+  assert.equal(retryTurn([ok]), false);
+  assert.equal(retryTurn([{ outcome: "timeout", reason: "still running after 1 ms" }]), false);
+  assert.equal(retryTurn([{ outcome: "no_turn", reason: null }]), false);
+  assert.equal(retryTurn([]), false);
+  // The entry of the turn is that of its last attempt, with the time of
+  // both and how each ended; one attempt is the entry as it is.
+  assert.deepEqual(mergeAttempts([ok]), ok);
+  assert.deepEqual(mergeAttempts([api, ok]), {
+    ...ok,
+    seconds: 35,
+    attempts: [
+      { outcome: "failed", reason: api.reason, seconds: 5 },
+      { outcome: "ok", reason: null, seconds: 30 },
+    ],
+  });
+  // The text the daemon gives such an end.
+  assert.ok(
+    read("../daemon/limit-detect.mjs").includes("error: `The turn ended on an API error: ${"),
+  );
+  const again = { outcome: "ok", seconds: 35, attempts: [api, ok] };
+  const report = changesReport(
+    FOLLOWED,
+    [],
+    { "R1.1": again, "R1.2": ok },
+    [],
+    [{ ref: "R1.1", ...again }],
+  );
+  assert.ok(
+    summaryText(report, { seconds: 1, saved: true, models: {} }).includes(
+      "\nturns run again after an API error: 2 (R1.1, R1.1 follow-through)\n",
+    ),
+  );
+});
+
+test("changes.json and summary.txt: what the follow-through turns did", () => {
+  const report = changesReport(
+    FOLLOWED,
+    [],
+    { "R1.1": { outcome: "ok", seconds: 30 } },
+    [],
+    [FOLLOW_TURN, { ref: "R9.9" }],
+  );
+  assert.deepEqual(report[0].follow, {
+    candidates: [0, 3, 2, 9],
+    changes: ["R1.1-2", "R1.1-3"],
+    questions: 1,
+  });
+  assert.deepEqual(report[0].follow_turns, [FOLLOW_TURN]);
+  assert.deepEqual([report[1].follow, report[1].follow_turns], [null, []]);
+  const text = summaryText(report, { seconds: 90, saved: true, models: { asked: {}, line: "" } });
+  for (const line of [
+    "follow-through turns run: 1",
+    "follow-through: changes 2 in 1 paragraphs, questions 1",
+    "edits a guard refused: NumberNeedsAuthor 1",
+    "turns that did not end well: 0",
+    "turn time: 70 s",
+  ])
+    assert.ok(text.includes(`\n${line}\n`), `${line}\n${text}`);
+  // A turn that did not end well is named; a run without the flag says 0.
+  const bad = changesReport(FOLLOWED, [], {}, [], [{ ...FOLLOW_TURN, outcome: "timeout" }]);
+  assert.ok(
+    summaryText(bad, { seconds: 1, saved: true, models: {} }).includes(
+      "\nturns that did not end well: 1 (R1.1 follow-through timeout)\n",
+    ),
+  );
+  const off = summaryText(changesReport({ comments: [FOLLOWED.comments[1]] }), {
+    seconds: 1,
+    saved: true,
+    models: {},
+  });
+  assert.ok(off.includes("\nfollow-through turns run: 0\n"));
+  assert.ok(off.includes("\nturns run again after an API error: 0\n"));
+  assert.ok(off.includes("\nfollow-through: changes 0 in 0 paragraphs, questions 0\n"));
+});
+
 test("replay.mjs asks only for pane steps and Windows scripts that exist, and names no path of its own", () => {
   const runner = read("../scripts/e2e/replay.mjs");
   const base = read("../scripts/e2e/pane-driver.cjs");
@@ -1007,6 +1173,28 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   assert.ok(stacked < runner.indexOf('pane("rewrite-paragraph", { nth }'));
   assert.ok(runner.indexOf('pane("rewrite-paragraph"') < runner.lastIndexOf('pane("refresh")'));
   assert.equal((runner.match(/pane\("rewrite-paragraph"/g) ?? []).length, 1);
+  // --follow-through: off unless asked for; the turns come after the turns
+  // of the comments and their refresh and before the paragraph check, which
+  // then reads what they left; one per comment the card offers the check
+  // for (follow-places.js followState), and a refresh follows them.
+  assert.match(runner, /"follow-through": \{ type: "boolean", default: false \}/);
+  const follow = runner.indexOf('if (opt["follow-through"]) {');
+  assert.ok(runner.indexOf('pane("refresh")') < follow);
+  assert.ok(follow < runner.indexOf('pane("follow-through", { ref }'));
+  assert.ok(runner.indexOf('pane("follow-through"') < runner.indexOf('pane("check-paragraphs"'));
+  assert.equal((runner.match(/pane\("follow-through"/g) ?? []).length, 1);
+  const between = runner.slice(follow, runner.indexOf('pane("check-paragraphs"'));
+  assert.match(between, /followState\(/);
+  assert.match(between, /pane\("refresh"\)/);
+  assert.match(base, /"Check other places"/);
+  assert.match(runner, /changesReport\(revision, headings, turns, rewriteTurns, followTurns\)/);
+  // A turn of a comment or a follow-through turn that failed on an API error
+  // is run once more after a minute (replay-lib.mjs retryTurn); both go
+  // through the same function, and a rewrite turn does not.
+  assert.match(runner, /while \(retryTurn\(attempts\)\) \{\s*\n\s*await sleep\(60_000\);/);
+  assert.equal((runner.match(/await proposeTurn\(/g) ?? []).length, 2);
+  assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\}`/);
+  assert.match(runner, /await proposeTurn\(ref, `follow-through \$\{ref\}`/);
   // The exit code follows the pane's line (modelFailures), nothing else.
   assert.match(
     runner,

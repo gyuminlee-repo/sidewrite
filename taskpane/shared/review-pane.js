@@ -63,6 +63,7 @@ import {
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
+import { followState } from "./follow-places.js";
 import { firstWords, paragraphLabel } from "./paragraph-label.js";
 import { createAutoRefresh } from "./auto-refresh.js";
 
@@ -159,6 +160,7 @@ export function initReviewPane({
     jobsDone: new Map(), // job_id -> result of a job_done that came before its answer
     candidates: [], // P15: ledger rule candidates of the last suggestion, each with `picked`
     turnStart: new Map(), // ref -> { changes, blocked } on record when its turn was asked for
+    followRefs: new Set(), // refs whose running turn checks their other places
     turnWaiters: new Map(), // P15: ref -> { resolve, timer } of a "Propose all" turn
     queueNote: null, // P15: "Propose all: 2/5 R1.2." while the queue runs
     reviewTurnOpen: false, // P15: a review turn was asked for and its turn_done has not come
@@ -988,6 +990,28 @@ export function initReviewPane({
         if (n.paragraph_index != null) line.append(" ", paragraphLink(n.paragraph_index));
         body.append(line);
       }
+      // The places the changes of this comment did not touch (follow-places.js):
+      // what the last check of them did, and the button for a turn of this
+      // comment that is given them, until it ran for the changes there are.
+      const follow = followState(c, state.revision?.snapshot);
+      if (follow.line) body.append(el("div", { class: "review-residue", text: follow.line }));
+      if (follow.offer) {
+        const check = el("button", {
+          type: "button",
+          class: "btn-secondary btn-small",
+          text: `Check other places (${follow.offer})`,
+        });
+        proposeButtons.push(check);
+        check.disabled = isTurnInFlight() || queue.running;
+        const run = guard((release) => proposeRef(c.ref, release, false, { follow_through: true }));
+        check.addEventListener("click", () => {
+          if (isTurnInFlight() || queue.running) return;
+          return run(
+            onTurnStarted(`Review ${c.ref}: checking ${follow.offer} other places (tracked)...`),
+          );
+        });
+        body.append(check);
+      }
       for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));
       body.append(advanced);
       box.append(card);
@@ -1509,15 +1533,27 @@ export function initReviewPane({
       (state.revision?.comments ?? []).find((x) => x.ref === ref),
       elsewhere(ref),
     );
+    const comment = (state.revision?.comments ?? []).find((x) => x.ref === ref);
+    // A turn that checked the other places and changed none: most places
+    // need no change, so it is said as what was checked, not as a turn that
+    // proposed nothing.
+    const checked =
+      state.followRefs.delete(ref) && n <= 0 && blocked <= 0
+        ? followState(comment, state.revision?.snapshot).line
+        : null;
+    if (checked) return { text: open ? `${checked} ${open}` : checked, noChange: false };
     const line =
       n > 0
         ? `Proposed ${n} change${n === 1 ? "" : "s"} for ${ref}${withModel}.${blocked > 0 ? ` ${blockedText}.` : ""}`
         : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is below"}.`;
     return { text: open ? `${line} ${open}` : line, noChange: n <= 0 };
   }
-  // extra: more fields of the request (rewrite_paragraph for a rewrite turn).
+  // extra: more fields of the request (rewrite_paragraph for a rewrite turn,
+  // follow_through for a turn that checks the other places of the comment).
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
+    if (extra.follow_through) state.followRefs.add(ref);
+    else state.followRefs.delete(ref);
     state.results.delete(ref);
     state.notices.delete(ref);
     // The card shows the work from the click on, not from the answer of the daemon.

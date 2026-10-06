@@ -1,0 +1,514 @@
+// "Check other places": a second turn of a comment that is given the places
+// its changes did not touch (taskpane/shared/follow-places.js) and told to
+// make them agree. All texts here are made up (a bridge inspection report).
+import { plainPane } from "./helpers/plain-pane.mjs";
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { followNote, followPlan } from "../daemon/paragraph-check.mjs";
+import { createReviewService } from "../daemon/review-service.mjs";
+import { applyTrackedEdit, applyTrackedRewrite, askAuthor } from "../daemon/review-tools.mjs";
+import {
+  RevisionSchema,
+  loadRevision,
+  saveRevision,
+  replaceComments,
+  setFollowThrough,
+} from "../daemon/revision-store.mjs";
+
+const PARAGRAPHS = [
+  "Deck survey",
+  "Rust was eliminated on all 14 spans after recoating in 2031 (Fig. 2).",
+  "The coating held through the winter.",
+  "Figure 2. Rust coverage per span.",
+  "Cable tension",
+  "Tension stayed within limits.",
+];
+const COMMENTS = [
+  { ref: "R1.1", reviewer: 1, text: "Saying rust was eliminated is too strong." },
+  { ref: "R1.2", reviewer: 1, text: "Name the paint supplier." },
+];
+
+const T0 = "2026-01-01T00:00:00.000Z"; // the status refresh
+const REV = {
+  snapshot: { taken_at: T0, paragraphs: PARAGRAPHS, ids: ["k0", "k1", "k2", "k3", "k4", "k5"] },
+  comments: [
+    {
+      ...COMMENTS[0],
+      changes: [
+        {
+          id: "R1.1-1",
+          kind: "replace",
+          find: "was eliminated",
+          text: "was reduced",
+          paragraph_index: 1,
+          paragraph_id: "k1",
+          rationale: { what: "w", why: "y", addresses: "a", requirement_ids: ["q1"] },
+          narrowed_from: null,
+          state: "pending",
+          created_at: "2026-01-02T00:00:00.000Z", // after the refresh: put into the text
+        },
+        {
+          id: "R1.1-2",
+          kind: "delete",
+          find: " through the winter",
+          text: "",
+          paragraph_index: 2,
+          paragraph_id: "k2",
+          rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+          narrowed_from: null,
+          state: "rejected",
+          created_at: "2025-12-31T00:00:00.000Z", // before the refresh, which found it rejected
+        },
+      ],
+    },
+    { ...COMMENTS[1], changes: [] },
+  ],
+};
+
+test("followPlan: the changes of the comment, their paragraphs as they read now, the other places", () => {
+  const plan = followPlan(REV, "R1.1");
+  assert.deepEqual(plan.changes, [
+    {
+      id: "R1.1-1",
+      kind: "replace",
+      before: "was eliminated",
+      after: "was reduced",
+      requirement_ids: ["q1"],
+    },
+  ]);
+  assert.deepEqual(plan.changed, [
+    {
+      index: 1,
+      id: "k1",
+      text: "Rust was reduced on all 14 spans after recoating in 2031 (Fig. 2).",
+    },
+  ]);
+  assert.deepEqual(
+    plan.candidates.map((p) => [p.id, p.kind, p.why, p.text]),
+    [
+      ["k0", "heading", "heading above a changed paragraph", "Deck survey"],
+      ["k3", "caption", "legend of Fig. 2", "Figure 2. Rust coverage per span."],
+      // Not k2: the author rejected a change of this comment there.
+    ],
+  );
+  assert.deepEqual(followPlan(REV, "R1.2").candidates, []);
+});
+
+test("followNote: the instruction a follow-through turn carries", () => {
+  const note = followNote(REV, "R1.1", "F1");
+  assert.equal(
+    note,
+    [
+      "[Other places of R1.1]",
+      "This turn does one thing. The changes made for R1.1 so far:",
+      '- R1.1-1 (q1): "was eliminated" → "was reduced"',
+      'The 2 places below were not changed by them. Each is given as [paragraph id] (what it is; why it is listed) and its text as it stands now. Most listed places need no change: a place is listed for where it stands, which is no sign of a problem. For each place decide whether it still states what these changes withdrew, weakened or made conditional, or still uses the name of a quantity or a method that they changed. Where it does, change it so that it agrees with them: office_tracked_edit or office_tracked_rewrite, comment_ref "R1.1", with the requirement_ids of the change it follows. Where agreeing takes data, a number, an analysis or a citation the manuscript does not have, ask with office_ask_author and name the place. Where it already agrees, leave it.',
+      "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
+      "<<<F1",
+      "[k0] (heading; heading above a changed paragraph) Deck survey",
+      "[k3] (caption; legend of Fig. 2) Figure 2. Rust coverage per span.",
+      ">>>F1",
+    ].join("\n"),
+  );
+  // A deletion and an insertion, and a long text cut short.
+  const rev = structuredClone(REV);
+  rev.comments[0].changes = [
+    { ...rev.comments[0].changes[0], kind: "delete", find: "Rust ", text: "" },
+    {
+      ...rev.comments[0].changes[0],
+      id: "R1.1-3",
+      kind: "insert",
+      find: "recoating",
+      text: ` ${"x".repeat(300)}`,
+      rationale: null,
+    },
+  ];
+  const lines = followNote(rev, "R1.1", "F1").split("\n");
+  assert.equal(lines[2], '- R1.1-1 (q1): took out "Rust "');
+  assert.equal(lines[3], `- R1.1-3: after "recoating" put in " ${"x".repeat(196)}..."`);
+  // Nothing to check: no note.
+  assert.throws(
+    () => followNote(REV, "R1.2", "F1"),
+    /R1\.2 has no change in the document, so there is no other place to check/,
+  );
+  const alone = structuredClone(REV);
+  alone.snapshot = { taken_at: T0, paragraphs: [PARAGRAPHS[1]], ids: ["k1"] };
+  assert.throws(
+    () => followNote(alone, "R1.1", "F1"),
+    /No other place was found for the changes of R1\.1/,
+  );
+});
+
+test("the field of the review file: old files load, a comment-list save keeps it", () => {
+  let rev = RevisionSchema.parse({
+    version: 1,
+    manuscript: "m",
+    updated_at: "t",
+    comments: [{ ref: "R1.1", reviewer: 1, text: "c" }],
+  });
+  // No default: an old file saves as it was loaded.
+  assert.ok(!("follow_through" in rev.comments[0]));
+  const record = {
+    at: "2026-01-03T00:00:00.000Z",
+    candidate_ids: ["k0", "k3"],
+    change_ids: ["R1.1-2"],
+    questions: 1,
+    seen_change_ids: ["R1.1-1", "R1.1-2"],
+  };
+  rev = setFollowThrough(rev, "R1.1", record);
+  assert.deepEqual(rev.comments[0].follow_through, record);
+  assert.equal(setFollowThrough(rev, "R9.9", record), null);
+  assert.deepEqual(RevisionSchema.parse(JSON.parse(JSON.stringify(rev))), rev);
+  const saved = replaceComments(rev, [{ ref: "R1.1", reviewer: 1, text: "c edited" }]);
+  assert.deepEqual(saved.comments[0].follow_through, record);
+});
+
+const R = { what: "w", why: "y", addresses: "a" };
+
+async function setup(paragraphs = PARAGRAPHS) {
+  const dir = await mkdtemp(join(tmpdir(), "follow-svc-"));
+  const doc = join(dir, "paper.docx");
+  const events = [];
+  const lines = [];
+  const pushed = [];
+  // Word, as the task pane answers for it: the paragraph the edit went into.
+  const word = { paragraph_index: 1 };
+  const wordResult = () => ({
+    ok: true,
+    word_comment_id: 5,
+    paragraph_index: word.paragraph_index,
+    before: "b",
+    after: "a",
+    target_checked: true,
+  });
+  const svc = createReviewService({
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    callTool: async () => wordResult(),
+    pushTurn: (key, host, text, turn) => pushed.push({ key, host, text, turn }),
+    oneshot: null,
+    sendEvent: (key, obj) => events.push(obj),
+    log: (s) => lines.push(s),
+    env: { CC_OFFICE_WSL_PATHS: "0" },
+  });
+  const ask = (type, payload = {}) =>
+    new Promise((resolve) => {
+      svc.handlers[type]({ type, request_id: "q1", ...plainPane(payload) }, resolve, "k", "word");
+    });
+  await ask("review_save_comments", { comments: COMMENTS });
+  await ask("review_refresh", {
+    snapshot: {
+      paragraphs: paragraphs.map((text, index) => ({
+        index,
+        id: `p${index}`,
+        text,
+        reviewed_text: text,
+        w_ins: 0,
+        w_del: 0,
+      })),
+      comments: [],
+    },
+  });
+  const deps = { ...svc.trackedEditDeps("k"), call: async () => wordResult() };
+  const edit = (find, replace, turn) =>
+    applyTrackedEdit(deps, { comment_ref: "R1.1", find, replace, rationale: R }, turn);
+  const turnDone = async (turn, outcome) => {
+    const n = () => events.filter((e) => e.event === "turn_done").length;
+    const before = n();
+    svc.turnEnded("k", turn, outcome);
+    for (let i = 0; i < 100 && n() === before; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.equal(n(), before + 1);
+  };
+  return {
+    dir,
+    svc,
+    ask,
+    lines,
+    pushed,
+    word,
+    deps,
+    edit,
+    turnDone,
+    load: () => loadRevision(join(dir, "paper.revision.json")),
+    cleanup: () => rm(dir, { recursive: true, force: true }),
+  };
+}
+
+// The first turn of the comment, and what a follow-through turn does to the legend.
+const FIRST = ["was eliminated on all 14 spans", "was reduced on each of the 14 spans"];
+const CAPTION = ["Rust coverage per span.", "Rust coverage on the 14 spans."];
+const rewriteOf = (t, paragraph_id, text, turn) =>
+  applyTrackedRewrite(
+    { ...t.deps, paneCan: () => true },
+    { comment_ref: "R1.1", paragraph_id, text, what: "w", why: "y", addresses: "a" },
+    turn,
+  );
+
+test("review_propose with follow_through: the turn is given the other places of the comment", async () => {
+  const t = await setup();
+  try {
+    // No change yet: no turn.
+    const none = await t.ask("review_propose", {
+      ref: "R1.1",
+      paragraphs: [],
+      follow_through: true,
+    });
+    assert.equal(none.ok, false);
+    assert.match(none.error, /R1\.1 has no change in the document/);
+    assert.equal(t.pushed.length, 0);
+
+    const first = await t.edit(...FIRST, { ref: "R1.1" });
+    assert.equal(first.ok, true, first.message);
+
+    // Not with a rewrite in one turn.
+    const both = await t.ask("review_propose", {
+      ref: "R1.1",
+      paragraphs: [],
+      follow_through: true,
+      rewrite_paragraph: 1,
+    });
+    assert.equal(both.ok, false);
+    assert.match(both.error, /either writes a paragraph anew or checks the other places/);
+    assert.equal(t.pushed.length, 0);
+
+    const r = await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    assert.equal(r.ok, true, r.error);
+    const { text, turn } = t.pushed.at(-1);
+    assert.match(
+      text,
+      /\n\n\[Other places of R1\.1\]\nThis turn does one thing\. The changes made for R1\.1 so far:\n- R1\.1-1: "was eliminated on all 14 spans" → "was reduced on each of the 14 spans"\nThe 3 places below/,
+    );
+    assert.ok(text.includes("[p3] (caption; legend of Fig. 2) Figure 2. Rust coverage per span."));
+    assert.equal(turn.ref, "R1.1");
+    assert.deepEqual(turn.follow.candidate_ids, ["p0", "p3", "p2"]);
+    // The sources of numbers: what the changes of this comment put in and took out.
+    assert.deepEqual(turn.follow.sources, [FIRST[1], FIRST[0]]);
+    // A turn without the flag carries nothing of it.
+    await t.ask("review_propose", { ref: "R1.1", paragraphs: [] });
+    assert.deepEqual(t.pushed.at(-1).turn, { ref: "R1.1" });
+    assert.ok(!t.pushed.at(-1).text.includes("[Other places of"));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("number guard: a number of a change of this comment may go to its legend in a follow-through turn only", async () => {
+  const t = await setup();
+  try {
+    assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+    t.word.paragraph_index = 3;
+    // An ordinary turn: 14 is not in the legend, the comment or an answer.
+    const refused = await t.edit(...CAPTION, { ref: "R1.1" });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.code, "NumberNeedsAuthor");
+    assert.deepEqual(refused.numbers, ["14"]);
+
+    await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    const { turn } = t.pushed.at(-1);
+    const ok = await t.edit(...CAPTION, turn);
+    assert.equal(ok.ok, true, ok.message);
+    // A number that only stands elsewhere in the changed paragraph (another
+    // comment may have put it there) is refused as ever.
+    t.word.paragraph_index = 0;
+    const other = await t.edit("Deck survey", "Deck survey of 2031", turn);
+    assert.equal(other.code, "NumberNeedsAuthor");
+    // The same for a paragraph written anew (office_tracked_rewrite).
+    t.word.paragraph_index = 2;
+    const rewrite = (with_) =>
+      rewriteOf(t, "p2", "The coating held on the 14 spans through the winter.", with_);
+    assert.equal((await rewrite({ ref: "R1.1" })).code, "NumberNeedsAuthor");
+    const anew = await rewrite(turn);
+    assert.equal(anew.ok, true, anew.message);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a follow-through turn changes the listed places only", async () => {
+  const t = await setup();
+  try {
+    assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+    await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    const { turn } = t.pushed.at(-1);
+    // A paragraph the comment changed, one that is no place, and words that
+    // are in no paragraph: refused before Word is called.
+    for (const [find, replace, at, says] of [
+      ["after recoating", "after repainting", "1", /This paragraph is not one of them\./],
+      ["within limits", "inside limits", "5", /This paragraph is not one of them\./],
+      ["words the report does not have", "others", "?", /The words to change are in no paragraph/],
+    ]) {
+      const r = await t.edit(find, replace, turn);
+      assert.equal(r.ok, false);
+      assert.equal(r.code, "NotAFollowPlace", r.message);
+      assert.match(r.message, says);
+      assert.equal(t.lines.at(-1), `[review] not a follow place R1.1 paragraph=${at}`);
+    }
+    // Words that stand in several paragraphs ("Rust": the changed paragraph
+    // and the legend; "s": twice in the legend). Each refusal says what to
+    // give next, so the same call is not made again.
+    const hinted = (find, replace, paragraph_hint) =>
+      applyTrackedEdit(
+        t.deps,
+        { comment_ref: "R1.1", find, replace, paragraph_hint, rationale: R },
+        turn,
+      );
+    for (const [find, hint, says] of [
+      [
+        "Rust",
+        undefined,
+        /occur in more than one place: give paragraph_hint with the id of a listed place/,
+      ],
+      ["Rust", "p99", /paragraph_hint p99 names no paragraph/],
+      ["s", "p3", /occur more than once in p3: give more of the words around them/],
+      ["Rust", "p1", /This paragraph is not one of them\./],
+    ]) {
+      const r = await hinted(find, "Corrosion", hint);
+      assert.equal(r.code, "NotAFollowPlace", r.message);
+      assert.match(r.message, says);
+    }
+    t.word.paragraph_index = 3;
+    const byHint = await hinted("Rust", "Corrosion", "p3");
+    assert.equal(byHint.ok, true, byHint.message);
+    const anew = await rewriteOf(t, "p5", "Tension stayed inside limits.", turn);
+    assert.equal(anew.code, "NotAFollowPlace", anew.message);
+    assert.equal(t.lines.at(-1), "[review] not a follow place R1.1 paragraph=5");
+    assert.equal((await t.load()).comments[0].changes.length, 2);
+    // A listed place: both tools go through.
+    t.word.paragraph_index = 2;
+    const edit = await t.edit("held through", "lasted through", turn);
+    assert.equal(edit.ok, true, edit.message);
+    t.word.paragraph_index = 0;
+    const head = await rewriteOf(t, "p0", "Deck inspection", turn);
+    assert.equal(head.ok, true, head.message);
+    // An ordinary turn of the comment is held to no list.
+    t.word.paragraph_index = 5;
+    const plain = await t.edit("within limits", "inside limits", { ref: "R1.1" });
+    assert.equal(plain.ok, true, plain.message);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("a listed place written anew in more than three parts goes in whole", async () => {
+  const LONG =
+    "The coating held in spring. The drains ran clear in summer. The joints stayed dry in autumn. The bearings moved freely in winter.";
+  const t = await setup(PARAGRAPHS.map((text, i) => (i === 2 ? LONG : text)));
+  try {
+    assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+    await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    const { turn } = t.pushed.at(-1);
+    t.word.paragraph_index = 2;
+    // The parts are not judged one by one against the list: the paragraph was.
+    const r = await rewriteOf(
+      t,
+      "p2",
+      "The coating lasted in spring. The drains ran free in summer. The joints stayed tight in autumn. The bearings moved well in winter.",
+      turn,
+    );
+    assert.equal(r.ok, true, r.message);
+    assert.ok(r.parts > 3 && r.change_ids.length === r.parts, JSON.stringify(r));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("an edit of a follow-through turn that a forbid rule blocked can be allowed afterwards", async () => {
+  const t = await setup();
+  try {
+    await t.ask("ledger_add", {
+      item: {
+        kind: "forbid",
+        text: "do not say novel",
+        check: { type: "regex", pattern: String.raw`\bnovel\b`, flags: "i" },
+      },
+    });
+    assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+    await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    const { turn } = t.pushed.at(-1);
+    t.word.paragraph_index = 3;
+    const blocked = await t.edit(CAPTION[0], "Novel rust coverage on the 14 spans.", turn);
+    assert.equal(blocked.ok, false);
+    assert.ok(blocked.blocked_id, blocked.message);
+    // The blocked edit keeps what its turn was held to and allowed.
+    const on = (await t.load()).comments[0].blocked.find((b) => b.id === blocked.blocked_id);
+    assert.deepEqual(on.follow, {
+      candidate_ids: ["p0", "p3", "p2"],
+      sources: [FIRST[1], FIRST[0]],
+    });
+    await t.turnDone(turn, { ok: true });
+    // "Allow exception": the number and the place are judged as in the turn.
+    const r = await t.ask("review_override", { ref: "R1.1", blocked_id: blocked.blocked_id });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.applied, true, JSON.stringify(r.result));
+    // No text of the manuscript went to the log with it.
+    assert.ok(!t.lines.some((l) => l.includes("14 spans")));
+
+    // An item whose paragraph is not among the places on it stays refused.
+    const again = await t.edit("The coating held", "The novel coating held", turn);
+    assert.ok(again.blocked_id, again.message);
+    const file = join(t.dir, "paper.revision.json");
+    const rev = await t.load();
+    rev.comments[0].blocked.find((b) => b.id === again.blocked_id).follow.candidate_ids = ["p0"];
+    await saveRevision(file, rev);
+    const no = await t.ask("review_override", { ref: "R1.1", blocked_id: again.blocked_id });
+    assert.equal(no.applied, false);
+    assert.equal(no.result.code, "NotAFollowPlace");
+    assert.ok((await t.load()).comments[0].blocked.some((b) => b.id === again.blocked_id));
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("the end of a follow-through turn: one log line, and the comment says the check ran", async () => {
+  const t = await setup();
+  try {
+    assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+    // What the first turn said of the term is on file.
+    await t.turnDone({ ref: "R1.1" }, { ok: true, text: "Done.\n\nSame term still at: p2" });
+    assert.deepEqual((await t.load()).comments[0].same_term_at, ["p2"]);
+    await t.ask("review_propose", { ref: "R1.1", paragraphs: [], follow_through: true });
+    const { turn } = t.pushed.at(-1);
+
+    // A turn that failed: logged, not marked, so it can be run again.
+    await t.turnDone(turn, { ok: false, error: "Claude usage limit reached." });
+    assert.ok(t.lines.includes("[review] follow R1.1 candidates=3 changes=0 questions=0"));
+    assert.equal((await t.load()).comments[0].follow_through, undefined);
+
+    t.word.paragraph_index = 3;
+    assert.equal((await t.edit(...CAPTION, turn)).ok, true);
+    const asked = await askAuthor(
+      t.deps,
+      {
+        comment_ref: "R1.1",
+        question: "Was the heading 'Deck survey' meant to cover the approach spans?",
+        why: "The report does not say.",
+      },
+      turn,
+    );
+    assert.equal(asked.ok, true, asked.message);
+    await t.turnDone(turn, { ok: true, text: "The legend now agrees." });
+    assert.ok(t.lines.includes("[review] follow R1.1 candidates=3 changes=1 questions=1"));
+    // Its answer has no line on the term: the list of the first turn stays.
+    assert.deepEqual((await t.load()).comments[0].same_term_at, ["p2"]);
+    const c = (await t.load()).comments[0];
+    assert.deepEqual(
+      [
+        c.follow_through.candidate_ids,
+        c.follow_through.change_ids,
+        c.follow_through.questions,
+        c.follow_through.seen_change_ids,
+      ],
+      [["p0", "p3", "p2"], ["R1.1-2"], 1, ["R1.1-1", "R1.1-2"]],
+    );
+    assert.match(c.follow_through.at, /^\d{4}-\d\d-\d\dT/);
+    // An ordinary turn leaves the record as it is and logs no such line.
+    const n = t.lines.filter((l) => l.startsWith("[review] follow ")).length;
+    await t.turnDone({ ref: "R1.1" }, { ok: true });
+    assert.equal(t.lines.filter((l) => l.startsWith("[review] follow ")).length, n);
+    assert.deepEqual((await t.load()).comments[0].follow_through, c.follow_through);
+  } finally {
+    await t.cleanup();
+  }
+});

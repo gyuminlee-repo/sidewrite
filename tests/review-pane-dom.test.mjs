@@ -3023,3 +3023,84 @@ test("Rewrite this paragraph starts a review turn that carries the paragraph", a
     await t.pane.reload();
   }
 });
+
+// "Check other places (N)" on the card of a comment that has changes: a
+// second turn of that comment for the places its changes did not touch
+// (follow-places.js). Once it ran, the card says so and offers it no more.
+test("Check other places starts a follow-through turn of the comment and then shows what it did", async () => {
+  const t = await proposeAllSetup({});
+  t.revision.snapshot = {
+    taken_at: "2026-01-01T00:00:00Z",
+    paragraphs: [
+      "Deck survey",
+      "Rust was reduced on every span after recoating (Fig. 2).",
+      "Figure 2. Rust coverage per span.",
+    ],
+    ids: ["k0", "k1", "k2"],
+  };
+  const card = t.revision.comments.find((c) => c.ref === "R1.3");
+  card.changes = [
+    {
+      id: "R1.3-1",
+      word_comment_id: "w1",
+      state: "pending",
+      kind: "replace",
+      find: "was eliminated",
+      text: "was reduced",
+      narrowed_from: null,
+      paragraph_index: 1,
+      paragraph_id: "k1",
+      before: "Rust was eliminated on every span after recoating (Fig. 2).",
+      after: "Rust was reduced on every span after recoating (Fig. 2).",
+      rationale: { what: "w", why: "y", addresses: "a", requirement_ids: [] },
+    },
+  ];
+  t.doc.comments.push({ id: "w1", content: "[R1.3] a / b / c" });
+  const buttons = () =>
+    findAll(t.$("review-comments"), (n) => /^Check other places/.test(n.textContent));
+  const lines = () =>
+    findAll(t.$("review-comments"), (n) => /^Other places checked/.test(n.textContent));
+  try {
+    await t.pane.reload();
+    assert.deepEqual(
+      buttons().map((b) => b.textContent),
+      ["Check other places (2)"],
+    );
+    assert.equal(lines().length, 0);
+    await buttons()[0].click();
+    await t.wait();
+    const sent = t.sent.filter(([type]) => type === "review_propose").at(-1);
+    assert.deepEqual([sent[1].ref, sent[1].follow_through, sent[1].paragraphs], ["R1.3", true, []]);
+    // Like every button that starts a turn, it waits while one runs.
+    assert.equal(buttons()[0].disabled, true);
+    card.follow_through = {
+      at: "2026-01-02T00:00:00Z",
+      candidate_ids: ["k0", "k2"],
+      change_ids: [],
+      questions: 0,
+      seen_change_ids: ["R1.3-1"],
+    };
+    t.endTurn("R1.3");
+    await t.wait();
+    await t.wait();
+    assert.equal(buttons().length, 0);
+    // The line of the card, and what came of the turn: not the "No change
+    // was proposed" of a turn of the comment itself.
+    // Twice: the line of the card, and what came of the turn.
+    assert.deepEqual(
+      lines().map((n) => n.textContent),
+      Array(2).fill("Other places checked: 2 (no change needed)."),
+    );
+    assert.equal(resultOf(t, "R1.3"), "Other places checked: 2 (no change needed).");
+    assert.equal(
+      findAll(t.$("review-comments"), (n) => /No change was proposed/.test(n.textContent)).length,
+      0,
+    );
+  } finally {
+    card.changes = [];
+    delete card.follow_through;
+    t.doc.comments.length = 0;
+    delete t.revision.snapshot;
+    await t.pane.reload();
+  }
+});

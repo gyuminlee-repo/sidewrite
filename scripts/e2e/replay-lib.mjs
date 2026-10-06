@@ -87,6 +87,18 @@ export const rewritesFromLog = (log, ref) =>
     stopped: m[4] ?? null,
   }));
 
+// What a follow-through turn did (review-service.mjs followEnded):
+//   [review] follow <ref> candidates=<n> changes=<n> questions=<n>
+// candidates: the places it was given; changes and questions: what it added.
+// null when the log of the turn has no such line.
+export function followFromLog(log, ref) {
+  const m = new RegExp(
+    `^\\[review\\] follow ${ref.replace(".", "\\.")} candidates=(\\d+) changes=(\\d+) questions=(\\d+)$`,
+    "m",
+  ).exec(String(log ?? ""));
+  return m ? { candidates: Number(m[1]), changes: Number(m[2]), questions: Number(m[3]) } : null;
+}
+
 // The edits a guard of the daemon refused while a turn ran, by code, read
 // from the lines review-tools.mjs logs (they hold counts and ids, no text).
 // The code is the one the tool result of that refusal carries; the block by
@@ -101,6 +113,7 @@ export const rewritesFromLog = (log, ref) =>
 //   [review] refused <ref>: anything else                 Refused
 //   [review] field edit refused <ref> why=<reason> ...    FieldNotEditable
 //   [review] fields unread <ref> paragraph=<i> ...        FieldsUnread
+//   [review] not a follow place <ref> paragraph=<i>       NotAFollowPlace
 //   [review] rewrite <ref> ... applied=0 stopped=<code>   <code> (ParagraphNotPlain, ...)
 //   [review] rewrite <ref> ... applied=<k> stopped=...    RewriteStopped
 // A rewrite that cannot be written as tracked changes (RewriteNotExpressible)
@@ -114,6 +127,7 @@ const REFUSALS = [
   ["Refused", "refused", ": (?!forbid rule|task pane without )"],
   ["FieldNotEditable", "field edit refused", " why="],
   ["FieldsUnread", "fields unread", " paragraph="],
+  ["NotAFollowPlace", "not a follow place", " paragraph="],
 ];
 export function refusalsFromLog(log, ref) {
   const at = ref.replace(".", "\\.");
@@ -183,6 +197,33 @@ export const extractBatchesFromLog = (log) =>
     unlabelled: m[7] ? m[7].split(",") : [],
   }));
 
+// Whether a turn is run once more. attempts: the turnResult of each try so
+// far. Only after the first try, and only when the turn ended on an API
+// error (daemon/limit-detect.mjs: an authentication or server answer in
+// place of the model's; a replay lost seven turns in a row to one). A turn
+// the model declined, one that ran out of time and one no end was seen of
+// are not tried again: the same request would end the same way, or a turn
+// may still be running.
+export const retryTurn = (attempts) =>
+  attempts.length === 1 &&
+  attempts[0].outcome === "failed" &&
+  /^The turn ended on an API error/.test(attempts[0].reason ?? "");
+
+// The entry of a turn that was tried more than once: that of the last try,
+// with the time of all of them and how each ended.
+export const mergeAttempts = (attempts) =>
+  attempts.length < 2
+    ? attempts[0]
+    : {
+        ...attempts.at(-1),
+        seconds: attempts.reduce((n, t) => n + (t.seconds ?? 0), 0),
+        attempts: attempts.map((t) => ({
+          outcome: t.outcome,
+          reason: t.reason ?? null,
+          seconds: t.seconds ?? 0,
+        })),
+      };
+
 // One comment of the run: { step, log, seconds } of its propose step.
 // outcome: "ok", "failed" (the turn ended with an error: limit, refusal,
 // crash), "timeout" (the pane step gave up), "no_turn" (no turn was seen).
@@ -203,6 +244,7 @@ export function turnResult(ref, { step, log, seconds, model = null, line = null 
     reason = "the daemon logged no end of a review turn for this comment";
   }
   const edits = line === null ? null : (readModelLine(line).edits ?? null);
+  const follow = followFromLog(log, ref);
   return {
     outcome,
     reason,
@@ -215,6 +257,8 @@ export function turnResult(ref, { step, log, seconds, model = null, line = null 
     stays: staysFromLog(log),
     rewrites: rewritesFromLog(log, ref),
     refused: refusalsFromLog(log, ref),
+    // Only a follow-through turn has it.
+    ...(follow ? { follow } : {}),
   };
 }
 
@@ -270,14 +314,32 @@ export const modelFailures = (line, lastTurn = null) =>
 // that other paragraphs still hold (residue.js), the terms the reviewer
 // named with every paragraph that holds them now (named-terms.js), where the
 // turn itself said the same term is left, the paragraphs written anew, what
-// the paragraph check found on its changes, and what the guards refused.
+// the paragraph check found on its changes, what the guards refused, and
+// what the follow-through turn of the comment did (follow: the places it was
+// given as paragraph indexes of the snapshot, the changes it added, the
+// number of its questions; null when none ran to its end).
 //   revision: revision.json as the daemon saved it
 //   headings: [{ index, level, text }] of the document after the run
 //   turns: { <ref>: turnResult(...) }
 //   rewriteTurns: [{ ref, paragraph_index, ...turnResult(...) }] of
 //     --rewrite-stacked
-export function changesReport(revision, headings = [], turns = {}, rewriteTurns = []) {
+//   followTurns: [{ ref, ...turnResult(...) }] of --follow-through
+export function changesReport(
+  revision,
+  headings = [],
+  turns = {},
+  rewriteTurns = [],
+  followTurns = [],
+) {
   const snapshot = revision?.snapshot ?? null;
+  // A place of a follow-through turn, as a paragraph index: by the task pane
+  // id, else by the index an id like "p12" names; left out when neither.
+  const placeIndex = (id) => {
+    const i = (snapshot?.ids ?? []).indexOf(id);
+    if (i !== -1) return i;
+    const m = /^p(\d+)$/.exec(id);
+    return m ? Number(m[1]) : null;
+  };
   const findings = revision?.consistency?.findings ?? [];
   return (revision?.comments ?? []).map((c) => {
     const changes = (c.changes ?? []).map((x) => ({
@@ -350,6 +412,14 @@ export function changesReport(revision, headings = [], turns = {}, rewriteTurns 
       refused: turns[c.ref]?.refused ?? {},
       turn: turns[c.ref] ?? null,
       rewrite_turns: rewriteTurns.filter((t) => t.ref === c.ref),
+      follow: c.follow_through
+        ? {
+            candidates: c.follow_through.candidate_ids.map(placeIndex).filter((i) => i !== null),
+            changes: c.follow_through.change_ids,
+            questions: c.follow_through.questions,
+          }
+        : null,
+      follow_turns: followTurns.filter((t) => t.ref === c.ref),
       changes,
     };
   });
@@ -395,11 +465,19 @@ export function summaryText(
 ) {
   const turns = report.filter((c) => c.turn);
   const rewriteTurns = report.flatMap((c) => c.rewrite_turns ?? []);
+  const followTurns = report.flatMap((c) => c.follow_turns ?? []);
   const bad = [
     ...turns.filter((c) => c.turn.outcome !== "ok").map((c) => `${c.ref} ${c.turn.outcome}`),
+    ...followTurns
+      .filter((t) => t.outcome !== "ok")
+      .map((t) => `${t.ref} follow-through ${t.outcome}`),
     ...rewriteTurns
       .filter((t) => t.outcome !== "ok")
       .map((t) => `${t.ref} rewrite p${t.paragraph_index} ${t.outcome}`),
+  ];
+  const again = [
+    ...turns.filter((c) => c.turn.attempts).map((c) => c.ref),
+    ...followTurns.filter((t) => t.attempts).map((t) => `${t.ref} follow-through`),
   ];
   const asked = models?.asked ?? {};
   const failures = modelFailures(models?.line, lastTurn);
@@ -410,6 +488,7 @@ export function summaryText(
   const codes = {};
   const refused = [
     ...report.map((c) => c.refused ?? {}),
+    ...followTurns.map((t) => t.refused ?? {}),
     ...rewriteTurns.map((t) => t.refused ?? {}),
   ];
   for (const r of refused)
@@ -419,6 +498,10 @@ export function summaryText(
   const named = report.flatMap((c) => c.named_terms ?? []);
   const rewrites = report.flatMap((c) => c.rewrites ?? []);
   const logged = [...turns.map((c) => c.turn), ...rewriteTurns].flatMap((t) => t.rewrites ?? []);
+  // The changes the follow-through turns added, and the paragraphs they are in.
+  const followed = report.flatMap((c) =>
+    c.changes.filter((x) => (c.follow?.changes ?? []).includes(x.change_id)),
+  );
   const kinds = {};
   for (const f of paragraphCheck?.findings ?? []) kinds[f.kind] = (kinds[f.kind] ?? 0) + 1;
   const list = (o) =>
@@ -462,8 +545,11 @@ export function summaryText(
     `changes with words from the review: ${sum((c) => c.changes.filter((x) => x.from_review?.length).length)}`,
     `paragraphs written anew: ${rewrites.length} rewrites of ${new Set(rewrites.map((w) => w.paragraph_index)).size} paragraphs, ${rewrites.reduce((n, w) => n + w.change_ids.length, 0)} parts recorded; stopped: ${logged.filter((w) => w.stopped).length}`,
     `rewrite turns run: ${rewriteTurns.length}`,
+    `follow-through turns run: ${followTurns.length}`,
+    `follow-through: changes ${followed.length} in ${new Set(followed.map((x) => x.paragraph_index)).size} paragraphs, questions ${sum((c) => c.follow?.questions ?? 0)}`,
     `edits a guard refused: ${list(codes) || "none"}`,
     `turns that did not end well: ${bad.length}${bad.length ? ` (${bad.join(", ")})` : ""}`,
+    `turns run again after an API error: ${again.length}${again.length ? ` (${again.join(", ")})` : ""}`,
     `models asked for: edits ${asked.edits ?? "-"}, writing ${asked.writing ?? "(the pane's own)"}, judgments ${asked.judgments ?? "(the pane's own)"}`,
     `models that ran, as the pane says: ${models?.line || "-"}`,
     `models that ran, from the daemon log: ${[...new Set(turns.map((c) => c.turn.model).filter(Boolean))].join(", ") || "-"}`,
@@ -476,7 +562,7 @@ export function summaryText(
         ? `${paragraphCheck.findings?.length ?? 0} findings in ${paragraphCheck.paragraphs?.length ?? 0} paragraphs${Object.keys(kinds).length ? ` (${list(kinds)})` : ""}`
         : "not run"
     }`,
-    `turn time: ${[...turns.map((c) => c.turn), ...rewriteTurns].reduce((n, t) => n + (t.seconds ?? 0), 0)} s`,
+    `turn time: ${[...turns.map((c) => c.turn), ...followTurns, ...rewriteTurns].reduce((n, t) => n + (t.seconds ?? 0), 0)} s`,
     `total time: ${seconds} s`,
     `copy saved with its tracked changes: ${saved ? "yes" : "NO"}`,
   ];

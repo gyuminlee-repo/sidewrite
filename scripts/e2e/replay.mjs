@@ -10,6 +10,7 @@
 //     [--model opus] [--writing-model <alias>] [--judgment-model <alias>] \
 //     [--only R1.1,R2.3] [--instructions <txt>] [--forbid <txt>] \
 //     [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked]
+//     [--follow-through]
 //
 // Before the run, a Word of its own is asked whether it opens the copy the
 // run will use (the add-in tagged on) as it is. A file Word wants to repair
@@ -22,6 +23,10 @@
 // on another model because the chosen one declines it is no failure).
 // With --rewrite-stacked, after the paragraph check every paragraph that
 // holds three or more changes gets its "Rewrite this paragraph" turn.
+// With --follow-through, after the turns of the comments and before the
+// paragraph check every comment whose card offers "Check other places" gets
+// that turn: the places its changes did not touch (the heading above, the
+// legends of the figures cited, the methods, the rest of the section).
 //
 // The manuscript and the review are only read. Everything is written to a
 // new folder <base-dir>/replay-<UTC time>/:
@@ -60,6 +65,7 @@ import { cleanupDecision } from "./judge.mjs";
 import { pauseResident } from "./resident-unit.mjs";
 import { execWithInteropRetry } from "./wsl-interop.mjs";
 import { consistencyLines } from "../../taskpane/shared/review-view.js";
+import { followState } from "../../taskpane/shared/follow-places.js";
 import {
   changesReport,
   extractBatchesFromLog,
@@ -73,6 +79,8 @@ import {
   summaryText,
   newWords,
   sweepSelection,
+  mergeAttempts,
+  retryTurn,
   turnFromLog,
   turnResult,
 } from "./replay-lib.mjs";
@@ -105,6 +113,9 @@ const { values: opt } = parseArgs({
     // After the paragraph check: a rewrite turn for every paragraph that
     // holds three or more changes ("Rewrite this paragraph").
     "rewrite-stacked": { type: "boolean", default: false },
+    // After the turns of the comments: a second turn for every comment whose
+    // changes left other places to check ("Check other places").
+    "follow-through": { type: "boolean", default: false },
     // The longest one review turn may take.
     "turn-minutes": { type: "string", default: "10" },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
@@ -531,6 +542,8 @@ let drafted = null;
 let modelsLine = "";
 // The rewrite turns of --rewrite-stacked, and the last turn that ran.
 const rewriteTurns = [];
+// The turns of --follow-through.
+const followTurns = [];
 let lastTurn = null;
 // A model other than the one asked for, with no reason in the pane's line
 // (replay-lib.mjs modelFailures).
@@ -552,6 +565,18 @@ function runTurn(ref, label, step) {
     line: pane("models-line").line ?? null,
   });
   return lastTurn;
+}
+
+// The turn of a comment, or its follow-through turn: one that ended on an
+// API error is run once more after a minute (replay-lib.mjs retryTurn). The
+// entry keeps how each try ended (mergeAttempts).
+async function proposeTurn(ref, label, step) {
+  const attempts = [runTurn(ref, label, step)];
+  while (retryTurn(attempts)) {
+    await sleep(60_000);
+    attempts.push(runTurn(ref, `${label} (again after an API error)`, step));
+  }
+  return mergeAttempts(attempts);
 }
 
 async function main() {
@@ -593,7 +618,7 @@ async function main() {
   // One turn per comment, in order. A turn that fails or runs out of time is
   // written down and the next comment goes on.
   for (const ref of refs) {
-    turns[ref] = runTurn(ref, `propose ${ref}`, () =>
+    turns[ref] = await proposeTurn(ref, `propose ${ref}`, () =>
       pane("propose", { ref }, TURN_MS + 3 * 60_000),
     );
     record.turns = turns;
@@ -601,6 +626,28 @@ async function main() {
     console.log(`      ${ref}: ${turns[ref].outcome}, ${turns[ref].seconds} s`);
   }
   note("refresh", pane("refresh"));
+  if (opt["follow-through"]) {
+    // The comments whose card now offers the check, by the rule of the card
+    // (follow-places.js followState) on the review file of that refresh.
+    const rev = readRevision();
+    const due = refs.filter(
+      (ref) =>
+        followState(
+          (rev?.comments ?? []).find((c) => c.ref === ref),
+          rev?.snapshot,
+        ).offer,
+    );
+    for (const ref of due) {
+      const turn = await proposeTurn(ref, `follow-through ${ref}`, () =>
+        pane("follow-through", { ref }, TURN_MS + 3 * 60_000),
+      );
+      followTurns.push({ ref, ...turn });
+      record.follow_turns = followTurns;
+      save();
+      console.log(`      follow-through ${ref}: ${turn.outcome}, ${turn.seconds} s`);
+    }
+    if (due.length) note("refresh", pane("refresh"));
+  }
   // The paragraphs that now hold two or more changes, read once more by the
   // model of the edits. Its result is in revision.json (consistency).
   note("check-paragraphs", pane("check-paragraphs", {}, 25 * 60_000));
@@ -654,7 +701,7 @@ const readRevision = () =>
 function writeReports(headings = []) {
   const revision = readRevision();
   if (!revision) return;
-  const report = changesReport(revision, headings, turns, rewriteTurns);
+  const report = changesReport(revision, headings, turns, rewriteTurns, followTurns);
   const log = readLog();
   const out = (name, text) => fs.writeFileSync(path.join(RUN, name), text);
   out("changes.json", JSON.stringify(report, null, 2));
