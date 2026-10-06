@@ -1163,6 +1163,21 @@ refusal the replay does not know). One log line is one refused edit or rewrite.
 request was extracted in the whole run, `summary.txt` says "not measured" for
 the requirements no change names.
 
+A turn that ends on the usage limit of the account (the daemon ends it with
+"Claude usage limit reached.", and " resets at <time>" when it knows the
+time) is the last turn of the run, whichever kind it is: every later turn
+would end the same way. No further turn is started and the steps that need
+the model are passed over (the answers, the follow-through turns, the
+paragraph check, the rewrites, the response drafts). The status refresh
+after the turns of the comments, the model line, the headings, the save of
+the copy, the reports and the Word cleanup still run. `summary.txt` then has
+the line "stopped: usage limit reached at <ref> (<kind>), resets at <time>"
+(without the time when the daemon gave none), `result.json` has it as
+`stopped` (`ref`, `kind`, `resets`), and the run ends with exit code 3. Such
+a turn is not run again. (Exit codes of the replay: 0 the flow ran to its
+end and the checks above hold, 1 otherwise, 2 bad arguments, 3 stopped on
+the usage limit.)
+
 `--instructions` and `--forbid` are text files with one rule per line (`#`
 starts a note); each line becomes a ledger rule the model checks.
 

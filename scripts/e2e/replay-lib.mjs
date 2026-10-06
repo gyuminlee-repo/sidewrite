@@ -271,6 +271,21 @@ export const retryTurn = (attempts) =>
   attempts[0].outcome === "failed" &&
   /^The turn ended on an API error/.test(attempts[0].reason ?? "");
 
+// Whether a turn ends the run: it failed on the usage limit of the account
+// (daemon/limit-detect.mjs: "Claude usage limit reached." and, when the
+// daemon knows it, " resets at <time>"). Every turn after it would end the
+// same way; a replay went on for an hour like that. turn: its turnResult.
+// { ref, kind, resets } (resets: the time as the daemon gave it, or null),
+// or null for any other end: an API error is run again (retryTurn), a
+// refusal and a turn out of time say nothing about the next comment.
+export function limitStop(ref, kind, turn) {
+  const m =
+    turn?.outcome === "failed"
+      ? /^Claude usage limit reached\.?(?: resets at (\S+))?/.exec(turn.reason ?? "")
+      : null;
+  return m ? { ref, kind, resets: m[1] ?? null } : null;
+}
+
 // The entry of a turn that was tried more than once: that of the last try,
 // with the time of all of them and how each ended.
 export const mergeAttempts = (attempts) =>
@@ -517,6 +532,7 @@ export function responsesReport(revision) {
 //   models: { asked: { edits, writing, judgments }, line } (line: the pane's
 //   own line at the end of the run); source: how the manuscript was opened;
 //   paragraphCheck: revision.consistency after "Check revised paragraphs".
+//   stopped: limitStop(...) of the turn the run stopped at, or null.
 export function summaryText(
   report,
   {
@@ -530,6 +546,7 @@ export function summaryText(
     stays = [],
     restored = 0,
     lastTurn = null,
+    stopped = null,
   },
 ) {
   const turns = report.filter((c) => c.turn);
@@ -645,6 +662,10 @@ export function summaryText(
     `total time: ${seconds} s`,
     `copy saved with its tracked changes: ${saved ? "yes" : "NO"}`,
   ];
+  if (stopped)
+    lines.push(
+      `stopped: usage limit reached at ${stopped.ref} (${stopped.kind})${stopped.resets ? `, resets at ${stopped.resets}` : ""}`,
+    );
   if (source) lines.push(`manuscript: ${source}`);
   if (responses !== null) lines.push(`responses drafted: ${responses}`);
   return `${lines.join("\n")}\n`;

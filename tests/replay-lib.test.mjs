@@ -11,6 +11,7 @@ import path from "node:path";
 import { cleanupDecision } from "../scripts/e2e/judge.mjs";
 import { execWithInteropRetry } from "../scripts/e2e/wsl-interop.mjs";
 import {
+  limitStop,
   answeredOf,
   answerPlan,
   parseAnswers,
@@ -1285,6 +1286,60 @@ test("replies.json: the answer of the model in each turn, as the pane step gave 
   assert.throws(() => replyRow("R1.1", "other", {}), /kind/);
 });
 
+test("a turn that ended on the usage limit stops the run; an API error or a refusal does not", () => {
+  const limit = {
+    outcome: "failed",
+    reason: "Claude usage limit reached. resets at 2026-01-02T05:00:00.000Z",
+  };
+  assert.deepEqual(limitStop("R1.4", "follow-through", limit), {
+    ref: "R1.4",
+    kind: "follow-through",
+    resets: "2026-01-02T05:00:00.000Z",
+  });
+  // The daemon gives no time when it knows none.
+  assert.deepEqual(
+    limitStop("R1.4", "ordinary", { ...limit, reason: "Claude usage limit reached." }),
+    {
+      ref: "R1.4",
+      kind: "ordinary",
+      resets: null,
+    },
+  );
+  for (const turn of [
+    { outcome: "ok", reason: null },
+    { outcome: "failed", reason: "The turn ended on an API error: 529 overloaded" },
+    {
+      outcome: "failed",
+      reason: "The model declined this request (category=x). Nothing was changed by this answer.",
+    },
+    { outcome: "timeout", reason: "turn R1.4 still running after 600000 ms" },
+    { outcome: "no_turn", reason: "the daemon logged no end of a review turn for this comment" },
+    // Said by the model, not the end of a turn.
+    { outcome: "ok", reason: "Claude usage limit reached." },
+    null,
+  ])
+    assert.equal(limitStop("R1.4", "ordinary", turn), null);
+  // Such a turn is not run again.
+  assert.equal(retryTurn([limit]), false);
+  // The text the daemon gives such an end, and the time after it.
+  const daemon = read("../daemon/limit-detect.mjs");
+  assert.ok(daemon.includes("error: `Claude usage limit reached.${detail}`"));
+  assert.ok(daemon.includes("`resets at ${new Date(info.resetsAt * 1000).toISOString()}`"));
+  // summary.txt says where the run stopped; a run that did not stop has no such line.
+  const report = changesReport(FOLLOWED);
+  const said = (stopped) =>
+    summaryText(report, { seconds: 1, saved: true, models: {}, stopped })
+      .split("\n")
+      .filter((l) => l.startsWith("stopped:"));
+  assert.deepEqual(said(limitStop("R1.4", "follow-through", limit)), [
+    "stopped: usage limit reached at R1.4 (follow-through), resets at 2026-01-02T05:00:00.000Z",
+  ]);
+  assert.deepEqual(said({ ref: "R1.4", kind: "answer", resets: null }), [
+    "stopped: usage limit reached at R1.4 (answer)",
+  ]);
+  assert.deepEqual(said(null), []);
+});
+
 test("replay.mjs asks only for pane steps and Windows scripts that exist, and names no path of its own", () => {
   const runner = read("../scripts/e2e/replay.mjs");
   const base = read("../scripts/e2e/pane-driver.cjs");
@@ -1301,7 +1356,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // --rewrite-stacked: off unless asked for; the rewrite turns come after
   // the paragraph check, each button once, and a refresh follows them.
   assert.match(runner, /"rewrite-stacked": \{ type: "boolean", default: false \}/);
-  const stacked = runner.indexOf('if (opt["rewrite-stacked"]) {');
+  const stacked = runner.indexOf('if (opt["rewrite-stacked"] && !stopped) {');
   assert.ok(runner.indexOf('pane("check-paragraphs"') < stacked);
   assert.ok(stacked < runner.indexOf('pane("rewrite-paragraph", { nth }'));
   assert.ok(runner.indexOf('pane("rewrite-paragraph"') < runner.lastIndexOf('pane("refresh")'));
@@ -1311,7 +1366,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // then reads what they left; one per comment the card offers the check
   // for (follow-places.js followState), and a refresh follows them.
   assert.match(runner, /"follow-through": \{ type: "boolean", default: false \}/);
-  const follow = runner.indexOf('if (opt["follow-through"]) {');
+  const follow = runner.indexOf('if (opt["follow-through"] && !stopped) {');
   assert.ok(runner.indexOf('pane("refresh")') < follow);
   assert.ok(follow < runner.indexOf('pane("follow-through", { ref }'));
   assert.ok(runner.indexOf('pane("follow-through"') < runner.indexOf('pane("check-paragraphs"'));
@@ -1330,7 +1385,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // comment are answered through the pane, then the comment gets its turn
   // again, and a refresh follows. The step is given the file, not the text.
   assert.match(runner, /\n    answers: \{ type: "string" \},/);
-  const answersAt = runner.indexOf("if (ANSWERS) {");
+  const answersAt = runner.indexOf("if (ANSWERS && !stopped) {");
   assert.ok(runner.indexOf('pane("refresh")') < answersAt);
   assert.ok(answersAt < runner.indexOf('pane("answer-questions", {'));
   assert.ok(runner.indexOf('pane("answer-questions"') < runner.lastIndexOf('pane("propose"'));
@@ -1383,6 +1438,29 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\} \(after answers\)`/);
   assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\}`/);
   assert.match(runner, /await proposeTurn\(ref, `follow-through \$\{ref\}`/);
+  // A turn that ended on the usage limit (replay-lib.mjs limitStop) is the
+  // last turn of the run: every turn goes through runTurn, which notes it;
+  // each loop of turns ends there, and the phases that need the model (the
+  // answers, follow-through, the paragraph check, the rewrites, the drafts)
+  // are passed over. What needs no model still runs: the save of the copy
+  // and the reports. The run then ends with code 3.
+  assert.match(runner, /stopped \?\?= limitStop\(ref, kind, lastTurn\);/);
+  assert.equal((runner.match(/if \(stopped\) break;/g) ?? []).length, 4);
+  for (const gate of [
+    "if (ANSWERS && !stopped) {",
+    'if (opt["follow-through"] && !stopped) {',
+    'if (!stopped) note("check-paragraphs", pane("check-paragraphs", {}, 25 * 60_000));',
+    'if (opt["rewrite-stacked"] && !stopped) {',
+    'if (opt["draft-responses"] && !stopped) {',
+  ])
+    assert.ok(runner.includes(gate), gate);
+  assert.ok(
+    runner.indexOf('if (opt["draft-responses"] && !stopped) {') < runner.indexOf('"save copy"'),
+  );
+  assert.match(runner, /record\.stopped = stopped;/);
+  assert.match(runner, /\n      stopped,\n/);
+  assert.match(runner, /process\.exit\(\s*failed \? 1 : stopped \? 3 : /);
+  assert.match(read("../scripts/e2e/README.md"), /exit code 3/);
   // The exit code follows the pane's line (modelFailures), nothing else.
   assert.match(
     runner,
