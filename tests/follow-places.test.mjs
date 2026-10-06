@@ -77,6 +77,23 @@ test("figurePointers reads plurals, panel letters, S numbers and ranges", () => 
     "tab:S3",
     "sch:1",
   ]);
+  // A comma before "and", a long dash for a range, the short forms of
+  // "supplementary".
+  assert.deepEqual(figurePointers("Figs. 2, 3, and 4"), ["fig:2", "fig:3", "fig:4"]);
+  assert.deepEqual(figurePointers("Figs. 2\u20144 and Tables 6–7"), [
+    "fig:2",
+    "fig:3",
+    "fig:4",
+    "tab:6",
+    "tab:7",
+  ]);
+  assert.deepEqual(figurePointers("Supplemental Fig. 2, Supp. Fig. 3 and Suppl. Table 1"), [
+    "fig:S2",
+    "fig:S3",
+    "tab:S1",
+  ]);
+  // A range too long to be one is read as its two ends.
+  assert.deepEqual(figurePointers("Figs. 1-40"), ["fig:1", "fig:40"]);
   // Not a pointer: a number that follows no figure word, a figure word alone.
   assert.deepEqual(figurePointers("The figure shows 12 spans; configure 3 gauges."), []);
 });
@@ -103,7 +120,7 @@ test("followPlaces lists heading, legends, methods and section, in that order", 
       [13, "k13", "caption", "legend of Fig. 2"],
       [14, "k14", "body", "continues the legend of Fig. 2"],
       [16, "k16", "caption", "legend of Table S1"],
-      [5, "k5", "methods", 'methods; holds "eliminated"'],
+      [5, "k5", "methods", 'methods; also has "eliminated"'],
       [9, "k9", "body", "same section as a changed paragraph"],
     ],
   );
@@ -114,7 +131,9 @@ test("followPlaces lists heading, legends, methods and section, in that order", 
 
 test("followPlaces: a figure named only in the comment or in what a change took out", () => {
   const inComment = { ...COMMENT, text: "See Figure 3A: the claim is too strong." };
-  assert.ok(indexes(followPlaces(inComment, PARAGRAPHS, IDS)).includes(15));
+  // What the comment or a change names comes before what only the rest of
+  // the changed paragraph cites.
+  assert.deepEqual(indexes(followPlaces(inComment, PARAGRAPHS, IDS)).slice(0, 4), [7, 15, 13, 14]);
   const removed = {
     ...COMMENT,
     changes: [change("R1.1-1", 9, "held (Supplementary Fig. 4)", "held")],
@@ -132,7 +151,7 @@ test("followPlaces: a figure named only in the comment or in what a change took 
   assert.ok(indexes(followPlaces(plain, PARAGRAPHS, IDS)).includes(15));
 });
 
-test("followPlaces: a legend goes on for a few paragraphs, up to the next caption or heading", () => {
+test("followPlaces: a legend goes on only where at most three paragraphs follow its caption", () => {
   const texts = [
     "Deck",
     "Rust fell after recoating (Fig. 1).",
@@ -145,17 +164,82 @@ test("followPlaces: a legend goes on for a few paragraphs, up to the next captio
     "Figure 2. Another figure.",
     "Its legend goes on here.",
   ];
-  const c = { ref: "R1.1", text: "Too strong.", changes: [change("x", 1, "fell", "was lower")] };
+  const c = {
+    ref: "R1.1",
+    text: "Too strong (see Figure 2).",
+    changes: [change("x", 1, "fell", "was lower")],
+  };
   const got = followPlaces(c, texts);
+  // Fig. 2 (named in the comment) first, with the one paragraph after its
+  // caption; four paragraphs follow the caption of Fig. 1: body text.
   assert.deepEqual(
-    got.filter((p) => /legend/.test(p.why)).map((p) => p.index),
-    [2, 3, 5, 6],
+    got.filter((p) => /legend/.test(p.why)).map((p) => [p.index, p.why]),
+    [
+      [8, "legend of Fig. 2"],
+      [9, "continues the legend of Fig. 2"],
+      [2, "legend of Fig. 1"],
+    ],
   );
-  // Paragraphs 7 and 9 are still under the heading "Deck": listed as of the
-  // section. The empty paragraph is no place.
-  for (const i of [7, 9])
+  for (const i of [3, 5, 6, 7])
     assert.equal(got.find((p) => p.index === i).why, "same section as a changed paragraph");
   assert.ok(!indexes(got).includes(4));
+});
+
+test("followPlaces: the legends a changed paragraph cites do not crowd out the rest", () => {
+  const texts = [
+    "Deck",
+    "Rust fell on every span (Figs. 1-10).",
+    "The coating held.",
+    ...Array.from({ length: 10 }, (_, i) => `Figure ${i + 1}. Span group ${i + 1}.`),
+  ];
+  const c = {
+    ref: "R1.1",
+    text: "Figure 10 does not show this.",
+    changes: [change("x", 1, "fell", "was lower")],
+  };
+  // Fig. 10 (the comment names it), then seven of the others: eight legends.
+  assert.deepEqual(indexes(followPlaces(c, texts)), [0, 12, 3, 4, 5, 6, 7, 8, 9, 2]);
+});
+
+test("followPlaces: a paragraph without words is no heading, no boundary and no place", () => {
+  const texts = [
+    "Deck survey",
+    "/",
+    "0.05",
+    "Rust fell after recoating.",
+    "12 / 14",
+    "The coating held.",
+    "Cable tension",
+    "Tension stayed within limits.",
+  ];
+  assert.deepEqual(
+    [1, 2, 4].map((i) => paragraphKinds(texts)[i]),
+    ["heading", "heading", "heading"],
+  );
+  const c = { ref: "R1.1", text: "Too strong.", changes: [change("x", 3, "fell", "was lower")] };
+  assert.deepEqual(
+    followPlaces(c, texts).map((p) => [p.index, p.why]),
+    [
+      [0, "heading above a changed paragraph"],
+      [5, "same section as a changed paragraph"],
+    ],
+  );
+  // Nor does such a line end the reference list.
+  const refs = [
+    "Deck",
+    "Rust fell (Fig. 1).",
+    "References",
+    "Okafor T. Coatings for steel bridges. 2018.",
+    "/",
+    "Yeo K. Drainage of expansion joints. 2020.",
+    "Figure 1. Rust cover per span.",
+  ];
+  const d = {
+    ref: "R1.1",
+    text: "Too strong.",
+    changes: [change("a", 1, "fell", "was lower"), change("b", 3, "2018", "2019")],
+  };
+  assert.deepEqual(indexes(followPlaces(d, refs)), [0, 6]);
 });
 
 test("followPlaces: methods paragraphs with a word a change took out, unless it is everywhere", () => {
@@ -176,13 +260,76 @@ test("followPlaces: methods paragraphs with a word a change took out, unless it 
     followPlaces(c, texts).map((p) => [p.index, p.why]),
     [
       [3, "heading above a changed paragraph"],
-      [1, 'methods; holds "permanent", which a change took out'],
+      [1, 'methods; also has "permanent"'],
       [5, "same section as a changed paragraph"],
     ],
   );
-  // The word in more than a fifth of the paragraphs (never fewer than 3): vocabulary.
+  // The word in more than two body or methods paragraphs: vocabulary.
   const many = [...texts, "A permanent anchor.", "Permanent bolts hold.", "No permanent mark."];
   assert.ok(!indexes(followPlaces(c, many)).includes(1));
+});
+
+test("followPlaces: which removed words bring a methods paragraph", () => {
+  const filler = Array.from({ length: 150 }, (_, i) => `Span ${i} held firm.`);
+  const methods = [
+    "Methods",
+    "Girders were scanned with ultrasonic probes.", // 1
+    "Ultrasonic readings were logged hourly.", // 2
+    "The ultrasonic unit was calibrated daily.", // 3
+    "Ultrasonic gel was applied across the weld.", // 4
+    "Welds were graded by radiographic film.", // 5
+    "Loads were applied by hydraulic jacks.", // 6
+    "Rivets were set by pneumatic hammers.", // 7
+    "A rusty plate with significant pitting was the reference.", // 8
+    "Positions came from the GPS-2 logger.", // 9
+    "Results", // 10
+    "Cracks were absent.", // 11, changed
+  ];
+  const texts = [...methods, ...filler];
+  const of = (find, more = {}) => ({
+    ref: "R1.1",
+    text: "The testing claim goes too far.",
+    changes: [change("x", 11, find, "Cracks were absent", more)],
+  });
+  const inMethods = (c) =>
+    followPlaces(c, texts)
+      .filter((p) => p.kind === "methods")
+      .map((p) => [p.index, p.why]);
+  // Common words of any report ("across", "significant", "showed") and short
+  // plain words ("rusty") bring nothing. Of the others at most three, those
+  // in the fewest paragraphs first.
+  assert.deepEqual(
+    inMethods(
+      of(
+        "Ultrasonic radiographic hydraulic pneumatic scans across rusty spans showed significant cracks",
+      ),
+    ),
+    [
+      [5, 'methods; also has "radiographic"'],
+      [6, 'methods; also has "hydraulic"'],
+      [7, 'methods; also has "pneumatic"'],
+    ],
+  );
+  // One word: at most three methods paragraphs (160 paragraphs: it may be in four).
+  assert.deepEqual(inMethods(of("Ultrasonic scans found cracks")), [
+    [1, 'methods; also has "ultrasonic"'],
+    [2, 'methods; also has "ultrasonic"'],
+    [3, 'methods; also has "ultrasonic"'],
+  ]);
+  // In a short text a word in more than two paragraphs is vocabulary.
+  const short = [...methods, "Ultrasonic scans were repeated."];
+  assert.deepEqual(
+    followPlaces(of("Ultrasonic scans found cracks"), short).filter((p) => p.kind === "methods"),
+    [],
+  );
+  // A short word that is a technical token (a digit, a hyphen, a capital inside).
+  assert.deepEqual(inMethods(of("GPS-2 fixes found cracks")), [[9, 'methods; also has "gps-2"']]);
+  // A short plain word the comment and the reason of the change both name.
+  const claim = of("Rusty plates had cracks", {
+    rationale: { what: "w", why: "No plate was rusty.", addresses: "a", requirement_ids: [] },
+  });
+  claim.text = "Nothing shows the plates were rusty.";
+  assert.deepEqual(inMethods(claim), [[8, 'methods; also has "rusty"']]);
 });
 
 test("followPlaces: no live change, no places; changed paragraphs are never places", () => {
@@ -202,6 +349,16 @@ test("followPlaces: no live change, no places; changed paragraphs are never plac
   };
   const got = indexes(followPlaces(more, PARAGRAPHS, IDS));
   assert.deepEqual(got, [7, 12, 14, 16, 5]);
+  // Nor is a paragraph where the author rejected a change of this comment.
+  const refused = {
+    ...COMMENT,
+    changes: [
+      ...COMMENT.changes,
+      change("R1.1-2", 9, "also held", "held", { state: "rejected" }),
+      change("R1.1-3", 13, "Rust coverage", "Rust cover", { state: "rejected" }),
+    ],
+  };
+  assert.deepEqual(indexes(followPlaces(refused, PARAGRAPHS, IDS)), [7, 14, 16, 5]);
 });
 
 test("followPlaces: the reference list is skipped, also past an entry that reads as a heading", () => {
@@ -231,12 +388,21 @@ test("followPlaces: each paragraph once, and the list is cut from the end", () =
   const c = { ...COMMENT, changes: [...COMMENT.changes, change("R1.1-2", 4, "graded", "rated")] };
   const got = followPlaces(c, PARAGRAPHS, IDS);
   assert.equal(got.filter((p) => p.index === 5).length, 1);
-  assert.equal(got.find((p) => p.index === 5).why, 'methods; holds "eliminated"');
+  assert.equal(got.find((p) => p.index === 5).why, 'methods; also has "eliminated"');
   assert.deepEqual(indexes(followPlaces(COMMENT, PARAGRAPHS, IDS, { maxPlaces: 2 })), [7, 13]);
   const chars = PARAGRAPHS[7].length + PARAGRAPHS[13].length + PARAGRAPHS[14].length;
   assert.deepEqual(
     indexes(followPlaces(COMMENT, PARAGRAPHS, IDS, { maxChars: chars })),
     [7, 13, 14],
+  );
+  // A paragraph too long for what is left is passed over, not the end of
+  // the list; one that alone is over the limit does not leave the list empty.
+  const big = ["Deck", "Rust fell.", "x ".repeat(60), "Span A held.", "Span B held."];
+  const cut = { ref: "R1.1", text: "Why?", changes: [change("x", 1, "fell", "was lower")] };
+  assert.deepEqual(indexes(followPlaces(cut, big, null, { maxChars: 40 })), [0, 3, 4]);
+  assert.deepEqual(
+    indexes(followPlaces(cut, ["Deck of the long bridge", "Rust fell."], null, { maxChars: 5 })),
+    [0],
   );
   // The defaults: 20 paragraphs.
   const long = ["Deck", "Rust fell.", ...Array.from({ length: 30 }, (_, i) => `Span ${i} held.`)];
@@ -267,6 +433,11 @@ test("followState: the button is offered until the check ran, and again after a 
   const s = followState(again, snapshot);
   assert.equal(s.line, "Other places checked: 6 (1 change, 2 questions).");
   assert.ok(s.offer > 0);
+  const nothing = {
+    ...ran,
+    follow_through: { ...ran.follow_through, change_ids: [], questions: 0 },
+  };
+  assert.equal(followState(nothing, snapshot).line, "Other places checked: 6 (no change needed).");
   // A file from before the field: as if no check ran.
   assert.equal(followState({ ...COMMENT, follow_through: null }, snapshot).offer, 6);
 });
