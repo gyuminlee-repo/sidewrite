@@ -63,6 +63,7 @@ import {
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
+import { followState } from "./follow-places.js";
 import { firstWords, paragraphLabel } from "./paragraph-label.js";
 import { createAutoRefresh } from "./auto-refresh.js";
 
@@ -988,6 +989,28 @@ export function initReviewPane({
         if (n.paragraph_index != null) line.append(" ", paragraphLink(n.paragraph_index));
         body.append(line);
       }
+      // The places the changes of this comment did not touch (follow-places.js):
+      // what the last check of them did, and the button for a turn of this
+      // comment that is given them, until it ran for the changes there are.
+      const follow = followState(c, state.revision?.snapshot);
+      if (follow.line) body.append(el("div", { class: "review-residue", text: follow.line }));
+      if (follow.offer) {
+        const check = el("button", {
+          type: "button",
+          class: "btn-secondary btn-small",
+          text: `Check other places (${follow.offer})`,
+        });
+        proposeButtons.push(check);
+        check.disabled = isTurnInFlight() || queue.running;
+        const run = guard((release) => proposeRef(c.ref, release, false, { follow_through: true }));
+        check.addEventListener("click", () => {
+          if (isTurnInFlight() || queue.running) return;
+          return run(
+            onTurnStarted(`Review ${c.ref}: checking ${follow.offer} other places (tracked)...`),
+          );
+        });
+        body.append(check);
+      }
       for (const b of c.blocked) if (!inFlightEdit(b)) body.append(blockedRow(c.ref, b));
       body.append(advanced);
       box.append(card);
@@ -1515,7 +1538,8 @@ export function initReviewPane({
         : `No change was proposed for ${ref}${withModel}: ${blocked > 0 ? blockedText : "the reason is below"}.`;
     return { text: open ? `${line} ${open}` : line, noChange: n <= 0 };
   }
-  // extra: more fields of the request (rewrite_paragraph for a rewrite turn).
+  // extra: more fields of the request (rewrite_paragraph for a rewrite turn,
+  // follow_through for a turn that checks the other places of the comment).
   async function proposeRef(ref, release, useSelection, extra = {}) {
     state.reviewTurnOpen = true;
     state.results.delete(ref);
