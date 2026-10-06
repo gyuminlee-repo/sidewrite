@@ -79,6 +79,8 @@ import {
   summaryText,
   newWords,
   sweepSelection,
+  mergeAttempts,
+  retryTurn,
   turnFromLog,
   turnResult,
 } from "./replay-lib.mjs";
@@ -565,6 +567,18 @@ function runTurn(ref, label, step) {
   return lastTurn;
 }
 
+// The turn of a comment, or its follow-through turn: one that ended on an
+// API error is run once more after a minute (replay-lib.mjs retryTurn). The
+// entry keeps how each try ended (mergeAttempts).
+async function proposeTurn(ref, label, step) {
+  const attempts = [runTurn(ref, label, step)];
+  while (retryTurn(attempts)) {
+    await sleep(60_000);
+    attempts.push(runTurn(ref, `${label} (again after an API error)`, step));
+  }
+  return mergeAttempts(attempts);
+}
+
 async function main() {
   must("open-review", pane("open-review"));
   // The three kinds of work, chosen in Setup (Providers).
@@ -604,7 +618,7 @@ async function main() {
   // One turn per comment, in order. A turn that fails or runs out of time is
   // written down and the next comment goes on.
   for (const ref of refs) {
-    turns[ref] = runTurn(ref, `propose ${ref}`, () =>
+    turns[ref] = await proposeTurn(ref, `propose ${ref}`, () =>
       pane("propose", { ref }, TURN_MS + 3 * 60_000),
     );
     record.turns = turns;
@@ -624,7 +638,7 @@ async function main() {
         ).offer,
     );
     for (const ref of due) {
-      const turn = runTurn(ref, `follow-through ${ref}`, () =>
+      const turn = await proposeTurn(ref, `follow-through ${ref}`, () =>
         pane("follow-through", { ref }, TURN_MS + 3 * 60_000),
       );
       followTurns.push({ ref, ...turn });

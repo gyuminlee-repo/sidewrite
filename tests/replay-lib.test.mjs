@@ -18,6 +18,8 @@ import {
   restoredFromLog,
   rewritesFromLog,
   followFromLog,
+  mergeAttempts,
+  retryTurn,
   staysFromLog,
   refusalsFromLog,
   keepRefPattern,
@@ -868,6 +870,7 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "follow-through: changes 0 in 0 paragraphs, questions 0",
       "edits a guard refused: NumberNeedsAuthor 2, ForbidBlocked 1",
       "turns that did not end well: 1 (R1.2 timeout)",
+      "turns run again after an API error: 0",
       "models asked for: edits opus, writing (the pane's own), judgments haiku",
       `models that ran, as the pane says: ${LINE}`,
       "models that ran, from the daemon log: m1",
@@ -1058,6 +1061,56 @@ test("the end of a follow-through turn is read from the log of the turn, as the 
   );
 });
 
+test("a turn that failed on an API error is run once more; a refusal or a second failure is not", () => {
+  const api = {
+    outcome: "failed",
+    reason: "The turn ended on an API error: Failed to authenticate. API Error: 403",
+    seconds: 5,
+    model: "m",
+  };
+  const declined = {
+    outcome: "failed",
+    reason: "The model declined this request (category=x). Nothing was changed by this answer.",
+    seconds: 3,
+  };
+  const ok = { outcome: "ok", reason: null, seconds: 30, model: "m" };
+  assert.equal(retryTurn([api]), true);
+  assert.equal(retryTurn([declined]), false);
+  assert.equal(retryTurn([api, api]), false);
+  assert.equal(retryTurn([ok]), false);
+  assert.equal(retryTurn([{ outcome: "timeout", reason: "still running after 1 ms" }]), false);
+  assert.equal(retryTurn([{ outcome: "no_turn", reason: null }]), false);
+  assert.equal(retryTurn([]), false);
+  // The entry of the turn is that of its last attempt, with the time of
+  // both and how each ended; one attempt is the entry as it is.
+  assert.deepEqual(mergeAttempts([ok]), ok);
+  assert.deepEqual(mergeAttempts([api, ok]), {
+    ...ok,
+    seconds: 35,
+    attempts: [
+      { outcome: "failed", reason: api.reason, seconds: 5 },
+      { outcome: "ok", reason: null, seconds: 30 },
+    ],
+  });
+  // The text the daemon gives such an end.
+  assert.ok(
+    read("../daemon/limit-detect.mjs").includes("error: `The turn ended on an API error: ${"),
+  );
+  const again = { outcome: "ok", seconds: 35, attempts: [api, ok] };
+  const report = changesReport(
+    FOLLOWED,
+    [],
+    { "R1.1": again, "R1.2": ok },
+    [],
+    [{ ref: "R1.1", ...again }],
+  );
+  assert.ok(
+    summaryText(report, { seconds: 1, saved: true, models: {} }).includes(
+      "\nturns run again after an API error: 2 (R1.1, R1.1 follow-through)\n",
+    ),
+  );
+});
+
 test("changes.json and summary.txt: what the follow-through turns did", () => {
   const report = changesReport(
     FOLLOWED,
@@ -1095,6 +1148,7 @@ test("changes.json and summary.txt: what the follow-through turns did", () => {
     models: {},
   });
   assert.ok(off.includes("\nfollow-through turns run: 0\n"));
+  assert.ok(off.includes("\nturns run again after an API error: 0\n"));
   assert.ok(off.includes("\nfollow-through: changes 0 in 0 paragraphs, questions 0\n"));
 });
 
@@ -1134,6 +1188,13 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   assert.match(between, /pane\("refresh"\)/);
   assert.match(base, /"Check other places"/);
   assert.match(runner, /changesReport\(revision, headings, turns, rewriteTurns, followTurns\)/);
+  // A turn of a comment or a follow-through turn that failed on an API error
+  // is run once more after a minute (replay-lib.mjs retryTurn); both go
+  // through the same function, and a rewrite turn does not.
+  assert.match(runner, /while \(retryTurn\(attempts\)\) \{\s*\n\s*await sleep\(60_000\);/);
+  assert.equal((runner.match(/await proposeTurn\(/g) ?? []).length, 2);
+  assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\}`/);
+  assert.match(runner, /await proposeTurn\(ref, `follow-through \$\{ref\}`/);
   // The exit code follows the pane's line (modelFailures), nothing else.
   assert.match(
     runner,

@@ -197,6 +197,33 @@ export const extractBatchesFromLog = (log) =>
     unlabelled: m[7] ? m[7].split(",") : [],
   }));
 
+// Whether a turn is run once more. attempts: the turnResult of each try so
+// far. Only after the first try, and only when the turn ended on an API
+// error (daemon/limit-detect.mjs: an authentication or server answer in
+// place of the model's; a replay lost seven turns in a row to one). A turn
+// the model declined, one that ran out of time and one no end was seen of
+// are not tried again: the same request would end the same way, or a turn
+// may still be running.
+export const retryTurn = (attempts) =>
+  attempts.length === 1 &&
+  attempts[0].outcome === "failed" &&
+  /^The turn ended on an API error/.test(attempts[0].reason ?? "");
+
+// The entry of a turn that was tried more than once: that of the last try,
+// with the time of all of them and how each ended.
+export const mergeAttempts = (attempts) =>
+  attempts.length < 2
+    ? attempts[0]
+    : {
+        ...attempts.at(-1),
+        seconds: attempts.reduce((n, t) => n + (t.seconds ?? 0), 0),
+        attempts: attempts.map((t) => ({
+          outcome: t.outcome,
+          reason: t.reason ?? null,
+          seconds: t.seconds ?? 0,
+        })),
+      };
+
 // One comment of the run: { step, log, seconds } of its propose step.
 // outcome: "ok", "failed" (the turn ended with an error: limit, refusal,
 // crash), "timeout" (the pane step gave up), "no_turn" (no turn was seen).
@@ -448,6 +475,10 @@ export function summaryText(
       .filter((t) => t.outcome !== "ok")
       .map((t) => `${t.ref} rewrite p${t.paragraph_index} ${t.outcome}`),
   ];
+  const again = [
+    ...turns.filter((c) => c.turn.attempts).map((c) => c.ref),
+    ...followTurns.filter((t) => t.attempts).map((t) => `${t.ref} follow-through`),
+  ];
   const asked = models?.asked ?? {};
   const failures = modelFailures(models?.line, lastTurn);
   const drifted = turns.filter((c) => c.turn.other_model);
@@ -518,6 +549,7 @@ export function summaryText(
     `follow-through: changes ${followed.length} in ${new Set(followed.map((x) => x.paragraph_index)).size} paragraphs, questions ${sum((c) => c.follow?.questions ?? 0)}`,
     `edits a guard refused: ${list(codes) || "none"}`,
     `turns that did not end well: ${bad.length}${bad.length ? ` (${bad.join(", ")})` : ""}`,
+    `turns run again after an API error: ${again.length}${again.length ? ` (${again.join(", ")})` : ""}`,
     `models asked for: edits ${asked.edits ?? "-"}, writing ${asked.writing ?? "(the pane's own)"}, judgments ${asked.judgments ?? "(the pane's own)"}`,
     `models that ran, as the pane says: ${models?.line || "-"}`,
     `models that ran, from the daemon log: ${[...new Set(turns.map((c) => c.turn.model).filter(Boolean))].join(", ") || "-"}`,
