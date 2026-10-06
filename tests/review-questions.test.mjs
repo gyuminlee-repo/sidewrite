@@ -129,7 +129,85 @@ test("office_ask_author: only in the turn of its comment, with a known request i
     "requirement_id",
     "question",
     "why",
+    "paragraph_id",
   ]);
+});
+
+// The place of a question: the paragraph the answer would go into. Made-up
+// texts of a library catalogue report.
+test("office_ask_author: the paragraph the answer goes into is kept when the manuscript has it", async () => {
+  const ask = {
+    comment_ref: "R1.1",
+    question: "How many shelf marks were checked by hand?",
+    why: "The report gives no count.",
+  };
+  const deps = (ctx) => ({ ...toolDeps([]), getReviewContext: async () => ctx });
+  let d = deps({
+    paragraphs: ["Catalogue", "Shelf marks were checked."],
+    paragraph_ids: ["k0", "k1"],
+  });
+  let r = await askAuthor(d, { ...ask, paragraph_id: "k1" }, { ref: "R1.1" });
+  assert.equal(r.ok, true);
+  assert.equal(d.asked[0][1].paragraph_id, "k1");
+  assert.deepEqual(d.lines, ["[review] question R1.1 a1 requirement=- place=k1"]);
+  // An id the manuscript does not have: the question is recorded all the
+  // same, without a place, and the answer of the tool says so.
+  d = deps({ paragraphs: ["Catalogue", "Shelf marks were checked."], paragraph_ids: ["k0", "k1"] });
+  r = await askAuthor(d, { ...ask, paragraph_id: "k9" }, { ref: "R1.1" });
+  assert.deepEqual([r.ok, r.question_id], [true, "a1"]);
+  assert.match(r.message, /paragraph_id k9 is not a paragraph of the manuscript/);
+  assert.equal("paragraph_id" in d.asked[0][1], false);
+  assert.deepEqual(d.lines, ["[review] question R1.1 a1 requirement=-"]);
+  // A manuscript read without task pane ids: a paragraph is named by its index.
+  d = deps({ paragraphs: ["Catalogue", "Shelf marks were checked."], paragraph_ids: null });
+  await askAuthor(d, { ...ask, paragraph_id: "p1" }, { ref: "R1.1" });
+  await askAuthor(d, { ...ask, paragraph_id: "p2" }, { ref: "R1.1" });
+  assert.deepEqual(
+    d.asked.map(([, q]) => q.paragraph_id),
+    ["p1", undefined],
+  );
+});
+
+test("store: a question keeps its place; one without a place has no such field", () => {
+  const rev = replaceComments(emptyRevision(), COMMENTS);
+  const r = addQuestion(
+    rev,
+    "R1.1",
+    { question: "How many shelf marks?", why: "No count.", paragraph_id: "k1" },
+    NOW,
+  );
+  assert.equal(r.question.paragraph_id, "k1");
+  const plain = addQuestion(r.revision, "R1.1", { question: "Which year?", why: "Not said." });
+  assert.equal("paragraph_id" in plain.question, false);
+  // It stays through an answer and a comment-list save.
+  const saved = replaceComments(answerQuestion(plain.revision, "R1.1", "a1", "412", NOW), [
+    { ref: "R1.1", reviewer: 1, text: "Edited text." },
+  ]);
+  assert.deepEqual(
+    saved.comments[0].questions.map((q) => q.paragraph_id),
+    ["k1", undefined],
+  );
+});
+
+test("prompt: a question is listed with the paragraph its answer goes into; the rule asks for it", () => {
+  const comment = {
+    ref: "R1.1",
+    reviewer: 1,
+    text: "The count of shelf marks is missing.",
+    questions: [
+      { id: "a1", question: "How many shelf marks?", why: "w", answer: "412", paragraph_id: "k4" },
+      { id: "a2", question: "Which year?", why: "w", answer: "", paragraph_id: "k7" },
+      { id: "a3", question: "Who checked?", why: "w", answer: "" },
+    ],
+  };
+  const { text } = buildReviewPrompt({ comment, others: [comment], fence: "F1" });
+  assert.ok(text.includes("- [R1.1 a1] (for [k4]) How many shelf marks? Answer: 412"), text);
+  assert.ok(text.includes("- [a2] (for [k7]) Which year?\n- [a3] Who checked?"), text);
+  // Appended: the rules before it keep their numbers (POLICY_PACKS).
+  assert.equal(REVIEW_RULES.length, 17);
+  assert.match(REVIEW_RULES[16], /^When you ask the author \(office_ask_author\)/);
+  assert.match(REVIEW_RULES[16], /paragraph_id/);
+  assert.ok(text.includes(`17. ${REVIEW_RULES[16]}`));
 });
 
 test("the question tool is a review-turn tool that writes no document", () => {
@@ -325,6 +403,27 @@ test("service: a question is saved and the pane told; the answer lifts the numbe
       turn,
     );
     assert.equal(ok.ok, true, ok.message);
+    // A question that names the paragraph its answer goes into: the id of
+    // that paragraph in the last refresh is in the review file; the first
+    // question, asked without one, has no such field.
+    const ids = (await t.svc.trackedEditDeps("k").getReviewContext("R1.1")).paragraph_ids;
+    const placed = await askAuthor(
+      t.svc.trackedEditDeps("k"),
+      {
+        comment_ref: "R1.1",
+        question: "Who signed the log?",
+        why: "Not said.",
+        paragraph_id: ids?.[1] ?? "p1",
+      },
+      turn,
+    );
+    assert.equal(placed.ok, true, placed.message);
+    rev = await loadRevision(join(t.dir, "paper.revision.json"));
+    assert.deepEqual(
+      rev.comments[0].questions.map((q) => q.paragraph_id),
+      [undefined, ids?.[1] ?? "p1"],
+    );
+    assert.equal("paragraph_id" in rev.comments[0].questions[0], false);
   } finally {
     await t.cleanup();
   }

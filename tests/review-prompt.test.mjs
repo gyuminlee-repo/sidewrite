@@ -168,7 +168,7 @@ test("without a profile every rule is in the prompt, numbered from 1", () => {
 
 test("the rule about citations and other fields is appended, in the prompt with and without the pack", () => {
   // Appended: the rules a pack names by index stay where they are.
-  assert.equal(REVIEW_RULES.length, 16);
+  assert.equal(REVIEW_RULES.length, 17);
   assert.match(REVIEW_RULES[1], /^Make only the changes this comment asks for/);
   assert.match(REVIEW_RULES[3], /^Base every change and every rationale/);
   const rule = REVIEW_RULES[15];

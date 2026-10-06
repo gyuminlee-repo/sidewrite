@@ -228,6 +228,10 @@ const Question = z.object({
   asked_at: z.string(),
   answer: z.string().default(""),
   answered_at: z.string().nullable().default(null),
+  // The paragraph the answer would go into (its task pane id, else "p" and
+  // its index), when the model named one that the manuscript has. Optional,
+  // no default: a file from before it saves as it was loaded.
+  paragraph_id: z.string().optional(),
 });
 
 // ---- figure lane -------------------------------------------------------------
@@ -940,7 +944,7 @@ export function setRequirements(rev, ref, texts) {
 export function addQuestion(
   rev,
   ref,
-  { requirement_id = null, question, why = "" },
+  { requirement_id = null, question, why = "", paragraph_id = null },
   now = new Date(),
 ) {
   const next = clone(rev);
@@ -958,6 +962,7 @@ export function addQuestion(
     question: text,
     why: String(why ?? "").trim(),
     asked_at: now.toISOString(),
+    ...(paragraph_id ? { paragraph_id: String(paragraph_id) } : {}),
   });
   c.questions.push(row);
   return { revision: next, question: row };

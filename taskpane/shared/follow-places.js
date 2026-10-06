@@ -15,6 +15,11 @@
 // imports but the other shared files, nothing of the browser or of node.
 //
 // Where the places come from, in the order they are listed:
+//   answer   the paragraph a question of this comment names as the place
+//            its answer goes into (review-tools.mjs askAuthor), once the
+//            author has answered it. The only place that is listed also
+//            when it holds no word or the author rejected a change of this
+//            comment there: the answer came after.
 //   heading  the nearest heading above each changed paragraph
 //   legend   the captions of the figures, tables and schemes named in the
 //            comment or in the text a change took out or put in, then those
@@ -94,6 +99,15 @@ function indexesOf(changes, ids, count) {
     if (Number.isInteger(i) && i >= 0 && i < count) out.add(i);
   }
   return [...out].sort((a, b) => a - b);
+}
+
+// The index of the paragraph an id names: its task pane id, else "p" and
+// its index ("p12"); -1 when the manuscript has no such paragraph.
+export function placeIndex(id, ids, count) {
+  const byId = (ids ?? []).indexOf(id);
+  if (byId !== -1) return byId < count ? byId : -1;
+  const m = /^p(\d+)$/.exec(String(id ?? ""));
+  return m && Number(m[1]) < count ? Number(m[1]) : -1;
 }
 
 // The paragraphs the live changes of a comment are in.
@@ -199,6 +213,13 @@ export function followPlaces(
     found.set(index, why);
     return true;
   };
+
+  for (const q of comment?.questions ?? []) {
+    if (!q.answer || q.paragraph_id == null) continue;
+    const i = placeIndex(q.paragraph_id, ids, texts.length);
+    if (i !== -1 && !changed.includes(i) && !found.has(i))
+      found.set(i, `the author's answer to ${q.id} goes here`);
+  }
 
   // A changed heading is the heading of its own section.
   const headOf = (i) => {

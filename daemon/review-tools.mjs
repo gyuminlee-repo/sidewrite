@@ -188,6 +188,12 @@ export const askAuthorShape = {
       "The question, in the language of the rationale. Name the places and the values it is about, so the author can answer without searching.",
     ),
   why: z.string().min(1).describe("Why the manuscript and the review cannot answer it."),
+  paragraph_id: z
+    .string()
+    .optional()
+    .describe(
+      "Id of the paragraph the answer would go into, when there is one such paragraph. Left out when the answer has no one place.",
+    ),
 };
 
 // The turn and the request id of a note tool, checked as office_tracked_edit
@@ -216,25 +222,42 @@ async function noteTurn(deps, tool, args, turn) {
 }
 
 // office_ask_author. deps: { begin(), getReviewContext(ref),
-// onQuestion({ref, question: {requirement_id, question, why}, at}) -> {id}, log }.
+// onQuestion({ref, question: {requirement_id, question, why, paragraph_id?}, at})
+// -> {id}, log }.
 // The log names the question by id; its text stays in the review file.
+// paragraph_id: kept when the manuscript of the last status refresh has that
+// paragraph (its task pane id, else "p" and its index); any other id is
+// dropped and the question is recorded without a place.
 export async function askAuthor(deps, args, turn) {
   const t = await noteTurn(deps, "office_ask_author", args, turn);
   if (t.error) return t.error;
+  const asked = args.paragraph_id ?? null;
+  const place =
+    asked !== null &&
+    (t.ctx.paragraphs ?? []).some((_, i) => (t.ctx.paragraph_ids?.[i] ?? `p${i}`) === asked)
+      ? asked
+      : null;
   const saved = await deps.onQuestion({
     ref: turn.ref,
     question: {
       requirement_id: args.requirement_id ?? null,
       question: args.question,
       why: args.why,
+      ...(place ? { paragraph_id: place } : {}),
     },
     at: t.at,
   });
-  deps.log?.(`[review] question ${turn.ref} ${saved.id} requirement=${args.requirement_id ?? "-"}`);
+  deps.log?.(
+    `[review] question ${turn.ref} ${saved.id} requirement=${args.requirement_id ?? "-"}${place ? ` place=${place}` : ""}`,
+  );
+  const unknown =
+    asked !== null && !place
+      ? ` paragraph_id ${asked} is not a paragraph of the manuscript: the question is recorded without a place.`
+      : "";
   return {
     ok: true,
     question_id: saved.id,
-    message: `Recorded as ${saved.id} on the card of ${turn.ref}. Leave the text it is about as it is in this turn (unless the question goes with the change of a request made conditional on evidence the manuscript does not give); the author's answer comes with the next turn.`,
+    message: `Recorded as ${saved.id} on the card of ${turn.ref}. Leave the text it is about as it is in this turn (unless the question goes with the change of a request made conditional on evidence the manuscript does not give); the author's answer comes with the next turn.${unknown}`,
   };
 }
 

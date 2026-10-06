@@ -120,7 +120,7 @@ test("the prompt of a manuscript is what it was: no file line, no block, the sam
   assert.deepEqual(rulesFor({}), REVIEW_RULES);
 });
 
-test("the rule about what is not in this file is swapped at its index; the field rule stays last", () => {
+test("the rule about what is not in this file is swapped at its index; the appended rules stay last", () => {
   const rules = rulesFor({}, PART);
   assert.equal(rules.length, REVIEW_RULES.length);
   assert.match(REVIEW_RULES[OUTSIDE_RULE], /^Tell apart what is not in this file/);
@@ -141,7 +141,8 @@ test("the rule about what is not in this file is swapped at its index; the field
   assert.doesNotMatch(swapped, /a figure file, the supplementary material,/);
   assert.match(swapped, /office_requirement_outside/);
   assert.match(swapped, /office_ask_author/);
-  assert.match(rules.at(-1), /^Citations and other fields/);
+  assert.match(rules.at(-2), /^Citations and other fields/);
+  assert.match(rules.at(-1), /^When you ask the author \(office_ask_author\)/);
   // In the prompt: the same number, the swapped text.
   const lines = prompt({ part: PART }).text.split("\n");
   assert.equal(
@@ -149,14 +150,14 @@ test("the rule about what is not in this file is swapped at its index; the field
     `${OUTSIDE_RULE + 1}. ${swapped}`,
   );
   assert.match(
-    lines[lines.indexOf("Rules:") + REVIEW_RULES.length],
+    lines[lines.indexOf("Rules:") + REVIEW_RULES.length - 1],
     /^\d+\. Citations and other fields/,
   );
   // A policy pack that is off takes its rules out by index, in a part too.
   const off = rulesFor({ policy_packs: { review_scope: false } }, PART);
   assert.equal(off.length, REVIEW_RULES.length - POLICY_PACKS.review_scope.length);
   assert.ok(off.includes(swapped));
-  assert.match(off.at(-1), /^Citations and other fields/);
+  assert.match(off.at(-2), /^Citations and other fields/);
 });
 
 test("author answers of the other files go into the prompt, named with their file", () => {

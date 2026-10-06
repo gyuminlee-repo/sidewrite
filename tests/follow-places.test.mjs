@@ -476,6 +476,43 @@ test("followPlaces: the paragraphs that report stop at six, those that cite the 
   assert.deepEqual(indexes(got), [11, 3, 4, 5, 6, 7]);
 });
 
+test("followPlaces: the paragraph an answered question names comes first", () => {
+  const q = (id, paragraph_id, answer) => ({ id, question: "?", why: "w", answer, paragraph_id });
+  const c = {
+    ...COMMENT,
+    questions: [
+      q("a1", "k11", "Two cables were retensioned."),
+      q("a2", "k9", ""), // not answered
+      q("a3", "k8", "Yes."), // this comment changed it
+      q("a4", "k99", "No."), // not in the manuscript
+      { id: "a5", question: "?", why: "w", answer: "Yes." }, // no place
+      q("a6", "k11", "Again."), // listed once
+    ],
+  };
+  const got = followPlaces(c, PARAGRAPHS, IDS);
+  assert.deepEqual(
+    got.slice(0, 2).map((p) => [p.index, p.id, p.kind, p.why]),
+    [
+      [11, "k11", "body", "the author's answer to a1 goes here"],
+      [7, "k7", "heading", "heading above a changed paragraph"],
+    ],
+  );
+  assert.deepEqual(indexes(got), [11, 7, 13, 14, 16, 5, 9]);
+  // Without task pane ids a paragraph is named by its index.
+  const byIndex = { ...COMMENT, questions: [q("a1", "p11", "Two.")] };
+  assert.equal(followPlaces(byIndex, PARAGRAPHS)[0].index, 11);
+  // A place the answer names is one also where the author rejected a change
+  // of this comment: the answer came after.
+  const rejected = {
+    ...COMMENT,
+    changes: [...COMMENT.changes, change("R1.1-2", 9, "also held", "held", { state: "rejected" })],
+    questions: [q("a1", "k9", "It held for one winter.")],
+  };
+  assert.equal(followPlaces(rejected, PARAGRAPHS, IDS)[0].index, 9);
+  // No change in the document: no places, as before.
+  assert.deepEqual(followPlaces({ ...c, changes: [] }, PARAGRAPHS, IDS), []);
+});
+
 test("followPlaces: no live change, no places; changed paragraphs are never places", () => {
   assert.deepEqual(followPlaces({ ...COMMENT, changes: [] }, PARAGRAPHS, IDS), []);
   const rejected = {

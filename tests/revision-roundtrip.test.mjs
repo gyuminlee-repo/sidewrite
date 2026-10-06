@@ -14,9 +14,11 @@ test("a review file from before the replay-3 fields loads and saves byte for byt
   const fixture = new URL("./fixtures/revision_before_replay3.json", import.meta.url);
   const raw = JSON.parse(await readFile(fixture, "utf8"));
   const text = JSON.stringify(raw, null, 2) + "\n";
+  assert.ok(raw.comments.some((c) => c.questions.length));
   for (const c of raw.comments) {
     assert.equal("rewrites_stopped" in c, false, "the fixture is the old format");
     for (const n of c.requirements_outside) assert.equal("part" in n, false);
+    for (const q of c.questions) assert.equal("paragraph_id" in q, false);
   }
   const dir = await mkdtemp(join(tmpdir(), "replay3-old-"));
   try {
