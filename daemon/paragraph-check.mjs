@@ -22,6 +22,7 @@
 import { currentTexts } from "./review-tools.mjs";
 import { byCreated } from "./revision-store.mjs";
 import { commentFence } from "./review-prompt.mjs";
+import { changedIndexes, followPlaces, liveChanges } from "../taskpane/shared/follow-places.js";
 
 export const CHECK_KINDS = [
   "contradiction",
@@ -160,6 +161,79 @@ export function rewriteNote(rev, index, ref, fence) {
     `Paragraph ${p.id} as it stands now:`,
     `<<<${f}`,
     p.text,
+    `>>>${f}`,
+  ].join("\n");
+}
+
+// What a follow-through turn of a comment ("Check other places" in the Review
+// tab) works on: the changes of the comment that are in the document, the
+// paragraphs they are in and the places they did not touch
+// (taskpane/shared/follow-places.js), each with its text as it reads now
+// (as paragraphsToCheck reads it).
+// { ref, changes: [{ id, kind, before, after, requirement_ids }],
+//   changed: [{ index, id, text }], candidates: [{ index, id, kind, why, text }] }
+export function followPlan(rev, ref) {
+  const snap = rev?.snapshot;
+  const comment = (rev?.comments ?? []).find((c) => c.ref === ref);
+  if (!snap || !comment) return { ref, changes: [], changed: [], candidates: [] };
+  const texts = currentTexts(
+    snap.paragraphs,
+    (rev.comments ?? [])
+      .flatMap((c) => c.changes ?? [])
+      .filter((ch) => ch.created_at > snap.taken_at)
+      .sort(byCreated),
+  );
+  const ids = snap.ids ?? null;
+  return {
+    ref,
+    changes: liveChanges(comment).map((ch) => ({
+      id: ch.id,
+      kind: ch.kind,
+      before: ch.narrowed_from?.find ?? ch.find,
+      after: ch.narrowed_from?.text ?? ch.text,
+      requirement_ids: ch.rationale?.requirement_ids ?? [],
+    })),
+    changed: changedIndexes(comment, ids, texts.length).map((index) => ({
+      index,
+      id: ids?.[index] ?? `p${index}`,
+      text: texts[index],
+    })),
+    candidates: followPlaces(comment, texts, ids).map((p) => ({ ...p, text: texts[p.index] })),
+  };
+}
+
+const FOLLOW_CHARS = 200;
+const short = (t) => {
+  const s = String(t ?? "");
+  return q(s.length > FOLLOW_CHARS ? `${s.slice(0, FOLLOW_CHARS - 3)}...` : s);
+};
+function followChangeLine(ch) {
+  const did =
+    ch.kind === "delete"
+      ? `took out ${short(ch.before)}`
+      : ch.kind === "insert"
+        ? `after ${short(ch.before)} put in ${short(ch.after)}`
+        : `${short(ch.before)} → ${short(ch.after)}`;
+  const reqs = ch.requirement_ids.length ? ` (${ch.requirement_ids.join(", ")})` : "";
+  return `- ${ch.id}${reqs}: ${did}`;
+}
+
+// The instruction of a follow-through turn. It goes after the prompt of the
+// turn of that comment, like rewriteNote. Throws when the comment has no
+// change in the document or no other place was found.
+export function followNote(rev, ref, fence, plan = followPlan(rev, ref)) {
+  if (!plan.changes.length)
+    throw new Error(`${ref} has no change in the document, so there is no other place to check.`);
+  const n = plan.candidates.length;
+  if (!n) throw new Error(`No other place was found for the changes of ${ref}; nothing to check.`);
+  const f = fence ?? commentFence(plan.candidates.map((p) => p.text).join("\n"));
+  return [
+    `[Other places of ${ref}]`,
+    `This turn does one thing. The changes made for ${ref} so far:`,
+    ...plan.changes.map(followChangeLine),
+    `The ${n} place${n === 1 ? "" : "s"} below ${n === 1 ? "was" : "were"} not changed by them. Each is given as [paragraph id] (what it is; why it is listed) and its text as it stands now. For each place decide whether it still states what these changes withdrew, reworded or made conditional. Where it does, change it so that it agrees with them: office_tracked_edit or office_tracked_rewrite, comment_ref "${ref}", with the requirement_ids of the change it follows. Where agreeing takes data, a number, an analysis or a citation the manuscript does not have, ask with office_ask_author and name the place. Where it already agrees, leave it. Make no other change in this turn.`,
+    `<<<${f}`,
+    ...plan.candidates.map((p) => `[${p.id}] (${p.kind}; ${p.why}) ${one(p.text)}`),
     `>>>${f}`,
   ].join("\n");
 }

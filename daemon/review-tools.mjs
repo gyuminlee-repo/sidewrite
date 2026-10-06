@@ -336,7 +336,12 @@ function fail(message, extra = {}) {
 // snapshot paragraphs, for paragraph_hint; recent_changes: changes recorded
 // since that snapshot, oldest first; author_texts: what the author answered
 // to questions of this review, a source of numbers like the comment).
-// turn: { ref } of the current review turn, or null.
+// turn: { ref } of the current review turn, or null. A follow-through turn
+// ("Check other places", review-service.mjs review_propose) also has
+// follow.sources: the paragraphs this comment changed, as they read when the
+// turn began. A number that stands there went in through this guard or was
+// in the manuscript, so the turn may carry it to the heading, legend or
+// methods paragraph that states the same thing; no other guard reads it.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
 // part: set only by applyTrackedRewrite, for one edit of a paragraph that is
@@ -443,7 +448,8 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
   }
   // A number the change adds (number-guard.mjs) must be given: by the text
   // it replaces, the paragraph it lands in, the reviewer comment, an author
-  // instruction or an author answer. Any other number is a fact only the
+  // instruction or an author answer (in a follow-through turn also by a
+  // paragraph the comment changed: turn.follow.sources). Any other number is a fact only the
   // author can confirm, so the edit is refused and the model asks. Unit
   // notation changes no number; a deletion adds none. An approved forbid
   // exception does not lift this. The log holds the count, not the number.
@@ -456,6 +462,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
         sources: [
           ctx.comment_text ?? "",
           ...(ctx.author_texts ?? []),
+          ...(turn.follow?.sources ?? []),
           ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
           ...(target === null ? [] : [current[target]]),
         ],
@@ -861,6 +868,7 @@ export async function applyTrackedRewrite(deps, args, turn) {
     sources: [
       ctx.comment_text ?? "",
       ...(ctx.author_texts ?? []),
+      ...(turn.follow?.sources ?? []),
       ...ledger.filter((i) => i.kind === "instruction").map((i) => i.text ?? ""),
     ],
   });

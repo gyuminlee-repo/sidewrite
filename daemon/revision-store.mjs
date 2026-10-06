@@ -329,6 +329,22 @@ const Comment = z.object({
   // Paragraph ids the last turn of this comment named as still holding the
   // term it changed (review-prompt.mjs sameTermReport).
   same_term_at: z.array(z.string()).default([]),
+  // The last "Check other places" turn of this comment that ended without an
+  // error (review-service.mjs turnEnded): the places it was given
+  // (taskpane/shared/follow-places.js), the changes and the number of
+  // questions it added, and the changes that were in the document at its
+  // end. The card offers the check again only when the comment has a change
+  // that is not among those. null: none ran.
+  follow_through: z
+    .object({
+      at: z.string(),
+      candidate_ids: z.array(z.string()).default([]),
+      change_ids: z.array(z.string()).default([]),
+      questions: z.number().int().nonnegative().default(0),
+      seen_change_ids: z.array(z.string()).default([]),
+    })
+    .nullable()
+    .default(null),
   // Requests the model said cannot be handled in this file (review-tools.mjs
   // requirementOutside): one note per request id.
   // part: what of the request belongs to another file when the rest of it
@@ -769,6 +785,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       questions: old ? clone(old.questions ?? []) : [],
       requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
       same_term_at: old ? clone(old.same_term_at ?? []) : [],
+      follow_through: old ? clone(old.follow_through ?? null) : null,
       ...(old?.rewrites_stopped ? { rewrites_stopped: clone(old.rewrites_stopped) } : {}),
       named_terms: Array.isArray(c.named_terms)
         ? c.named_terms.filter((t) => typeof t === "string")
@@ -995,6 +1012,15 @@ export function setSameTerm(rev, ref, ids) {
   if (!old || JSON.stringify(old.same_term_at ?? []) === JSON.stringify(ids)) return null;
   const next = clone(rev);
   findComment(next, ref).same_term_at = ids;
+  return next;
+}
+
+// What the last "Check other places" turn of a comment did (Comment
+// follow_through). null when the comment is gone.
+export function setFollowThrough(rev, ref, record) {
+  if (!findComment(rev, ref)) return null;
+  const next = clone(rev);
+  findComment(next, ref).follow_through = record;
   return next;
 }
 
