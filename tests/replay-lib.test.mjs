@@ -1167,10 +1167,17 @@ test("--answers: an object of ref and answer text; anything else is refused", ()
   });
   for (const bad of [null, [], "x", { "R1.1": "" }, { "R1.1": 3 }, { q1: "x" }, {}])
     assert.throws(() => parseAnswers(bad), /--answers/);
-  // What is wrong is said without the answer itself.
+  // What is wrong is said without the answer itself, and without the key:
+  // in a file with key and value the wrong way round the key is the answer.
   assert.throws(
-    () => parseAnswers({ "R1.1": "Twelve spans.", nine: "The deck was recoated." }),
-    (e) => /nine/.test(e.message) && !/recoated|Twelve/.test(e.message),
+    () => parseAnswers({ "R1.1": "Twelve spans.", "The deck was recoated.": "R1.2" }),
+    (e) =>
+      /--answers: entry 2 of 2 has no comment ref like R1\.3 as its key/.test(e.message) &&
+      !/recoated|Twelve/.test(e.message),
+  );
+  assert.throws(
+    () => parseAnswers({ "R1.1": "Twelve spans.", "R1.2": ["The deck was recoated."] }),
+    (e) => /the answer of R1\.2 is not a text/.test(e.message) && !/recoated/.test(e.message),
   );
 });
 
@@ -1339,6 +1346,13 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // The file is read in one place, and an answer is never printed.
   assert.equal((runner.match(/readFileSync\(opt\.answers/g) ?? []).length, 1);
   assert.match(base, /"Save answer"/);
+  // A file the step cannot read as JSON: said without the words of the parser,
+  // which quote the file.
+  assert.match(
+    base,
+    /try \{\s*answers = JSON\.parse\(fs\.readFileSync\(a\.answers_file, "utf8"\)\);\s*\} catch \{\s*throw new Error\("the answers file is not JSON"\);/,
+  );
+  assert.match(runner, /catch \{\s*throw new Error\("--answers: the file is not JSON"\);/);
   assert.match(read("../taskpane/shared/review-pane.js"), /text: "Save answer"/);
   // replies.json: the answer of the model in every turn (the turns of the
   // comments, those after answers, follow-through and rewrite), written

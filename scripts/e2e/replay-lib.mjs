@@ -200,16 +200,20 @@ export const extractBatchesFromLog = (log) =>
 // --answers: what the author would answer when asked, per comment:
 // { "<ref>": "<answer text>", ... } (the file as JSON.parse read it). Every
 // open question of a comment gets the answer of its ref. Returns the same
-// with the texts trimmed; throws on anything else. What it says names a ref
-// at most: an answer is text of the author and is never printed.
+// with the texts trimmed; throws on anything else. What it says names a
+// valid ref at most: an answer is text of the author and is never printed,
+// and a key that is no ref may be one (key and value the wrong way round).
 export function parseAnswers(json) {
   const rows =
     json && typeof json === "object" && !Array.isArray(json) ? Object.entries(json) : null;
   if (!rows?.length)
     throw new Error('--answers takes a JSON object { "<ref>": "<answer text>", ... }');
   const out = {};
-  for (const [ref, text] of rows) {
-    if (!REF.test(ref)) throw new Error(`--answers: "${ref}" is not a comment ref like R1.3`);
+  for (const [n, [ref, text]] of rows.entries()) {
+    if (!REF.test(ref))
+      throw new Error(
+        `--answers: entry ${n + 1} of ${rows.length} has no comment ref like R1.3 as its key`,
+      );
     if (typeof text !== "string" || !text.trim())
       throw new Error(`--answers: the answer of ${ref} is not a text`);
     out[ref] = text.trim();

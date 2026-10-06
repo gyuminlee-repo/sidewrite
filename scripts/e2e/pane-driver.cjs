@@ -1192,9 +1192,16 @@ const steps = {
   // so that the answer is in no file of the run but the review file).
   // Gives counts only: { answered, questions }.
   async "answer-questions"(page, a) {
-    const answer = String(
-      a.text ?? JSON.parse(fs.readFileSync(a.answers_file, "utf8"))[a.ref] ?? "",
-    ).trim();
+    let answers = { [a.ref]: a.text };
+    if (a.text == null) {
+      // What the parser says of a bad file quotes the file: not passed on.
+      try {
+        answers = JSON.parse(fs.readFileSync(a.answers_file, "utf8"));
+      } catch {
+        throw new Error("the answers file is not JSON");
+      }
+    }
+    const answer = String(answers?.[a.ref] ?? "").trim();
     if (!answer) throw new Error(`no answer text for ${a.ref}`);
     await openCard(page, a.ref);
     const boxes = card(page, a.ref).locator("textarea.review-answer");

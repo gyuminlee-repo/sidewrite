@@ -1139,10 +1139,14 @@ of its answer. `changes.json` has per comment `answered` (the questions the
 review file got an answer to) and `answer_turn` (that second turn, like
 `turn`); `summary.txt` has the lines "questions answered from the answers
 file: n in m comments" and "turns run after answers: n". The file is only
-read, by the run to check it and by the pane step for the text: an answer
-goes into the review file through the pane and into no report, log or
-argument file of the run. A file that is not such an object ends the run
-before it starts (exit code 2), with a message that names a ref at most.
+read, by the run to check it and by the pane step for the text. The answer
+text itself goes into the review file (`manuscript.revision.json`) through
+the pane and into no report, log or argument file of the run. What the model
+says in a turn after it may quote the answer: that reply is kept in
+`replies.json` and in `result.json` of the run folder. A file that is not
+such an object ends the run before it starts (exit code 2), with a message
+that names a valid ref or the position of an entry, never a key that is no
+ref and never an answer.
 
 `summary.txt` lists the batches of the request extraction as the daemon
 logged them (labelled, unlabelled refs, or FAILED with the error).
