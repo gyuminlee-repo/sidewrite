@@ -1036,7 +1036,8 @@ node scripts/e2e/replay.mjs \
   --playwright-core 'D:\path\to\node_modules\playwright-core' \
   [--model opus] [--writing-model opus] [--judgment-model haiku] \
   [--only R1.1,R2.3] [--instructions rules.txt] [--forbid forbid.txt] \
-  [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked]
+  [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked] \
+  [--follow-through]
 
 python3 scripts/e2e/replay-compare.py \
   --before /path/to/before.docx --after /path/to/submitted.docx \
@@ -1107,6 +1108,16 @@ three or more changes gets its "Rewrite this paragraph" turn (the buttons in
 the order of the check, each once), then the status is refreshed; the turns
 are in `changes.json` under `rewrite_turns` and the new changes carry a
 `rewrite_id`. Off by default.
+
+With `--follow-through`, after the turns of the comments and before the
+paragraph check every comment whose card offers "Check other places" gets
+that turn: a second turn of the comment for the places its changes did not
+touch (the heading above a changed paragraph, the legends of the figures it
+cites, the methods, the rest of its section). The turns are in `changes.json`
+under `follow_turns`, and `follow` of a comment holds the places the turn was
+given (paragraph indexes), the changes it added and the number of its
+questions; the changes themselves stand among the changes of the comment.
+`summary.txt` counts them in the two "follow-through" lines. Off by default.
 
 `summary.txt` lists the batches of the request extraction as the daemon
 logged them (labelled, unlabelled refs, or FAILED with the error).
