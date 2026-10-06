@@ -143,7 +143,8 @@ test("the field of the review file: old files load, a comment-list save keeps it
     updated_at: "t",
     comments: [{ ref: "R1.1", reviewer: 1, text: "c" }],
   });
-  assert.equal(rev.comments[0].follow_through, null);
+  // No default: an old file saves as it was loaded.
+  assert.ok(!("follow_through" in rev.comments[0]));
   const record = {
     at: "2026-01-03T00:00:00.000Z",
     candidate_ids: ["k0", "k3"],
@@ -332,7 +333,7 @@ test("the end of a follow-through turn: one log line, and the comment says the c
     // A turn that failed: logged, not marked, so it can be run again.
     await t.turnDone(turn, { ok: false, error: "Claude usage limit reached." });
     assert.ok(t.lines.includes("[review] follow R1.1 candidates=3 changes=0 questions=0"));
-    assert.equal((await t.load()).comments[0].follow_through, null);
+    assert.equal((await t.load()).comments[0].follow_through, undefined);
 
     t.word.paragraph_index = 3;
     assert.equal((await t.edit(...CAPTION, turn)).ok, true);

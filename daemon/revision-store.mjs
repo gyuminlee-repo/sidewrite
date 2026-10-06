@@ -334,7 +334,8 @@ const Comment = z.object({
   // (taskpane/shared/follow-places.js), the changes and the number of
   // questions it added, and the changes that were in the document at its
   // end. The card offers the check again only when the comment has a change
-  // that is not among those. null: none ran.
+  // that is not among those. Absent: none ran. Optional, no default, like
+  // `part` above.
   follow_through: z
     .object({
       at: z.string(),
@@ -343,8 +344,7 @@ const Comment = z.object({
       questions: z.number().int().nonnegative().default(0),
       seen_change_ids: z.array(z.string()).default([]),
     })
-    .nullable()
-    .default(null),
+    .optional(),
   // Requests the model said cannot be handled in this file (review-tools.mjs
   // requirementOutside): one note per request id.
   // part: what of the request belongs to another file when the rest of it
@@ -785,7 +785,7 @@ export function replaceComments(rev, incoming, keep = new Set()) {
       questions: old ? clone(old.questions ?? []) : [],
       requirements_outside: old ? clone(old.requirements_outside ?? []) : [],
       same_term_at: old ? clone(old.same_term_at ?? []) : [],
-      follow_through: old ? clone(old.follow_through ?? null) : null,
+      ...(old?.follow_through ? { follow_through: clone(old.follow_through) } : {}),
       ...(old?.rewrites_stopped ? { rewrites_stopped: clone(old.rewrites_stopped) } : {}),
       named_terms: Array.isArray(c.named_terms)
         ? c.named_terms.filter((t) => typeof t === "string")

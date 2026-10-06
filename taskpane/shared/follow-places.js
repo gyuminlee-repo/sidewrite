@@ -187,7 +187,7 @@ export function followPlaces(
 // the comment got no change since (comment.follow_through.seen_change_ids);
 // line is what the last check did, or null when none ran.
 export function followState(comment, snapshot) {
-  const ran = comment?.follow_through ?? null;
+  const ran = comment?.follow_through;
   const seen = new Set(ran?.seen_change_ids ?? []);
   const fresh = !ran || liveChanges(comment).some((ch) => !seen.has(ch.id));
   const n = fresh ? followPlaces(comment, snapshot?.paragraphs, snapshot?.ids).length : 0;
