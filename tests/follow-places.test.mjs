@@ -204,6 +204,27 @@ test("followPlaces: no live change, no places; changed paragraphs are never plac
   assert.deepEqual(got, [7, 12, 14, 16, 5]);
 });
 
+test("followPlaces: the reference list is skipped, also past an entry that reads as a heading", () => {
+  const texts = [
+    "Deck",
+    "Rust fell after recoating (Fig. 1).",
+    "References",
+    "Okafor T. Coatings for steel bridges. J Bridge Maint. 2018.",
+    "Lindqvist A, Maro P. Rust on decks. doi:10.0000/abc123", // no full stop: a heading by kind
+    "Yeo K. Drainage of expansion joints. Road Eng. 2020.",
+    "Figure legends",
+    "Figure 1. Rust cover per span.",
+    "Bars give the range of three surveys.",
+  ];
+  assert.equal(paragraphKinds(texts)[4], "heading");
+  const c = {
+    ref: "R1.1",
+    text: "Too strong.",
+    changes: [change("a", 1, "fell", "was lower"), change("b", 5, "2020", "2021")],
+  };
+  assert.deepEqual(indexes(followPlaces(c, texts)), [0, 7, 8]);
+});
+
 test("followPlaces: each paragraph once, and the list is cut from the end", () => {
   // Paragraph 5 holds the term and stands under a heading of a changed
   // paragraph: listed once, as the methods place.

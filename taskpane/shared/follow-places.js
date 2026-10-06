@@ -30,7 +30,9 @@
 //   section  the other body and methods paragraphs under the same heading
 // A paragraph is listed once, under the first of these. Left out: the
 // paragraphs the comment changed, empty ones and the reference list (from a
-// heading "References" or "Bibliography" to the next heading or caption).
+// heading "References" or "Bibliography" to the next caption or heading; a
+// short entry without a full stop at its end reads as a heading, so there
+// only a line of at most four words without a digit or a full stop ends it).
 // At most MAX_PLACES paragraphs and MAX_CHARS characters of text; what is
 // over is dropped from the end. A comment without a change that is in the
 // document (not rejected, not unlocated) has no places.
@@ -116,8 +118,10 @@ export function followPlaces(
   const skip = new Set(changed);
   let inList = false;
   texts.forEach((t, i) => {
-    if (kinds[i] === "heading" || kinds[i] === "caption")
-      inList = kinds[i] === "heading" && REFERENCE_LIST.test(t.trim());
+    if (kinds[i] === "caption") inList = false;
+    else if (kinds[i] === "heading" && REFERENCE_LIST.test(t.trim())) inList = true;
+    else if (kinds[i] === "heading" && !/[\d.]/.test(t) && t.trim().split(/\s+/).length <= 4)
+      inList = false;
     if (inList || !t.trim()) skip.add(i);
   });
 
