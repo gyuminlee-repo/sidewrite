@@ -374,6 +374,108 @@ test("followPlaces: which removed words bring a methods paragraph", () => {
   assert.deepEqual(methodsOf(at(4), rusty(4, filler.slice(0, 20))), [1, 2, 3]);
 });
 
+// A made-up load test of a footbridge: the comment changes how a quantity
+// is measured, in the methods only.
+const SURVEY = [
+  "Load test of the Mill Lane footbridge", // 0 heading
+  "Summary", // 1 heading
+  "Midspan deflection stayed small in every load test.", // 2 body
+  "Methods", // 3 heading
+  "Midspan deflection was read from a calibrated dial gauge under a static load.", // 4 methods
+  "Results", // 5 heading
+  "Loads were applied in four steps.", // 6 body
+  "The midspan deflection reached 4 mm at full load.", // 7 body
+  "Midspan deflection per load step is shown in Fig. 2.", // 8 body
+  "Figure legends", // 9 heading
+  "Figure 2. Deflection per load step.", // 10 caption
+  "References", // 11 heading
+  "Hale R. Midspan deflection of footbridges. J Span Eng. 2011.", // 12
+];
+const GAUGE = {
+  ref: "R2.1",
+  text: "How “midspan deflection” was measured is not clear (Fig. 2).",
+  changes: [change("R2.1-1", 4, "a calibrated dial gauge", "a laser level")],
+};
+
+test("followPlaces: a change in the methods brings the paragraphs that report the measurement", () => {
+  assert.deepEqual(
+    followPlaces(GAUGE, SURVEY).map((p) => [p.index, p.kind, p.why]),
+    [
+      [3, "heading", "heading above a changed paragraph"],
+      [10, "caption", "legend of Fig. 2"],
+      // The one that cites the figure the comment names first, then the
+      // order of the document. The reference list is no place.
+      [8, "body", 'reports; also has "midspan deflection"'],
+      [2, "body", 'reports; also has "midspan deflection"'],
+      [7, "body", 'reports; also has "midspan deflection"'],
+    ],
+  );
+  // A change in the body only: the methods paragraph is listed as before,
+  // and no paragraph as one that reports.
+  const body = { ...GAUGE, changes: [change("R2.1-1", 7, "reached 4 mm", "stayed under 5 mm")] };
+  const places = followPlaces(body, SURVEY);
+  assert.deepEqual(indexes(places), [5, 10, 4, 6, 8]);
+  assert.ok(places.every((p) => !p.why.startsWith("reports")));
+  // The paragraphs this comment changed, and those where the author
+  // rejected a change of it, are not listed.
+  const more = {
+    ...GAUGE,
+    changes: [
+      ...GAUGE.changes,
+      change("R2.1-2", 2, "stayed small", "was small"),
+      change("R2.1-3", 7, "reached", "was", { state: "rejected" }),
+    ],
+  };
+  assert.deepEqual(indexes(followPlaces(more, SURVEY)), [1, 3, 10, 8]);
+});
+
+test("followPlaces: a withdrawn word of a methods change brings what reports it, unless it is everywhere", () => {
+  const texts = [
+    "Methods",
+    "Sag was read from a calibrated dial gauge.",
+    "Results",
+    "The calibrated readings agreed within 1 mm.",
+    "Sag grew with each load step.",
+    "17 / 0.4", // no letters: no place
+  ];
+  const c = {
+    ref: "R2.2",
+    text: "Nothing shows that the gauge was calibrated.",
+    changes: [
+      change("R2.2-1", 1, "a calibrated dial gauge", "a dial gauge", {
+        rationale: { why: "No record that it was calibrated.", addresses: "calibrated" },
+      }),
+    ],
+  };
+  assert.deepEqual(
+    followPlaces(c, texts).map((p) => [p.index, p.why]),
+    [
+      [0, "heading above a changed paragraph"],
+      [3, 'reports; also has "calibrated"'],
+    ],
+  );
+  // The word in more than three body or methods paragraphs: vocabulary.
+  const many = [...texts, "A calibrated scale.", "Calibrated rods held.", "No calibrated mark."];
+  assert.ok(!indexes(followPlaces(c, many)).includes(3));
+});
+
+test("followPlaces: the paragraphs that report stop at six, those that cite the figure first", () => {
+  const texts = [
+    "Methods",
+    "Midspan deflection was read from a dial gauge.",
+    "Results",
+    ...Array.from({ length: 8 }, (_, i) => `Midspan deflection of span ${i} was small.`),
+    "Midspan deflection of the last span is in Table 3.",
+  ];
+  const c = {
+    ref: "R2.3",
+    text: "Define “midspan deflection”.",
+    changes: [change("R2.3-1", 1, "a dial gauge (Table 3)", "a laser level (Table 3)")],
+  };
+  const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(indexes(got), [11, 3, 4, 5, 6, 7]);
+});
+
 test("followPlaces: no live change, no places; changed paragraphs are never places", () => {
   assert.deepEqual(followPlaces({ ...COMMENT, changes: [] }, PARAGRAPHS, IDS), []);
   const rejected = {

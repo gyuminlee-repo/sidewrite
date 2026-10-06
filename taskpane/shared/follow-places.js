@@ -40,6 +40,14 @@
 //            never more than 5). Those in the fewest paragraphs first. A
 //            removed word brings at most METHOD_PLACES paragraphs. A judged
 //            run listed methods paragraphs for "across" and "significant".
+//   reports  only when the comment changed a methods paragraph (how a
+//            quantity is measured, say): the body paragraphs that hold a
+//            term the comment names or a removed word that the comment and
+//            the reason of its change both name (the same cut as above).
+//            Those that cite a figure or table the comment or its changes
+//            name first, then in the order of the document; at most
+//            REPORT_PLACES. A replay left the results that report a
+//            measurement as they were when only its method was changed.
 //   section  the other body and methods paragraphs under the same heading
 // A paragraph is listed once, under the first of these. Left out: the
 // paragraphs the comment changed, those where the author rejected a change
@@ -66,6 +74,7 @@ const CONTINUATION = 3;
 const LEGEND_PLACES = 8;
 const METHOD_WORDS = 3;
 const METHOD_PLACES = 3;
+const REPORT_PLACES = 6;
 // The longest range of figure numbers that is read as one ("Figs. 2-4").
 const RANGE = 10;
 
@@ -236,8 +245,17 @@ export function followPlaces(
   const inMethods = (re) =>
     texts.flatMap((t, i) => (kinds[i] === "methods" && re.test(t) ? [i] : []));
   const also = (i, word) => add(i, `methods; also has "${word}"`);
+  // The body paragraphs that hold a word of the comment, with that word:
+  // listed below when a methods paragraph was changed.
+  const reports = new Map();
+  const report = (i, word) => {
+    if (kinds[i] === "body" && !reports.has(i)) reports.set(i, word);
+  };
   for (const row of termPlaces(comment, texts, ids))
-    for (const p of row.places) if (p.kind === "methods") also(p.index, row.term);
+    for (const p of row.places) {
+      if (p.kind === "methods") also(p.index, row.term);
+      report(p.index, row.term);
+    }
   const claimed = new Set(changes.flatMap((ch) => claimTerms(ch, comment?.text)));
   const prose = texts.flatMap((t, i) =>
     words[i] && (kinds[i] === "body" || kinds[i] === "methods") ? [t] : [],
@@ -247,6 +265,7 @@ export function followPlaces(
     const re = wordRe(word);
     if (prose.filter((t) => re.test(t)).length > vocabulary) continue;
     for (const i of inMethods(re).slice(0, METHOD_PLACES)) also(i, word);
+    texts.forEach((t, i) => re.test(t) && report(i, word));
   }
   const most = Math.min(5, Math.max(2, Math.ceil(prose.length * 0.02)));
   [...new Set(changes.flatMap(removedTerms))]
@@ -260,6 +279,13 @@ export function followPlaces(
     .sort((a, b) => a.n - b.n)
     .slice(0, METHOD_WORDS)
     .forEach((r) => r.at.slice(0, METHOD_PLACES).forEach((i) => also(i, r.word)));
+
+  if (changed.some((i) => kinds[i] === "methods")) {
+    const cites = (i) => figurePointers(texts[i]).some((k) => named.has(k));
+    let listed = 0;
+    for (const i of [...reports.keys()].sort((a, b) => cites(b) - cites(a) || a - b))
+      if (listed < REPORT_PLACES && add(i, `reports; also has "${reports.get(i)}"`)) listed++;
+  }
 
   for (const h of heads)
     for (let i = h + 1; i < texts.length && !heading(i); i++)
