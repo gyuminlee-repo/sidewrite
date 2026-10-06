@@ -46,13 +46,16 @@
 //            removed word brings at most METHOD_PLACES paragraphs. A judged
 //            run listed methods paragraphs for "across" and "significant".
 //   reports  only when the comment changed a methods paragraph (how a
-//            quantity is measured, say): the body paragraphs that hold a
-//            term the comment names or a removed word that the comment and
-//            the reason of its change both name (the same cut as above).
-//            Those that cite a figure or table the comment or its changes
-//            name first, then in the order of the document; at most
-//            REPORT_PLACES. A replay left the results that report a
-//            measurement as they were when only its method was changed.
+//            quantity is measured, say): first the body paragraphs that
+//            cite a figure or table the comment or its changes name, or one
+//            a changed methods paragraph cites (the methods of a measurement
+//            usually cite the figure that reports it; an insert there takes
+//            no word out). Then those that hold a term the comment names or
+//            a removed word that the comment and the reason of its change
+//            both name (the same cut as above). Each in the order of the
+//            document; at most REPORT_PLACES in all. A replay left the
+//            results that report a measurement as they were when only its
+//            method was changed.
 //   section  the other body and methods paragraphs under the same heading
 // A paragraph is listed once, under the first of these. Left out: the
 // paragraphs the comment changed, those where the author rejected a change
@@ -302,10 +305,19 @@ export function followPlaces(
     .forEach((r) => r.at.slice(0, METHOD_PLACES).forEach((i) => also(i, r.word)));
 
   if (changed.some((i) => kinds[i] === "methods")) {
-    const cites = (i) => figurePointers(texts[i]).some((k) => named.has(k));
+    const pointed = new Set([
+      ...named,
+      ...changed.filter((i) => kinds[i] === "methods").flatMap((i) => figurePointers(texts[i])),
+    ]);
+    const rows = [];
+    texts.forEach((t, i) => {
+      const k = kinds[i] === "body" ? figurePointers(t).find((x) => pointed.has(x)) : null;
+      if (k) rows.push([i, `reports; cites ${keyName(k)}`]);
+    });
+    for (const i of [...reports.keys()].sort((a, b) => a - b))
+      rows.push([i, `reports; also has "${reports.get(i)}"`]);
     let listed = 0;
-    for (const i of [...reports.keys()].sort((a, b) => cites(b) - cites(a) || a - b))
-      if (listed < REPORT_PLACES && add(i, `reports; also has "${reports.get(i)}"`)) listed++;
+    for (const [i, why] of rows) if (listed < REPORT_PLACES && add(i, why)) listed++;
   }
 
   for (const h of heads)

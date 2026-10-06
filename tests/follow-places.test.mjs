@@ -405,7 +405,7 @@ test("followPlaces: a change in the methods brings the paragraphs that report th
       [10, "caption", "legend of Fig. 2"],
       // The one that cites the figure the comment names first, then the
       // order of the document. The reference list is no place.
-      [8, "body", 'reports; also has "midspan deflection"'],
+      [8, "body", "reports; cites Fig. 2"],
       [2, "body", 'reports; also has "midspan deflection"'],
       [7, "body", 'reports; also has "midspan deflection"'],
     ],
@@ -474,6 +474,95 @@ test("followPlaces: the paragraphs that report stop at six, those that cite the 
   };
   const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
   assert.deepEqual(indexes(got), [11, 3, 4, 5, 6, 7]);
+});
+
+// A made-up shelf survey of a library: the comment gets an insert in the
+// methods, which takes no word out, and names no term the results hold.
+test("followPlaces: a methods change brings the paragraphs that cite the figure it points to", () => {
+  const texts = [
+    "Methods", // 0 heading
+    "Shelf marks were read by two clerks.", // 1 methods
+    "Misfiled volumes were counted per aisle (Fig. 5).", // 2 methods
+    "Results", // 3 heading
+    "Most misfiled volumes stood in the east wing (Fig. 5B).", // 4 body
+    "Loans rose over the year (Fig. 4).", // 5 body
+    "The reading room was full on weekdays.", // 6 body
+    "Aisle counts and loan counts are given in Tables 2 and 3.", // 7 body
+    "Figure legends", // 8 heading
+    "Figure 5. Misfiled volumes per aisle.", // 9 caption
+    "Table 2. Aisle counts.", // 10 caption
+  ];
+  const insert = (index, find, text) => change("R3.1-1", index, find, text, { kind: "insert" });
+  // The changed methods paragraph cites the figure itself.
+  const c = {
+    ref: "R3.1",
+    text: "Say who counted.",
+    changes: [insert(2, "were counted", " by one clerk")],
+  };
+  assert.deepEqual(
+    followPlaces(c, texts).map((p) => [p.index, p.why]),
+    [
+      [0, "heading above a changed paragraph"],
+      [9, "legend of Fig. 5"],
+      [4, "reports; cites Fig. 5"],
+      [1, "same section as a changed paragraph"],
+    ],
+  );
+  // The figure is named by the comment, or by what the insert put in.
+  const byComment = {
+    ref: "R3.1",
+    text: "Say who counted the volumes of Table 2.",
+    changes: [insert(1, "two clerks", " in March")],
+  };
+  assert.deepEqual(
+    followPlaces(byComment, texts)
+      .filter((p) => p.why.startsWith("reports"))
+      .map((p) => [p.index, p.why]),
+    [[7, "reports; cites Table 2"]],
+  );
+  const byInsert = { ...c, changes: [insert(1, "two clerks", " (see Fig. 4)")] };
+  assert.deepEqual(
+    followPlaces(byInsert, texts)
+      .filter((p) => p.why.startsWith("reports"))
+      .map((p) => [p.index, p.why]),
+    [[5, "reports; cites Fig. 4"]],
+  );
+  // A change in the body only: no paragraph is listed as one that reports.
+  const body = { ...c, changes: [change("R3.1-1", 6, "was full", "was busy (Fig. 5)")] };
+  assert.ok(followPlaces(body, texts).every((p) => !p.why.startsWith("reports")));
+});
+
+test("followPlaces: those that cite the figure come before those that only hold the word, six in all", () => {
+  const texts = [
+    "Methods",
+    "Misfiled volumes were counted per aisle (Fig. 5).",
+    "Results",
+    "A “recount” of aisle 1 gave the same number.",
+    ...Array.from({ length: 4 }, (_, i) => `Aisle ${i} is in Fig. 5.`),
+    "The recount of aisle 9 differed.",
+    ...Array.from({ length: 3 }, (_, i) => `Wing ${i} is in Fig. 5 too.`),
+  ];
+  const c = {
+    ref: "R3.2",
+    text: "Was there a “recount”?",
+    changes: [change("R3.2-1", 1, "were counted", " once", { kind: "insert" })],
+  };
+  const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(indexes(got), [4, 5, 6, 7, 9, 10]);
+  assert.ok(got.every((p) => p.why === "reports; cites Fig. 5"));
+  // With fewer that cite it, those that hold the word follow.
+  const few = followPlaces(c, texts.slice(0, 9)).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(
+    few.map((p) => [p.index, p.why]),
+    [
+      [4, "reports; cites Fig. 5"],
+      [5, "reports; cites Fig. 5"],
+      [6, "reports; cites Fig. 5"],
+      [7, "reports; cites Fig. 5"],
+      [3, 'reports; also has "recount"'],
+      [8, 'reports; also has "recount"'],
+    ],
+  );
 });
 
 test("followPlaces: the paragraph an answered question names comes first", () => {
