@@ -1601,8 +1601,9 @@ async function readFields(context, para) {
   }
 }
 
-// Can this Word reject the tracked changes of a range
-// (Range.getTrackedChanges, TrackedChangeCollection.rejectAll: WordApi 1.6)?
+// WordApi 1.6 exposes TrackedChange.reject(), type, text and getRange(),
+// but no stable ID with which to distinguish an old change from our edit.
+// Never infer ownership from author/date or reject a whole range collection.
 function canReject() {
   try {
     return Office.context.requirements.isSetSupported("WordApi", "1.6") === true;
@@ -1611,24 +1612,49 @@ function canReject() {
   }
 }
 
-// Take a tracked edit back: the tracked changes on the ranges of the edit
-// are rejected. What came of it is read from the document, not from the
-// call (field-text.js undoOutcome): "clean" when the paragraph then has its
-// fields and its reviewed text as before the edit; "kept" when the edit is
-// still there; "more" when the edit is gone and the paragraph still does not
-// read as before. A tracked change of the same author that touched the edit
-// may have been merged with it by Word and goes back with it: that is "more".
-// reviewedBefore, reviewedAfter: the reviewed text of the paragraph before
-// the edit and after it.
-async function takeBack(context, para, ranges, fields, reviewedBefore, reviewedAfter) {
-  for (const r of ranges) {
-    if (!r) continue;
-    try {
-      r.getTrackedChanges().rejectAll();
-      await context.sync();
-    } catch {
-      /* the next range, then the document decides */
+// A pending change anywhere in this paragraph might merge with this edit,
+// including one next to (not intersecting) the target. Without a confirmed
+// empty collection we cannot safely promise to undo a field deletion.
+async function paragraphHasNoChanges(context, para) {
+  try {
+    const changes = para.getRange("Whole").getTrackedChanges();
+    changes.load("items");
+    await context.sync();
+    return Array.isArray(changes.items) && changes.items.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Only undo an isolated edit from a previously revision-free paragraph.
+// Validate the COMPLETE collection before queuing any rejection: one change
+// for each expected deletion/insertion, with exact type/text and a range
+// contained in that edit's target. A merge, split, new neighbouring change,
+// unknown API result or unreadable range fails closed. In that case the
+// edit stays applied and the author must inspect it in Word.
+async function takeBack(context, para, expected, undoSafe, fields, reviewedBefore, reviewedAfter) {
+  if (!undoSafe) return "kept";
+  try {
+    const changes = para.getRange("Whole").getTrackedChanges();
+    changes.load("items/type, items/text");
+    await context.sync();
+    if (!Array.isArray(changes.items) || changes.items.length !== expected.length) return "kept";
+    const unmatched = [...expected];
+    const locations = [];
+    for (const change of changes.items) {
+      const i = unmatched.findIndex((e) => e.type === change.type && e.text === change.text);
+      if (i === -1 || typeof change.reject !== "function") return "kept";
+      const [match] = unmatched.splice(i, 1);
+      locations.push(change.getRange("Whole").compareLocationWith(match.range));
     }
+    await context.sync();
+    if (!locations.every((r) => ["Equal", "Inside", "InsideStart", "InsideEnd"].includes(r.value)))
+      return "kept";
+    for (const change of changes.items) change.reject();
+    await context.sync();
+  } catch {
+    // Read the document after a failed rejection too; never queue a second,
+    // broader undo. The existing applied/postcondition contract still holds.
   }
   const now = await readFields(context, para);
   const text = await getReviewedTextBatch(context, [para.getRange("Whole")]);
@@ -1696,12 +1722,14 @@ async function notPlain(context, para) {
 //   nothing changed. A deletion that holds a field whole, with words on
 //   both sides (a sentence with its citation), is made with Range.delete(),
 //   so that Word puts the field into the tracked deletion from its begin
-//   marker to its end marker; only in a Word that can take the edit back.
+//   marker to its end marker; only in a Word that can take the edit back
+//   and only in a paragraph with no existing tracked changes.
 //   After the edit: the fields of the paragraph are read again from its XML
 //   and compared with those read before (fieldsKept). A field that is
 //   hollowed, split, changed or gone: the edit is taken back (takeBack) and
 //   refused as FieldNotEditable, reason after-edit. When Word cannot take
-//   it back, the result is applied:true with code FieldEditNotUndone, so
+//   it back safely (including preexisting or merged revisions), the result
+//   is applied:true with code FieldEditNotUndone, so
 //   the daemon records the change and the author sees it. When the undo
 //   took a pending change next to the edit with it, the refusal carries
 //   took_more:true: nothing is recorded and the review state is read again.
@@ -1844,7 +1872,15 @@ export async function toolTrackedEdit({
       // A deletion that takes a field with it: only when the paragraph can
       // be checked after it and the edit can be taken back.
       const takesField = verdict.remove > 0;
-      if (takesField && !(fields && canReject())) return refused("no-undo");
+      const undoSafe =
+        !!(fields && (fields.length || fields.stray)) &&
+        canReject() &&
+        (await paragraphHasNoChanges(context, para));
+      if (takesField && !undoSafe)
+        return refused("no-undo", {
+          detail:
+            "A safe undo needs a paragraph with no pending tracked changes and a readable change collection",
+        });
       let inserted = null;
       if (isInsert) inserted = hit.insertText(insert_after, Word.InsertLocation.after);
       else if (takesField) target.delete();
@@ -1882,7 +1918,13 @@ export async function toolTrackedEdit({
           const back = await takeBack(
             context,
             para,
-            [target, inserted],
+            [
+              ...(!isInsert ? [{ type: "Deleted", text: editFind, range: target }] : []),
+              ...((isInsert ? insert_after : editReplace)
+                ? [{ type: "Added", text: isInsert ? insert_after : editReplace, range: inserted }]
+                : []),
+            ],
+            undoSafe,
             fields,
             reviewed?.[0],
             edited?.[0],

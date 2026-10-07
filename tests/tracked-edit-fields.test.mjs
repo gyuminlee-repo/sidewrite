@@ -342,7 +342,7 @@ const XML = {
 //   word(op)   what Word makes of an edit: the key of XML the paragraph has
 //              after it, and (reviewed) its reviewed text
 //   api16      Office says WordApi 1.6 is there (tracked changes of a range)
-//   rejects    true: rejectAll() puts the paragraph back as it was; false:
+//   rejects    true: rejecting this edit restores the paragraph; false:
 //              it changes nothing; { xml, reviewed }: what the paragraph is
 //              after it (Word took back less, or more, than the edit)
 //   reviewed   what getReviewedText gives before the edit
@@ -353,9 +353,26 @@ function fakeWord({
   rejects = true,
   reviewed = HALLIVANE,
   ooxml = true,
+  pending = [],
+  afterChanges,
+  trackedChanges = true,
 } = {}) {
   const shown = fieldView(HALLIVANE).text;
-  const s = { ops: [], comments: [], rejected: 0, mode: "Off", xml: "live", reviewed };
+  const s = {
+    ops: [],
+    comments: [],
+    rejected: 0,
+    rejectAllCalls: 0,
+    rejectedIds: [],
+    mode: "Off",
+    xml: "live",
+    reviewed,
+    changes: pending.map((c, i) => ({ id: `prior-${i}`, ...c })),
+  };
+  const restore = () => {
+    if (rejects === true) Object.assign(s, { xml: "live", reviewed });
+    else if (rejects) Object.assign(s, rejects);
+  };
   const coll = (items) => ({ items, load() {} });
   const hits = (text, q) => {
     const out = [];
@@ -364,12 +381,18 @@ function fakeWord({
   };
   const did = (op) => {
     s.ops.push(op);
+    const own = [
+      ...(op.where === "After" ? [] : [{ id: "own-delete", type: "Deleted", text: op.on }]),
+      ...(op.text ? [{ id: "own-insert", type: "Added", text: op.text }] : []),
+    ];
+    s.changes.push(...(afterChanges ? afterChanges(own) : own));
     const next = word(op);
     s.xml = next.xml;
     if (next.reviewed !== undefined) s.reviewed = next.reviewed;
   };
   let para;
   const range = (text) => ({
+    text,
     load() {},
     paragraphs: { getFirst: () => para },
     search: (q) => coll(hits(text, q).map(() => range(q))),
@@ -378,13 +401,39 @@ function fakeWord({
     insertComment: (c) => (s.comments.push(c), { id: `C${s.comments.length}`, load() {} }),
     compareLocationWith: () => ({ value: "Before" }),
     getReviewedText: () => ({ value: s.reviewed }),
-    getTrackedChanges: () => ({
-      rejectAll() {
-        s.rejected += 1;
-        if (rejects === true) Object.assign(s, { xml: "live", reviewed });
-        else if (rejects) Object.assign(s, rejects);
-      },
-    }),
+    getTrackedChanges() {
+      if (!trackedChanges) throw new Error("Tracked changes unavailable");
+      return {
+        load() {},
+        items: s.changes.map((c) => ({
+          // WordApi 1.6 has type/text/getRange/reject, no stable change ID.
+          type: c.type,
+          text: c.text,
+          getRange: () => ({
+            compareLocationWith: (r) => ({
+              value: c.location ?? (r.text === c.text ? "Equal" : "Before"),
+            }),
+          }),
+          reject() {
+            s.rejected += 1;
+            s.rejectedIds.push(c.id);
+            if (rejects !== false) {
+              s.changes = s.changes.filter((x) => x !== c);
+              if (!s.changes.some((x) => x.id.startsWith("own-"))) restore();
+            }
+          },
+        })),
+        // Model the old unsafe operation too: it also rejects preexisting
+        // changes in this range. The regression fails against that code.
+        rejectAll() {
+          s.rejectAllCalls += 1;
+          s.rejected += 1;
+          s.rejectedIds.push(...s.changes.map((c) => c.id));
+          if (rejects !== false) s.changes = [];
+          restore();
+        },
+      };
+    },
   });
   para = {
     ...range(shown),
@@ -574,7 +623,7 @@ test("task pane: an edit that is still in the document after the undo is reporte
   assert.match(r.message, /could not be taken back\. Reject this change in Word\./);
 });
 
-test("task pane: an undo that took a pending change next to the edit with it is refused, not applied, and says so", async () => {
+test("task pane: unexpected host over-undo still uses the defensive took_more postcondition", async () => {
   const s = fakeWord({ word: hollowing, rejects: { xml: "live", reviewed: NEIGHBOUR_GONE } });
   const r = await call(SENTENCE, "");
   assert.deepEqual(
@@ -686,8 +735,8 @@ test("task pane: a Word whose reviewed text does not show the fields is still he
     [r.ok, r.code, r.reason, r.detail, r.undone],
     [false, "FieldNotEditable", "after-edit", "hollowed", true],
   );
-  // (the range that was replaced and the range of the new text: two rejects)
-  assert.deepEqual([s.ops.length, s.rejected, s.xml, s.comments.length], [1, 2, "live", 0]);
+  // One deletion, no insertion for the empty replacement; reject once.
+  assert.deepEqual([s.ops.length, s.rejected, s.xml, s.comments.length], [1, 1, "live", 0]);
   // A replacement that turned a field into words (the field whole in the
   // deletion, its text typed again) is not a removal the edit named.
   const f = fakeWord({ reviewed: plain, word: () => ({ xml: "whole" }) });
@@ -698,4 +747,77 @@ test("task pane: a Word whose reviewed text does not show the fields is still he
     [flat.code, flat.reason, flat.detail, f.rejected],
     ["FieldNotEditable", "after-edit", "removed 1", 2],
   );
+});
+
+// These are synthetic Office.js contract tests, not Word acceptance tests.
+test("task pane: a pending change anywhere in the field paragraph prevents a deletion needing undo", async () => {
+  for (const type of ["Added", "Deleted", "Formatted"]) {
+    const s = fakeWord({ pending: [{ type, text: "every hour" }], word: hollowing });
+    const prior = [...s.changes];
+    const r = await call(SENTENCE, "");
+    assert.deepEqual([r.code, r.reason, r.applied], ["FieldNotEditable", "no-undo", undefined]);
+    assert.deepEqual(untouched(s), [0, 0, 0, "Off"]);
+    assert.deepEqual(s.changes, prior);
+  }
+});
+
+test("task pane: a field-breaking replacement cannot reject a preexisting overlapping change", async () => {
+  const s = fakeWord({
+    pending: [{ type: "Added", text: "Samples were kept on ice" }],
+    word: hollowing,
+  });
+  const r = await call("Samples were kept on ice", "Samples on ice");
+  assert.deepEqual([r.applied, r.code, s.rejected], [true, "FieldEditNotUndone", 0]);
+  assert.ok(s.changes.some((c) => c.id === "prior-0"));
+  assert.equal(s.mode, "Off");
+});
+
+test("task pane: an unavailable revision collection cannot authorize field-deletion undo", async () => {
+  const s = fakeWord({ trackedChanges: false, word: hollowing });
+  const r = await call(SENTENCE, "");
+  assert.deepEqual(
+    [r.code, r.reason, ...untouched(s)],
+    ["FieldNotEditable", "no-undo", 0, 0, 0, "Off"],
+  );
+});
+
+test("task pane: every undo candidate must match this edit's type, text and range before any rejection", async () => {
+  const uncertain = [
+    (own) => [...own, { id: "concurrent", type: "Added", text: "user words" }],
+    (own) => own.map((c) => ({ ...c, text: c.text + " merged user words" })),
+    (own) => own.map((c) => ({ ...c, location: "Contains" })),
+    (own) => own.map((c) => ({ ...c, location: "OverlapsBefore" })),
+    (own) => own.map((c) => ({ ...c, type: "Formatted" })),
+    (own) => own.map((c) => ({ ...c, location: "Before" })),
+    () => [],
+  ];
+  for (const afterChanges of uncertain) {
+    const s = fakeWord({ word: hollowing, afterChanges });
+    const r = await call(SENTENCE, "");
+    assert.deepEqual([r.applied, r.code, s.rejected], [true, "FieldEditNotUndone", 0]);
+    assert.equal(s.mode, "Off");
+  }
+});
+
+test("task pane: an isolated rollback rejects each owned change once and never calls rejectAll", async () => {
+  const s = fakeWord({ word: hollowing });
+  const r = await call("Samples were kept on ice", "Samples on ice");
+  assert.equal(r.undone, true);
+  assert.deepEqual(s.rejectedIds, ["own-delete", "own-insert"]);
+  assert.equal(s.rejected, 2);
+  assert.equal(s.rejectAllCalls, 0);
+  assert.deepEqual(s.changes, []);
+});
+
+test("task pane: an isolated insertion rollback rejects only the inserted change", async () => {
+  const s = fakeWord({ word: hollowing });
+  const r = await toolTrackedEdit({
+    find: "Samples were kept on ice",
+    insert_after: " for transport",
+    comment_text: "[R1.2] w / y / a",
+    expected_before_hash: paragraphHash(HALLIVANE),
+  });
+  assert.equal(r.undone, true);
+  assert.deepEqual(s.rejectedIds, ["own-insert"]);
+  assert.equal(s.rejectAllCalls, 0);
 });

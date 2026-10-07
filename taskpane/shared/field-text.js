@@ -40,7 +40,7 @@ const DETAILS = {
   "replace-across":
     "The text to change holds a whole field; a replacement would turn it into plain words. Change the words before it and the words after it in separate edits.",
   "no-undo":
-    "Deleting a sentence with its field needs a Word that can take the edit back if the field does not go as a whole; this one cannot.",
+    "Deleting a sentence with its field needs an isolated edit that Word can safely take back if the field does not go as a whole; that cannot be established here.",
   "pane-outdated":
     "The task pane is older than the daemon and does not check fields. Tell the author to reload the task pane (close and reopen it).",
   "after-edit": "Word did not keep the field whole, so the edit was taken back.",
