@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  MAX_CHARS,
+  MAX_PLACES,
   changedIndexes,
   figurePointers,
   followPlaces,
@@ -631,13 +633,10 @@ test("followPlaces: the paragraph an answered question names comes first", () =>
   };
   assert.equal(followPlaces(rejected, PARAGRAPHS, IDS)[0].index, 9);
   // No change in the document: the places the answers name are the only
-  // ones (k8 is no changed paragraph then), nothing else is looked for.
+  // ones with unchecked answers, nothing else is looked for.
   assert.deepEqual(
     followPlaces({ ...c, changes: [] }, PARAGRAPHS, IDS).map((p) => [p.index, p.why, p.answer_ids]),
-    [
-      [11, "the author's answer to a1 goes here", ["a1", "a6"]],
-      [8, "the author's answer to a3 goes here", ["a3"]],
-    ],
+    [[11, "the author's answer to a1 goes here", ["a1", "a6"]]],
   );
   assert.deepEqual(got[0].answer_ids, ["a1", "a6"]);
   assert.deepEqual(got[1].answer_ids, []);
@@ -793,4 +792,106 @@ test("followState: the button is offered until the check ran, and again after a 
   assert.equal(followState(nothing, snapshot).line, "Other places checked: 6 (no change needed).");
   // A file from before the field: as if no check ran.
   assert.equal(followState({ ...COMMENT, follow_through: null }, snapshot).offer, 6);
+});
+
+for (const [name, paragraphs, sizes] of [
+  ["paragraph limit", Array.from({ length: 41 }, (_, i) => `Span ${i} held firm.`), [20, 20, 1]],
+  ["character limit", ["a".repeat(25000) + ".", "b".repeat(25000) + "."], [1, 1]],
+]) {
+  test(`followPlaces: checked answers do not starve later batches at the ${name}`, () => {
+    const ids = paragraphs.map((_, i) => `k${i}`);
+    const c = {
+      changes: [],
+      questions: ids.map((paragraph_id, i) => ({ id: `a${i + 1}`, paragraph_id, answer: "Yes." })),
+    };
+    const snapshot = { paragraphs, ids };
+    const checked = new Set();
+    for (const size of sizes) {
+      const before = structuredClone(c);
+      const places = followPlaces(c, paragraphs, ids);
+      assert.equal(places.length, size);
+      assert.equal(followState(c, snapshot).offer, size);
+      assert.ok(places.length <= MAX_PLACES);
+      assert.ok(places.reduce((n, p) => n + paragraphs[p.index].length, 0) <= MAX_CHARS);
+      assert.equal(new Set(places.map((p) => p.id)).size, places.length);
+      assert.deepEqual(c, before, "selection does not mutate checked history");
+      for (const p of places) {
+        assert.ok(!checked.has(p.id), "a checked answer must not consume another batch");
+        checked.add(p.id);
+      }
+      c.follow_through = {
+        candidate_ids: places.map((p) => p.id),
+        change_ids: [],
+        questions: 0,
+        seen_change_ids: [],
+        seen_answer_ids: [
+          ...(c.follow_through?.seen_answer_ids ?? []),
+          ...places.flatMap((p) => p.answer_ids),
+        ],
+      };
+    }
+    assert.equal(checked.size, ids.length);
+    assert.deepEqual(followPlaces(c, paragraphs, ids), []);
+    assert.equal(followState(c, snapshot).offer, null);
+  });
+}
+
+test("followPlaces: pending answers on a checked paragraph keep all its answer context once", () => {
+  const c = {
+    changes: [],
+    questions: [
+      { id: "a1", paragraph_id: "k2", answer: "One winter." },
+      { id: "a2", paragraph_id: "k2", answer: "Coating held." },
+      { id: "a3", paragraph_id: "k2", answer: "Inspection completed." },
+    ],
+    follow_through: { seen_answer_ids: ["a1", "a2"] },
+  };
+  const before = structuredClone(c);
+  const places = followPlaces(c, PARAGRAPHS, IDS, { maxPlaces: 1 });
+  assert.deepEqual(
+    places.map((p) => [p.id, p.answer_ids]),
+    [["k2", ["a1", "a2", "a3"]]],
+  );
+  assert.deepEqual(c, before);
+});
+
+test("followPlaces: answer progress leaves unrelated, unanswered and unavailable places out", () => {
+  const c = {
+    changes: [],
+    questions: [
+      { id: "checked", paragraph_id: "k11", answer: "Checked." },
+      { id: "empty", paragraph_id: "k2", answer: "" },
+      { id: "missing", paragraph_id: "gone", answer: "Missing." },
+      { id: "unplaced", answer: "No place." },
+      { id: "reference", paragraph_id: "k19", answer: "Reference." },
+      { id: "pending", paragraph_id: "k9", answer: "One winter." },
+    ],
+    follow_through: {
+      candidate_ids: ["k11"],
+      change_ids: [],
+      questions: 0,
+      seen_change_ids: [],
+      seen_answer_ids: ["checked"],
+    },
+  };
+  assert.deepEqual(indexes(followPlaces(c, PARAGRAPHS, IDS)), [9]);
+  const absent = IDS.map((id) => (id === "k9" ? "replacement" : id));
+  assert.deepEqual(followPlaces(c, PARAGRAPHS, absent), []);
+  assert.equal(followState(c, { paragraphs: PARAGRAPHS, ids: absent }).offer, null);
+  assert.equal(followState(c, { paragraphs: PARAGRAPHS, ids: IDS }).offer, 1);
+  assert.ok(!c.follow_through.seen_answer_ids.includes("pending"));
+});
+
+test("followPlaces: a checked answer can still be context for a live change", () => {
+  const c = {
+    ...COMMENT,
+    questions: [{ id: "a1", paragraph_id: "k9", answer: "One winter." }],
+    follow_through: { seen_answer_ids: ["a1"] },
+  };
+  const places = followPlaces(c, PARAGRAPHS, IDS);
+  assert.equal(places[0].id, "k7");
+  const section = places.filter((p) => p.id === "k9");
+  assert.equal(section.length, 1);
+  assert.equal(section[0].why, "same section as a changed paragraph");
+  assert.deepEqual(section[0].answer_ids, ["a1"]);
 });

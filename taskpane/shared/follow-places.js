@@ -17,7 +17,8 @@
 // Where the places come from, in the order they are listed:
 //   answer   the paragraph a question of this comment names as the place
 //            its answer goes into (review-tools.mjs askAuthor), once the
-//            author has answered it. The only place that is listed also
+//            author has answered it and an answer there remains unchecked.
+//            The only place that is listed also
 //            when it holds no word or the author rejected a change of this
 //            comment there: the answer came after. Not in the reference
 //            list. Such a place carries its question ids (`answer_ids`).
@@ -251,7 +252,9 @@ export function followPlaces(
   }
   const seenAnswers = new Set(comment?.follow_through?.seen_answer_ids ?? []);
   for (const [i, ids] of answers) {
-    if (changed.includes(i) && ids.every((id) => seenAnswers.has(id))) continue;
+    // Checked answers must not spend the bounded batch before unseen ones.
+    // Keep all answer ids as context when another answer reopens this place.
+    if (ids.every((id) => seenAnswers.has(id))) continue;
     found.set(i, `the author's answer to ${ids[0]} goes here`);
   }
   if (!changed.length) return listed();
