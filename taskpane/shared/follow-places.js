@@ -1,5 +1,5 @@
-// The other places of a comment: paragraphs its changes did not touch that
-// are likely to state the same thing as the paragraphs they did.
+// The other places of a comment: paragraphs likely to state the same thing
+// as its changed paragraphs, or named by an answered question.
 //
 // A turn changes the sentence a comment points at. Replays against a real
 // revision showed what it then leaves as it was: the section heading above,
@@ -20,7 +20,7 @@
 //            author has answered it. The only place that is listed also
 //            when it holds no word or the author rejected a change of this
 //            comment there: the answer came after. Not in the reference
-//            list. Such a place carries the id of its question (`answer`).
+//            list. Such a place carries its question ids (`answer_ids`).
 //   heading  the nearest heading above each changed paragraph
 //   legend   the captions of the figures, tables and schemes named in the
 //            comment or in the text a change took out or put in, then those
@@ -48,18 +48,18 @@
 //            run listed methods paragraphs for "across" and "significant".
 //   reports  only when the comment changed a methods paragraph (how a
 //            quantity is measured, say): first the body paragraphs that
-//            cite a figure or table the comment or its changes name, or one
-//            a changed methods paragraph cites (the methods of a measurement
-//            usually cite the figure that reports it; an insert there takes
-//            no word out). Then those that hold a term the comment names or
+//            cite a figure or table the comment or its changes name.
+//            Then those that hold a term the comment names or
 //            a removed word that the comment and the reason of its change
-//            both name (the same cut as above). Each in the order of the
+//            both name (the same cut as above), then those that only cite
+//            a figure from a changed methods paragraph. Each in the order of the
 //            document; at most REPORT_PLACES in all. A replay left the
 //            results that report a measurement as they were when only its
 //            method was changed.
 //   section  the other body and methods paragraphs under the same heading
 // A paragraph is listed once, under the first of these. Left out: the
-// paragraphs the comment changed, those where the author rejected a change
+// paragraphs the comment changed (unless an answer there is unseen),
+// those where the author rejected a change
 // of this comment (the author has decided there), empty ones, and the
 // reference list (from a heading "References" or "Bibliography" to the next
 // caption or heading; a short entry without a full stop at its end reads as
@@ -179,7 +179,7 @@ function technical(word, changes) {
   });
 }
 
-// [{ index, id, kind, why }]: the other places of a comment, in the order
+// [{ index, id, kind, why, answer_ids }]: the other places of a comment, in the order
 // they are listed. paragraphs: the texts as they read now; ids: their task
 // pane ids, or null.
 export function followPlaces(
@@ -230,7 +230,7 @@ export function followPlaces(
       id: ids?.[index] ?? `p${index}`,
       kind: kinds[index],
       why,
-      ...(answers.has(index) ? { answer: answers.get(index) } : {}),
+      answer_ids: answers.get(index) ?? [],
     });
     for (const row of found) {
       if (out.length >= maxPlaces) break;
@@ -245,9 +245,14 @@ export function followPlaces(
   for (const q of comment?.questions ?? []) {
     if (!q.answer || q.paragraph_id == null) continue;
     const i = placeIndex(q.paragraph_id, ids, texts.length);
-    if (i === -1 || changed.includes(i) || references.has(i) || found.has(i)) continue;
-    found.set(i, `the author's answer to ${q.id} goes here`);
-    answers.set(i, q.id);
+    if (i === -1 || references.has(i)) continue;
+    if (!answers.has(i)) answers.set(i, []);
+    answers.get(i).push(q.id);
+  }
+  const seenAnswers = new Set(comment?.follow_through?.seen_answer_ids ?? []);
+  for (const [i, ids] of answers) {
+    if (changed.includes(i) && ids.every((id) => seenAnswers.has(id))) continue;
+    found.set(i, `the author's answer to ${ids[0]} goes here`);
   }
   if (!changed.length) return listed();
 
@@ -333,16 +338,23 @@ export function followPlaces(
 
   if (changed.some((i) => kinds[i] === "methods")) {
     const pointed = new Set([
-      ...named,
       ...changed.filter((i) => kinds[i] === "methods").flatMap((i) => figurePointers(texts[i])),
     ]);
     const rows = [];
+    const incidental = [];
     texts.forEach((t, i) => {
-      const k = kinds[i] === "body" ? figurePointers(t).find((x) => pointed.has(x)) : null;
+      if (kinds[i] !== "body") return;
+      const pointers = figurePointers(t);
+      const k = pointers.find((x) => named.has(x));
       if (k) rows.push([i, `reports; cites ${keyName(k)}`]);
+      else {
+        const cited = pointers.find((x) => pointed.has(x));
+        if (cited) incidental.push([i, `reports; cites ${keyName(cited)}`]);
+      }
     });
     for (const i of [...reports.keys()].sort((a, b) => a - b))
       rows.push([i, `reports; also has "${reports.get(i)}"`]);
+    rows.push(...incidental);
     let listed = 0;
     for (const [i, why] of rows) if (listed < REPORT_PLACES && add(i, why)) listed++;
   }
@@ -368,7 +380,7 @@ export function followState(comment, snapshot) {
   const fresh =
     !ran ||
     liveChanges(comment).some((ch) => !seen.has(ch.id)) ||
-    places.some((p) => p.answer && !answers.has(p.answer));
+    places.some((p) => p.answer_ids.some((id) => !answers.has(id)));
   const n = fresh ? places.length : 0;
   const count = (k, word) => `${k} ${word}${k === 1 ? "" : "s"}`;
   const did = !ran

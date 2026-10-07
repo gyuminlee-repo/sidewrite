@@ -17,6 +17,7 @@ import {
   saveRevision,
   replaceComments,
   setFollowThrough,
+  answerQuestion,
 } from "../daemon/revision-store.mjs";
 
 const PARAGRAPHS = [
@@ -106,7 +107,7 @@ test("followNote: the instruction a follow-through turn carries", () => {
       "[Other places of R1.1]",
       "This turn does one thing. The changes made for R1.1 so far:",
       '- R1.1-1 (q1): "was eliminated" → "was reduced"',
-      'The 2 places below were not changed by them. Each is given as [paragraph id] (what it is; why it is listed) and its text as it stands now. Most listed places need no change: a place is listed for where it stands, which is no sign of a problem. For each place decide whether it still states what these changes withdrew, weakened or made conditional, or still uses the name of a quantity or a method that they changed. Where it does, change it so that it agrees with them: office_tracked_edit or office_tracked_rewrite, comment_ref "R1.1", with the requirement_ids of the change it follows. Where agreeing takes data, a number, an analysis or a citation the manuscript does not have, ask with office_ask_author and name the place. Where it already agrees, leave it.',
+      'The 2 places below are candidates to check. Each is given as [paragraph id] (what it is; why it is listed) and its text as it stands now. Most listed places need no change: a place is listed for where it stands, which is no sign of a problem. For each place decide whether it still states what these changes withdrew, weakened or made conditional, or still uses the name of a quantity or a method that they changed. Where it does, change it so that it agrees with them: office_tracked_edit or office_tracked_rewrite, comment_ref "R1.1", with the requirement_ids of the change it follows. Where agreeing takes data, a number, an analysis or a citation the manuscript does not have, ask with office_ask_author and name the place. Where it already agrees, leave it.',
       "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
       "<<<F1",
       "[k0] (heading; heading above a changed paragraph) Deck survey",
@@ -154,7 +155,7 @@ test("followNote: the instruction a follow-through turn carries", () => {
       id: "k2",
       kind: "body",
       why: "the author's answer to a1 goes here",
-      answer: "a1",
+      answer_ids: ["a1"],
       text: PARAGRAPHS[2],
     },
   ]);
@@ -179,7 +180,7 @@ test("followNote: the instruction a follow-through turn carries", () => {
     withBoth[3],
     /^The author answered question a1 of this comment .* goes into \[k5\]\./,
   );
-  assert.match(withBoth[4], /^The 3 places below were not changed by them\./);
+  assert.match(withBoth[4], /^The 3 places below are candidates to check\./);
   assert.equal(
     withBoth[7],
     "[k5] (body; the author's answer to a1 goes here) Tension stayed within limits.",
@@ -236,8 +237,8 @@ async function setup(paragraphs = PARAGRAPHS) {
     ok: true,
     word_comment_id: 5,
     paragraph_index: word.paragraph_index,
-    before: "b",
-    after: "a",
+    before: word.before ?? "b",
+    after: word.after ?? "a",
     target_checked: true,
   });
   const svc = createReviewService({
@@ -350,7 +351,7 @@ test("review_propose with follow_through: the turn is given the other places of 
   }
 });
 
-test("review_propose with follow_through: an answer that names its place is enough, without a change", async () => {
+test("review_propose with follow_through: an answer stays seen after another turn and rejection", async () => {
   const t = await setup();
   try {
     const asked = await askAuthor(
@@ -397,6 +398,8 @@ test("review_propose with follow_through: an answer that names its place is enou
     const other = await t.edit("Tension stayed", "Tension held", turn);
     assert.equal(other.code, "NotAFollowPlace");
     t.word.paragraph_index = 2;
+    t.word.before = PARAGRAPHS[2];
+    t.word.after = "On 3 spans the coating held through the winter.";
     const put = await t.edit("The coating held", "On 3 spans the coating held", turn);
     assert.equal(put.ok, true, put.message);
     await t.turnDone(turn, { ok: true, text: "Written in." });
@@ -409,6 +412,247 @@ test("review_propose with follow_through: an answer that names its place is enou
       ],
       [["p2"], ["R1.1-1"], ["a1"]],
     );
+    const again = await t.ask("review_propose", {
+      ref: "R1.1",
+      paragraphs: [],
+      follow_through: true,
+    });
+    assert.equal(again.ok, true, again.error);
+    const next = t.pushed.at(-1).turn;
+    assert.deepEqual(next.follow.answers, []);
+    await t.turnDone(next, { ok: true, text: "No change needed." });
+
+    // Word rejects the answer-driven change and refreshes the original text.
+    const refreshed = await t.ask("review_refresh", {
+      snapshot: {
+        paragraphs: PARAGRAPHS.map((text, index) => ({
+          index,
+          id: `p${index}`,
+          text,
+          reviewed_text: text,
+          w_ins: 0,
+          w_del: 0,
+        })),
+        comments: [],
+      },
+    });
+    assert.equal(refreshed.ok, true, refreshed.error);
+    const rejected = await t.load();
+    assert.equal(rejected.comments[0].changes[0].state, "rejected");
+    assert.equal(followState(rejected.comments[0], rejected.snapshot).offer, null);
+    assert.deepEqual(rejected.comments[0].follow_through.seen_answer_ids, ["a1"]);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+async function answerAt(t, answer, paragraph_id = "p2") {
+  const asked = await askAuthor(
+    t.deps,
+    { comment_ref: "R1.1", question: `Detail ${answer}?`, why: "Missing detail.", paragraph_id },
+    { ref: "R1.1" },
+  );
+  assert.equal(asked.ok, true, asked.message);
+  const rev = await t.load();
+  const id = rev.comments[0].questions.at(-1).id;
+  const saved = await t.ask("review_question_answer", { ref: "R1.1", id, answer });
+  assert.equal(saved.ok, true, saved.error);
+  return id;
+}
+
+async function startFollow(t) {
+  const reply = await t.ask("review_propose", {
+    ref: "R1.1",
+    paragraphs: [],
+    follow_through: true,
+  });
+  assert.equal(reply.ok, true, reply.error);
+  return t.pushed.at(-1).turn;
+}
+
+test("H1: two answers at one paragraph stay fresh, appear once and both become seen", async () => {
+  const t = await setup();
+  try {
+    await answerAt(t, "One winter.");
+    await t.turnDone(await startFollow(t), { ok: true, text: "No change needed." });
+    await answerAt(t, "The coating held.");
+    const rev = await t.load();
+    assert.equal(followState(rev.comments[0], rev.snapshot).offer, 1);
+    const plan = followPlan(rev, "R1.1");
+    assert.deepEqual(
+      plan.candidates.map((p) => p.id),
+      ["p2"],
+    );
+    assert.deepEqual(plan.candidates[0].answer_ids, ["a1", "a2"]);
+    const turn = await startFollow(t);
+    assert.deepEqual(turn.follow.candidate_ids, ["p2"]);
+    for (const id of ["a1", "a2"])
+      assert.ok(
+        t.pushed.at(-1).text.includes(`The author answered question ${id} of this comment`),
+      );
+    await t.turnDone(turn, { ok: true, text: "No change needed." });
+    const done = await t.load();
+    assert.deepEqual(done.comments[0].follow_through.seen_answer_ids, ["a1", "a2"]);
+    assert.equal(followState(done.comments[0], done.snapshot).offer, null);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+for (const changed of [false, true]) {
+  test(`H2: changed answer reoffers after ${changed ? "a live edit" : "no change"}; identical save does not`, async () => {
+    const t = await setup();
+    try {
+      await answerAt(t, "One winter.");
+      const first = await startFollow(t);
+      if (changed) {
+        t.word.paragraph_index = 2;
+        t.word.before = PARAGRAPHS[2];
+        t.word.after = "The coating held through one winter.";
+        const edit = await t.edit("through the winter", "through one winter", first);
+        assert.equal(edit.ok, true, edit.message);
+      }
+      await t.turnDone(first, { ok: true, text: "Checked." });
+      const save = (answer) => t.ask("review_question_answer", { ref: "R1.1", id: "a1", answer });
+      const same = await save("  One winter.  ");
+      assert.equal(same.ok, true, same.error);
+      assert.deepEqual(same.revision.comments[0].follow_through.seen_answer_ids, ["a1"]);
+      assert.equal(followState(same.revision.comments[0], same.revision.snapshot).offer, null);
+      const updated = await save("Two winters.");
+      assert.equal(updated.ok, true, updated.error);
+      assert.deepEqual(updated.revision.comments[0].follow_through.seen_answer_ids, []);
+      assert.ok(followState(updated.revision.comments[0], updated.revision.snapshot).offer > 0);
+      const next = await startFollow(t);
+      assert.ok(next.follow.candidate_ids.includes("p2"));
+      assert.ok(t.pushed.at(-1).text.includes("Answer: Two winters."));
+      await t.turnDone(next, { ok: true, text: "Checked." });
+      const done = await t.load();
+      assert.deepEqual(done.comments[0].follow_through.seen_answer_ids, ["a1"]);
+      assert.equal(followState(done.comments[0], done.snapshot).offer, null);
+    } finally {
+      await t.cleanup();
+    }
+  });
+}
+
+for (const [ok, live] of [
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+]) {
+  test(`H2: ${ok ? "successful" : "failed"} turn preserves freshness of late answer updates${live ? " with a live edit" : ""}`, async () => {
+    const t = await setup();
+    try {
+      await answerAt(t, "One winter.");
+      await t.turnDone(await startFollow(t), { ok: true, text: "Checked." });
+      await answerAt(t, "Coating held.");
+      const turn = await startFollow(t);
+      if (live) {
+        t.word.paragraph_index = 2;
+        t.word.before = PARAGRAPHS[2];
+        t.word.after = "The coating endured through the winter.";
+        const edit = await t.edit("The coating held", "The coating endured", turn);
+        assert.equal(edit.ok, true, edit.message);
+      }
+      const saved = await t.ask("review_question_answer", {
+        ref: "R1.1",
+        id: "a1",
+        answer: "Two winters.",
+      });
+      assert.equal(saved.ok, true, saved.error);
+      await answerAt(t, "Inspection completed.");
+      const before = await t.load();
+      await t.turnDone(
+        turn,
+        ok ? { ok: true, text: "Checked old answers." } : { ok: false, error: "Interrupted." },
+      );
+      const after = await t.load();
+      const c = after.comments[0];
+      if (!ok) assert.deepEqual(c.follow_through, before.comments[0].follow_through);
+      assert.deepEqual(c.follow_through.seen_answer_ids, ok ? ["a2"] : []);
+      assert.ok(followState(c, after.snapshot).offer > 0);
+      assert.ok(followPlan(after, "R1.1").candidates.some((p) => p.id === "p2"));
+      await t.turnDone(await startFollow(t), { ok: true, text: "Checked current answers." });
+      const done = await t.load();
+      assert.deepEqual([...done.comments[0].follow_through.seen_answer_ids].sort(), [
+        "a1",
+        "a2",
+        "a3",
+      ]);
+      assert.equal(followState(done.comments[0], done.snapshot).offer, null);
+    } finally {
+      await t.cleanup();
+    }
+  });
+}
+
+test("H2: identical trimmed save during a turn still becomes seen", async () => {
+  const t = await setup();
+  try {
+    await answerAt(t, "One winter.");
+    const turn = await startFollow(t);
+    const saved = await t.ask("review_question_answer", {
+      ref: "R1.1",
+      id: "a1",
+      answer: "  One winter.  ",
+    });
+    assert.equal(saved.ok, true, saved.error);
+    await t.turnDone(turn, { ok: true, text: "Checked." });
+    const done = await t.load();
+    assert.deepEqual(done.comments[0].follow_through.seen_answer_ids, ["a1"]);
+    assert.equal(followState(done.comments[0], done.snapshot).offer, null);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("H2: answer save invalidates only the changed question and preserves input history", () => {
+  const rev = {
+    comments: [
+      {
+        ref: "R1.1",
+        questions: [
+          { id: "a1", answer: "One winter." },
+          { id: "a2", answer: "Coating held." },
+        ],
+        follow_through: {
+          seen_answer_ids: ["a1", "a2"],
+          candidate_ids: ["p2"],
+          change_ids: [],
+          questions: 0,
+        },
+      },
+    ],
+  };
+  const same = answerQuestion(rev, "R1.1", "a1", " One winter. ");
+  assert.deepEqual(same.comments[0].follow_through, rev.comments[0].follow_through);
+  for (const text of ["Two winters.", ""]) {
+    const edited = answerQuestion(rev, "R1.1", "a1", text);
+    assert.deepEqual(edited.comments[0].follow_through, {
+      ...rev.comments[0].follow_through,
+      seen_answer_ids: ["a2"],
+    });
+    assert.deepEqual(rev.comments[0].follow_through.seen_answer_ids, ["a1", "a2"]);
+    assert.equal(rev.comments[0].questions[0].answer, "One winter.");
+  }
+});
+
+test("H2: a new answer reopens an already changed paragraph", async () => {
+  const t = await setup();
+  try {
+    const edit = await t.edit(...FIRST, { ref: "R1.1" });
+    assert.equal(edit.ok, true, edit.message);
+    await t.turnDone(await startFollow(t), { ok: true, text: "Checked." });
+    await answerAt(t, "The coating reduced rust.", "p1");
+    const rev = await t.load();
+    assert.ok(followState(rev.comments[0], rev.snapshot).offer > 0);
+    const turn = await startFollow(t);
+    assert.ok(turn.follow.candidate_ids.includes("p1"));
+    await t.turnDone(turn, { ok: true, text: "Checked answer." });
+    const done = await t.load();
+    assert.deepEqual(done.comments[0].follow_through.seen_answer_ids, ["a1"]);
+    assert.equal(followState(done.comments[0], done.snapshot).offer, null);
   } finally {
     await t.cleanup();
   }

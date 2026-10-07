@@ -10,6 +10,11 @@ import { termPlaces } from "../../taskpane/shared/named-terms.js";
 
 const REF = /^(?:R\d+|E)\.\d+$/;
 
+export function replayExitCode({ failed, stopped, saved, otherModel, cleanup = {} }) {
+  if (failed || !saved || cleanup.failed || cleanup.daemon_error) return 1;
+  return stopped ? 3 : otherModel ? 1 : 0;
+}
+
 // "--only R1.2,R2.1" -> ["R1.2", "R2.1"]; nothing given -> [].
 export function parseOnly(spec) {
   const refs = String(spec ?? "")

@@ -974,9 +974,14 @@ export function addQuestion(
 // The author's answer to a question; an empty one takes the answer back.
 export function answerQuestion(rev, ref, id, answer, now = new Date()) {
   const next = clone(rev);
-  const q = (requireComment(next, ref).questions ?? []).find((x) => x.id === id);
+  const c = requireComment(next, ref);
+  const q = (c.questions ?? []).find((x) => x.id === id);
   if (!q) throw new Error(`No question ${id} under ${ref}`);
-  q.answer = String(answer ?? "").trim();
+  const text = String(answer ?? "").trim();
+  if (q.answer !== text && c.follow_through?.seen_answer_ids) {
+    c.follow_through.seen_answer_ids = c.follow_through.seen_answer_ids.filter((x) => x !== id);
+  }
+  q.answer = text;
   q.answered_at = q.answer ? now.toISOString() : null;
   return next;
 }

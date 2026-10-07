@@ -930,7 +930,7 @@ export function createReviewService({
   // to the document the turn began in (turn.follow.doc), whatever the pane
   // shows by now.
   async function followEnded(turn, failed) {
-    const { candidate_ids, answer_ids = [], had, doc } = turn.follow;
+    const { candidate_ids, answers, had, doc } = turn.follow;
     let added = { changes: 0, questions: 0 };
     await update(doc, (rev) => {
       const c = findComment(rev, turn.ref);
@@ -939,6 +939,12 @@ export function createReviewService({
       const questions = (c.questions ?? []).filter((x) => !had.questions.includes(x.id)).length;
       added = { changes: change_ids.length, questions };
       if (failed) return null;
+      const answer_ids = answers
+        .filter(({ id, answer }) => c.questions?.some((q) => q.id === id && q.answer === answer))
+        .map(({ id }) => id);
+      const seen_answer_ids = [
+        ...new Set([...(c.follow_through?.seen_answer_ids ?? []), ...answer_ids]),
+      ];
       return setFollowThrough(rev, turn.ref, {
         at: new Date().toISOString(),
         candidate_ids,
@@ -947,7 +953,7 @@ export function createReviewService({
         seen_change_ids: c.changes
           .filter((ch) => ch.state !== "rejected" && ch.state !== "unlocated")
           .map((ch) => ch.id),
-        ...(answer_ids.length ? { seen_answer_ids: answer_ids } : {}),
+        ...(seen_answer_ids.length ? { seen_answer_ids } : {}),
       });
     });
     log(
@@ -1418,8 +1424,10 @@ export function createReviewService({
         ...(plan && {
           follow: {
             candidate_ids: plan.candidates.map((p) => p.id),
-            // The answered questions whose place is among them.
-            answer_ids: plan.candidates.flatMap((p) => (p.answer ? [p.answer] : [])),
+            // Snapshot the answers so a save during this turn stays fresh.
+            answers: (comment.questions ?? [])
+              .filter((q) => plan.candidates.some((p) => p.answer_ids.includes(q.id)))
+              .map(({ id, answer }) => ({ id, answer })),
             sources: plan.changes.flatMap((ch) => [ch.after, ch.before]).filter(Boolean),
             doc: d,
             had: {

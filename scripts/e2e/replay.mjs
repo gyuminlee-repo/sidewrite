@@ -66,7 +66,8 @@
 // reports are written (summary.txt: "stopped: usage limit reached at ...").
 // Exit code: 0 when the flow ran to its end, the copy was saved and the
 // pane's line names no other model than the one asked for without a reason,
-// else 1; 2 for bad arguments; 3 when the run stopped on the usage limit.
+// else 1; 2 for bad arguments; 3 for a usage stop with the copy saved and
+// cleanup complete. A save or cleanup failure still returns 1.
 
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -86,6 +87,7 @@ import {
   modelFailures,
   answeredOf,
   limitStop,
+  replayExitCode,
   answerPlan,
   parseAnswers,
   replyRow,
@@ -855,4 +857,6 @@ if (fs.existsSync(RUN)) save();
 const summary = path.join(RUN, "summary.txt");
 if (fs.existsSync(summary)) console.log(`\n${fs.readFileSync(summary, "utf8")}`);
 console.log(`run folder: ${RUN}`);
-process.exit(failed ? 1 : stopped ? 3 : saved && !otherModel() && !record.cleanup.failed ? 0 : 1);
+process.exit(
+  replayExitCode({ failed, stopped, saved, otherModel: otherModel(), cleanup: record.cleanup }),
+);

@@ -532,7 +532,7 @@ test("followPlaces: a methods change brings the paragraphs that cite the figure 
   assert.ok(followPlaces(body, texts).every((p) => !p.why.startsWith("reports")));
 });
 
-test("followPlaces: those that cite the figure come before those that only hold the word, six in all", () => {
+test("followPlaces: direct terms precede incidental methods citations, six in all", () => {
   const texts = [
     "Methods",
     "Misfiled volumes were counted per aisle (Fig. 5).",
@@ -548,19 +548,50 @@ test("followPlaces: those that cite the figure come before those that only hold 
     changes: [change("R3.2-1", 1, "were counted", " once", { kind: "insert" })],
   };
   const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
-  assert.deepEqual(indexes(got), [4, 5, 6, 7, 9, 10]);
-  assert.ok(got.every((p) => p.why === "reports; cites Fig. 5"));
-  // With fewer that cite it, those that hold the word follow.
+  assert.deepEqual(indexes(got), [3, 8, 4, 5, 6, 7]);
+  // With fewer citations, direct terms still come first.
   const few = followPlaces(c, texts.slice(0, 9)).filter((p) => p.why.startsWith("reports"));
   assert.deepEqual(
     few.map((p) => [p.index, p.why]),
     [
+      [3, 'reports; also has "recount"'],
+      [8, 'reports; also has "recount"'],
       [4, "reports; cites Fig. 5"],
       [5, "reports; cites Fig. 5"],
       [6, "reports; cites Fig. 5"],
       [7, "reports; cites Fig. 5"],
-      [3, 'reports; also has "recount"'],
-      [8, 'reports; also has "recount"'],
+    ],
+  );
+});
+
+test("followPlaces: methods citations cannot starve direct measurement reports", () => {
+  const texts = [
+    "Methods",
+    "Midspan deflection was read using a dial gauge (Figs. 1-7).",
+    "Results",
+    ...Array.from(
+      { length: 7 },
+      (_, i) => `Coating coverage at pier ${i + 1} is shown in Fig. ${i + 1}.`,
+    ),
+    "Midspan deflection decreased under the static load.",
+    "Midspan deflection remained stable after unloading (Fig. 1).",
+    "The load response is shown in Fig. 9.",
+  ];
+  const c = {
+    ref: "R2.4",
+    text: "Define “midspan deflection” and clarify Fig. 9.",
+    changes: [change("R2.4-1", 1, "a dial gauge", "a calibrated dial gauge")],
+  };
+  const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(
+    got.map((p) => [p.index, p.why]),
+    [
+      [12, "reports; cites Fig. 9"],
+      [10, 'reports; also has "midspan deflection"'],
+      [11, 'reports; also has "midspan deflection"'],
+      [3, "reports; cites Fig. 1"],
+      [4, "reports; cites Fig. 2"],
+      [5, "reports; cites Fig. 3"],
     ],
   );
 });
@@ -572,11 +603,12 @@ test("followPlaces: the paragraph an answered question names comes first", () =>
     questions: [
       q("a1", "k11", "Two cables were retensioned."),
       q("a2", "k9", ""), // not answered
-      q("a3", "k8", "Yes."), // this comment changed it
+      q("a3", "k8", "Yes."), // already checked and changed
       q("a4", "k99", "No."), // not in the manuscript
       { id: "a5", question: "?", why: "w", answer: "Yes." }, // no place
       q("a6", "k11", "Again."), // listed once
     ],
+    follow_through: { seen_answer_ids: ["a3"] },
   };
   const got = followPlaces(c, PARAGRAPHS, IDS);
   assert.deepEqual(
@@ -601,14 +633,14 @@ test("followPlaces: the paragraph an answered question names comes first", () =>
   // No change in the document: the places the answers name are the only
   // ones (k8 is no changed paragraph then), nothing else is looked for.
   assert.deepEqual(
-    followPlaces({ ...c, changes: [] }, PARAGRAPHS, IDS).map((p) => [p.index, p.why, p.answer]),
+    followPlaces({ ...c, changes: [] }, PARAGRAPHS, IDS).map((p) => [p.index, p.why, p.answer_ids]),
     [
-      [11, "the author's answer to a1 goes here", "a1"],
-      [8, "the author's answer to a3 goes here", "a3"],
+      [11, "the author's answer to a1 goes here", ["a1", "a6"]],
+      [8, "the author's answer to a3 goes here", ["a3"]],
     ],
   );
-  assert.deepEqual(got[0].answer, "a1");
-  assert.ok(!("answer" in got[1]));
+  assert.deepEqual(got[0].answer_ids, ["a1", "a6"]);
+  assert.deepEqual(got[1].answer_ids, []);
   // An answer does not go into the reference list; a heading or a legend
   // is a place like any other.
   const list = {
@@ -642,11 +674,10 @@ test("followState: an answer that names a place offers the check, also without a
     },
   };
   assert.equal(followState(ran, snapshot).offer, null);
-  // A new answer with a place: offered again. One whose place this comment
-  // changed, or that names none, is nothing new.
+  // A new answer reopens even a changed place, but not references or no place.
   const more = (x) => followState({ ...ran, questions: [...ran.questions, x] }, snapshot).offer;
   assert.ok(more(q("a2", "k9", "One winter.")) > 0);
-  assert.equal(more(q("a2", "k8", "Yes.")), null);
+  assert.ok(more(q("a2", "k8", "Yes.")) > 0);
   assert.equal(more(q("a2", "k19", "Okafor 2019.")), null);
   assert.equal(more({ id: "a2", question: "?", why: "w", answer: "Yes." }), null);
   // A check from before the field saw no answer.

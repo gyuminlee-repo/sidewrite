@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import path from "node:path";
@@ -12,6 +12,7 @@ import { cleanupDecision } from "../scripts/e2e/judge.mjs";
 import { execWithInteropRetry } from "../scripts/e2e/wsl-interop.mjs";
 import {
   limitStop,
+  replayExitCode,
   answeredOf,
   answerPlan,
   parseAnswers,
@@ -45,6 +46,48 @@ import {
 import { LedgerItemSchema } from "../daemon/revision-store.mjs";
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+
+for (const [name, state, expected] of [
+  ["normal success", {}, 0],
+  ["clean saved usage stop", { stopped: true }, 3],
+  ["failed save during usage stop", { stopped: true, saved: false }, 1],
+  ["failed Word cleanup during usage stop", { stopped: true, cleanup: { failed: true } }, 1],
+  [
+    "failed daemon cleanup during usage stop",
+    { stopped: true, cleanup: { daemon_error: "ports still busy" } },
+    1,
+  ],
+  [
+    "failed daemon cleanup without usage stop",
+    { cleanup: { daemon_error: "ports still busy" } },
+    1,
+  ],
+  ["failed run during usage stop", { stopped: true, failed: true }, 1],
+  ["model mismatch without usage stop", { otherModel: true }, 1],
+  ["model mismatch during clean usage stop", { stopped: true, otherModel: true }, 3],
+]) {
+  test(`replay exit: ${name}`, () => {
+    const input = { saved: true, ...state };
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+      import { replayExitCode } from ${JSON.stringify(new URL("../scripts/e2e/replay-lib.mjs", import.meta.url).href)};
+      process.exit(replayExitCode(JSON.parse(process.argv[1])));
+    `,
+        JSON.stringify(input),
+      ],
+      { encoding: "utf8" },
+    );
+    assert.ifError(child.error);
+    assert.equal(child.signal, null);
+    assert.equal(child.stderr, "");
+    assert.equal(child.status, expected, name);
+    assert.equal(replayExitCode(input), expected);
+  });
+}
 
 test("replay: refused, unknown and lingering quits never terminate Word", () => {
   const runner = read("../scripts/e2e/replay.mjs");
@@ -1459,7 +1502,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   );
   assert.match(runner, /record\.stopped = stopped;/);
   assert.match(runner, /\n      stopped,\n/);
-  assert.match(runner, /process\.exit\(\s*failed \? 1 : stopped \? 3 : /);
+  assert.match(runner, /process\.exit\(\s*replayExitCode\(/);
   assert.match(read("../scripts/e2e/README.md"), /exit code 3/);
   // The exit code follows the pane's line (modelFailures), nothing else.
   assert.match(

@@ -1173,10 +1173,12 @@ after the turns of the comments, the model line, the headings, the save of
 the copy, the reports and the Word cleanup still run. `summary.txt` then has
 the line "stopped: usage limit reached at <ref> (<kind>), resets at <time>"
 (without the time when the daemon gave none), `result.json` has it as
-`stopped` (`ref`, `kind`, `resets`), and the run ends with exit code 3. Such
-a turn is not run again. (Exit codes of the replay: 0 the flow ran to its
+`stopped` (`ref`, `kind`, `resets`). The run ends with exit code 3 only when
+the copy was saved and cleanup completed. A failed save, Word cleanup or
+daemon cleanup returns 1 even after a usage stop. Such a turn is not run
+again. (Exit codes of the replay: 0 the flow ran to its
 end and the checks above hold, 1 otherwise, 2 bad arguments, 3 stopped on
-the usage limit.)
+the usage limit with the copy saved and cleanup complete.)
 
 `--instructions` and `--forbid` are text files with one rule per line (`#`
 starts a note); each line becomes a ledger rule the model checks.
