@@ -10,8 +10,10 @@
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 
 export const unitName = "sidewrite-daemon";
+export const legacyUnitName = "draftspect-daemon";
 export const HEALTH_URL = "http://127.0.0.1:47834/health";
 
 const SYSTEM_PATH = ["/usr/local/bin", "/usr/bin", "/bin"];
@@ -64,10 +66,46 @@ WantedBy=default.target
 `;
 }
 
+// Only the unit emitted before the Sidewrite rename is ours to migrate.
+// A same-named custom service, additional command or edited setting is not.
+export function isLegacyUnit(text) {
+  const repo = text.match(/^WorkingDirectory=(.+)$/m)?.[1];
+  const node = text.match(/^ExecStart=(\S+) /m)?.[1];
+  const logFile = text.match(/^StandardOutput=append:(.+)$/m)?.[1];
+  const path = text.match(/^Environment=PATH=(.+)$/m)?.[1];
+  try {
+    const expected = renderUnit({ node, repo, logFile, extraPath: path?.split(":") }).replace(
+      "Description=Sidewrite daemon",
+      "Description=Draftspect daemon",
+    );
+    return text === expected;
+  } catch {
+    return false;
+  }
+}
+
+// `systemctl show -p ExecStart --value` includes runtime timestamps after
+// the command. Check the single effective command, not just the file on disk:
+// the manager may still have a different unit cached until daemon-reload.
+export function isLegacyExecStart(text, effective) {
+  if (!isLegacyUnit(text)) return false;
+  const command = text.match(/^ExecStart=(.+)$/m)?.[1];
+  const node = command?.split(" ")[0];
+  const match = effective.match(
+    /^\{\s*path=(\S+)\s*;\s*argv\[\]=([^;{}]+?)\s*;\s*ignore_errors=no\s*;[^{}]*\}$/,
+  );
+  return !!match && match[1] === node && match[2] === command;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [cmd, logFile, ...extraPath] = process.argv.slice(2);
   if (cmd === "name") console.log(unitName);
-  else if (cmd === "render" && logFile) {
+  else if (cmd === "legacy-name") console.log(legacyUnitName);
+  else if (cmd === "is-legacy" && logFile) {
+    process.exitCode = isLegacyUnit(readFileSync(logFile, "utf8")) ? 0 : 1;
+  } else if (cmd === "is-legacy-exec" && logFile && extraPath[0]) {
+    process.exitCode = isLegacyExecStart(readFileSync(logFile, "utf8"), extraPath[0]) ? 0 : 1;
+  } else if (cmd === "render" && logFile) {
     const repo = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
     process.stdout.write(renderUnit({ node: process.execPath, repo, logFile, extraPath }));
   } else {

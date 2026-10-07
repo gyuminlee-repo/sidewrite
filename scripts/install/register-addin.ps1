@@ -19,6 +19,54 @@ $keyPath = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
 $dir = Join-Path $env:APPDATA "Sidewrite\manifests"
 $dst = Join-Path $dir (Split-Path -Leaf $Manifest)
 
+function Remove-LegacyManifest {
+  # Exact shipped files before PR #15; keep custom manifests, even when they
+  # use the old filename or GUID. These hashes also live in legacy-manifests.mjs.
+  $hashes = @{
+    "word.xml" = "e4c72462952e21aad24517c5fe474dfb370d05ff99b279f81bb3a44b9fbc834d"
+    "excel.xml" = "4573041c6fcd00e7de42cf5ec7c39424cd963bceb936afde98ea298e8a91fd2f"
+  }
+  $file = Split-Path -Leaf $Manifest
+  if (-not $hashes.ContainsKey($file)) { return }
+  $legacyRoot = Join-Path $env:APPDATA "Draftspect"
+  $legacyDir = Join-Path $legacyRoot "manifests"
+  $legacy = Join-Path $legacyDir $file
+  foreach ($path in @($legacyRoot, $legacyDir, $legacy)) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Write-Warning "legacy manifest: preserved redirected path ($path)"
+      return
+    }
+  }
+  $exists = Test-Path -LiteralPath $legacy
+  if ($exists) {
+    if (-not (Test-Path -LiteralPath $legacy -PathType Leaf)) { return }
+    $text = [IO.File]::ReadAllText($legacy).TrimStart([char]0xFEFF).Replace("`r`n", "`n")
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+      $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))).Replace("-", "").ToLowerInvariant()
+    } finally {
+      $sha.Dispose()
+    }
+    if ($hash -ne $hashes[$file]) {
+      Write-Warning "legacy manifest: preserved custom file ($legacy)"
+      return
+    }
+  }
+  if (Test-Path -LiteralPath $keyPath) {
+    $key = Get-Item -LiteralPath $keyPath
+    $value = $key.GetValue($legacy, $null)
+    if ($null -ne $value) {
+      if (($key.GetValueKind($legacy) -ne [Microsoft.Win32.RegistryValueKind]::String) -or ($value -ne $legacy)) {
+        Write-Warning "legacy manifest: preserved custom registration ($legacy)"
+        return
+      }
+      Remove-ItemProperty -LiteralPath $keyPath -Name $legacy
+    }
+  }
+  if ($exists) { Remove-Item -LiteralPath $legacy -Force }
+}
+
 function Test-Registered {
   if (-not (Test-Path -LiteralPath $keyPath)) { return $false }
   return $null -ne (Get-Item -LiteralPath $keyPath).GetValue($dst, $null)
@@ -37,6 +85,7 @@ if ($Unregister) {
   } else {
     Write-Output "manifest: not there"
   }
+  Remove-LegacyManifest
   exit 0
 }
 
@@ -63,3 +112,6 @@ if (Test-Registered) {
   Set-ItemProperty -LiteralPath $keyPath -Name $dst -Value $dst -Type String
   Write-Output "registry: written (restart Word to see the add-in)"
 }
+# Register the replacement first; a failed copy/registration leaves the old
+# add-in usable. Only this host's exact old manifest and value are removed.
+Remove-LegacyManifest

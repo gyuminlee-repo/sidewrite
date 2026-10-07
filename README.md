@@ -115,6 +115,8 @@ A tray icon (menu bar on macOS, system tray on Windows) appears. First launch of
 
 > **One install per host.** The manifests use fixed add-in `<Id>` GUIDs, so a single Word (or Excel) install can sideload only one copy at a time. To run two clones side by side, change the `<Id>` in one clone's `manifests/word.xml` / `excel.xml` to a fresh UUID.
 
+**Upgrading an old Draftspect install:** run the Sidewrite installer again, or choose _Install_ in the tray app, then fully quit and reopen Office. The resident installer stops the old generated `draftspect-daemon.service` before starting Sidewrite, retires it only after the new daemon is healthy, and restores its prior enabled/running state if the handover fails. It also replaces the current user's matching `Draftspect WSL keep-alive` task. Manifest cleanup removes only the shipped old Word/Excel files and their matching `WEF\Developer` values at the former `Draftspect/manifests` paths; the Word-only WSL installer handles Word, while the tray app handles both hosts. On macOS the filenames are unchanged, and installation replaces the old manifests in place. Customized manifests, services with edits/drop-ins or symlinks, unrelated tasks/registrations, logs, credentials and user files are preserved. Review any preserved legacy artifact manually if it still uses the daemon ports or appears in Office; no old product folder is recursively deleted.
+
 > **Daemon-only debugging.** To see daemon output in the terminal, run `npm run dev` instead of `npm start` (skips the Electron shell).
 
 ### Windows with WSL2: the daemon without a terminal
