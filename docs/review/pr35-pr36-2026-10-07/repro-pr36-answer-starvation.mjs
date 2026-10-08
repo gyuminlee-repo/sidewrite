@@ -37,11 +37,7 @@ function scenario(name, paragraphs, expectedFirst) {
     .map((q) => q.id);
   const next = followState(comment, { paragraphs, ids });
   assert.ok(unseen.length, "fixture must retain an unchecked answer");
-  assert.equal(
-    next.offer,
-    null,
-    "reviewed head incorrectly hides the unchecked answer",
-  );
+  assert.equal(next.offer, null, "reviewed head incorrectly hides the unchecked answer");
   return { name, firstCount: first.length, unseen, next };
 }
 console.log(
@@ -49,17 +45,10 @@ console.log(
     [
       scenario(
         "place limit",
-        Array.from(
-          { length: MAX_PLACES + 1 },
-          (_, i) => `This is paragraph ${i} with a sentence.`,
-        ),
+        Array.from({ length: MAX_PLACES + 1 }, (_, i) => `This is paragraph ${i} with a sentence.`),
         MAX_PLACES,
       ),
-      scenario(
-        "character limit",
-        ["a".repeat(25000) + ".", "b".repeat(25000) + "."],
-        1,
-      ),
+      scenario("character limit", ["a".repeat(25000) + ".", "b".repeat(25000) + "."], 1),
     ],
     null,
     2,
