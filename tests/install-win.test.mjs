@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { LEGACY_MANIFEST_HASHES } from "../app/legacy-manifests.mjs";
 import {
   APP_FOLDER,
   DEVELOPER_KEY,
@@ -101,4 +102,70 @@ test("autostart.ps1 registers the task of autostartCommand, for this user, witho
   assert.match(ps, /-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries/);
   assert.match(ps, /-Hidden/);
   assert.match(ps, /Unregister-ScheduledTask -TaskName \$name -Confirm:\$false/);
+});
+
+test("legacy PowerShell manifest source contract: exact hashes, paths and value ownership", async () => {
+  // Source-contract checks only: PowerShell/Office are not available in this
+  // test environment. JS behavior is covered with stubbed reg.exe separately.
+  const ps = await read("scripts/install/register-addin.ps1");
+  for (const [file, hash] of Object.entries(LEGACY_MANIFEST_HASHES)) {
+    assert.ok(ps.includes(`"${file}" = "${hash}"`));
+  }
+  assert.match(ps, /if \(-not \$hashes\.ContainsKey\(\$file\)\) \{ return \}/);
+  assert.match(ps, /\$legacyRoot = Join-Path \$env:APPDATA "Draftspect"/);
+  assert.match(ps, /foreach \(\$path in @\(\$legacyRoot, \$legacyDir, \$legacy\)\)/);
+  assert.match(ps, /FileAttributes\]::ReparsePoint/);
+  assert.match(ps, /if \(\$hash -ne \$hashes\[\$file\]\)/);
+  assert.match(ps, /GetValueKind\(\$legacy\) -ne \[Microsoft\.Win32\.RegistryValueKind\]::String/);
+  assert.match(ps, /\$value -ne \$legacy/);
+  assert.match(ps, /Remove-ItemProperty -LiteralPath \$keyPath -Name \$legacy/);
+  assert.match(ps, /if \(\$exists\) \{ Remove-Item -LiteralPath \$legacy -Force \}/);
+  assert.doesNotMatch(ps, /Remove-Item[^\n]*-Recurse|Remove-ItemProperty[^\n]*\*/);
+  assert.match(ps, /\.Replace\("`r`n", "`n"\)/);
+  assert.equal(ps.match(/^\s*Remove-LegacyManifest$/gm).length, 2, "install and uninstall");
+  assert.ok(ps.lastIndexOf("Remove-LegacyManifest") > ps.indexOf("Set-ItemProperty"));
+});
+
+test("legacy PowerShell task source contract: root task, current user, exact single action", async () => {
+  const ps = await read("scripts/install/autostart.ps1");
+  const cleanup = ps.slice(ps.indexOf("function Remove-LegacyTask"), ps.indexOf("if ($Remove)"));
+  assert.ok(cleanup.includes('$legacyName = "Draftspect WSL keep-alive"'));
+  assert.ok(cleanup.includes('Get-ScheduledTask -TaskName $legacyName -TaskPath "\\"'));
+  for (const condition of [
+    '$legacy.TaskPath -eq "\\"',
+    "$actions.Count -eq 1",
+    "$triggers.Count -eq 1",
+    '$actions[0].Execute -eq "conhost.exe"',
+    "-not $actions[0].WorkingDirectory",
+    "'^--headless wsl\\.exe -d [\\w.-]+ --exec sleep infinity$'",
+    "$users -contains $legacy.Principal.UserId",
+    '$legacy.Principal.LogonType -eq "Interactive"',
+    '$legacy.Principal.RunLevel -eq "Limited"',
+    '$triggers[0].CimClass.CimClassName -eq "MSFT_TaskLogonTrigger"',
+    "$users -contains $triggers[0].UserId",
+    '$actions[0].Arguments -ceq "--headless wsl.exe -d $Distro --exec sleep infinity"',
+  ])
+    assert.ok(cleanup.includes(condition), condition);
+  assert.match(cleanup, /if \(-not \$owned\) \{[\s\S]*?return\s*\}/);
+  assert.ok(cleanup.indexOf("return\n  }") < cleanup.indexOf("Stop-ScheduledTask"));
+  assert.match(cleanup, /Stop-ScheduledTask[^\n]*\n\s*Unregister-ScheduledTask/);
+  assert.doesNotMatch(cleanup, /Stop-ScheduledTask[^\n]*SilentlyContinue|TaskName[^\n]*\*/);
+  assert.equal(ps.match(/^\s*Remove-LegacyTask$/gm).length, 2, "install and remove");
+  assert.ok(ps.lastIndexOf("Remove-LegacyTask") > ps.indexOf("Start-ScheduledTask"));
+});
+
+test("legacy PowerShell migration requires the exact replacement registration before cleanup", async () => {
+  // Source-contract regression only; this does not execute PowerShell or
+  // touch a Windows registry. A non-null stale/wrong-type value must not
+  // let install retire the known-good Draftspect registration.
+  const ps = await read("scripts/install/register-addin.ps1");
+  const guard = ps.slice(ps.indexOf("$replacementKey ="));
+  assert.match(guard, /^\$replacementKey = Get-Item -LiteralPath \$keyPath/);
+  assert.match(guard, /GetValueKind\(\$dst\) -ne \[Microsoft\.Win32\.RegistryValueKind\]::String/);
+  assert.match(guard, /-or\s*\(\$replacementKey\.GetValue\(\$dst, \$null\) -ne \$dst\)/);
+  assert.match(guard, /throw "Preserved an unexpected Sidewrite registration/);
+  assert.ok(guard.indexOf("throw ") < guard.indexOf("Remove-LegacyManifest"));
+  assert.ok(ps.indexOf("$replacementKey =") > ps.indexOf("Set-ItemProperty"));
+  assert.doesNotMatch(guard, /Set-ItemProperty|Remove-ItemProperty/);
+  assert.match(ps, /\$ErrorActionPreference = "Stop"/);
 });
