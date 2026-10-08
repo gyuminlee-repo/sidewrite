@@ -1,0 +1,20 @@
+[
+  {
+    "name": "place limit",
+    "firstCount": 20,
+    "unseen": ["a21"],
+    "next": {
+      "offer": null,
+      "line": "Other places checked: 20 (no change needed)."
+    }
+  },
+  {
+    "name": "character limit",
+    "firstCount": 1,
+    "unseen": ["a2"],
+    "next": {
+      "offer": null,
+      "line": "Other places checked: 1 (no change needed)."
+    }
+  }
+]
