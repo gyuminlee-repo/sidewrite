@@ -71,7 +71,9 @@
 // line for a heading, here it is passed over.
 // At most MAX_PLACES paragraphs and MAX_CHARS characters of text. A
 // paragraph that does not fit into what is left of the characters is passed
-// over; when none fits, the first is listed alone. A comment without a
+// over; when none fits, the first is listed alone. An unchecked answer that
+// is oversized also goes alone when the batch is empty, before smaller
+// change context can hide it. A comment without a
 // change that is in the document (not rejected, not unlocated) has only the
 // places its answered questions name.
 // Assumed: English; paragraphKinds tells headings, captions and methods.
@@ -235,7 +237,17 @@ export function followPlaces(
     });
     for (const row of found) {
       if (out.length >= maxPlaces) break;
-      if (chars + texts[row[0]].length > maxChars) continue;
+      if (chars + texts[row[0]].length > maxChars) {
+        // Keep the existing standalone-oversize exception for an unchecked
+        // answer too: smaller change context must not hide it forever.
+        // Defer it when this batch already has a place; never combine it
+        // with another place or truncate the paragraph.
+        if (!out.length && answers.get(row[0])?.some((id) => !seenAnswers.has(id))) {
+          out.push(place(row));
+          break;
+        }
+        continue;
+      }
       chars += texts[row[0]].length;
       out.push(place(row));
     }
