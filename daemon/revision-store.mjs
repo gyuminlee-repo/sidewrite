@@ -228,6 +228,10 @@ const Question = z.object({
   asked_at: z.string(),
   answer: z.string().default(""),
   answered_at: z.string().nullable().default(null),
+  // The paragraph the answer would go into (its task pane id, else "p" and
+  // its index), when the model named one that the manuscript has. Optional,
+  // no default: a file from before it saves as it was loaded.
+  paragraph_id: z.string().optional(),
 });
 
 // ---- figure lane -------------------------------------------------------------
@@ -347,6 +351,9 @@ const Comment = z.object({
       change_ids: z.array(z.string()).default([]),
       questions: z.number().int().nonnegative().default(0),
       seen_change_ids: z.array(z.string()).default([]),
+      // The answered questions whose place it was given (follow-places.js).
+      // Optional, no default: a record from before it saves as it was.
+      seen_answer_ids: z.array(z.string()).optional(),
     })
     .optional(),
   // Requests the model said cannot be handled in this file (review-tools.mjs
@@ -940,7 +947,7 @@ export function setRequirements(rev, ref, texts) {
 export function addQuestion(
   rev,
   ref,
-  { requirement_id = null, question, why = "" },
+  { requirement_id = null, question, why = "", paragraph_id = null },
   now = new Date(),
 ) {
   const next = clone(rev);
@@ -958,6 +965,7 @@ export function addQuestion(
     question: text,
     why: String(why ?? "").trim(),
     asked_at: now.toISOString(),
+    ...(paragraph_id ? { paragraph_id: String(paragraph_id) } : {}),
   });
   c.questions.push(row);
   return { revision: next, question: row };
@@ -966,9 +974,14 @@ export function addQuestion(
 // The author's answer to a question; an empty one takes the answer back.
 export function answerQuestion(rev, ref, id, answer, now = new Date()) {
   const next = clone(rev);
-  const q = (requireComment(next, ref).questions ?? []).find((x) => x.id === id);
+  const c = requireComment(next, ref);
+  const q = (c.questions ?? []).find((x) => x.id === id);
   if (!q) throw new Error(`No question ${id} under ${ref}`);
-  q.answer = String(answer ?? "").trim();
+  const text = String(answer ?? "").trim();
+  if (q.answer !== text && c.follow_through?.seen_answer_ids) {
+    c.follow_through.seen_answer_ids = c.follow_through.seen_answer_ids.filter((x) => x !== id);
+  }
+  q.answer = text;
   q.answered_at = q.answer ? now.toISOString() : null;
   return next;
 }

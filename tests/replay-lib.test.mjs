@@ -4,13 +4,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import path from "node:path";
 import { cleanupDecision } from "../scripts/e2e/judge.mjs";
 import { execWithInteropRetry } from "../scripts/e2e/wsl-interop.mjs";
 import {
+  limitStop,
+  replayExitCode,
+  answeredOf,
+  answerPlan,
+  parseAnswers,
+  replyRow,
+  REPLY_KINDS,
   changesReport,
   extractBatchesFromLog,
   fallbacksFromLog,
@@ -39,6 +46,48 @@ import {
 import { LedgerItemSchema } from "../daemon/revision-store.mjs";
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+
+for (const [name, state, expected] of [
+  ["normal success", {}, 0],
+  ["clean saved usage stop", { stopped: true }, 3],
+  ["failed save during usage stop", { stopped: true, saved: false }, 1],
+  ["failed Word cleanup during usage stop", { stopped: true, cleanup: { failed: true } }, 1],
+  [
+    "failed daemon cleanup during usage stop",
+    { stopped: true, cleanup: { daemon_error: "ports still busy" } },
+    1,
+  ],
+  [
+    "failed daemon cleanup without usage stop",
+    { cleanup: { daemon_error: "ports still busy" } },
+    1,
+  ],
+  ["failed run during usage stop", { stopped: true, failed: true }, 1],
+  ["model mismatch without usage stop", { otherModel: true }, 1],
+  ["model mismatch during clean usage stop", { stopped: true, otherModel: true }, 3],
+]) {
+  test(`replay exit: ${name}`, () => {
+    const input = { saved: true, ...state };
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+      import { replayExitCode } from ${JSON.stringify(new URL("../scripts/e2e/replay-lib.mjs", import.meta.url).href)};
+      process.exit(replayExitCode(JSON.parse(process.argv[1])));
+    `,
+        JSON.stringify(input),
+      ],
+      { encoding: "utf8" },
+    );
+    assert.ifError(child.error);
+    assert.equal(child.signal, null);
+    assert.equal(child.stderr, "");
+    assert.equal(child.status, expected, name);
+    assert.equal(replayExitCode(input), expected);
+  });
+}
 
 test("replay: refused, unknown and lingering quits never terminate Word", () => {
   const runner = read("../scripts/e2e/replay.mjs");
@@ -632,7 +681,7 @@ test("changes.json: per comment its changes with heading and rationale, and the 
       requirement_id: "q2",
       question: "Which unit did the reading have?",
       why: "the text gives none",
-      answer: "",
+      answered: false,
     },
   ]);
   assert.deepEqual(a.outside, [{ requirement_id: "q3", why: "a supplementary file" }]);
@@ -860,6 +909,8 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "requests by state: changed 1, needs_author 1, outside_this_file 1, open 1",
       "requirements no change names: 3",
       "questions for the author: 1",
+      "questions answered from the answers file: 0 in 0 comments",
+      "turns run after answers: 0",
       "requests declared outside this file: 1",
       "terms still present elsewhere: 0",
       "terms the reviewers named: 0 in 0 comments; still in the text: 0",
@@ -1152,6 +1203,186 @@ test("changes.json and summary.txt: what the follow-through turns did", () => {
   assert.ok(off.includes("\nfollow-through: changes 0 in 0 paragraphs, questions 0\n"));
 });
 
+// --answers: the author's answers the replay gives. Every text is invented.
+test("--answers: an object of ref and answer text; anything else is refused", () => {
+  assert.deepEqual(parseAnswers({ "R1.1": " Twelve spans. ", "E.2": "Yes." }), {
+    "R1.1": "Twelve spans.",
+    "E.2": "Yes.",
+  });
+  for (const bad of [null, [], "x", { "R1.1": "" }, { "R1.1": 3 }, { q1: "x" }, {}])
+    assert.throws(() => parseAnswers(bad), /--answers/);
+  // What is wrong is said without the answer itself, and without the key:
+  // in a file with key and value the wrong way round the key is the answer.
+  assert.throws(
+    () => parseAnswers({ "R1.1": "Twelve spans.", "The deck was recoated.": "R1.2" }),
+    (e) =>
+      /--answers: entry 2 of 2 has no comment ref like R1\.3 as its key/.test(e.message) &&
+      !/recoated|Twelve/.test(e.message),
+  );
+  assert.throws(
+    () => parseAnswers({ "R1.1": "Twelve spans.", "R1.2": ["The deck was recoated."] }),
+    (e) => /the answer of R1\.2 is not a text/.test(e.message) && !/recoated/.test(e.message),
+  );
+});
+
+test("--answers: the comments with an open question get the answer; the others are named and skipped", () => {
+  const q = (id, answer = "") => ({ id, question: "Which span?", why: "Not said.", answer });
+  const revision = {
+    comments: [
+      { ref: "R1.1", questions: [q("a1"), q("a2", "Span 4."), q("a3")] },
+      { ref: "R1.2", questions: [q("a1", "Yes.")] },
+      { ref: "R1.3", questions: [] },
+      { ref: "R2.1", questions: [q("a1")] },
+    ],
+  };
+  const answers = { "R2.1": "x", "R1.2": "x", "R1.1": "x", "R1.3": "x", "R9.9": "x", "R1.4": "x" };
+  assert.deepEqual(answerPlan(revision, answers, ["R1.1", "R1.2", "R1.3", "R2.1", "R1.4"]), {
+    // In the order of the run.
+    due: [
+      { ref: "R1.1", open: ["a1", "a3"] },
+      { ref: "R2.1", open: ["a1"] },
+    ],
+    skipped: [
+      { ref: "R1.2", reason: "no open question" },
+      { ref: "R1.3", reason: "no open question" },
+      { ref: "R1.4", reason: "no open question" },
+      { ref: "R9.9", reason: "not a comment of this run" },
+    ],
+  });
+  // After the pane step: how many of those the review file has an answer to.
+  const after = structuredClone(revision);
+  after.comments[0].questions[2].answer = "Span 6.";
+  assert.equal(answeredOf(after, "R1.1", ["a1", "a3"]), 1);
+  assert.equal(answeredOf(revision, "R1.1", ["a1", "a3"]), 0);
+  assert.equal(answeredOf(null, "R1.1", ["a1"]), 0);
+  assert.deepEqual(answerPlan(null, { "R1.1": "x" }, ["R1.1"]), {
+    due: [],
+    skipped: [{ ref: "R1.1", reason: "no open question" }],
+  });
+});
+
+test("changes.json and summary.txt: the answers given and the turns after them, never an answer text", () => {
+  const revision = {
+    comments: [
+      {
+        ...FOLLOWED.comments[0],
+        questions: [
+          { id: "a1", question: "Which span?", why: "Not said.", answer: "The fourth span only." },
+          { id: "a2", question: "Which year?", why: "Not said.", answer: "" },
+        ],
+      },
+      FOLLOWED.comments[1],
+    ],
+  };
+  const turn = { outcome: "ok", seconds: 25, refused: { ForbidBlocked: 2 } };
+  const report = changesReport(revision, [], { "R1.1": { outcome: "ok", seconds: 30 } }, [], [], {
+    answered: { "R1.1": 1 },
+    turns: { "R1.1": turn },
+  });
+  assert.deepEqual([report[0].answered, report[0].answer_turn], [1, turn]);
+  assert.deepEqual([report[1].answered, report[1].answer_turn], [0, null]);
+  // A question says whether it has an answer, not what the answer is.
+  assert.deepEqual(
+    report[0].questions.map((x) => [x.id, x.answered, "answer" in x]),
+    [
+      ["a1", true, false],
+      ["a2", false, false],
+    ],
+  );
+  const text = summaryText(report, { seconds: 90, saved: true, models: { asked: {}, line: "" } });
+  for (const line of [
+    "questions answered from the answers file: 1 in 1 comments",
+    "turns run after answers: 1",
+    "edits a guard refused: ForbidBlocked 2",
+    "turns that did not end well: 0",
+    "turn time: 55 s",
+  ])
+    assert.ok(text.includes(`\n${line}\n`), `${line}\n${text}`);
+  assert.doesNotMatch(JSON.stringify(report) + text, /fourth span/);
+  // A turn after answers that did not end well, or was run again, is named.
+  const bad = changesReport(revision, [], {}, [], [], {
+    answered: { "R1.1": 1 },
+    turns: { "R1.1": { outcome: "failed", seconds: 5, attempts: [{}, {}] } },
+  });
+  const badText = summaryText(bad, { seconds: 1, saved: true, models: {} });
+  assert.ok(badText.includes("\nturns that did not end well: 1 (R1.1 after answers failed)\n"));
+  assert.ok(badText.includes("\nturns run again after an API error: 1 (R1.1 after answers)\n"));
+  // A run without the file.
+  const off = summaryText(changesReport(revision), { seconds: 1, saved: true, models: {} });
+  assert.ok(off.includes("\nquestions answered from the answers file: 0 in 0 comments\n"));
+  assert.ok(off.includes("\nturns run after answers: 0\n"));
+});
+
+test("replies.json: the answer of the model in each turn, as the pane step gave it", () => {
+  assert.deepEqual(
+    replyRow("R1.1", "ordinary", { ok: true, reply: "Changed the deck sentence." }),
+    {
+      ref: "R1.1",
+      kind: "ordinary",
+      text: "Changed the deck sentence.",
+    },
+  );
+  // A step that failed, or a turn that said nothing: an empty text.
+  for (const step of [{ ok: false, error: "x" }, { ok: true }, null, { reply: 3 }])
+    assert.deepEqual(replyRow("R1.2", "rewrite", step), { ref: "R1.2", kind: "rewrite", text: "" });
+  assert.deepEqual(REPLY_KINDS, ["ordinary", "answer", "follow-through", "rewrite"]);
+  assert.throws(() => replyRow("R1.1", "other", {}), /kind/);
+});
+
+test("a turn that ended on the usage limit stops the run; an API error or a refusal does not", () => {
+  const limit = {
+    outcome: "failed",
+    reason: "Claude usage limit reached. resets at 2026-01-02T05:00:00.000Z",
+  };
+  assert.deepEqual(limitStop("R1.4", "follow-through", limit), {
+    ref: "R1.4",
+    kind: "follow-through",
+    resets: "2026-01-02T05:00:00.000Z",
+  });
+  // The daemon gives no time when it knows none.
+  assert.deepEqual(
+    limitStop("R1.4", "ordinary", { ...limit, reason: "Claude usage limit reached." }),
+    {
+      ref: "R1.4",
+      kind: "ordinary",
+      resets: null,
+    },
+  );
+  for (const turn of [
+    { outcome: "ok", reason: null },
+    { outcome: "failed", reason: "The turn ended on an API error: 529 overloaded" },
+    {
+      outcome: "failed",
+      reason: "The model declined this request (category=x). Nothing was changed by this answer.",
+    },
+    { outcome: "timeout", reason: "turn R1.4 still running after 600000 ms" },
+    { outcome: "no_turn", reason: "the daemon logged no end of a review turn for this comment" },
+    // Said by the model, not the end of a turn.
+    { outcome: "ok", reason: "Claude usage limit reached." },
+    null,
+  ])
+    assert.equal(limitStop("R1.4", "ordinary", turn), null);
+  // Such a turn is not run again.
+  assert.equal(retryTurn([limit]), false);
+  // The text the daemon gives such an end, and the time after it.
+  const daemon = read("../daemon/limit-detect.mjs");
+  assert.ok(daemon.includes("error: `Claude usage limit reached.${detail}`"));
+  assert.ok(daemon.includes("`resets at ${new Date(info.resetsAt * 1000).toISOString()}`"));
+  // summary.txt says where the run stopped; a run that did not stop has no such line.
+  const report = changesReport(FOLLOWED);
+  const said = (stopped) =>
+    summaryText(report, { seconds: 1, saved: true, models: {}, stopped })
+      .split("\n")
+      .filter((l) => l.startsWith("stopped:"));
+  assert.deepEqual(said(limitStop("R1.4", "follow-through", limit)), [
+    "stopped: usage limit reached at R1.4 (follow-through), resets at 2026-01-02T05:00:00.000Z",
+  ]);
+  assert.deepEqual(said({ ref: "R1.4", kind: "answer", resets: null }), [
+    "stopped: usage limit reached at R1.4 (answer)",
+  ]);
+  assert.deepEqual(said(null), []);
+});
+
 test("replay.mjs asks only for pane steps and Windows scripts that exist, and names no path of its own", () => {
   const runner = read("../scripts/e2e/replay.mjs");
   const base = read("../scripts/e2e/pane-driver.cjs");
@@ -1168,7 +1399,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // --rewrite-stacked: off unless asked for; the rewrite turns come after
   // the paragraph check, each button once, and a refresh follows them.
   assert.match(runner, /"rewrite-stacked": \{ type: "boolean", default: false \}/);
-  const stacked = runner.indexOf('if (opt["rewrite-stacked"]) {');
+  const stacked = runner.indexOf('if (opt["rewrite-stacked"] && !stopped) {');
   assert.ok(runner.indexOf('pane("check-paragraphs"') < stacked);
   assert.ok(stacked < runner.indexOf('pane("rewrite-paragraph", { nth }'));
   assert.ok(runner.indexOf('pane("rewrite-paragraph"') < runner.lastIndexOf('pane("refresh")'));
@@ -1178,7 +1409,7 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   // then reads what they left; one per comment the card offers the check
   // for (follow-places.js followState), and a refresh follows them.
   assert.match(runner, /"follow-through": \{ type: "boolean", default: false \}/);
-  const follow = runner.indexOf('if (opt["follow-through"]) {');
+  const follow = runner.indexOf('if (opt["follow-through"] && !stopped) {');
   assert.ok(runner.indexOf('pane("refresh")') < follow);
   assert.ok(follow < runner.indexOf('pane("follow-through", { ref }'));
   assert.ok(runner.indexOf('pane("follow-through"') < runner.indexOf('pane("check-paragraphs"'));
@@ -1187,20 +1418,98 @@ test("replay.mjs asks only for pane steps and Windows scripts that exist, and na
   assert.match(between, /followState\(/);
   assert.match(between, /pane\("refresh"\)/);
   assert.match(base, /"Check other places"/);
-  assert.match(runner, /changesReport\(revision, headings, turns, rewriteTurns, followTurns\)/);
+  assert.match(
+    runner,
+    /changesReport\(revision, headings, turns, rewriteTurns, followTurns, \{\s*answered,\s*turns: answerTurns,?\s*\}\)/,
+  );
+  // --answers: off unless a file is given. After the turns of the comments
+  // and their refresh, and before the follow-through turns (which then get
+  // the places the answered questions name): the open questions of a
+  // comment are answered through the pane, then the comment gets its turn
+  // again, and a refresh follows. The step is given the file, not the text.
+  assert.match(runner, /\n    answers: \{ type: "string" \},/);
+  const answersAt = runner.indexOf("if (ANSWERS && !stopped) {");
+  assert.ok(runner.indexOf('pane("refresh")') < answersAt);
+  assert.ok(answersAt < runner.indexOf('pane("answer-questions", {'));
+  assert.ok(runner.indexOf('pane("answer-questions"') < runner.lastIndexOf('pane("propose"'));
+  assert.ok(runner.lastIndexOf('pane("propose"') < follow);
+  assert.equal((runner.match(/pane\("propose"/g) ?? []).length, 2);
+  assert.equal((runner.match(/pane\("answer-questions"/g) ?? []).length, 1);
+  const answering = runner.slice(answersAt, follow);
+  assert.match(answering, /answerPlan\(readRevision\(\), ANSWERS, refs\)/);
+  assert.match(answering, /answered\[ref\] = answeredOf\(readRevision\(\), ref, open\);/);
+  assert.match(answering, /answers_file: winPath\(path\.resolve\(opt\.answers\)\)/);
+  assert.match(answering, /pane\("refresh"\)/);
+  assert.doesNotMatch(answering, /ANSWERS\[/);
+  // The file is read in one place, and an answer is never printed.
+  assert.equal((runner.match(/readFileSync\(opt\.answers/g) ?? []).length, 1);
+  assert.match(base, /"Save answer"/);
+  // A file the step cannot read as JSON: said without the words of the parser,
+  // which quote the file.
+  assert.match(
+    base,
+    /try \{\s*answers = JSON\.parse\(fs\.readFileSync\(a\.answers_file, "utf8"\)\);\s*\} catch \{\s*throw new Error\("the answers file is not JSON"\);/,
+  );
+  assert.match(runner, /catch \{\s*throw new Error\("--answers: the file is not JSON"\);/);
+  assert.match(read("../taskpane/shared/review-pane.js"), /text: "Save answer"/);
+  // replies.json: the answer of the model in every turn (the turns of the
+  // comments, those after answers, follow-through and rewrite), written
+  // beside the reports and into none of them. Each turn step gives it.
+  assert.match(runner, /out\("replies\.json", JSON\.stringify\(replies, null, 2\)\)/);
+  assert.match(runner, /replies\.push\(replyRow\(ref, kind, done\)\)/);
+  for (const [call, kind] of [
+    ["proposeTurn(ref, `propose ${ref}`", "ordinary"],
+    ["proposeTurn(ref, `propose ${ref} (after answers)`", "answer"],
+    ["proposeTurn(ref, `follow-through ${ref}`", "follow-through"],
+    ["runTurn(ref, `rewrite ${ref} p${line.paragraph_index}`", "rewrite"],
+  ]) {
+    assert.ok(runner.includes(`${call}, "${kind}", () =>`), `${call}: ${kind}`);
+  }
+  for (const s of ["propose", "follow-through", "rewrite-paragraph"]) {
+    const at = base.indexOf(`  async ${/-/.test(s) ? `"${s}"` : s}(page`);
+    assert.ok(at !== -1, s);
+    const body = base.slice(at, base.indexOf("\n  },\n", at));
+    assert.ok(body.indexOf("await markReply(page)") !== -1, `${s} marks the chat`);
+    assert.ok(body.indexOf("await markReply(page)") < body.indexOf(".click()"), s);
+    assert.match(body, /reply: await readReply\(page\)/, s);
+  }
   // A turn of a comment or a follow-through turn that failed on an API error
   // is run once more after a minute (replay-lib.mjs retryTurn); both go
   // through the same function, and a rewrite turn does not.
   assert.match(runner, /while \(retryTurn\(attempts\)\) \{\s*\n\s*await sleep\(60_000\);/);
-  assert.equal((runner.match(/await proposeTurn\(/g) ?? []).length, 2);
+  assert.equal((runner.match(/await proposeTurn\(/g) ?? []).length, 3);
+  assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\} \(after answers\)`/);
   assert.match(runner, /await proposeTurn\(ref, `propose \$\{ref\}`/);
   assert.match(runner, /await proposeTurn\(ref, `follow-through \$\{ref\}`/);
+  // A turn that ended on the usage limit (replay-lib.mjs limitStop) is the
+  // last turn of the run: every turn goes through runTurn, which notes it;
+  // each loop of turns ends there, and the phases that need the model (the
+  // answers, follow-through, the paragraph check, the rewrites, the drafts)
+  // are passed over. What needs no model still runs: the save of the copy
+  // and the reports. The run then ends with code 3.
+  assert.match(runner, /stopped \?\?= limitStop\(ref, kind, lastTurn\);/);
+  assert.equal((runner.match(/if \(stopped\) break;/g) ?? []).length, 4);
+  for (const gate of [
+    "if (ANSWERS && !stopped) {",
+    'if (opt["follow-through"] && !stopped) {',
+    'if (!stopped) note("check-paragraphs", pane("check-paragraphs", {}, 25 * 60_000));',
+    'if (opt["rewrite-stacked"] && !stopped) {',
+    'if (opt["draft-responses"] && !stopped) {',
+  ])
+    assert.ok(runner.includes(gate), gate);
+  assert.ok(
+    runner.indexOf('if (opt["draft-responses"] && !stopped) {') < runner.indexOf('"save copy"'),
+  );
+  assert.match(runner, /record\.stopped = stopped;/);
+  assert.match(runner, /\n      stopped,\n/);
+  assert.match(runner, /process\.exit\(\s*replayExitCode\(/);
+  assert.match(read("../scripts/e2e/README.md"), /exit code 3/);
   // The exit code follows the pane's line (modelFailures), nothing else.
   assert.match(
     runner,
     /const otherModel = \(\) => modelFailures\(modelsLine, lastTurn\)\.length > 0;/,
   );
-  assert.ok(runner.lastIndexOf('pane("propose"') < runner.indexOf('pane("refresh")'));
+  assert.ok(runner.indexOf('pane("propose"') < runner.indexOf('pane("refresh")'));
   assert.ok(runner.indexOf('pane("refresh")') < runner.indexOf('pane("check-paragraphs"'));
   assert.match(runner, /"paragraph_check\.json"/);
   assert.match(runner, /paragraphCheck: revision\.consistency/);

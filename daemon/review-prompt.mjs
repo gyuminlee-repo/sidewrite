@@ -46,6 +46,7 @@ export const REVIEW_RULES = [
   'When the reviewer says a claim does not hold, is not supported, or should be removed or not made, take the claim out or rewrite it as what was observed. Do not keep the claim and put a caveat next to it ("although this was not measured"): no sentence and no paragraph may state a claim and its denial together. Write a limitation, or an experiment that was not done, into the manuscript only when the reviewer asks for that.',
   'Before you end the turn, check: every request has a change, a question or a note; no changed paragraph states a claim and its denial together; the term you changed is not left elsewhere without being named. End your answer with the line "Same term still at: " followed by the ids of the paragraphs where it is left, or "none".',
   "Citations and other fields (cross-references, the reference list) are not edited: they are written by the reference manager. When you reword, keep each one where it is and change only the words around it. To remove one, delete its whole sentence in ONE office_tracked_edit, never the citation text on its own. `find` takes the text as Word shows it, without the instruction of the field.",
+  "When you ask the author (office_ask_author) and the answer would go into one paragraph of the manuscript, name that paragraph: give its id as paragraph_id. Leave paragraph_id out when the answer has no one place.",
 ];
 
 // The rule that tells what is not in this file from what only the author
@@ -357,13 +358,15 @@ export function buildReviewPrompt({
     String(t ?? "")
       .replace(/\s+/g, " ")
       .trim();
+  // The paragraph the answer would go into, when the question names one.
+  const place = (q) => (q.paragraph_id ? ` (for [${q.paragraph_id}])` : "");
   if (answers.length || linkedAnswers.length) {
     lines.push(
       "",
       "Author answers (what the author said when asked; they hold like author instructions, and a number in them may be written):",
     );
     for (const q of answers)
-      lines.push(`- [${q.ref} ${q.id}] ${one(q.question)} Answer: ${one(q.answer)}`);
+      lines.push(`- [${q.ref} ${q.id}]${place(q)} ${one(q.question)} Answer: ${one(q.answer)}`);
     // Asked in another file of the revision; the answer holds here too.
     for (const q of linkedAnswers)
       lines.push(
@@ -376,7 +379,7 @@ export function buildReviewPrompt({
       "",
       "Asked for this comment and not answered yet (do not ask again; leave the text they are about as it is):",
     );
-    for (const q of waiting) lines.push(`- [${q.id}] ${one(q.question)}`);
+    for (const q of waiting) lines.push(`- [${q.id}]${place(q)} ${one(q.question)}`);
   }
   lines.push("", "Forbidden (an edit containing these is refused before it is applied):");
   if (forbids.length) for (const i of forbids) lines.push(`- [${i.id}] ${i.text}`);

@@ -1,5 +1,5 @@
-// The other places of a comment: paragraphs its changes did not touch that
-// are likely to state the same thing as the paragraphs they did.
+// The other places of a comment: paragraphs likely to state the same thing
+// as its changed paragraphs, or named by an answered question.
 //
 // A turn changes the sentence a comment points at. Replays against a real
 // revision showed what it then leaves as it was: the section heading above,
@@ -15,6 +15,13 @@
 // imports but the other shared files, nothing of the browser or of node.
 //
 // Where the places come from, in the order they are listed:
+//   answer   the paragraph a question of this comment names as the place
+//            its answer goes into (review-tools.mjs askAuthor), once the
+//            author has answered it and an answer there remains unchecked.
+//            The only place that is listed also
+//            when it holds no word or the author rejected a change of this
+//            comment there: the answer came after. Not in the reference
+//            list. Such a place carries its question ids (`answer_ids`).
 //   heading  the nearest heading above each changed paragraph
 //   legend   the captions of the figures, tables and schemes named in the
 //            comment or in the text a change took out or put in, then those
@@ -40,9 +47,20 @@
 //            never more than 5). Those in the fewest paragraphs first. A
 //            removed word brings at most METHOD_PLACES paragraphs. A judged
 //            run listed methods paragraphs for "across" and "significant".
+//   reports  only when the comment changed a methods paragraph (how a
+//            quantity is measured, say): first the body paragraphs that
+//            cite a figure or table the comment or its changes name.
+//            Then those that hold a term the comment names or
+//            a removed word that the comment and the reason of its change
+//            both name (the same cut as above), then those that only cite
+//            a figure from a changed methods paragraph. Each in the order of the
+//            document; at most REPORT_PLACES in all. A replay left the
+//            results that report a measurement as they were when only its
+//            method was changed.
 //   section  the other body and methods paragraphs under the same heading
 // A paragraph is listed once, under the first of these. Left out: the
-// paragraphs the comment changed, those where the author rejected a change
+// paragraphs the comment changed (unless an answer there is unseen),
+// those where the author rejected a change
 // of this comment (the author has decided there), empty ones, and the
 // reference list (from a heading "References" or "Bibliography" to the next
 // caption or heading; a short entry without a full stop at its end reads as
@@ -53,8 +71,11 @@
 // line for a heading, here it is passed over.
 // At most MAX_PLACES paragraphs and MAX_CHARS characters of text. A
 // paragraph that does not fit into what is left of the characters is passed
-// over; when none fits, the first is listed alone. A comment without a
-// change that is in the document (not rejected, not unlocated) has no places.
+// over; when none fits, the first is listed alone. An unchecked answer that
+// is oversized also goes alone when the batch is empty, before smaller
+// change context can hide it. A comment without a
+// change that is in the document (not rejected, not unlocated) has only the
+// places its answered questions name.
 // Assumed: English; paragraphKinds tells headings, captions and methods.
 
 import { paragraphKinds, termPlaces } from "./named-terms.js";
@@ -66,6 +87,7 @@ const CONTINUATION = 3;
 const LEGEND_PLACES = 8;
 const METHOD_WORDS = 3;
 const METHOD_PLACES = 3;
+const REPORT_PLACES = 6;
 // The longest range of figure numbers that is read as one ("Figs. 2-4").
 const RANGE = 10;
 
@@ -85,6 +107,15 @@ function indexesOf(changes, ids, count) {
     if (Number.isInteger(i) && i >= 0 && i < count) out.add(i);
   }
   return [...out].sort((a, b) => a - b);
+}
+
+// The index of the paragraph an id names: its task pane id, else "p" and
+// its index ("p12"); -1 when the manuscript has no such paragraph.
+export function placeIndex(id, ids, count) {
+  const byId = (ids ?? []).indexOf(id);
+  if (byId !== -1) return byId < count ? byId : -1;
+  const m = /^p(\d+)$/.exec(String(id ?? ""));
+  return m && Number(m[1]) < count ? Number(m[1]) : -1;
 }
 
 // The paragraphs the live changes of a comment are in.
@@ -151,7 +182,7 @@ function technical(word, changes) {
   });
 }
 
-// [{ index, id, kind, why }]: the other places of a comment, in the order
+// [{ index, id, kind, why, answer_ids }]: the other places of a comment, in the order
 // they are listed. paragraphs: the texts as they read now; ids: their task
 // pane ids, or null.
 export function followPlaces(
@@ -162,7 +193,6 @@ export function followPlaces(
 ) {
   const texts = (paragraphs ?? []).map((t) => String(t ?? ""));
   const changed = changedIndexes(comment, ids, texts.length);
-  if (!changed.length) return [];
   const kinds = paragraphKinds(texts);
   const changes = liveChanges(comment);
   const words = texts.map((t) => /\p{L}{2}/u.test(t));
@@ -176,11 +206,13 @@ export function followPlaces(
       texts.length,
     ),
   ]);
+  const references = new Set();
   let inList = false;
   texts.forEach((t, i) => {
     if (kinds[i] === "caption") inList = false;
     else if (heading(i) && REFERENCE_LIST.test(t.trim())) inList = true;
     else if (heading(i) && !/[\d.]/.test(t) && t.trim().split(/\s+/).length <= 4) inList = false;
+    if (inList) references.add(i);
     if (inList || !words[i]) skip.add(i);
   });
 
@@ -190,6 +222,54 @@ export function followPlaces(
     found.set(index, why);
     return true;
   };
+
+  // The cut of the list, at its end and when there is nothing but answers.
+  const answers = new Map();
+  const listed = () => {
+    const out = [];
+    let chars = 0;
+    const place = ([index, why]) => ({
+      index,
+      id: ids?.[index] ?? `p${index}`,
+      kind: kinds[index],
+      why,
+      answer_ids: answers.get(index) ?? [],
+    });
+    for (const row of found) {
+      if (out.length >= maxPlaces) break;
+      if (chars + texts[row[0]].length > maxChars) {
+        // Keep the existing standalone-oversize exception for an unchecked
+        // answer too: smaller change context must not hide it forever.
+        // Defer it when this batch already has a place; never combine it
+        // with another place or truncate the paragraph.
+        if (!out.length && answers.get(row[0])?.some((id) => !seenAnswers.has(id))) {
+          out.push(place(row));
+          break;
+        }
+        continue;
+      }
+      chars += texts[row[0]].length;
+      out.push(place(row));
+    }
+    if (!out.length && found.size) out.push(place([...found][0]));
+    return out;
+  };
+
+  for (const q of comment?.questions ?? []) {
+    if (!q.answer || q.paragraph_id == null) continue;
+    const i = placeIndex(q.paragraph_id, ids, texts.length);
+    if (i === -1 || references.has(i)) continue;
+    if (!answers.has(i)) answers.set(i, []);
+    answers.get(i).push(q.id);
+  }
+  const seenAnswers = new Set(comment?.follow_through?.seen_answer_ids ?? []);
+  for (const [i, ids] of answers) {
+    // Checked answers must not spend the bounded batch before unseen ones.
+    // Keep all answer ids as context when another answer reopens this place.
+    if (ids.every((id) => seenAnswers.has(id))) continue;
+    found.set(i, `the author's answer to ${ids[0]} goes here`);
+  }
+  if (!changed.length) return listed();
 
   // A changed heading is the heading of its own section.
   const headOf = (i) => {
@@ -236,8 +316,17 @@ export function followPlaces(
   const inMethods = (re) =>
     texts.flatMap((t, i) => (kinds[i] === "methods" && re.test(t) ? [i] : []));
   const also = (i, word) => add(i, `methods; also has "${word}"`);
+  // The body paragraphs that hold a word of the comment, with that word:
+  // listed below when a methods paragraph was changed.
+  const reports = new Map();
+  const report = (i, word) => {
+    if (kinds[i] === "body" && !reports.has(i)) reports.set(i, word);
+  };
   for (const row of termPlaces(comment, texts, ids))
-    for (const p of row.places) if (p.kind === "methods") also(p.index, row.term);
+    for (const p of row.places) {
+      if (p.kind === "methods") also(p.index, row.term);
+      report(p.index, row.term);
+    }
   const claimed = new Set(changes.flatMap((ch) => claimTerms(ch, comment?.text)));
   const prose = texts.flatMap((t, i) =>
     words[i] && (kinds[i] === "body" || kinds[i] === "methods") ? [t] : [],
@@ -247,6 +336,7 @@ export function followPlaces(
     const re = wordRe(word);
     if (prose.filter((t) => re.test(t)).length > vocabulary) continue;
     for (const i of inMethods(re).slice(0, METHOD_PLACES)) also(i, word);
+    texts.forEach((t, i) => re.test(t) && report(i, word));
   }
   const most = Math.min(5, Math.max(2, Math.ceil(prose.length * 0.02)));
   [...new Set(changes.flatMap(removedTerms))]
@@ -261,38 +351,52 @@ export function followPlaces(
     .slice(0, METHOD_WORDS)
     .forEach((r) => r.at.slice(0, METHOD_PLACES).forEach((i) => also(i, r.word)));
 
+  if (changed.some((i) => kinds[i] === "methods")) {
+    const pointed = new Set([
+      ...changed.filter((i) => kinds[i] === "methods").flatMap((i) => figurePointers(texts[i])),
+    ]);
+    const rows = [];
+    const incidental = [];
+    texts.forEach((t, i) => {
+      if (kinds[i] !== "body") return;
+      const pointers = figurePointers(t);
+      const k = pointers.find((x) => named.has(x));
+      if (k) rows.push([i, `reports; cites ${keyName(k)}`]);
+      else {
+        const cited = pointers.find((x) => pointed.has(x));
+        if (cited) incidental.push([i, `reports; cites ${keyName(cited)}`]);
+      }
+    });
+    for (const i of [...reports.keys()].sort((a, b) => a - b))
+      rows.push([i, `reports; also has "${reports.get(i)}"`]);
+    rows.push(...incidental);
+    let listed = 0;
+    for (const [i, why] of rows) if (listed < REPORT_PLACES && add(i, why)) listed++;
+  }
+
   for (const h of heads)
     for (let i = h + 1; i < texts.length && !heading(i); i++)
       if (kinds[i] !== "caption") add(i, "same section as a changed paragraph");
 
-  const out = [];
-  let chars = 0;
-  const place = ([index, why]) => ({
-    index,
-    id: ids?.[index] ?? `p${index}`,
-    kind: kinds[index],
-    why,
-  });
-  for (const row of found) {
-    if (out.length >= maxPlaces) break;
-    if (chars + texts[row[0]].length > maxChars) continue;
-    chars += texts[row[0]].length;
-    out.push(place(row));
-  }
-  if (!out.length && found.size) out.push(place([...found][0]));
-  return out;
+  return listed();
 }
 
 // What the card of a comment shows of this. snapshot: revision.snapshot.
 // { offer, line }: offer is the number of places for the button "Check other
 // places (N)", or null when there is nothing to check or the check ran and
-// the comment got no change since (comment.follow_through.seen_change_ids);
+// the comment got since neither a change (follow_through.seen_change_ids)
+// nor an answer that names a place (follow_through.seen_answer_ids);
 // line is what the last check did, or null when none ran.
 export function followState(comment, snapshot) {
   const ran = comment?.follow_through;
   const seen = new Set(ran?.seen_change_ids ?? []);
-  const fresh = !ran || liveChanges(comment).some((ch) => !seen.has(ch.id));
-  const n = fresh ? followPlaces(comment, snapshot?.paragraphs, snapshot?.ids).length : 0;
+  const places = followPlaces(comment, snapshot?.paragraphs, snapshot?.ids);
+  const answers = new Set(ran?.seen_answer_ids ?? []);
+  const fresh =
+    !ran ||
+    liveChanges(comment).some((ch) => !seen.has(ch.id)) ||
+    places.some((p) => p.answer_ids.some((id) => !answers.has(id)));
+  const n = fresh ? places.length : 0;
   const count = (k, word) => `${k} ${word}${k === 1 ? "" : "s"}`;
   const did = !ran
     ? ""

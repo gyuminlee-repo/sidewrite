@@ -63,7 +63,7 @@ import {
 } from "./review-view.js";
 import { createProposeQueue } from "./propose-queue.js";
 import { stillPresentItems } from "./residue.js";
-import { followState } from "./follow-places.js";
+import { followState, placeIndex } from "./follow-places.js";
 import { firstWords, paragraphLabel } from "./paragraph-label.js";
 import { createAutoRefresh } from "./auto-refresh.js";
 
@@ -970,9 +970,26 @@ export function initReviewPane({
               text: `${q.id}${q.requirement_id ? ` (${q.requirement_id})` : ""}: ${q.question}`,
             }),
             el("div", { class: "review-reqs-line", text: `Why it is asked: ${q.why}` }),
-            answer,
-            saveAnswer,
           );
+          // The paragraph the answer would go into, when the question names
+          // one the manuscript still has.
+          const at =
+            q.paragraph_id == null
+              ? -1
+              : placeIndex(
+                  q.paragraph_id,
+                  state.revision?.snapshot?.ids,
+                  state.revision?.snapshot?.paragraphs?.length ?? 0,
+                );
+          if (at !== -1) {
+            const where = el("div", {
+              class: "review-reqs-line review-question-place",
+              text: "Where the answer goes:",
+            });
+            where.append(" ", paragraphLink(at));
+            body.append(where);
+          }
+          body.append(answer, saveAnswer);
         }
       }
       for (const ch of c.changes) body.append(changeRow(ch));

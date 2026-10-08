@@ -10,6 +10,11 @@ import { termPlaces } from "../../taskpane/shared/named-terms.js";
 
 const REF = /^(?:R\d+|E)\.\d+$/;
 
+export function replayExitCode({ failed, stopped, saved, otherModel, cleanup = {} }) {
+  if (failed || !saved || cleanup.failed || cleanup.daemon_error) return 1;
+  return stopped ? 3 : otherModel ? 1 : 0;
+}
+
 // "--only R1.2,R2.1" -> ["R1.2", "R2.1"]; nothing given -> [].
 export function parseOnly(spec) {
   const refs = String(spec ?? "")
@@ -197,6 +202,68 @@ export const extractBatchesFromLog = (log) =>
     unlabelled: m[7] ? m[7].split(",") : [],
   }));
 
+// --answers: what the author would answer when asked, per comment:
+// { "<ref>": "<answer text>", ... } (the file as JSON.parse read it). Every
+// open question of a comment gets the answer of its ref. Returns the same
+// with the texts trimmed; throws on anything else. What it says names a
+// valid ref at most: an answer is text of the author and is never printed,
+// and a key that is no ref may be one (key and value the wrong way round).
+export function parseAnswers(json) {
+  const rows =
+    json && typeof json === "object" && !Array.isArray(json) ? Object.entries(json) : null;
+  if (!rows?.length)
+    throw new Error('--answers takes a JSON object { "<ref>": "<answer text>", ... }');
+  const out = {};
+  for (const [n, [ref, text]] of rows.entries()) {
+    if (!REF.test(ref))
+      throw new Error(
+        `--answers: entry ${n + 1} of ${rows.length} has no comment ref like R1.3 as its key`,
+      );
+    if (typeof text !== "string" || !text.trim())
+      throw new Error(`--answers: the answer of ${ref} is not a text`);
+    out[ref] = text.trim();
+  }
+  return out;
+}
+
+// Which comments get their answer. revision: revision.json after the turns
+// of the comments; answers: parseAnswers(...); refs: the comments of the
+// run, in its order.
+// { due: [{ ref, open: [question ids] }], skipped: [{ ref, reason }] }
+export function answerPlan(revision, answers, refs = []) {
+  const due = [];
+  const skipped = [];
+  for (const ref of refs) {
+    if (!(ref in answers)) continue;
+    const c = (revision?.comments ?? []).find((x) => x.ref === ref);
+    const open = (c?.questions ?? []).filter((q) => !q.answer).map((q) => q.id);
+    if (open.length) due.push({ ref, open });
+    else skipped.push({ ref, reason: "no open question" });
+  }
+  for (const ref of Object.keys(answers))
+    if (!refs.includes(ref)) skipped.push({ ref, reason: "not a comment of this run" });
+  return { due, skipped };
+}
+
+// How many of the questions that were open (answerPlan: open) the review
+// file now holds an answer to: what the pane step saved, read from the file
+// and not from what the step says it did.
+export function answeredOf(revision, ref, open = []) {
+  const now = (revision?.comments ?? []).find((c) => c.ref === ref)?.questions ?? [];
+  return open.filter((id) => now.find((q) => q.id === id)?.answer).length;
+}
+
+// replies.json: the answer of the model in one turn, for reading a run
+// afterwards. kind: the turn of a comment ("ordinary"), its turn after the
+// answers of --answers ("answer"), "follow-through" or "rewrite". step: what
+// the pane step of the turn gave; its `reply` is the last answer in the chat
+// when the turn put one there (pane-driver.cjs readReply), else there is none.
+export const REPLY_KINDS = ["ordinary", "answer", "follow-through", "rewrite"];
+export function replyRow(ref, kind, step) {
+  if (!REPLY_KINDS.includes(kind)) throw new Error(`unknown kind of turn: ${kind}`);
+  return { ref, kind, text: typeof step?.reply === "string" ? step.reply : "" };
+}
+
 // Whether a turn is run once more. attempts: the turnResult of each try so
 // far. Only after the first try, and only when the turn ended on an API
 // error (daemon/limit-detect.mjs: an authentication or server answer in
@@ -208,6 +275,21 @@ export const retryTurn = (attempts) =>
   attempts.length === 1 &&
   attempts[0].outcome === "failed" &&
   /^The turn ended on an API error/.test(attempts[0].reason ?? "");
+
+// Whether a turn ends the run: it failed on the usage limit of the account
+// (daemon/limit-detect.mjs: "Claude usage limit reached." and, when the
+// daemon knows it, " resets at <time>"). Every turn after it would end the
+// same way; a replay went on for an hour like that. turn: its turnResult.
+// { ref, kind, resets } (resets: the time as the daemon gave it, or null),
+// or null for any other end: an API error is run again (retryTurn), a
+// refusal and a turn out of time say nothing about the next comment.
+export function limitStop(ref, kind, turn) {
+  const m =
+    turn?.outcome === "failed"
+      ? /^Claude usage limit reached\.?(?: resets at (\S+))?/.exec(turn.reason ?? "")
+      : null;
+  return m ? { ref, kind, resets: m[1] ?? null } : null;
+}
 
 // The entry of a turn that was tried more than once: that of the last try,
 // with the time of all of them and how each ended.
@@ -324,12 +406,17 @@ export const modelFailures = (line, lastTurn = null) =>
 //   rewriteTurns: [{ ref, paragraph_index, ...turnResult(...) }] of
 //     --rewrite-stacked
 //   followTurns: [{ ref, ...turnResult(...) }] of --follow-through
+//   answers: { answered: { <ref>: n }, turns: { <ref>: turnResult(...) } } of
+//     --answers: the questions answered from the file and the turn after
+//     them. A question says whether it has an answer (`answered`); the
+//     answer itself is text of the author and stays in revision.json.
 export function changesReport(
   revision,
   headings = [],
   turns = {},
   rewriteTurns = [],
   followTurns = [],
+  answers = {},
 ) {
   const snapshot = revision?.snapshot ?? null;
   // A place of a follow-through turn, as a paragraph index: by the task pane
@@ -387,8 +474,10 @@ export function changesReport(
         requirement_id: q.requirement_id ?? null,
         question: q.question,
         why: q.why ?? "",
-        answer: q.answer ?? "",
+        answered: !!q.answer,
       })),
+      answered: answers.answered?.[c.ref] ?? 0,
+      answer_turn: answers.turns?.[c.ref] ?? null,
       outside: (c.requirements_outside ?? []).map((n) => ({
         requirement_id: n.id,
         why: n.why ?? "",
@@ -448,6 +537,7 @@ export function responsesReport(revision) {
 //   models: { asked: { edits, writing, judgments }, line } (line: the pane's
 //   own line at the end of the run); source: how the manuscript was opened;
 //   paragraphCheck: revision.consistency after "Check revised paragraphs".
+//   stopped: limitStop(...) of the turn the run stopped at, or null.
 export function summaryText(
   report,
   {
@@ -461,13 +551,20 @@ export function summaryText(
     stays = [],
     restored = 0,
     lastTurn = null,
+    stopped = null,
   },
 ) {
   const turns = report.filter((c) => c.turn);
   const rewriteTurns = report.flatMap((c) => c.rewrite_turns ?? []);
   const followTurns = report.flatMap((c) => c.follow_turns ?? []);
+  const answerTurns = report
+    .filter((c) => c.answer_turn)
+    .map((c) => ({ ref: c.ref, ...c.answer_turn }));
   const bad = [
     ...turns.filter((c) => c.turn.outcome !== "ok").map((c) => `${c.ref} ${c.turn.outcome}`),
+    ...answerTurns
+      .filter((t) => t.outcome !== "ok")
+      .map((t) => `${t.ref} after answers ${t.outcome}`),
     ...followTurns
       .filter((t) => t.outcome !== "ok")
       .map((t) => `${t.ref} follow-through ${t.outcome}`),
@@ -477,6 +574,7 @@ export function summaryText(
   ];
   const again = [
     ...turns.filter((c) => c.turn.attempts).map((c) => c.ref),
+    ...answerTurns.filter((t) => t.attempts).map((t) => `${t.ref} after answers`),
     ...followTurns.filter((t) => t.attempts).map((t) => `${t.ref} follow-through`),
   ];
   const asked = models?.asked ?? {};
@@ -488,6 +586,7 @@ export function summaryText(
   const codes = {};
   const refused = [
     ...report.map((c) => c.refused ?? {}),
+    ...answerTurns.map((t) => t.refused ?? {}),
     ...followTurns.map((t) => t.refused ?? {}),
     ...rewriteTurns.map((t) => t.refused ?? {}),
   ];
@@ -539,6 +638,8 @@ export function summaryText(
         : "not measured (no requests were extracted)"
     }`,
     `questions for the author: ${sum((c) => c.questions.length)}`,
+    `questions answered from the answers file: ${sum((c) => c.answered ?? 0)} in ${report.filter((c) => c.answered).length} comments`,
+    `turns run after answers: ${answerTurns.length}`,
     `requests declared outside this file: ${sum((c) => c.outside.length)}`,
     `terms still present elsewhere: ${sum((c) => c.still_present.length)}`,
     `terms the reviewers named: ${named.length} in ${report.filter((c) => c.named_terms?.length).length} comments; still in the text: ${named.filter((t) => t.places.length).length}`,
@@ -562,10 +663,14 @@ export function summaryText(
         ? `${paragraphCheck.findings?.length ?? 0} findings in ${paragraphCheck.paragraphs?.length ?? 0} paragraphs${Object.keys(kinds).length ? ` (${list(kinds)})` : ""}`
         : "not run"
     }`,
-    `turn time: ${[...turns.map((c) => c.turn), ...followTurns, ...rewriteTurns].reduce((n, t) => n + (t.seconds ?? 0), 0)} s`,
+    `turn time: ${[...turns.map((c) => c.turn), ...answerTurns, ...followTurns, ...rewriteTurns].reduce((n, t) => n + (t.seconds ?? 0), 0)} s`,
     `total time: ${seconds} s`,
     `copy saved with its tracked changes: ${saved ? "yes" : "NO"}`,
   ];
+  if (stopped)
+    lines.push(
+      `stopped: usage limit reached at ${stopped.ref} (${stopped.kind})${stopped.resets ? `, resets at ${stopped.resets}` : ""}`,
+    );
   if (source) lines.push(`manuscript: ${source}`);
   if (responses !== null) lines.push(`responses drafted: ${responses}`);
   return `${lines.join("\n")}\n`;

@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  MAX_CHARS,
+  MAX_PLACES,
   changedIndexes,
   figurePointers,
   followPlaces,
@@ -374,6 +376,314 @@ test("followPlaces: which removed words bring a methods paragraph", () => {
   assert.deepEqual(methodsOf(at(4), rusty(4, filler.slice(0, 20))), [1, 2, 3]);
 });
 
+// A made-up load test of a footbridge: the comment changes how a quantity
+// is measured, in the methods only.
+const SURVEY = [
+  "Load test of the Mill Lane footbridge", // 0 heading
+  "Summary", // 1 heading
+  "Midspan deflection stayed small in every load test.", // 2 body
+  "Methods", // 3 heading
+  "Midspan deflection was read from a calibrated dial gauge under a static load.", // 4 methods
+  "Results", // 5 heading
+  "Loads were applied in four steps.", // 6 body
+  "The midspan deflection reached 4 mm at full load.", // 7 body
+  "Midspan deflection per load step is shown in Fig. 2.", // 8 body
+  "Figure legends", // 9 heading
+  "Figure 2. Deflection per load step.", // 10 caption
+  "References", // 11 heading
+  "Hale R. Midspan deflection of footbridges. J Span Eng. 2011.", // 12
+];
+const GAUGE = {
+  ref: "R2.1",
+  text: "How “midspan deflection” was measured is not clear (Fig. 2).",
+  changes: [change("R2.1-1", 4, "a calibrated dial gauge", "a laser level")],
+};
+
+test("followPlaces: a change in the methods brings the paragraphs that report the measurement", () => {
+  assert.deepEqual(
+    followPlaces(GAUGE, SURVEY).map((p) => [p.index, p.kind, p.why]),
+    [
+      [3, "heading", "heading above a changed paragraph"],
+      [10, "caption", "legend of Fig. 2"],
+      // The one that cites the figure the comment names first, then the
+      // order of the document. The reference list is no place.
+      [8, "body", "reports; cites Fig. 2"],
+      [2, "body", 'reports; also has "midspan deflection"'],
+      [7, "body", 'reports; also has "midspan deflection"'],
+    ],
+  );
+  // A change in the body only: the methods paragraph is listed as before,
+  // and no paragraph as one that reports.
+  const body = { ...GAUGE, changes: [change("R2.1-1", 7, "reached 4 mm", "stayed under 5 mm")] };
+  const places = followPlaces(body, SURVEY);
+  assert.deepEqual(indexes(places), [5, 10, 4, 6, 8]);
+  assert.ok(places.every((p) => !p.why.startsWith("reports")));
+  // The paragraphs this comment changed, and those where the author
+  // rejected a change of it, are not listed.
+  const more = {
+    ...GAUGE,
+    changes: [
+      ...GAUGE.changes,
+      change("R2.1-2", 2, "stayed small", "was small"),
+      change("R2.1-3", 7, "reached", "was", { state: "rejected" }),
+    ],
+  };
+  assert.deepEqual(indexes(followPlaces(more, SURVEY)), [1, 3, 10, 8]);
+});
+
+test("followPlaces: a withdrawn word of a methods change brings what reports it, unless it is everywhere", () => {
+  const texts = [
+    "Methods",
+    "Sag was read from a calibrated dial gauge.",
+    "Results",
+    "The calibrated readings agreed within 1 mm.",
+    "Sag grew with each load step.",
+    "17 / 0.4", // no letters: no place
+  ];
+  const c = {
+    ref: "R2.2",
+    text: "Nothing shows that the gauge was calibrated.",
+    changes: [
+      change("R2.2-1", 1, "a calibrated dial gauge", "a dial gauge", {
+        rationale: { why: "No record that it was calibrated.", addresses: "calibrated" },
+      }),
+    ],
+  };
+  assert.deepEqual(
+    followPlaces(c, texts).map((p) => [p.index, p.why]),
+    [
+      [0, "heading above a changed paragraph"],
+      [3, 'reports; also has "calibrated"'],
+    ],
+  );
+  // The word in more than three body or methods paragraphs: vocabulary.
+  const many = [...texts, "A calibrated scale.", "Calibrated rods held.", "No calibrated mark."];
+  assert.ok(!indexes(followPlaces(c, many)).includes(3));
+});
+
+test("followPlaces: the paragraphs that report stop at six, those that cite the figure first", () => {
+  const texts = [
+    "Methods",
+    "Midspan deflection was read from a dial gauge.",
+    "Results",
+    ...Array.from({ length: 8 }, (_, i) => `Midspan deflection of span ${i} was small.`),
+    "Midspan deflection of the last span is in Table 3.",
+  ];
+  const c = {
+    ref: "R2.3",
+    text: "Define “midspan deflection”.",
+    changes: [change("R2.3-1", 1, "a dial gauge (Table 3)", "a laser level (Table 3)")],
+  };
+  const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(indexes(got), [11, 3, 4, 5, 6, 7]);
+});
+
+// A made-up shelf survey of a library: the comment gets an insert in the
+// methods, which takes no word out, and names no term the results hold.
+test("followPlaces: a methods change brings the paragraphs that cite the figure it points to", () => {
+  const texts = [
+    "Methods", // 0 heading
+    "Shelf marks were read by two clerks.", // 1 methods
+    "Misfiled volumes were counted per aisle (Fig. 5).", // 2 methods
+    "Results", // 3 heading
+    "Most misfiled volumes stood in the east wing (Fig. 5B).", // 4 body
+    "Loans rose over the year (Fig. 4).", // 5 body
+    "The reading room was full on weekdays.", // 6 body
+    "Aisle counts and loan counts are given in Tables 2 and 3.", // 7 body
+    "Figure legends", // 8 heading
+    "Figure 5. Misfiled volumes per aisle.", // 9 caption
+    "Table 2. Aisle counts.", // 10 caption
+  ];
+  const insert = (index, find, text) => change("R3.1-1", index, find, text, { kind: "insert" });
+  // The changed methods paragraph cites the figure itself.
+  const c = {
+    ref: "R3.1",
+    text: "Say who counted.",
+    changes: [insert(2, "were counted", " by one clerk")],
+  };
+  assert.deepEqual(
+    followPlaces(c, texts).map((p) => [p.index, p.why]),
+    [
+      [0, "heading above a changed paragraph"],
+      [9, "legend of Fig. 5"],
+      [4, "reports; cites Fig. 5"],
+      [1, "same section as a changed paragraph"],
+    ],
+  );
+  // The figure is named by the comment, or by what the insert put in.
+  const byComment = {
+    ref: "R3.1",
+    text: "Say who counted the volumes of Table 2.",
+    changes: [insert(1, "two clerks", " in March")],
+  };
+  assert.deepEqual(
+    followPlaces(byComment, texts)
+      .filter((p) => p.why.startsWith("reports"))
+      .map((p) => [p.index, p.why]),
+    [[7, "reports; cites Table 2"]],
+  );
+  const byInsert = { ...c, changes: [insert(1, "two clerks", " (see Fig. 4)")] };
+  assert.deepEqual(
+    followPlaces(byInsert, texts)
+      .filter((p) => p.why.startsWith("reports"))
+      .map((p) => [p.index, p.why]),
+    [[5, "reports; cites Fig. 4"]],
+  );
+  // A change in the body only: no paragraph is listed as one that reports.
+  const body = { ...c, changes: [change("R3.1-1", 6, "was full", "was busy (Fig. 5)")] };
+  assert.ok(followPlaces(body, texts).every((p) => !p.why.startsWith("reports")));
+});
+
+test("followPlaces: direct terms precede incidental methods citations, six in all", () => {
+  const texts = [
+    "Methods",
+    "Misfiled volumes were counted per aisle (Fig. 5).",
+    "Results",
+    "A “recount” of aisle 1 gave the same number.",
+    ...Array.from({ length: 4 }, (_, i) => `Aisle ${i} is in Fig. 5.`),
+    "The recount of aisle 9 differed.",
+    ...Array.from({ length: 3 }, (_, i) => `Wing ${i} is in Fig. 5 too.`),
+  ];
+  const c = {
+    ref: "R3.2",
+    text: "Was there a “recount”?",
+    changes: [change("R3.2-1", 1, "were counted", " once", { kind: "insert" })],
+  };
+  const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(indexes(got), [3, 8, 4, 5, 6, 7]);
+  // With fewer citations, direct terms still come first.
+  const few = followPlaces(c, texts.slice(0, 9)).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(
+    few.map((p) => [p.index, p.why]),
+    [
+      [3, 'reports; also has "recount"'],
+      [8, 'reports; also has "recount"'],
+      [4, "reports; cites Fig. 5"],
+      [5, "reports; cites Fig. 5"],
+      [6, "reports; cites Fig. 5"],
+      [7, "reports; cites Fig. 5"],
+    ],
+  );
+});
+
+test("followPlaces: methods citations cannot starve direct measurement reports", () => {
+  const texts = [
+    "Methods",
+    "Midspan deflection was read using a dial gauge (Figs. 1-7).",
+    "Results",
+    ...Array.from(
+      { length: 7 },
+      (_, i) => `Coating coverage at pier ${i + 1} is shown in Fig. ${i + 1}.`,
+    ),
+    "Midspan deflection decreased under the static load.",
+    "Midspan deflection remained stable after unloading (Fig. 1).",
+    "The load response is shown in Fig. 9.",
+  ];
+  const c = {
+    ref: "R2.4",
+    text: "Define “midspan deflection” and clarify Fig. 9.",
+    changes: [change("R2.4-1", 1, "a dial gauge", "a calibrated dial gauge")],
+  };
+  const got = followPlaces(c, texts).filter((p) => p.why.startsWith("reports"));
+  assert.deepEqual(
+    got.map((p) => [p.index, p.why]),
+    [
+      [12, "reports; cites Fig. 9"],
+      [10, 'reports; also has "midspan deflection"'],
+      [11, 'reports; also has "midspan deflection"'],
+      [3, "reports; cites Fig. 1"],
+      [4, "reports; cites Fig. 2"],
+      [5, "reports; cites Fig. 3"],
+    ],
+  );
+});
+
+test("followPlaces: the paragraph an answered question names comes first", () => {
+  const q = (id, paragraph_id, answer) => ({ id, question: "?", why: "w", answer, paragraph_id });
+  const c = {
+    ...COMMENT,
+    questions: [
+      q("a1", "k11", "Two cables were retensioned."),
+      q("a2", "k9", ""), // not answered
+      q("a3", "k8", "Yes."), // already checked and changed
+      q("a4", "k99", "No."), // not in the manuscript
+      { id: "a5", question: "?", why: "w", answer: "Yes." }, // no place
+      q("a6", "k11", "Again."), // listed once
+    ],
+    follow_through: { seen_answer_ids: ["a3"] },
+  };
+  const got = followPlaces(c, PARAGRAPHS, IDS);
+  assert.deepEqual(
+    got.slice(0, 2).map((p) => [p.index, p.id, p.kind, p.why]),
+    [
+      [11, "k11", "body", "the author's answer to a1 goes here"],
+      [7, "k7", "heading", "heading above a changed paragraph"],
+    ],
+  );
+  assert.deepEqual(indexes(got), [11, 7, 13, 14, 16, 5, 9]);
+  // Without task pane ids a paragraph is named by its index.
+  const byIndex = { ...COMMENT, questions: [q("a1", "p11", "Two.")] };
+  assert.equal(followPlaces(byIndex, PARAGRAPHS)[0].index, 11);
+  // A place the answer names is one also where the author rejected a change
+  // of this comment: the answer came after.
+  const rejected = {
+    ...COMMENT,
+    changes: [...COMMENT.changes, change("R1.1-2", 9, "also held", "held", { state: "rejected" })],
+    questions: [q("a1", "k9", "It held for one winter.")],
+  };
+  assert.equal(followPlaces(rejected, PARAGRAPHS, IDS)[0].index, 9);
+  // No change in the document: the places the answers name are the only
+  // ones with unchecked answers, nothing else is looked for.
+  assert.deepEqual(
+    followPlaces({ ...c, changes: [] }, PARAGRAPHS, IDS).map((p) => [p.index, p.why, p.answer_ids]),
+    [[11, "the author's answer to a1 goes here", ["a1", "a6"]]],
+  );
+  assert.deepEqual(got[0].answer_ids, ["a1", "a6"]);
+  assert.deepEqual(got[1].answer_ids, []);
+  // An answer does not go into the reference list; a heading or a legend
+  // is a place like any other.
+  const list = {
+    ...COMMENT,
+    changes: [],
+    questions: [q("a1", "k19", "Okafor 2019."), q("a2", "k7", "Rust."), q("a3", "k13", "Cover.")],
+  };
+  assert.deepEqual(indexes(followPlaces(list, PARAGRAPHS, IDS)), [7, 13]);
+  assert.ok(
+    !indexes(followPlaces({ ...list, changes: COMMENT.changes }, PARAGRAPHS, IDS)).includes(19),
+  );
+});
+
+test("followState: an answer that names a place offers the check, also without a change and after a check", () => {
+  const snapshot = { paragraphs: PARAGRAPHS, ids: IDS };
+  const q = (id, paragraph_id, answer) => ({ id, question: "?", why: "w", answer, paragraph_id });
+  const bare = { ...COMMENT, changes: [] };
+  assert.equal(followState({ ...bare, questions: [q("a1", "k11", "")] }, snapshot).offer, null);
+  assert.equal(followState({ ...bare, questions: [q("a1", "k11", "Two.")] }, snapshot).offer, 1);
+  // The check ran for the changes there are, and saw the answer a1.
+  const ran = {
+    ...COMMENT,
+    questions: [q("a1", "k11", "Two.")],
+    follow_through: {
+      at: "2026-01-02T03:04:05.000Z",
+      candidate_ids: ["k11", "k7"],
+      change_ids: [],
+      questions: 0,
+      seen_change_ids: ["R1.1-1"],
+      seen_answer_ids: ["a1"],
+    },
+  };
+  assert.equal(followState(ran, snapshot).offer, null);
+  // A new answer reopens even a changed place, but not references or no place.
+  const more = (x) => followState({ ...ran, questions: [...ran.questions, x] }, snapshot).offer;
+  assert.ok(more(q("a2", "k9", "One winter.")) > 0);
+  assert.ok(more(q("a2", "k8", "Yes.")) > 0);
+  assert.equal(more(q("a2", "k19", "Okafor 2019.")), null);
+  assert.equal(more({ id: "a2", question: "?", why: "w", answer: "Yes." }), null);
+  // A check from before the field saw no answer.
+  const { seen_answer_ids, ...old } = ran.follow_through;
+  assert.ok(followState({ ...ran, follow_through: old }, snapshot).offer > 0);
+});
+
 test("followPlaces: no live change, no places; changed paragraphs are never places", () => {
   assert.deepEqual(followPlaces({ ...COMMENT, changes: [] }, PARAGRAPHS, IDS), []);
   const rejected = {
@@ -482,4 +792,181 @@ test("followState: the button is offered until the check ran, and again after a 
   assert.equal(followState(nothing, snapshot).line, "Other places checked: 6 (no change needed).");
   // A file from before the field: as if no check ran.
   assert.equal(followState({ ...COMMENT, follow_through: null }, snapshot).offer, 6);
+});
+
+for (const [name, paragraphs, sizes] of [
+  ["paragraph limit", Array.from({ length: 41 }, (_, i) => `Span ${i} held firm.`), [20, 20, 1]],
+  ["character limit", ["a".repeat(25000) + ".", "b".repeat(25000) + "."], [1, 1]],
+]) {
+  test(`followPlaces: checked answers do not starve later batches at the ${name}`, () => {
+    const ids = paragraphs.map((_, i) => `k${i}`);
+    const c = {
+      changes: [],
+      questions: ids.map((paragraph_id, i) => ({ id: `a${i + 1}`, paragraph_id, answer: "Yes." })),
+    };
+    const snapshot = { paragraphs, ids };
+    const checked = new Set();
+    for (const size of sizes) {
+      const before = structuredClone(c);
+      const places = followPlaces(c, paragraphs, ids);
+      assert.equal(places.length, size);
+      assert.equal(followState(c, snapshot).offer, size);
+      assert.ok(places.length <= MAX_PLACES);
+      assert.ok(places.reduce((n, p) => n + paragraphs[p.index].length, 0) <= MAX_CHARS);
+      assert.equal(new Set(places.map((p) => p.id)).size, places.length);
+      assert.deepEqual(c, before, "selection does not mutate checked history");
+      for (const p of places) {
+        assert.ok(!checked.has(p.id), "a checked answer must not consume another batch");
+        checked.add(p.id);
+      }
+      c.follow_through = {
+        candidate_ids: places.map((p) => p.id),
+        change_ids: [],
+        questions: 0,
+        seen_change_ids: [],
+        seen_answer_ids: [
+          ...(c.follow_through?.seen_answer_ids ?? []),
+          ...places.flatMap((p) => p.answer_ids),
+        ],
+      };
+    }
+    assert.equal(checked.size, ids.length);
+    assert.deepEqual(followPlaces(c, paragraphs, ids), []);
+    assert.equal(followState(c, snapshot).offer, null);
+  });
+}
+
+test("followPlaces: pending answers on a checked paragraph keep all its answer context once", () => {
+  const c = {
+    changes: [],
+    questions: [
+      { id: "a1", paragraph_id: "k2", answer: "One winter." },
+      { id: "a2", paragraph_id: "k2", answer: "Coating held." },
+      { id: "a3", paragraph_id: "k2", answer: "Inspection completed." },
+    ],
+    follow_through: { seen_answer_ids: ["a1", "a2"] },
+  };
+  const before = structuredClone(c);
+  const places = followPlaces(c, PARAGRAPHS, IDS, { maxPlaces: 1 });
+  assert.deepEqual(
+    places.map((p) => [p.id, p.answer_ids]),
+    [["k2", ["a1", "a2", "a3"]]],
+  );
+  assert.deepEqual(c, before);
+});
+
+test("followPlaces: answer progress leaves unrelated, unanswered and unavailable places out", () => {
+  const c = {
+    changes: [],
+    questions: [
+      { id: "checked", paragraph_id: "k11", answer: "Checked." },
+      { id: "empty", paragraph_id: "k2", answer: "" },
+      { id: "missing", paragraph_id: "gone", answer: "Missing." },
+      { id: "unplaced", answer: "No place." },
+      { id: "reference", paragraph_id: "k19", answer: "Reference." },
+      { id: "pending", paragraph_id: "k9", answer: "One winter." },
+    ],
+    follow_through: {
+      candidate_ids: ["k11"],
+      change_ids: [],
+      questions: 0,
+      seen_change_ids: [],
+      seen_answer_ids: ["checked"],
+    },
+  };
+  assert.deepEqual(indexes(followPlaces(c, PARAGRAPHS, IDS)), [9]);
+  const absent = IDS.map((id) => (id === "k9" ? "replacement" : id));
+  assert.deepEqual(followPlaces(c, PARAGRAPHS, absent), []);
+  assert.equal(followState(c, { paragraphs: PARAGRAPHS, ids: absent }).offer, null);
+  assert.equal(followState(c, { paragraphs: PARAGRAPHS, ids: IDS }).offer, 1);
+  assert.ok(!c.follow_through.seen_answer_ids.includes("pending"));
+});
+
+test("followPlaces: a checked answer can still be context for a live change", () => {
+  const c = {
+    ...COMMENT,
+    questions: [{ id: "a1", paragraph_id: "k9", answer: "One winter." }],
+    follow_through: { seen_answer_ids: ["a1"] },
+  };
+  const places = followPlaces(c, PARAGRAPHS, IDS);
+  assert.equal(places[0].id, "k7");
+  const section = places.filter((p) => p.id === "k9");
+  assert.equal(section.length, 1);
+  assert.equal(section[0].why, "same section as a changed paragraph");
+  assert.deepEqual(section[0].answer_ids, ["a1"]);
+});
+
+test("followPlaces: oversized unanswered checks stay reachable beside smaller change context", () => {
+  const paragraphs = ["Results", "A value was measured.", "x".repeat(MAX_CHARS) + "."];
+  const ids = ["k0", "k1", "k2"];
+  const c = {
+    ref: "R1.1",
+    text: "Clarify the value.",
+    changes: [change("R1.1-1", 1, "value", "measurement")],
+    questions: [{ id: "a1", paragraph_id: "k2", answer: "The measurement was verified." }],
+    follow_through: {
+      candidate_ids: ["k0"],
+      change_ids: [],
+      questions: 0,
+      seen_change_ids: ["R1.1-1"],
+      seen_answer_ids: [],
+    },
+  };
+  const snapshot = { paragraphs, ids };
+  const before = structuredClone(c);
+  assert.deepEqual(
+    followPlaces(c, paragraphs, ids).map((p) => p.id),
+    ["k2"],
+  );
+  assert.equal(followState(c, snapshot).offer, 1);
+  assert.deepEqual(c, before, "selection does not consume the pending answer");
+  c.follow_through.seen_answer_ids = ["a1"];
+  assert.equal(followState(c, snapshot).offer, null);
+  assert.ok(!followPlaces(c, paragraphs, ids).some((p) => p.id === "k2"));
+});
+
+test("followPlaces: mixed answer batches keep each oversized paragraph alone without losing progress", () => {
+  for (const lengths of [
+    [MAX_CHARS + 1, MAX_CHARS + 2, 20],
+    [20, MAX_CHARS + 1, 20],
+  ]) {
+    const paragraphs = [
+      "Results",
+      "A value was measured.",
+      ...lengths.map((n) => "x".repeat(n - 1) + "."),
+    ];
+    const ids = paragraphs.map((_, i) => `k${i}`);
+    const c = {
+      ref: "R1.1",
+      text: "Clarify the value.",
+      changes: [change("R1.1-1", 1, "value", "measurement")],
+      questions: lengths.map((_, i) => ({
+        id: `a${i}`,
+        paragraph_id: `k${i + 2}`,
+        answer: "Verified.",
+      })),
+    };
+    const snapshot = { paragraphs, ids };
+    const seen = new Set();
+    let batches = 0;
+    while (followState(c, snapshot).offer) {
+      assert.ok(++batches <= 3, "the remaining answers must make progress");
+      const places = followPlaces(c, paragraphs, ids);
+      assert.ok(places.length <= MAX_PLACES);
+      const oversized = places.filter((p) => paragraphs[p.index].length > MAX_CHARS);
+      if (oversized.length) assert.equal(places.length, 1, "oversized means standalone");
+      else assert.ok(places.reduce((n, p) => n + paragraphs[p.index].length, 0) <= MAX_CHARS);
+      const fresh = places.flatMap((p) => p.answer_ids).filter((id) => !seen.has(id));
+      assert.ok(fresh.length, "old change context must not consume an answer batch");
+      fresh.forEach((id) => seen.add(id));
+      c.follow_through = {
+        candidate_ids: places.map((p) => p.id),
+        change_ids: [],
+        questions: 0,
+        seen_change_ids: ["R1.1-1"],
+        seen_answer_ids: [...seen],
+      };
+    }
+    assert.equal(seen.size, 3);
+  }
 });

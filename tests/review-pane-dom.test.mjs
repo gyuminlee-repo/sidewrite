@@ -2785,14 +2785,36 @@ test("a comment card shows the questions for the author; Save answer sends the a
       { ...card([]), ref: "R1.2" },
     ],
     ledger: [],
+    snapshot: {
+      paragraphs: ["Catalogue", "Shelf marks were checked against the ledger by two clerks."],
+      ids: ["k0", "k1"],
+    },
   };
+  // The paragraph the answer of a2 would go into; a1 names none, and an id
+  // the manuscript no longer has shows nothing.
+  revision.comments[0].questions[1].paragraph_id = "k1";
+  revision.comments[0].questions.push({
+    id: "a3",
+    requirement_id: null,
+    question: "Which year?",
+    why: "Not said.",
+    answer: "2019",
+    answered_at: "2026-01-01T00:00:00Z",
+    paragraph_id: "gone",
+  });
   const t = await setup({ revision });
   const all = () => findAll(t.$("review-comments"), () => true);
   const texts = all().map((n) => n.textContent);
-  assert.equal(
-    texts.filter((x) => x === "Questions for the author").length,
-    1,
-    "only on the card that has some",
+  const where = all().filter(
+    (n) => n.attributes.class === "review-reqs-line review-question-place",
+  );
+  assert.equal(where.length, 1);
+  assert.equal(where[0].textContent, "Where the answer goes:");
+  assert.deepEqual(
+    findAll(where[0], (n) => /review-paragraph-link/.test(n.attributes.class ?? "")).map(
+      (n) => n.textContent,
+    ),
+    ["Catalogue: \u201cShelf marks were checked against the ledger by...\u201d"],
   );
   assert.ok(texts.includes("a1 (q1): Which run time is right?"));
   assert.ok(texts.includes("Why it is asked: Two values."));
@@ -2800,7 +2822,7 @@ test("a comment card shows the questions for the author; Save answer sends the a
   const answers = () => all().filter((n) => n.attributes.class === "review-answer");
   assert.deepEqual(
     answers().map((n) => n.value),
-    ["", "12"],
+    ["", "12", "2019"],
   );
   typeInto(answers()[0], "3,020 hours.");
   // The pane is told a question was noted: it loads again, the draft stays.

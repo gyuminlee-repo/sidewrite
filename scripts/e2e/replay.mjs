@@ -10,7 +10,7 @@
 //     [--model opus] [--writing-model <alias>] [--judgment-model <alias>] \
 //     [--only R1.1,R2.3] [--instructions <txt>] [--forbid <txt>] \
 //     [--draft-responses] [--turn-minutes 10] [--repair] [--rewrite-stacked]
-//     [--follow-through]
+//     [--follow-through] [--answers <json>]
 //
 // Before the run, a Word of its own is asked whether it opens the copy the
 // run will use (the add-in tagged on) as it is. A file Word wants to repair
@@ -27,6 +27,12 @@
 // paragraph check every comment whose card offers "Check other places" gets
 // that turn: the places its changes did not touch (the heading above, the
 // legends of the figures cited, the methods, the rest of the section).
+// With --answers <json> ({ "<ref>": "<answer text>", ... }), after the turns
+// of the comments and before the follow-through turns every comment of the
+// file that has open questions gets them answered as the author would on
+// its card (each with the answer of its ref), and then its turn once more.
+// The file is only read; an answer is written to the review file by the
+// pane and to no report.
 //
 // The manuscript and the review are only read. Everything is written to a
 // new folder <base-dir>/replay-<UTC time>/:
@@ -43,6 +49,9 @@
 //                                the run: paragraphs with two or more
 //                                changes and what the model found in them
 //   responses.json               with --draft-responses: answers and quotes
+//   replies.json                 the answer of the model in each turn
+//                                (of a comment, after answers, follow-through,
+//                                rewrite), for reading the run afterwards
 //   summary.txt                  counts and times
 //   result.json, daemon.log      every step as the pane showed it; the log
 // The text of the manuscript is in these files and nowhere else: nothing of
@@ -51,10 +60,14 @@
 // Runs from WSL; Word, its pane and COM are on Windows, as run-acceptance.mjs
 // (the same Windows scripts, the same rules: only the Word this run started
 // is closed, the resident daemon is stopped for the run and started again).
-// A turn that fails or runs out of time does not end the run.
+// A turn that fails or runs out of time does not end the run. One that ends
+// on the usage limit of the account does: no further turn is started, the
+// steps that need the model are passed over, the copy is saved and the
+// reports are written (summary.txt: "stopped: usage limit reached at ...").
 // Exit code: 0 when the flow ran to its end, the copy was saved and the
 // pane's line names no other model than the one asked for without a reason,
-// else 1; 2 for bad arguments.
+// else 1; 2 for bad arguments; 3 for a usage stop with the copy saved and
+// cleanup complete. A save or cleanup failure still returns 1.
 
 import { spawn, execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -72,6 +85,12 @@ import {
   keepRefPattern,
   ledgerFromLines,
   modelFailures,
+  answeredOf,
+  limitStop,
+  replayExitCode,
+  answerPlan,
+  parseAnswers,
+  replyRow,
   parseOnly,
   responsesReport,
   restoredFromLog,
@@ -116,6 +135,10 @@ const { values: opt } = parseArgs({
     // After the turns of the comments: a second turn for every comment whose
     // changes left other places to check ("Check other places").
     "follow-through": { type: "boolean", default: false },
+    // What the author answers when asked: a JSON file { "<ref>": "<text>" }.
+    // After the turns of the comments their open questions get these
+    // answers, and each such comment its turn again.
+    answers: { type: "string" },
     // The longest one review turn may take.
     "turn-minutes": { type: "string", default: "10" },
     manifest: { type: "string", default: path.join(REPO, "manifests/word.xml") },
@@ -135,14 +158,26 @@ const die = (m) => {
 };
 for (const name of ["manuscript", "review", "base-dir", "playwright-core"])
   if (!opt[name]) die(`--${name} is required`);
-for (const name of ["manuscript", "review", "instructions", "forbid"])
+for (const name of ["manuscript", "review", "instructions", "forbid", "answers"])
   if (opt[name] && !fs.existsSync(opt[name])) die(`--${name}: no such file`);
 if (!/\.docx$/i.test(opt.manuscript)) die("--manuscript takes a .docx file");
 const TURN_MS = Number(opt["turn-minutes"]) * 60_000;
 if (!(TURN_MS > 0)) die("--turn-minutes takes a number of minutes");
 let ONLY;
+// The refs that have an answer in the file of --answers. The answers are
+// read here only to check the file; the pane step reads it for itself.
+let ANSWERS = null;
 try {
   ONLY = parseOnly(opt.only);
+  if (opt.answers) {
+    let json;
+    try {
+      json = JSON.parse(fs.readFileSync(opt.answers, "utf8"));
+    } catch {
+      throw new Error("--answers: the file is not JSON");
+    }
+    ANSWERS = Object.fromEntries(Object.keys(parseAnswers(json)).map((ref) => [ref, true]));
+  }
 } catch (e) {
   die(e.message);
 }
@@ -544,17 +579,27 @@ let modelsLine = "";
 const rewriteTurns = [];
 // The turns of --follow-through.
 const followTurns = [];
+// --answers: the questions answered per comment, and its turn after them.
+const answered = {};
+const answerTurns = {};
+// The answer of the model in each turn (replies.json).
+const replies = [];
 let lastTurn = null;
+// The turn that ended on the usage limit (replay-lib.mjs limitStop): no turn
+// is started after it.
+let stopped = null;
 // A model other than the one asked for, with no reason in the pane's line
 // (replay-lib.mjs modelFailures).
 const otherModel = () => modelFailures(modelsLine, lastTurn).length > 0;
 
 // One review turn through the pane: the step, its part of the daemon log,
-// and what the pane says the edits ran on right after it.
-function runTurn(ref, label, step) {
+// and what the pane says the edits ran on right after it. kind: what turn
+// it is, for replies.json (replay-lib.mjs REPLY_KINDS).
+function runTurn(ref, label, kind, step) {
   const at = readLog().length;
   const t0 = Date.now();
   const done = note(label, step());
+  replies.push(replyRow(ref, kind, done));
   if (done.ok === false) note(`stop-turn ${ref}`, pane("stop-turn", { wait_ms: 120_000 }));
   const log = readLog();
   lastTurn = turnResult(ref, {
@@ -564,17 +609,22 @@ function runTurn(ref, label, step) {
     model: turnFromLog(log, ref).model,
     line: pane("models-line").line ?? null,
   });
+  stopped ??= limitStop(ref, kind, lastTurn);
+  if (stopped) {
+    record.stopped = stopped;
+    save();
+  }
   return lastTurn;
 }
 
 // The turn of a comment, or its follow-through turn: one that ended on an
 // API error is run once more after a minute (replay-lib.mjs retryTurn). The
 // entry keeps how each try ended (mergeAttempts).
-async function proposeTurn(ref, label, step) {
-  const attempts = [runTurn(ref, label, step)];
+async function proposeTurn(ref, label, kind, step) {
+  const attempts = [runTurn(ref, label, kind, step)];
   while (retryTurn(attempts)) {
     await sleep(60_000);
-    attempts.push(runTurn(ref, `${label} (again after an API error)`, step));
+    attempts.push(runTurn(ref, `${label} (again after an API error)`, kind, step));
   }
   return mergeAttempts(attempts);
 }
@@ -618,7 +668,8 @@ async function main() {
   // One turn per comment, in order. A turn that fails or runs out of time is
   // written down and the next comment goes on.
   for (const ref of refs) {
-    turns[ref] = await proposeTurn(ref, `propose ${ref}`, () =>
+    if (stopped) break;
+    turns[ref] = await proposeTurn(ref, `propose ${ref}`, "ordinary", () =>
       pane("propose", { ref }, TURN_MS + 3 * 60_000),
     );
     record.turns = turns;
@@ -626,7 +677,37 @@ async function main() {
     console.log(`      ${ref}: ${turns[ref].outcome}, ${turns[ref].seconds} s`);
   }
   note("refresh", pane("refresh"));
-  if (opt["follow-through"]) {
+  if (ANSWERS && !stopped) {
+    // The comments of the file that now have open questions, by the review
+    // file of that refresh: their questions are answered on the card, then
+    // the comment gets its turn again, with the answers in its prompt. A ref
+    // of the file without an open question is named and passed over.
+    const plan = answerPlan(readRevision(), ANSWERS, refs);
+    record.answers = { due: plan.due, skipped: plan.skipped };
+    save();
+    for (const s of plan.skipped) console.log(`      answers ${s.ref}: skipped, ${s.reason}`);
+    for (const { ref, open } of plan.due) {
+      if (stopped) break;
+      note(
+        `answer-questions ${ref}`,
+        pane("answer-questions", { ref, answers_file: winPath(path.resolve(opt.answers)) }),
+      );
+      // What the review file now holds, whatever the step said: no turn
+      // after a step that saved nothing.
+      answered[ref] = answeredOf(readRevision(), ref, open);
+      if (!answered[ref]) continue;
+      answerTurns[ref] = await proposeTurn(ref, `propose ${ref} (after answers)`, "answer", () =>
+        pane("propose", { ref }, TURN_MS + 3 * 60_000),
+      );
+      record.answer_turns = answerTurns;
+      save();
+      console.log(
+        `      ${ref} after ${answered[ref]} answers: ${answerTurns[ref].outcome}, ${answerTurns[ref].seconds} s`,
+      );
+    }
+    if (Object.keys(answerTurns).length) note("refresh", pane("refresh"));
+  }
+  if (opt["follow-through"] && !stopped) {
     // The comments whose card now offers the check, by the rule of the card
     // (follow-places.js followState) on the review file of that refresh.
     const rev = readRevision();
@@ -638,7 +719,8 @@ async function main() {
         ).offer,
     );
     for (const ref of due) {
-      const turn = await proposeTurn(ref, `follow-through ${ref}`, () =>
+      if (stopped) break;
+      const turn = await proposeTurn(ref, `follow-through ${ref}`, "follow-through", () =>
         pane("follow-through", { ref }, TURN_MS + 3 * 60_000),
       );
       followTurns.push({ ref, ...turn });
@@ -650,15 +732,16 @@ async function main() {
   }
   // The paragraphs that now hold two or more changes, read once more by the
   // model of the edits. Its result is in revision.json (consistency).
-  note("check-paragraphs", pane("check-paragraphs", {}, 25 * 60_000));
-  if (opt["rewrite-stacked"]) {
+  if (!stopped) note("check-paragraphs", pane("check-paragraphs", {}, 25 * 60_000));
+  if (opt["rewrite-stacked"] && !stopped) {
     // The buttons stand in the order of these lines (review-pane.js draws
     // them from the same list), and a rewrite does not change the list: the
     // check is not run again.
     const stacked = consistencyLines(readRevision()?.consistency).filter((l) => l.rewrite_ref);
     for (const [nth, line] of stacked.entries()) {
+      if (stopped) break;
       const ref = line.rewrite_ref;
-      const turn = runTurn(ref, `rewrite ${ref} p${line.paragraph_index}`, () =>
+      const turn = runTurn(ref, `rewrite ${ref} p${line.paragraph_index}`, "rewrite", () =>
         pane("rewrite-paragraph", { nth }, TURN_MS + 3 * 60_000),
       );
       rewriteTurns.push({ ref, paragraph_index: line.paragraph_index, ...turn });
@@ -671,7 +754,7 @@ async function main() {
     if (stacked.length) note("refresh", pane("refresh"));
   }
 
-  if (opt["draft-responses"]) {
+  if (opt["draft-responses"] && !stopped) {
     const opened = note("open-response", pane("open-response"));
     if (opened.ok !== false) {
       const r = note(
@@ -701,10 +784,14 @@ const readRevision = () =>
 function writeReports(headings = []) {
   const revision = readRevision();
   if (!revision) return;
-  const report = changesReport(revision, headings, turns, rewriteTurns, followTurns);
+  const report = changesReport(revision, headings, turns, rewriteTurns, followTurns, {
+    answered,
+    turns: answerTurns,
+  });
   const log = readLog();
   const out = (name, text) => fs.writeFileSync(path.join(RUN, name), text);
   out("changes.json", JSON.stringify(report, null, 2));
+  out("replies.json", JSON.stringify(replies, null, 2));
   out(
     "paragraph_check.json",
     JSON.stringify(
@@ -734,6 +821,7 @@ function writeReports(headings = []) {
       stays: staysFromLog(log),
       restored: restoredFromLog(log),
       lastTurn,
+      stopped,
       responses: opt["draft-responses"] ? (drafted ?? 0) : null,
     }),
   );
@@ -769,4 +857,6 @@ if (fs.existsSync(RUN)) save();
 const summary = path.join(RUN, "summary.txt");
 if (fs.existsSync(summary)) console.log(`\n${fs.readFileSync(summary, "utf8")}`);
 console.log(`run folder: ${RUN}`);
-process.exit(!failed && saved && !otherModel() && !record.cleanup.failed ? 0 : 1);
+process.exit(
+  replayExitCode({ failed, stopped, saved, otherModel: otherModel(), cleanup: record.cleanup }),
+);
