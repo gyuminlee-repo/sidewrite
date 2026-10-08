@@ -153,3 +153,19 @@ test("legacy PowerShell task source contract: root task, current user, exact sin
   assert.equal(ps.match(/^\s*Remove-LegacyTask$/gm).length, 2, "install and remove");
   assert.ok(ps.lastIndexOf("Remove-LegacyTask") > ps.indexOf("Start-ScheduledTask"));
 });
+
+test("legacy PowerShell migration requires the exact replacement registration before cleanup", async () => {
+  // Source-contract regression only; this does not execute PowerShell or
+  // touch a Windows registry. A non-null stale/wrong-type value must not
+  // let install retire the known-good Draftspect registration.
+  const ps = await read("scripts/install/register-addin.ps1");
+  const guard = ps.slice(ps.indexOf("$replacementKey ="));
+  assert.match(guard, /^\$replacementKey = Get-Item -LiteralPath \$keyPath/);
+  assert.match(guard, /GetValueKind\(\$dst\) -ne \[Microsoft\.Win32\.RegistryValueKind\]::String/);
+  assert.match(guard, /-or\s*\(\$replacementKey\.GetValue\(\$dst, \$null\) -ne \$dst\)/);
+  assert.match(guard, /throw "Preserved an unexpected Sidewrite registration/);
+  assert.ok(guard.indexOf("throw ") < guard.indexOf("Remove-LegacyManifest"));
+  assert.ok(ps.indexOf("$replacementKey =") > ps.indexOf("Set-ItemProperty"));
+  assert.doesNotMatch(guard, /Set-ItemProperty|Remove-ItemProperty/);
+  assert.match(ps, /\$ErrorActionPreference = "Stop"/);
+});
