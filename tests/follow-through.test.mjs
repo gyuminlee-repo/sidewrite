@@ -878,3 +878,81 @@ test("the end of a follow-through turn: one log line, and the comment says the c
     await t.cleanup();
   }
 });
+
+for (const [name, paragraphs, firstSize] of [
+  ["paragraph limit", Array.from({ length: 21 }, (_, i) => `Span ${i} held firm.`), 20],
+  ["character limit", ["a".repeat(25000) + ".", "b".repeat(25000) + "."], 1],
+]) {
+  test(`answer batches: no-change turns reach the remaining answer after the ${name}`, async () => {
+    const t = await setup(paragraphs);
+    try {
+      for (let i = 0; i < paragraphs.length; i++) await answerAt(t, `Detail ${i}.`, `p${i}`);
+      const first = await startFollow(t);
+      assert.equal(first.follow.candidate_ids.length, firstSize);
+      await t.turnDone(first, { ok: true, text: "No change needed." });
+      const before = await t.load();
+      assert.equal(followState(before.comments[0], before.snapshot).offer, 1);
+      const second = await startFollow(t);
+      assert.deepEqual(second.follow.candidate_ids, [`p${firstSize}`]);
+      assert.deepEqual(
+        second.follow.answers.map((a) => a.id),
+        [`a${firstSize + 1}`],
+      );
+      await t.turnDone(second, { ok: true, text: "No change needed." });
+      const done = await t.load();
+      assert.equal(done.comments[0].follow_through.seen_answer_ids.length, paragraphs.length);
+      assert.equal(followState(done.comments[0], done.snapshot).offer, null);
+      assert.deepEqual(followPlan(done, "R1.1").candidates, []);
+      assert.deepEqual(done.comments[0].changes, []);
+      assert.deepEqual(done.comments[1], before.comments[1], "other comments keep their state");
+      const repeat = await t.ask("review_propose", {
+        ref: "R1.1",
+        paragraphs: [],
+        follow_through: true,
+      });
+      assert.equal(repeat.ok, false);
+      assert.equal(t.pushed.length, 2, "finished answer-only checks do not enqueue another turn");
+    } finally {
+      await t.cleanup();
+    }
+  });
+}
+
+test("answer batches: changed and newly saved answers during the next batch remain pending", async () => {
+  const paragraphs = Array.from({ length: 21 }, (_, i) => `Span ${i} held firm.`);
+  const t = await setup(paragraphs);
+  try {
+    for (let i = 0; i < paragraphs.length; i++) await answerAt(t, `Detail ${i}.`, `p${i}`);
+    await t.turnDone(await startFollow(t), { ok: true, text: "No change needed." });
+    const second = await startFollow(t);
+    assert.deepEqual(second.follow.candidate_ids, ["p20"]);
+    const saved = await t.ask("review_question_answer", {
+      ref: "R1.1",
+      id: "a1",
+      answer: "Revised detail.",
+    });
+    assert.equal(saved.ok, true, saved.error);
+    await answerAt(t, "Another detail.", "p20");
+    await t.turnDone(second, { ok: true, text: "Checked earlier answers." });
+    const pending = await t.load();
+    assert.deepEqual(
+      pending.comments[0].follow_through.seen_answer_ids,
+      Array.from({ length: 20 }, (_, i) => `a${i + 2}`),
+    );
+    assert.equal(followState(pending.comments[0], pending.snapshot).offer, 2);
+    const last = await startFollow(t);
+    assert.deepEqual(last.follow.candidate_ids, ["p0", "p20"]);
+    assert.deepEqual(
+      last.follow.answers.map((a) => a.id),
+      ["a1", "a21", "a22"],
+    );
+    assert.ok(t.pushed.at(-1).text.includes("Answer: Revised detail."));
+    await t.turnDone(last, { ok: true, text: "No change needed." });
+    const done = await t.load();
+    assert.equal(done.comments[0].follow_through.seen_answer_ids.length, 22);
+    assert.equal(followState(done.comments[0], done.snapshot).offer, null);
+    assert.deepEqual(done.comments[0].changes, []);
+  } finally {
+    await t.cleanup();
+  }
+});
