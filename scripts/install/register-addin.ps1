@@ -114,4 +114,11 @@ if (Test-Registered) {
 }
 # Register the replacement first; a failed copy/registration leaves the old
 # add-in usable. Only this host's exact old manifest and value are removed.
+# An existing value is not proof that it points to this replacement. Preserve
+# unrelated values and the working legacy registration rather than guessing.
+$replacementKey = Get-Item -LiteralPath $keyPath
+if (($replacementKey.GetValueKind($dst) -ne [Microsoft.Win32.RegistryValueKind]::String) -or
+    ($replacementKey.GetValue($dst, $null) -ne $dst)) {
+  throw "Preserved an unexpected Sidewrite registration at $dst; correct it before retiring Draftspect."
+}
 Remove-LegacyManifest
