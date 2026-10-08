@@ -8,7 +8,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { followNote, followPlan } from "../daemon/paragraph-check.mjs";
-import { followState } from "../taskpane/shared/follow-places.js";
+import { followState, MAX_CHARS } from "../taskpane/shared/follow-places.js";
 import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit, applyTrackedRewrite, askAuthor } from "../daemon/review-tools.mjs";
 import {
@@ -952,6 +952,37 @@ test("answer batches: changed and newly saved answers during the next batch rema
     assert.equal(done.comments[0].follow_through.seen_answer_ids.length, 22);
     assert.equal(followState(done.comments[0], done.snapshot).offer, null);
     assert.deepEqual(done.comments[0].changes, []);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("answer batches: an oversized answer reaches the turn beside live-change context", async () => {
+  const long = "The coating held. ".repeat(Math.ceil(MAX_CHARS / 18) + 1).trimEnd();
+  assert.ok(long.length > MAX_CHARS);
+  const t = await setup(PARAGRAPHS.map((text, i) => (i === 2 ? long : text)));
+  try {
+    assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+    const id = await answerAt(t, "The coating was inspected.", "p2");
+    const before = await t.load();
+    const plan = followPlan(before, "R1.1");
+    assert.deepEqual(
+      plan.candidates.map((p) => p.id),
+      ["p2"],
+    );
+    assert.equal(plan.candidates[0].text, long, "the oversized paragraph is not truncated");
+    const turn = await startFollow(t);
+    assert.deepEqual(turn.follow.candidate_ids, ["p2"]);
+    assert.deepEqual(
+      turn.follow.answers.map((a) => a.id),
+      [id],
+    );
+    await t.turnDone(turn, { ok: true, text: "No change needed." });
+    const done = await t.load();
+    assert.deepEqual(done.comments[0].follow_through.seen_answer_ids, [id]);
+    assert.equal(followState(done.comments[0], done.snapshot).offer, null);
+    assert.deepEqual(done.comments[0].changes, before.comments[0].changes);
+    assert.deepEqual(done.comments[1], before.comments[1]);
   } finally {
     await t.cleanup();
   }

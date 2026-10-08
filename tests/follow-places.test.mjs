@@ -895,3 +895,78 @@ test("followPlaces: a checked answer can still be context for a live change", ()
   assert.equal(section[0].why, "same section as a changed paragraph");
   assert.deepEqual(section[0].answer_ids, ["a1"]);
 });
+
+test("followPlaces: oversized unanswered checks stay reachable beside smaller change context", () => {
+  const paragraphs = ["Results", "A value was measured.", "x".repeat(MAX_CHARS) + "."];
+  const ids = ["k0", "k1", "k2"];
+  const c = {
+    ref: "R1.1",
+    text: "Clarify the value.",
+    changes: [change("R1.1-1", 1, "value", "measurement")],
+    questions: [{ id: "a1", paragraph_id: "k2", answer: "The measurement was verified." }],
+    follow_through: {
+      candidate_ids: ["k0"],
+      change_ids: [],
+      questions: 0,
+      seen_change_ids: ["R1.1-1"],
+      seen_answer_ids: [],
+    },
+  };
+  const snapshot = { paragraphs, ids };
+  const before = structuredClone(c);
+  assert.deepEqual(
+    followPlaces(c, paragraphs, ids).map((p) => p.id),
+    ["k2"],
+  );
+  assert.equal(followState(c, snapshot).offer, 1);
+  assert.deepEqual(c, before, "selection does not consume the pending answer");
+  c.follow_through.seen_answer_ids = ["a1"];
+  assert.equal(followState(c, snapshot).offer, null);
+  assert.ok(!followPlaces(c, paragraphs, ids).some((p) => p.id === "k2"));
+});
+
+test("followPlaces: mixed answer batches keep each oversized paragraph alone without losing progress", () => {
+  for (const lengths of [
+    [MAX_CHARS + 1, MAX_CHARS + 2, 20],
+    [20, MAX_CHARS + 1, 20],
+  ]) {
+    const paragraphs = [
+      "Results",
+      "A value was measured.",
+      ...lengths.map((n) => "x".repeat(n - 1) + "."),
+    ];
+    const ids = paragraphs.map((_, i) => `k${i}`);
+    const c = {
+      ref: "R1.1",
+      text: "Clarify the value.",
+      changes: [change("R1.1-1", 1, "value", "measurement")],
+      questions: lengths.map((_, i) => ({
+        id: `a${i}`,
+        paragraph_id: `k${i + 2}`,
+        answer: "Verified.",
+      })),
+    };
+    const snapshot = { paragraphs, ids };
+    const seen = new Set();
+    let batches = 0;
+    while (followState(c, snapshot).offer) {
+      assert.ok(++batches <= 3, "the remaining answers must make progress");
+      const places = followPlaces(c, paragraphs, ids);
+      assert.ok(places.length <= MAX_PLACES);
+      const oversized = places.filter((p) => paragraphs[p.index].length > MAX_CHARS);
+      if (oversized.length) assert.equal(places.length, 1, "oversized means standalone");
+      else assert.ok(places.reduce((n, p) => n + paragraphs[p.index].length, 0) <= MAX_CHARS);
+      const fresh = places.flatMap((p) => p.answer_ids).filter((id) => !seen.has(id));
+      assert.ok(fresh.length, "old change context must not consume an answer batch");
+      fresh.forEach((id) => seen.add(id));
+      c.follow_through = {
+        candidate_ids: places.map((p) => p.id),
+        change_ids: [],
+        questions: 0,
+        seen_change_ids: ["R1.1-1"],
+        seen_answer_ids: [...seen],
+      };
+    }
+    assert.equal(seen.size, 3);
+  }
+});
