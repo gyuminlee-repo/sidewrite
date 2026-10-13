@@ -592,6 +592,52 @@ test("isolation: a page load of the run's own document passes, one of another do
   assert.equal(J.foreignLogLines(["[review] edit /home/u/b.docx"], own).length, 1);
 });
 
+// The run of 2026-10-13: five tabs the figures button of earlier runs left
+// open in the user's browser loaded their page again.
+test("isolation: page loads from tabs of earlier runs are counted, every other foreign line fails", () => {
+  const own = ["D:\\test-root\\run\\e2e-6", "/mnt/d/test-root/run/e2e-6"];
+  const line = (doc) =>
+    `[figures] page GET doc=${JSON.stringify(doc)} ref=null ua=${JSON.stringify("Mozilla/5.0 Edg/154.0")}`;
+  const tabs = [1, 2, 3, 4, 5].map((n) =>
+    line(`D:\\test-root\\run\\e2e-${n}\\review_manuscript.docx`),
+  );
+  const five = J.isolationRow(tabs, own);
+  assert.deepEqual([five.result, five.stale.length, five.foreign.length], ["PASS", 5, 0]);
+  assert.match(
+    five.got,
+    /; 5 page loads from tabs of earlier runs \(e2e-1, e2e-2, e2e-3, e2e-4, e2e-5\)$/,
+  );
+  assert.deepEqual(J.isolationRow([], own).got, "only hello lines name other documents");
+  // A replay folder of the same base, and the WSL form of the path.
+  for (const doc of ["D:\\test-root\\run\\replay-2\\a.docx", "/mnt/d/test-root/run/e2e-2/a.docx"])
+    assert.equal(J.isolationRow([line(doc)], own).result, "PASS", doc);
+  // Any other line on a document of an earlier run fails, also among the
+  // page loads, and it is the line the row shows.
+  for (const other of [
+    "[review] edit D:\\test-root\\run\\e2e-2\\review_manuscript.docx",
+    "[tool] office_tracked_edit doc=D:\\test-root\\run\\e2e-2\\review_manuscript.docx",
+    "[agent] turn doc=D:\\test-root\\run\\e2e-2\\review_manuscript.docx session=a asked=- (started)",
+    "[figures] wrote D:\\test-root\\run\\e2e-2\\figures\\a.png for review_manuscript.docx",
+    // A page load of a document outside the base folder, or not in a run
+    // folder of it, or reached through "..".
+    line("D:\\Users\\me\\paper.docx"),
+    line("D:\\test-root\\other\\e2e-2\\review_manuscript.docx"),
+    line("D:\\test-root\\run\\notes\\review_manuscript.docx"),
+    line("D:\\test-root\\run\\review_manuscript.docx"),
+    line("D:\\test-root\\run\\e2e-2\\..\\..\\..\\Users\\me\\paper.docx"),
+    line("D:\\test-root\\run-2\\e2e-2\\review_manuscript.docx"),
+    // Not the line figure-http.mjs writes: something follows it.
+    `${line("D:\\test-root\\run\\e2e-2\\a.docx")} edit D:\\Users\\me\\paper.docx`,
+  ]) {
+    const row = J.isolationRow([...tabs, other], own);
+    assert.deepEqual([row.result, row.got, row.stale.length], ["FAIL", other, 5], other);
+  }
+  // foreignLogLines itself still names them all.
+  assert.equal(J.foreignLogLines(tabs, own).length, 5);
+  const runner = read("../scripts/e2e/run-acceptance.mjs");
+  assert.ok(runner.includes("isolationRow(lines, own, bare)"));
+});
+
 test("runner: after Check now and the figures button the Response tab is shown again before S3-39", () => {
   const runner = read("../scripts/e2e/run-acceptance.mjs");
   const s3 = runner.slice(

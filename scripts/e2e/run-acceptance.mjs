@@ -59,7 +59,7 @@ import {
   modelsEvidence,
   norm,
   ollamaSplitEvidence,
-  foreignLogLines,
+  isolationRow,
   PARTS_SEED_RULE,
   partsBeforeJoin,
   partsBoth,
@@ -97,6 +97,10 @@ import {
   trackedPlaced,
   trackedProbeMatch,
   plainWordOf,
+  plainPairOf,
+  trackedCuts,
+  trackedCutApply,
+  trackedCutsMatch,
   table,
 } from "./judge.mjs";
 import {
@@ -125,6 +129,9 @@ const OUTSIDE_SENTENCE =
   "Across the replicates the plateau optical density ranged from 0.82 to 0.91.";
 // The author's own tracked insertion next to the R1.4 change (siblingMatch).
 const HAND_INSERT = "Checked: ";
+// A second one between two plain words of that paragraph, there only while
+// the cuts over it are probed (trackedCutsMatch).
+const MID_INSERT = "Proofread ";
 const R13_REQUIREMENTS = [
   "say how growth was followed",
   "describe the synthetic carbon source as a novel substrate",
@@ -1101,11 +1108,63 @@ async function main() {
       : { threw: hand.ok ? "no plain word next to the R1.4 change" : "no tracked insertion" };
   record.word.probe_tracked_at = probe;
   const probed = trackedProbeMatch(probe, HAND_INSERT);
+  // Cuts that contain or cross an insertion of the author, which the one at
+  // the start of the paragraph cannot show (nothing stands before it): a
+  // second one goes between two plain words, the pane's insertionAround
+  // reads three cuts over it, one deletion of the containing cut is sent as
+  // the daemon sends it, and the insertion is rejected again, so that the
+  // steps below find the paragraph as they did before.
+  const pair = plainPairOf(r14Change, `${HAND_INSERT} ${MID_INSERT}`);
+  let cut = {
+    threw: !probed.pass
+      ? "the insertion at the start was not read as expected"
+      : "no two plain words in the paragraph of the R1.4 change",
+  };
+  if (probed.pass && pair) {
+    // The second insertion is taken out again whatever a step answers.
+    const tried = (f) => {
+      try {
+        return f();
+      } catch (e) {
+        return { ok: false, error: firstLine(e) };
+      }
+    };
+    const mid = tried(() =>
+      com("hand-insert", [
+        "-PlanJson",
+        winPath(planFile),
+        "-ChangeId",
+        r14.change_id,
+        "-Text",
+        MID_INSERT,
+        "-After",
+        `${pair.left} `,
+      ]),
+    );
+    cut = { threw: `second insertion: ${mid.error}` };
+    if (mid.ok) {
+      const find_inside = HAND_INSERT.trim().replace(/:$/, "");
+      const cuts = trackedCuts(pair, MID_INSERT);
+      cut = tried(() => pane("probe-tracked-cuts", { find_inside, cuts }));
+      if (cut.cuts) {
+        const args = trackedCutApply(r14Change, cuts.contains, cut);
+        const step = tried(() => pane("tracked-edit-direct", { args }));
+        cut.apply = {
+          result: step.result ?? null,
+          threw: step.threw ?? step.error ?? null,
+          after: tried(() => pane("probe-tracked-cuts", { find_inside })),
+        };
+      }
+      cut.undone = tried(() => com("hand-reject", ["-Text", MID_INSERT]));
+    }
+  }
+  record.word.probe_tracked_cuts = cut;
+  const cutsRead = trackedCutsMatch(cut);
   rows.push({
     step: "word: tracked insertion seen by the pane",
-    result: probed.pass ? "PASS" : "FAIL",
-    expect: probed.expect,
-    got: probed.got,
+    result: probed.pass && cutsRead.pass ? "PASS" : "FAIL",
+    expect: `${probed.expect}; ${cutsRead.expect}`,
+    got: `${probed.got}; cuts: ${cutsRead.got}`,
   });
   const applied = com("apply", ["-PlanJson", winPath(planFile)]);
   record.word.apply = applied;
@@ -3023,13 +3082,16 @@ function isolationCheck() {
     STAGE === "resident"
       ? residentLogText().split("\n")
       : [LOG, KNOB_LOG].flatMap((f) => readLog(f).split("\n"));
-  const foreign = foreignLogLines(lines, own, bare);
-  record.isolation = { foreign_lines: foreign.slice(0, 20), count: foreign.length };
-  rows.push({
-    step: "no tool call on other documents",
-    result: foreign.length ? "FAIL" : "PASS",
-    got: foreign.length ? foreign[0] : "only hello lines name other documents",
-  });
+  // A tab the figures button of an earlier run left open in the user's
+  // browser loads its page again: counted and named, not a failure.
+  const { foreign, stale, result, got } = isolationRow(lines, own, bare);
+  record.isolation = {
+    foreign_lines: foreign.slice(0, 20),
+    count: foreign.length,
+    earlier_run_tab_loads: stale.slice(0, 20),
+    earlier_run_tab_count: stale.length,
+  };
+  rows.push({ step: "no tool call on other documents", result, got });
 }
 
 isolationCheck();
