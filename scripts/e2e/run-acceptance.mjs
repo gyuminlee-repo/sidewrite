@@ -94,6 +94,8 @@ import {
   staleMarkers,
   suggestEvidence,
   trackedPlaced,
+  trackedProbeMatch,
+  plainWordOf,
   table,
 } from "./judge.mjs";
 import {
@@ -1071,6 +1073,28 @@ async function main() {
     step: "word: tracked insertion next to R1.4",
     result: hand.ok ? "PASS" : "FAIL",
     got: hand.ok ? `revisions in the paragraph: ${hand.revisions_in_paragraph}` : hand.error,
+  });
+  // The pane's own reading of that insertion (tools-word.js insertionHolds,
+  // the Office.js calls of trackedAt and in_insertion): a word inside it is
+  // inside, a plain word of the same paragraph next to the R1.4 change is not.
+  const r14Change = r14
+    ? revision.comments.flatMap((c) => c.changes).find((ch) => ch.id === r14.change_id)
+    : null;
+  const plainWord = plainWordOf(r14Change, HAND_INSERT);
+  const probe =
+    hand.ok && plainWord
+      ? pane("probe-tracked-at", {
+          find_inside: HAND_INSERT.trim().replace(/:$/, ""),
+          find_plain: plainWord,
+        })
+      : { threw: hand.ok ? "no plain word next to the R1.4 change" : "no tracked insertion" };
+  record.word.probe_tracked_at = probe;
+  const probed = trackedProbeMatch(probe);
+  rows.push({
+    step: "word: tracked insertion seen by the pane",
+    result: probed.pass ? "PASS" : "FAIL",
+    expect: probed.expect,
+    got: probed.got,
   });
   const applied = com("apply", ["-PlanJson", winPath(planFile)]);
   record.word.apply = applied;

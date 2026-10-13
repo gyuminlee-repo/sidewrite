@@ -1293,6 +1293,45 @@ const steps = {
     );
   },
 
+  // What the pane's insertionHolds (tools-word.js) answers in this Word for
+  // two ranges of one paragraph: a.find_inside (searched in the whole
+  // document, case kept, once) and a.find_plain (a whole word searched in
+  // the paragraph of that hit, once). The same Range.getTrackedChanges and
+  // compareLocationWith calls trackedAt and in_insertion rely on, which the
+  // unit tests only see through a fake Word. `changes`: the type and text
+  // of every tracked change Word lists for that paragraph.
+  async "probe-tracked-at"(page, a) {
+    return page.evaluate(
+      async ([origin, inside, plain]) => {
+        const m = await import(`${origin}/shared/tools-word.js`);
+        try {
+          return await Word.run(async (context) => {
+            const hits = context.document.body.search(inside, { matchCase: true });
+            hits.load("items");
+            await context.sync();
+            const out = { inside_hits: hits.items.length, plain_hits: null };
+            if (hits.items.length !== 1) return out;
+            const para = hits.items[0].paragraphs.getFirst();
+            const plains = para.search(plain, { matchCase: true, matchWholeWord: true });
+            plains.load("items");
+            const changes = para.getTrackedChanges();
+            changes.load("items/type, items/text");
+            await context.sync();
+            out.plain_hits = plains.items.length;
+            out.changes = changes.items.map((c) => ({ type: c.type, text: c.text }));
+            out.inside = await m.insertionHolds(context, para, hits.items[0]);
+            if (plains.items.length === 1)
+              out.plain = await m.insertionHolds(context, para, plains.items[0]);
+            return out;
+          });
+        } catch (e) {
+          return { threw: String(e?.message ?? e), code: e?.code ?? null };
+        }
+      },
+      [ORIGIN, a.find_inside, a.find_plain],
+    );
+  },
+
   async "clean-tool"(page) {
     await openFold(page, "review-submit-box");
     await clearMessage(page);

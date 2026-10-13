@@ -2176,3 +2176,59 @@ test("judge: the Review steps read the plain-word rows through their attributes"
   assert.equal(judge("refresh-after-user", after).pass, true);
   assert.equal(judge("refresh-after-user", { ...after, external: [] }).pass, false);
 });
+
+// probe-tracked-at (pane-driver.cjs) after the author's tracked insertion of
+// stage 2: the plain word it is given and how its answer is judged.
+test("plainWordOf: a word next to the change, once in the paragraph, not the author's", async () => {
+  const { plainWordOf } = await import("../scripts/e2e/judge.mjs");
+  const change = {
+    kind: "delete",
+    find: "steel ",
+    text: "",
+    before: "The new steel deck of the bridge and the road was checked.",
+    context: { left: "The new ", right: "deck of the" },
+  };
+  assert.equal(plainWordOf(change, "Checked: "), "new");
+  // No word on the left: one on the right; "the" is in the paragraph twice.
+  assert.equal(plainWordOf({ ...change, context: { left: "", right: "the deck of" } }), "deck");
+  assert.equal(plainWordOf({ ...change, context: { left: "", right: "the of" } }), null);
+  // A word of the author's insertion is never taken.
+  assert.equal(
+    plainWordOf(
+      { ...change, before: "Checked new steel deck.", context: { left: "Checked ", right: "" } },
+      "Checked: ",
+    ),
+    null,
+  );
+  assert.equal(plainWordOf(null), null);
+});
+
+test("trackedProbeMatch: inside true and plain false pass, anything else fails", async () => {
+  const { trackedProbeMatch } = await import("../scripts/e2e/judge.mjs");
+  const seen = { inside_hits: 1, plain_hits: 1, changes: [{ type: "Added", text: "Checked: " }] };
+  const ok = trackedProbeMatch({ ...seen, inside: true, plain: false });
+  assert.equal(ok.pass, true);
+  assert.match(ok.got, /Added:"Checked: "/);
+  for (const bad of [
+    { inside: false, plain: false },
+    { inside: true, plain: true },
+    { inside: null, plain: null },
+    { inside: true },
+  ])
+    assert.equal(trackedProbeMatch({ ...seen, ...bad }).pass, false, JSON.stringify(bad));
+  const threw = trackedProbeMatch({ threw: "GeneralException" });
+  assert.deepEqual([threw.pass, threw.got], [false, "threw GeneralException"]);
+  assert.equal(trackedProbeMatch({ ok: false, error: "no answer" }).got, "threw no answer");
+});
+
+// Every step the runner asks the pane driver for is a step of the driver
+// (a misspelt step fails only in Word, after minutes of a run).
+test("run-acceptance asks pane-driver only for steps it has", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+  const runner = read("../scripts/e2e/run-acceptance.mjs");
+  const { steps } = await import("../scripts/e2e/pane-driver.cjs");
+  const asked = new Set([...runner.matchAll(/\bpane\(\s*"([a-z-]+)"/g)].map((m) => m[1]));
+  assert.ok(asked.has("probe-tracked-at") && asked.has("refresh"));
+  for (const s of asked) assert.equal(typeof steps[s], "function", `no pane step ${s}`);
+});

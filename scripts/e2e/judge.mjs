@@ -877,6 +877,37 @@ export function openCheckEvidence(com, modelParagraphs, firstPath, secondPath) {
   };
 }
 
+// A plain word of the paragraph of `change` for the probe-tracked-at step:
+// one of the words around the change (change.context, the left side first,
+// nearest the change first), so not part of it, found once as a whole word
+// in the paragraph as it read before the change, and not a word of `avoid`
+// (the author's own insertion). null when there is none.
+export function plainWordOf(change, avoid = "") {
+  const words = (s) => String(s ?? "").match(/[A-Za-z]{3,}/g) ?? [];
+  const before = String(change?.before ?? "");
+  const once = (w) => (before.match(new RegExp(`\\b${w}\\b`, "g")) ?? []).length === 1;
+  const shun = new Set(words(avoid).map((w) => w.toLowerCase()));
+  const own = new Set(words(`${change?.find ?? ""} ${change?.text ?? ""}`));
+  const near = [...words(change?.context?.left).reverse(), ...words(change?.context?.right)];
+  return near.find((w) => once(w) && !own.has(w) && !shun.has(w.toLowerCase())) ?? null;
+}
+
+// The probe-tracked-at step (pane-driver.cjs): the pane's insertionHolds
+// read a word inside the author's pending tracked insertion as inside it
+// (true) and a plain word of the same paragraph as not (false). Any other
+// answer, null (Word could not say) included, fails.
+export function trackedProbeMatch(result) {
+  const changes = (result?.changes ?? []).map((c) => `${c.type}:${JSON.stringify(c.text)}`);
+  return {
+    pass: result?.inside === true && result?.plain === false,
+    expect: "inside the author's tracked insertion true, a plain word of its paragraph false",
+    got:
+      (result?.threw ?? result?.error)
+        ? `threw ${result.threw ?? result.error}`
+        : `inside ${result?.inside ?? "-"} (hits ${result?.inside_hits ?? "-"}); plain ${result?.plain ?? "-"} (hits ${result?.plain_hits ?? "-"}); changes ${changes.join(", ") || "-"}`,
+  };
+}
+
 // A change handled by the author while ANOTHER tracked change is pending in
 // its paragraph: it must show its own state, not Pending (the paragraph's
 // revision mark total used to decide), and its rationale comment must be
