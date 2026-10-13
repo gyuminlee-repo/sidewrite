@@ -1004,12 +1004,26 @@ test("restartSplitEvidence: after a daemon restart the split used the stored pro
   );
 });
 
+test("exitDecision: S2-31 is skipped when no pure deletion of R1.4 was recorded", async () => {
+  const { exitDecision } = await import("../scripts/e2e/judge.mjs");
+  const features = [{ id: "S2-31", exit: 1 }];
+  const rows = [{ step: "word: R1.4 next to a pending revision", result: "SKIP" }];
+  const logs = (kind) =>
+    `[agent] turn complete (stop)\n[review] change recorded R1.4-1 kind=${kind}\n`;
+  const skipped = exitDecision({ rows, features, conditional: ["S2-31"], logs: logs("replace") });
+  assert.equal(skipped.features[0].status, "SKIPPED-CONDITION-NOT-MET");
+  assert.equal(skipped.code, 0);
+  const counted = exitDecision({ rows, features, conditional: ["S2-31"], logs: logs("delete") });
+  assert.equal(counted.features[0].status, "FAIL");
+  assert.equal(counted.code, 1);
+});
+
 // Codex review 16: a change next to another tracked change in its paragraph.
 // The author rejects the R1.4 deletion while a tracked insertion of their own
 // is pending in the same paragraph; the change must read Rejected (not
 // Pending) and its rationale comment must be resolved.
 test("siblingMatch: the handled change shows its own state while a sibling revision is pending", async () => {
-  const { siblingMatch, DEFAULT_DECISIONS } = await import("../scripts/e2e/judge.mjs");
+  const { siblingMatch, demoChange, DEFAULT_DECISIONS } = await import("../scripts/e2e/judge.mjs");
   assert.equal(DEFAULT_DECISIONS["R1.4"], "reject");
   const HAND = "Checked: ";
   const ch = change("R1.4-1", { kind: "delete", state: "rejected", text: "" });
@@ -1043,12 +1057,33 @@ test("siblingMatch: the handled change shows its own state while a sibling revis
     siblingMatch(revision, view("Rejected"), word(true, []), { ref: "R1.4", hand: HAND }).pass,
     false,
   );
-  // A replace is judged by its text anyway: the case was not shown either.
+  // Only a replace: the demonstration case was not shown, the row is skipped.
   const replace = { comments: [{ ref: "R1.4", changes: [{ ...ch, kind: "replace" }] }] };
-  assert.equal(
-    siblingMatch(replace, view("Rejected"), word(true, pending), { ref: "R1.4", hand: HAND }).pass,
-    false,
+  const notShown = siblingMatch(replace, view("Rejected"), word(true, pending), {
+    ref: "R1.4",
+    hand: HAND,
+  });
+  assert.equal(notShown.shown, false);
+  assert.equal(notShown.pass, false);
+  assert.match(notShown.got, /no pure deletion or insertion: replace/);
+  // A replace first and a delete second: demoChange picks the delete, the
+  // delete is judged, and it passes when right.
+  const del = change("R1.4-2", { kind: "delete", state: "rejected", text: "" });
+  const two = { comments: [{ ref: "R1.4", changes: [{ ...ch, kind: "replace" }, del] }] };
+  assert.equal(demoChange(two, "R1.4"), del);
+  const textDel = formatRationaleComment("R1.4", del.rationale, { lost: [] });
+  // The pane lists the badges in change order: the delete's is the second.
+  const views = {
+    comments: [{ ref: "R1.4", changes: [{ badge: "Pending" }, { badge: "Rejected" }] }],
+  };
+  const judged = siblingMatch(
+    two,
+    views,
+    { comments: [{ text: textDel, done: true }], revisions: pending },
+    { ref: "R1.4", hand: HAND },
   );
+  assert.equal(judged.shown, true);
+  assert.equal(judged.pass, true, judged.got);
 });
 
 // Follow-up review: every tracked run the pane reads from the OOXML must be
@@ -2175,4 +2210,83 @@ test("judge: the Review steps read the plain-word rows through their attributes"
   };
   assert.equal(judge("refresh-after-user", after).pass, true);
   assert.equal(judge("refresh-after-user", { ...after, external: [] }).pass, false);
+});
+
+// probe-tracked-at (pane-driver.cjs) after the author's tracked insertion of
+// stage 2: the plain word it is given and how its answer is judged.
+test("plainWordOf: a word next to the change, once in the paragraph, not the author's", async () => {
+  const { plainWordOf } = await import("../scripts/e2e/judge.mjs");
+  const change = {
+    kind: "delete",
+    find: "steel ",
+    text: "",
+    before: "The new steel deck of the bridge and the road was checked.",
+    context: { left: "The new ", right: "deck of the" },
+  };
+  assert.equal(plainWordOf(change, "Checked: "), "new");
+  // No word on the left: one on the right; "the" is in the paragraph twice.
+  assert.equal(plainWordOf({ ...change, context: { left: "", right: "the deck of" } }), "deck");
+  assert.equal(plainWordOf({ ...change, context: { left: "", right: "the of" } }), null);
+  // A word of the author's insertion is never taken.
+  assert.equal(
+    plainWordOf(
+      { ...change, before: "Checked new steel deck.", context: { left: "Checked ", right: "" } },
+      "Checked: ",
+    ),
+    null,
+  );
+  assert.equal(plainWordOf(null), null);
+});
+
+test("trackedProbeMatch: inside true and plain false pass, anything else fails", async () => {
+  const { trackedProbeMatch } = await import("../scripts/e2e/judge.mjs");
+  // around: insertionAround on "Checked" at the start of the insertion
+  // "Checked: ": nothing of it left of the word, ": " right of it.
+  const seen = {
+    inside_hits: 1,
+    plain_hits: 1,
+    changes: [{ type: "Added", text: "Checked: " }],
+    around: { held: true, left: "", right: ": " },
+  };
+  const ok = trackedProbeMatch({ ...seen, inside: true, plain: false });
+  assert.equal(ok.pass, true);
+  assert.match(ok.got, /Added:"Checked: "/);
+  assert.match(ok.got, /left "" right ": "/);
+  // The remainders not told (the place in the text unknown), or told wrong.
+  for (const around of [
+    { held: true },
+    { held: true, left: "Checked", right: "" },
+    { held: false },
+  ])
+    assert.equal(
+      trackedProbeMatch({ ...seen, around, inside: true, plain: false }).pass,
+      false,
+      JSON.stringify(around),
+    );
+  assert.equal(
+    trackedProbeMatch({ ...seen, around: undefined, inside: true, plain: false }).pass,
+    false,
+  );
+  for (const bad of [
+    { inside: false, plain: false },
+    { inside: true, plain: true },
+    { inside: null, plain: null },
+    { inside: true },
+  ])
+    assert.equal(trackedProbeMatch({ ...seen, ...bad }).pass, false, JSON.stringify(bad));
+  const threw = trackedProbeMatch({ threw: "GeneralException" });
+  assert.deepEqual([threw.pass, threw.got], [false, "threw GeneralException"]);
+  assert.equal(trackedProbeMatch({ ok: false, error: "no answer" }).got, "threw no answer");
+});
+
+// Every step the runner asks the pane driver for is a step of the driver
+// (a misspelt step fails only in Word, after minutes of a run).
+test("run-acceptance asks pane-driver only for steps it has", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+  const runner = read("../scripts/e2e/run-acceptance.mjs");
+  const { steps } = await import("../scripts/e2e/pane-driver.cjs");
+  const asked = new Set([...runner.matchAll(/\bpane\(\s*"([a-z-]+)"/g)].map((m) => m[1]));
+  assert.ok(asked.has("probe-tracked-at") && asked.has("refresh"));
+  for (const s of asked) assert.equal(typeof steps[s], "function", `no pane step ${s}`);
 });

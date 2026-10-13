@@ -338,6 +338,53 @@ test("L3 narrowed range: recorded find, text and kind follow what the task pane 
   assert.equal("narrow" in d.calls[0][1], false);
 });
 
+// in_insertion (tools-word.js insertionHolds): kept on a deletion when the
+// task pane reported it, true or false; left out when it did not (an older
+// task pane, a Word without WordApi 1.6), and never put on another kind.
+test("in_insertion of a deletion is recorded only as the task pane reported it", async () => {
+  const del = { comment_ref: "R1.2", find: "red ", replace: "", rationale: R };
+  const run = async (result, args = del) => {
+    const d = deps({ before: "the red big dog", after: "the big dog", ...result });
+    await applyTrackedEdit(d, args, { ref: "R1.2" });
+    return d.edits[0][1];
+  };
+  let ch = await run({ in_insertion: true });
+  assert.deepEqual([ch.kind, ch.in_insertion], ["delete", true]);
+  assert.equal((await run({ in_insertion: false })).in_insertion, false);
+  assert.equal("in_insertion" in (await run({})), false);
+  // A narrowed deletion: what Word applied is a deletion.
+  ch = await run(
+    { narrowed: true, in_insertion: true },
+    { comment_ref: "R1.2", find: "the red big dog", replace: "the big dog", rationale: R },
+  );
+  assert.deepEqual([ch.kind, ch.in_insertion], ["delete", true]);
+  // Not a deletion: nothing to say, whatever came back.
+  ch = await run(
+    { in_insertion: true },
+    { comment_ref: "R1.2", find: "red", replace: "blue", rationale: R },
+  );
+  assert.deepEqual([ch.kind, "in_insertion" in ch], ["replace", false]);
+});
+
+// insertion_left / insertion_right: what was left of the carrying insertion
+// on each side of the deleted words. Kept only together with in_insertion
+// true and both as strings; otherwise neither is recorded.
+test("the remainders of the carrying insertion are recorded only with in_insertion true", async () => {
+  const del = { comment_ref: "R1.2", find: "red ", replace: "", rationale: R };
+  const run = async (result) => {
+    const d = deps({ before: "the red big dog", after: "the big dog", ...result });
+    await applyTrackedEdit(d, del, { ref: "R1.2" });
+    const ch = d.edits[0][1];
+    return [ch.insertion_left ?? "absent", ch.insertion_right ?? "absent"];
+  };
+  const sides = { insertion_left: "the ", insertion_right: "" };
+  assert.deepEqual(await run({ in_insertion: true, ...sides }), ["the ", ""]);
+  assert.deepEqual(await run({ in_insertion: false, ...sides }), ["absent", "absent"]);
+  assert.deepEqual(await run({ ...sides }), ["absent", "absent"]);
+  assert.deepEqual(await run({ in_insertion: true }), ["absent", "absent"]);
+  assert.deepEqual(await run({ in_insertion: true, insertion_left: "the " }), ["absent", "absent"]);
+});
+
 test("L5 requirement ids: unknown ids are refused, known ids go into the comment", async () => {
   const ctx = { requirements: [{ id: "q1", text: "state how growth was followed" }] };
   let d = withContext(deps(), ctx);

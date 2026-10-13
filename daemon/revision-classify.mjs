@@ -282,7 +282,13 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
   // The two sides are one change when one insertion run spans the place, or
   // when a sibling of the same paragraph inserted the dropped words: for a
   // deletion on the right, a replace whose new words end with them and
-  // whose old words stand right of the place.
+  // whose old words stand right of the place. An insertion the author typed
+  // in Word is no recorded change. For it the task pane's own reading at
+  // apply time stands in for the sibling: in_insertion (tools-word.js
+  // insertionAround) is true when one tracked insertion held the whole range
+  // Word deleted, with what of it stayed on each side. Plain text never
+  // carries it, so the shapes above, and an accepted deletion next to one
+  // insertion, stay accepted without a sibling.
   const own = normalizeParaText(change.find).trim();
   const sameParagraph = (s) =>
     s.id !== change.id &&
@@ -307,7 +313,32 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
     while (i >= 0 && t[i] === " ") i--;
     let j = a;
     while (j < t.length && t[j] === " ") j++;
-    if (i < 0 || j >= t.length || !own || !inRun("ins", i)) return false;
+    if (!own) return false;
+    // With in_insertion, a tracked insertion next to the place on either
+    // side is enough when it still holds what the task pane saw of the
+    // carrying insertion on that side (insertion_left, insertion_right):
+    // the run left of the place ends with the left remainder, or the run
+    // right of it starts with the right one. The deletion took the end or
+    // the start of that insertion, and the other side may be plain. The flag
+    // alone says the words were in SOME insertion, not that the one next to
+    // the place now is it (an independent insertion there, after the
+    // carrying one was accepted or deleted whole: Codex review). A deletion
+    // that took the whole insertion has no remainder and reads accepted:
+    // nothing is pending in Word then either. No remainders, no proof.
+    const rest = (s) => (typeof s === "string" ? normalizeParaText(s).trim() : "");
+    const runOf = (k) =>
+      k >= 0 && k < t.length
+        ? placed.runs.find((r) => r.kind === "ins" && r.start <= k && k < r.end)
+        : null;
+    if (change.in_insertion === true) {
+      const lr = rest(change.insertion_left);
+      const rr = rest(change.insertion_right);
+      const left = runOf(i);
+      const right = runOf(j);
+      if (lr && left && t.slice(left.start, i + 1).endsWith(lr)) return true;
+      if (rr && right && t.slice(j, right.end).startsWith(rr)) return true;
+    }
+    if (i < 0 || j >= t.length || !inRun("ins", i)) return false;
     const mates = siblings.filter(sameParagraph);
     if (inRun("ins", j)) {
       if (placed.runs.some((r) => r.kind === "ins" && r.start <= i && j < r.end)) return true;

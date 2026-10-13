@@ -351,6 +351,8 @@ export function cleanupDecision({ pid, preexisting = [], quit, runDir, alive = t
 export const CONDITIONS = {
   // A turn that ended on a Claude usage limit.
   "S2-27": { trigger: /^\[agent\] turn complete \(usage_limit\)/m },
+  // A change of R1.4 recorded as a pure deletion.
+  "S2-31": { trigger: /^\[review\] change recorded R1\.4-\d+ kind=delete\b/m },
 };
 const TURN_LOGGED = /^\[agent\] turn complete \(/m;
 
@@ -877,17 +879,82 @@ export function openCheckEvidence(com, modelParagraphs, firstPath, secondPath) {
   };
 }
 
+// A plain word of the paragraph of `change` for the probe-tracked-at step:
+// one of the words around the change (change.context, the left side first,
+// nearest the change first), so not part of it, found once as a whole word
+// in the paragraph as it read before the change, and not a word of `avoid`
+// (the author's own insertion). null when there is none.
+export function plainWordOf(change, avoid = "") {
+  const words = (s) => String(s ?? "").match(/[A-Za-z]{3,}/g) ?? [];
+  const before = String(change?.before ?? "");
+  const once = (w) => (before.match(new RegExp(`\\b${w}\\b`, "g")) ?? []).length === 1;
+  const shun = new Set(words(avoid).map((w) => w.toLowerCase()));
+  const own = new Set(words(`${change?.find ?? ""} ${change?.text ?? ""}`));
+  const near = [...words(change?.context?.left).reverse(), ...words(change?.context?.right)];
+  return near.find((w) => once(w) && !own.has(w) && !shun.has(w.toLowerCase())) ?? null;
+}
+
+// The probe-tracked-at step (pane-driver.cjs): the pane's insertionHolds
+// read a word inside the author's pending tracked insertion as inside it
+// (true) and a plain word of the same paragraph as not (false). Any other
+// answer, null (Word could not say) included, fails.
+export function trackedProbeMatch(result) {
+  const changes = (result?.changes ?? []).map((c) => `${c.type}:${JSON.stringify(c.text)}`);
+  // insertionAround on "Checked", the start of the insertion "Checked: ":
+  // held, nothing left of it, ": " right of it (ContainsStart and the
+  // TrackedChange text, what in_insertion's remainders rest on).
+  const a = result?.around;
+  const aroundOk =
+    a?.held === true &&
+    a.left === "" &&
+    typeof a.right === "string" &&
+    normalizeParaText(a.right).trim() === ":";
+  const side = (s) => (typeof s === "string" ? JSON.stringify(s) : "-");
+  return {
+    pass: result?.inside === true && result?.plain === false && aroundOk,
+    expect:
+      'inside the author\'s tracked insertion true with nothing of it left and ":" right of the word, a plain word of its paragraph false',
+    got:
+      (result?.threw ?? result?.error)
+        ? `threw ${result.threw ?? result.error}`
+        : `inside ${result?.inside ?? "-"} (hits ${result?.inside_hits ?? "-"}); around held ${a?.held ?? "-"} left ${side(a?.left)} right ${side(a?.right)}; plain ${result?.plain ?? "-"} (hits ${result?.plain_hits ?? "-"}); changes ${changes.join(", ") || "-"}`,
+  };
+}
+
+// The change of `ref` the pending-sibling case is demonstrated on: the
+// FIRST pure deletion or insertion, or null when the ref has none (a
+// replace carries no single author handling to read).
+export function demoChange(revision, ref) {
+  return (
+    revision?.comments
+      ?.find((c) => c.ref === ref)
+      ?.changes?.find((c) => c.kind === "delete" || c.kind === "insert") ?? null
+  );
+}
+
 // A change handled by the author while ANOTHER tracked change is pending in
 // its paragraph: it must show its own state, not Pending (the paragraph's
 // revision mark total used to decide), and its rationale comment must be
-// resolved. Shown on the first change of `ref`, a pure deletion that was
+// resolved. Shown on the change demoChange picks: a pure deletion that was
 // rejected or a pure insertion that was accepted; `hand` is the text of the
 // author's own tracked insertion in that paragraph, still pending in Word.
+// `shown` is false when `ref` has no such change and the case cannot be
+// demonstrated.
 // revision: revision.json after the refresh; view: the pane; word:
 // word-com.ps1 state.
 export function siblingMatch(revision, view, word, { ref, hand }) {
-  const ch = revision?.comments?.find((c) => c.ref === ref)?.changes?.[0];
-  const badge = view?.comments?.find((c) => c.ref === ref)?.changes?.[0]?.badge;
+  const changes = revision?.comments?.find((c) => c.ref === ref)?.changes;
+  const ch = demoChange(revision, ref);
+  const expect = `${ref} first change (a pure deletion rejected, or a pure insertion accepted) reads its own state with the author's tracked "${hand.trim()}" pending in the paragraph, and its rationale comment is resolved`;
+  if (!ch) {
+    return {
+      pass: false,
+      shown: false,
+      expect,
+      got: `${ref} has no pure deletion or insertion: ${(changes ?? []).map((c) => c.kind).join(", ") || "-"}`,
+    };
+  }
+  const badge = view?.comments?.find((c) => c.ref === ref)?.changes?.[changes.indexOf(ch)]?.badge;
   const want =
     ch?.kind === "delete"
       ? ["rejected", "Rejected"]
@@ -899,7 +966,8 @@ export function siblingMatch(revision, view, word, { ref, hand }) {
   const com = (word?.comments ?? []).find((c) => norm(c.text) === text);
   return {
     pass: !!want && sibling && ch.state === want[0] && badge === want[1] && com?.done === true,
-    expect: `${ref} first change (a pure deletion rejected, or a pure insertion accepted) reads its own state with the author's tracked "${hand.trim()}" pending in the paragraph, and its rationale comment is resolved`,
+    shown: true,
+    expect,
     got: `kind ${ch?.kind ?? "-"}; state ${ch?.state ?? "-"}; badge ${badge ?? "-"}; sibling revision pending ${sibling}; comment ${com ? (com.done ? "done" : "open") : "not found"}`,
   };
 }

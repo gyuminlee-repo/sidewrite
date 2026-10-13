@@ -903,6 +903,17 @@ revision`): before the author's steps the runner puts a tracked insertion
   with its rationale comment resolved, while Word still lists the author's
   insertion as a revision. The paragraph's revision mark total used to
   decide, which kept such a change Pending.
+- How the pane reads that insertion (row `word: tracked insertion seen
+by the pane`, pane step `probe-tracked-at` with `find_inside`,
+  `find_plain`): right after `Checked: ` is put in, the step calls
+  `insertionHolds` of the pane (`tools-word.js`) in the live Word on `Checked`
+  and on a plain word next to the R1.4 change (`plainWordOf`). PASS when
+  the first is inside a tracked insertion (true) and the second is not
+  (false), and `insertionAround` on `Checked` tells nothing of the
+  insertion left of it and `:` right of it; `got` lists the types and texts of the tracked changes Word
+  returned for the paragraph. These are the `Range.getTrackedChanges` and
+  `compareLocationWith` calls behind `trackedAt` and the `in_insertion`
+  flag of a deletion, which the unit tests see only through a fake Word.
 - Tracked special characters (row `special: tracked runs found in Word's
 paragraph text`, files under `special/`): `make_tracked_special.py` builds
   a document whose tracked insertions and deletions hold a no-break hyphen,
