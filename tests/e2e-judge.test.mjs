@@ -2240,10 +2240,33 @@ test("plainWordOf: a word next to the change, once in the paragraph, not the aut
 
 test("trackedProbeMatch: inside true and plain false pass, anything else fails", async () => {
   const { trackedProbeMatch } = await import("../scripts/e2e/judge.mjs");
-  const seen = { inside_hits: 1, plain_hits: 1, changes: [{ type: "Added", text: "Checked: " }] };
+  // around: insertionAround on "Checked" at the start of the insertion
+  // "Checked: ": nothing of it left of the word, ": " right of it.
+  const seen = {
+    inside_hits: 1,
+    plain_hits: 1,
+    changes: [{ type: "Added", text: "Checked: " }],
+    around: { held: true, left: "", right: ": " },
+  };
   const ok = trackedProbeMatch({ ...seen, inside: true, plain: false });
   assert.equal(ok.pass, true);
   assert.match(ok.got, /Added:"Checked: "/);
+  assert.match(ok.got, /left "" right ": "/);
+  // The remainders not told (the place in the text unknown), or told wrong.
+  for (const around of [
+    { held: true },
+    { held: true, left: "Checked", right: "" },
+    { held: false },
+  ])
+    assert.equal(
+      trackedProbeMatch({ ...seen, around, inside: true, plain: false }).pass,
+      false,
+      JSON.stringify(around),
+    );
+  assert.equal(
+    trackedProbeMatch({ ...seen, around: undefined, inside: true, plain: false }).pass,
+    false,
+  );
   for (const bad of [
     { inside: false, plain: false },
     { inside: true, plain: true },

@@ -1299,7 +1299,9 @@ const steps = {
   // the paragraph of that hit, once). The same Range.getTrackedChanges and
   // compareLocationWith calls trackedAt and in_insertion rely on, which the
   // unit tests only see through a fake Word. `changes`: the type and text
-  // of every tracked change Word lists for that paragraph.
+  // of every tracked change Word lists for that paragraph. `around`: what
+  // insertionAround tells for find_inside ({ held, left, right }), the
+  // remainders a deletion's in_insertion carries.
   async "probe-tracked-at"(page, a) {
     return page.evaluate(
       async ([origin, inside, plain]) => {
@@ -1320,6 +1322,8 @@ const steps = {
             out.plain_hits = plains.items.length;
             out.changes = changes.items.map((c) => ({ type: c.type, text: c.text }));
             out.inside = await m.insertionHolds(context, para, hits.items[0]);
+            // What of the insertion stays on each side of find_inside.
+            out.around = await m.insertionAround(context, para, hits.items[0], inside);
             if (plains.items.length === 1)
               out.plain = await m.insertionHolds(context, para, plains.items[0]);
             return out;

@@ -900,13 +900,24 @@ export function plainWordOf(change, avoid = "") {
 // answer, null (Word could not say) included, fails.
 export function trackedProbeMatch(result) {
   const changes = (result?.changes ?? []).map((c) => `${c.type}:${JSON.stringify(c.text)}`);
+  // insertionAround on "Checked", the start of the insertion "Checked: ":
+  // held, nothing left of it, ": " right of it (ContainsStart and the
+  // TrackedChange text, what in_insertion's remainders rest on).
+  const a = result?.around;
+  const aroundOk =
+    a?.held === true &&
+    a.left === "" &&
+    typeof a.right === "string" &&
+    normalizeParaText(a.right).trim() === ":";
+  const side = (s) => (typeof s === "string" ? JSON.stringify(s) : "-");
   return {
-    pass: result?.inside === true && result?.plain === false,
-    expect: "inside the author's tracked insertion true, a plain word of its paragraph false",
+    pass: result?.inside === true && result?.plain === false && aroundOk,
+    expect:
+      'inside the author\'s tracked insertion true with nothing of it left and ":" right of the word, a plain word of its paragraph false',
     got:
       (result?.threw ?? result?.error)
         ? `threw ${result.threw ?? result.error}`
-        : `inside ${result?.inside ?? "-"} (hits ${result?.inside_hits ?? "-"}); plain ${result?.plain ?? "-"} (hits ${result?.plain_hits ?? "-"}); changes ${changes.join(", ") || "-"}`,
+        : `inside ${result?.inside ?? "-"} (hits ${result?.inside_hits ?? "-"}); around held ${a?.held ?? "-"} left ${side(a?.left)} right ${side(a?.right)}; plain ${result?.plain ?? "-"} (hits ${result?.plain_hits ?? "-"}); changes ${changes.join(", ") || "-"}`,
   };
 }
 
