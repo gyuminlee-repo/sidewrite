@@ -98,14 +98,61 @@ test("the flag opens the junction of two insertion runs too", () => {
   assert.equal(classifyChange(d({ in_insertion: true }), two).state, "pending");
 });
 
-test("the flag never bypasses the insertion on the left or the tracked text on the right", () => {
+test("the flag needs a tracked insertion next to the place", () => {
   // The carrying insertion was accepted: nothing tracked is left of the
   // place, and the deletion is accepted with it.
   const accepted = para(r(prefix + "new steel ") + del(old) + r(suffix));
   assert.equal(classifyChange(deletion({ in_insertion: true }), accepted).state, "accepted");
-  // Plain text right of the place: the flag alone opens nothing new there.
+  // Plain text right of the place, the insertion on the left: the flag
+  // proves the deletion took the end of that insertion; without it nothing
+  // changes (an accepted deletion next to an insertion).
   const plainRight = para(r(prefix) + ins("new steel ") + r(old + suffix));
-  assert.equal(classifyChange(deletion({ in_insertion: true }), plainRight).state, "accepted");
+  assert.equal(classifyChange(deletion({ in_insertion: true }), plainRight).state, "pending");
+  assert.equal(classifyChange(deletion(), plainRight).state, "accepted");
+  assert.equal(classifyChange(deletion({ in_insertion: false }), plainRight).state, "accepted");
+});
+
+// The author's own pure insertion "fully checked and " (typed in Word,
+// pending) before "painted"; the tool deleted a part of it.
+test("a deletion at the end, the start or across the whole of the author's insertion", () => {
+  const head = "The deck was ";
+  const typed = "fully checked and ";
+  const tail = "painted after the repair.";
+  const input = head + typed + tail;
+  const d = (find, extra) => make("delete", find, "", input, "R2.1-1", extra);
+  const read = (find, body, flag) => {
+    const text = input.replace(find, "");
+    return classifyChange(d(find, flag), para(body, text, text)).state;
+  };
+  const cases = [
+    // End: " and" leaves "fully checked " tracked on the left, plain right.
+    [" and", r(head) + ins("fully checked ") + r(tail)],
+    // Start: "fully " leaves plain text left, "checked and " tracked right.
+    ["fully ", r(head) + ins("checked and ") + r(tail)],
+  ];
+  for (const [find, body] of cases) {
+    assert.equal(read(find, body, { in_insertion: true }), "pending", find);
+    // Controls: no flag, or a pane that read plain text: as before.
+    assert.equal(read(find, body), "accepted", find);
+    assert.equal(read(find, body, { in_insertion: false }), "accepted", find);
+  }
+  // Whole: nothing of the insertion is left, so nothing is pending in Word
+  // either (no revision mark remains to accept or reject). The paragraph
+  // reads exactly as an accepted deletion of plain text: accepted, flag or
+  // not. Known limit, and the state Word itself is in.
+  const whole = r(head + tail);
+  assert.equal(read(typed, whole, { in_insertion: true }), "accepted");
+  assert.equal(read(typed, whole), "accepted");
+});
+
+test("the start of the author's insertion at the start of the paragraph", () => {
+  // "Checked twice: " typed at the start; the tool deleted "Checked ".
+  const input = "Checked twice: the deck was painted.";
+  const text = "twice: the deck was painted.";
+  const d = (extra) => ({ ...make("delete", "Checked ", "", input, "R2.2-1"), ...extra });
+  const snap = para(ins("twice: ") + r("the deck was painted."), text, text);
+  assert.equal(classifyChange(d({ in_insertion: true }), snap).state, "pending");
+  assert.equal(classifyChange(d(), snap).state, "accepted");
 });
 
 test("same-type sweep: a replace inside the author's insertion needs no flag", () => {

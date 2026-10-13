@@ -286,8 +286,8 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
   // in Word is no recorded change. For it the task pane's own reading at
   // apply time stands in for the sibling: in_insertion (tools-word.js
   // insertionHolds) is true when one tracked insertion held the whole range
-  // Word deleted. Plain text never carries it, so the shapes above stay
-  // accepted without a sibling.
+  // Word deleted. Plain text never carries it, so the shapes above, and an
+  // accepted deletion next to one insertion, stay accepted without a sibling.
   const own = normalizeParaText(change.find).trim();
   const sameParagraph = (s) =>
     s.id !== change.id &&
@@ -312,9 +312,16 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
     while (i >= 0 && t[i] === " ") i--;
     let j = a;
     while (j < t.length && t[j] === " ") j++;
-    if (i < 0 || j >= t.length || !own || !inRun("ins", i)) return false;
+    if (!own) return false;
+    // With in_insertion one tracked insertion next to the place, on either
+    // side, is enough: the deletion took the end or the start of it, and
+    // the text on the other side may be plain. A deletion that took the
+    // whole insertion leaves none: nothing is pending in Word then either,
+    // and it reads accepted.
+    const insAt = (k) => k >= 0 && k < t.length && inRun("ins", k);
+    if (change.in_insertion === true && (insAt(i) || insAt(j))) return true;
+    if (i < 0 || j >= t.length || !inRun("ins", i)) return false;
     const mates = siblings.filter(sameParagraph);
-    const held = change.in_insertion === true;
     if (inRun("ins", j)) {
       if (placed.runs.some((r) => r.kind === "ins" && r.start <= i && j < r.end)) return true;
       // Two runs: a sibling whose new words hold the dropped words and the
@@ -324,9 +331,9 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
         return t.slice(r.start, r.end);
       };
       const sides = [runAt(i), runAt(j)];
-      return held || mates.some((s) => inserted(s) && sides.every((x) => newWords(s).includes(x)));
+      return mates.some((s) => inserted(s) && sides.every((x) => newWords(s).includes(x)));
     }
-    return inRun("del", j) && (held || mates.some((s) => replacedBefore(s, j)));
+    return inRun("del", j) && mates.some((s) => replacedBefore(s, j));
   };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);
