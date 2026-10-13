@@ -112,6 +112,8 @@ import { HEALTH_URL, unitName } from "../install/unit.mjs";
 import { refusalsFromLog, rewritesFromLog } from "./replay-lib.mjs";
 import { execWithInteropRetry, isWslInteropLaunchFailure } from "./wsl-interop.mjs";
 
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../..");
 const WS_PORT = 47833;
@@ -1516,10 +1518,9 @@ async function mainS3() {
     marker("s3-stale", {
       ...staleEvidence(failing, passing, first.ref),
       ref: first.ref,
-      log_stale: (new RegExp(
-        `^\\[response\\] stale ${first.ref.replace(".", "\\.")} .*$`,
-        "m",
-      ).exec(logFrom(at)) ?? [null])[0],
+      log_stale: (new RegExp(`^\\[response\\] stale ${escapeRe(first.ref)} .*$`, "m").exec(
+        logFrom(at),
+      ) ?? [null])[0],
       checks_before: failing.checks,
     });
   }
@@ -2193,11 +2194,7 @@ async function mainParts() {
 
   // b. Join by the candidate; the manuscript's pane follows without a press.
   const joined = pane("link-join", { main: names.paper }, S);
-  const mainLinked = pane(
-    "wait-linked",
-    { until: `^Linked files: ${names.si.replace(".", "\\.")}$` },
-    P,
-  );
+  const mainLinked = pane("wait-linked", { until: `^Linked files: ${escapeRe(names.si)}$` }, P);
   record.parts.join = { joined, mainLinked };
   partsRow(
     "b",
@@ -2313,7 +2310,7 @@ async function mainParts() {
   {
     const view = pane(
       "wait-state",
-      { ref: SI_ONLY, until: `to review in ${names.si.replace(".", "\\.")}$` },
+      { ref: SI_ONLY, until: `to review in ${escapeRe(names.si)}$` },
       P,
     );
     record.parts.cross = view;

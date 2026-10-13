@@ -918,7 +918,8 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "paragraphs written anew: 0 rewrites of 0 paragraphs, 0 parts recorded; stopped: 0",
       "rewrite turns run: 0",
       "follow-through turns run: 0",
-      "follow-through: changes 0 in 0 paragraphs, questions 0",
+      "follow-through logged work (all attempts): changes 0, questions 0",
+      "latest completed follow-through checks: changes 0 in 0 paragraphs, questions 0",
       "edits a guard refused: NumberNeedsAuthor 2, ForbidBlocked 1",
       "turns that did not end well: 1 (R1.2 timeout)",
       "turns run again after an API error: 0",
@@ -1162,6 +1163,141 @@ test("a turn that failed on an API error is run once more; a refusal or a second
   );
 });
 
+test("retry reports retain refusals and work from every attempt without changing the last outcome", () => {
+  const first = {
+    outcome: "failed",
+    reason: "The turn ended on an API error",
+    seconds: 5,
+    refused: { ForbidBlocked: 2, FieldsUnread: 1 },
+    fallbacks: [{ original: "model-a", fallback: "model-b" }],
+    stays: [{ original: "model-a", fallback: "model-b", count: 2, category: "example" }],
+    rewrites: [{ paragraph: 2, parts: 3, applied: 1, stopped: "FieldsUnread" }],
+    follow: { candidates: 3, changes: 1, questions: 2 },
+  };
+  const last = {
+    outcome: "ok",
+    reason: null,
+    seconds: 8,
+    model: "model-c",
+    refused: { ForbidBlocked: 1 },
+    fallbacks: [],
+    stays: [],
+    rewrites: [{ paragraph: 3, parts: 1, applied: 1, stopped: null }],
+    follow: { candidates: 2, changes: 2, questions: 1 },
+  };
+  const before = structuredClone([first, last]);
+  const merged = mergeAttempts([first, last]);
+  assert.deepEqual(merged.refused, { ForbidBlocked: 3, FieldsUnread: 1 });
+  assert.deepEqual(merged.fallbacks, first.fallbacks);
+  assert.deepEqual(merged.stays, first.stays);
+  assert.deepEqual(merged.rewrites, [...first.rewrites, ...last.rewrites]);
+  // Candidate count describes the final plan. Changes/questions count actual work.
+  assert.deepEqual(merged.follow, { candidates: 2, changes: 3, questions: 3 });
+  assert.deepEqual(
+    [merged.outcome, merged.reason, merged.model, merged.seconds],
+    ["ok", null, "model-c", 13],
+  );
+  assert.deepEqual([first, last], before);
+  assert.deepEqual(mergeAttempts([first]), first);
+  const withoutFollow = { outcome: "ok", seconds: 0 };
+  assert.deepEqual(mergeAttempts([first, withoutFollow]).follow, first.follow);
+  assert.equal("follow" in mergeAttempts([withoutFollow, withoutFollow]), false);
+});
+
+test("retry summary counts all logged work separately from the final completed follow-through check", () => {
+  const ref = "R1.1";
+  const attempt = (lines, seconds) =>
+    turnResult(ref, {
+      step: { ok: true },
+      log: lines.join("\n"),
+      seconds,
+    });
+  const first = attempt(
+    [
+      "[agent] model refusal fallback original=model-a fallback=model-b scope=turn category=example",
+      "[review] blocked R1.1 by=L1",
+      "[review] rewrite R1.1 paragraph=3 parts=2 applied=1 stopped=FieldsUnread",
+      "[review] follow R1.1 candidates=3 changes=1 questions=1",
+      "[review] turn done R1.1 failed: The turn ended on an API error: 503",
+    ],
+    5,
+  );
+  const last = attempt(
+    ["[review] follow R1.1 candidates=2 changes=0 questions=0", "[review] turn done R1.1"],
+    8,
+  );
+  const revision = structuredClone(FOLLOWED);
+  revision.comments[0].changes = [
+    {
+      id: "R1.1-2",
+      paragraph_index: 3,
+      kind: "replace",
+      state: "pending",
+      before: "The deck stayed firm.",
+      after: "The deck remained firm.",
+    },
+  ];
+  revision.comments[0].follow_through.change_ids = [];
+  revision.comments[0].follow_through.questions = 0;
+  const report = changesReport(revision, [], {}, [], [{ ref, ...mergeAttempts([first, last]) }]);
+  assert.deepEqual(report[0].follow_turns[0].follow, { candidates: 2, changes: 1, questions: 1 });
+  const text = summaryText(report, { seconds: 13, saved: true, models: {} });
+  for (const line of [
+    "follow-through logged work (all attempts): changes 1, questions 1",
+    "latest completed follow-through checks: changes 0 in 0 paragraphs, questions 0",
+    "edits a guard refused: ForbidBlocked 1, RewriteStopped 1",
+    "model replaced after a refusal: 1 times in 1 turns (R1.1 follow-through); restored 0 times",
+    "turns that did not end well: 0",
+    "turn time: 13 s",
+  ])
+    assert.ok(text.includes(`\n${line}\n`), `${line}\n${text}`);
+  assert.match(text, /paragraphs written anew: .*; stopped: 1\n/);
+  // The durable record may describe the same work. It is displayed as
+  // checked state and must not be added to the log-derived work count.
+  revision.comments[0].follow_through.change_ids = ["R1.1-2"];
+  revision.comments[0].follow_through.questions = 1;
+  const withReceipt = summaryText(
+    changesReport(revision, [], {}, [], [{ ref, ...mergeAttempts([first, last]) }]),
+    {
+      seconds: 13,
+      saved: true,
+      models: {},
+    },
+  );
+  assert.ok(
+    withReceipt.includes("\nfollow-through logged work (all attempts): changes 1, questions 1\n"),
+  );
+  assert.ok(
+    withReceipt.includes(
+      "\nlatest completed follow-through checks: changes 1 in 1 paragraphs, questions 1\n",
+    ),
+  );
+  // Each kind of turn owns its log once. The same type of retry evidence
+  // must also reach the totals for ordinary, answer and rewrite turns.
+  const merged = mergeAttempts([first, last]);
+  const allKinds = summaryText(
+    changesReport(
+      revision,
+      [],
+      { [ref]: merged },
+      [{ ref, paragraph_index: 3, ...merged }],
+      [{ ref, ...merged }],
+      { turns: { [ref]: merged } },
+    ),
+    { seconds: 52, saved: true, models: {} },
+  );
+  assert.ok(allKinds.includes("\nedits a guard refused: ForbidBlocked 4, RewriteStopped 4\n"));
+  assert.ok(
+    allKinds.includes(
+      "\nmodel replaced after a refusal: 4 times in 4 turns (R1.1, R1.1 after answers, R1.1 follow-through, R1.1 rewrite p3); restored 0 times\n",
+    ),
+  );
+  assert.match(allKinds, /paragraphs written anew: .*; stopped: 4\n/);
+  assert.ok(
+    allKinds.includes("\nfollow-through logged work (all attempts): changes 1, questions 1\n"),
+  );
+});
+
 test("changes.json and summary.txt: what the follow-through turns did", () => {
   const report = changesReport(
     FOLLOWED,
@@ -1180,7 +1316,8 @@ test("changes.json and summary.txt: what the follow-through turns did", () => {
   const text = summaryText(report, { seconds: 90, saved: true, models: { asked: {}, line: "" } });
   for (const line of [
     "follow-through turns run: 1",
-    "follow-through: changes 2 in 1 paragraphs, questions 1",
+    "follow-through logged work (all attempts): changes 2, questions 1",
+    "latest completed follow-through checks: changes 2 in 1 paragraphs, questions 1",
     "edits a guard refused: NumberNeedsAuthor 1",
     "turns that did not end well: 0",
     "turn time: 70 s",
@@ -1200,7 +1337,11 @@ test("changes.json and summary.txt: what the follow-through turns did", () => {
   });
   assert.ok(off.includes("\nfollow-through turns run: 0\n"));
   assert.ok(off.includes("\nturns run again after an API error: 0\n"));
-  assert.ok(off.includes("\nfollow-through: changes 0 in 0 paragraphs, questions 0\n"));
+  assert.ok(
+    off.includes(
+      "\nlatest completed follow-through checks: changes 0 in 0 paragraphs, questions 0\n",
+    ),
+  );
 });
 
 // --answers: the author's answers the replay gives. Every text is invented.

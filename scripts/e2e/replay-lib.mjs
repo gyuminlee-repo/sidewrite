@@ -8,6 +8,8 @@ import { requirementStates } from "../../taskpane/shared/review-view.js";
 import { stillPresent } from "../../taskpane/shared/residue.js";
 import { termPlaces } from "../../taskpane/shared/named-terms.js";
 
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const REF = /^(?:R\d+|E)\.\d+$/;
 
 export function replayExitCode({ failed, stopped, saved, otherModel, cleanup = {} }) {
@@ -29,7 +31,7 @@ export function parseOnly(spec) {
 // The draft rows the pane keeps (pane-driver.cjs edit-draft keep_ref): the
 // refs of --only, or every reviewer and editor comment.
 export const keepRefPattern = (only) =>
-  only.length ? `^(?:${only.map((r) => r.replace(".", "\\.")).join("|")})$` : REF.source;
+  only.length ? `^(?:${only.map((r) => escapeRe(r)).join("|")})$` : REF.source;
 
 // The lines of a text file that say something: no empty line, no "#" line.
 export const ruleLines = (text) =>
@@ -62,10 +64,9 @@ export function ledgerFromLines({ instructions = "", forbid = "" } = {}) {
 export function turnFromLog(log, ref) {
   const text = String(log ?? "");
   const models = [...text.matchAll(/^\[agent\] init session \S+ \(model: ([^)]+)\)/gm)];
-  const done = new RegExp(
-    `^\\[review\\] turn done ${ref.replace(".", "\\.")}( failed: (.*))?$`,
-    "m",
-  ).exec(text);
+  const done = new RegExp(`^\\[review\\] turn done ${escapeRe(ref)}( failed: (.*))?$`, "m").exec(
+    text,
+  );
   return {
     model: models.length ? models[models.length - 1][1] : null,
     ended: !!done,
@@ -81,7 +82,7 @@ export const rewritesFromLog = (log, ref) =>
   [
     ...String(log ?? "").matchAll(
       new RegExp(
-        `^\\[review\\] rewrite ${ref.replace(".", "\\.")} paragraph=(\\d+) parts=(\\d+) applied=(\\d+)(?: stopped=(\\S+))?$`,
+        `^\\[review\\] rewrite ${escapeRe(ref)} paragraph=(\\d+) parts=(\\d+) applied=(\\d+)(?: stopped=(\\S+))?$`,
         "gm",
       ),
     ),
@@ -98,7 +99,7 @@ export const rewritesFromLog = (log, ref) =>
 // null when the log of the turn has no such line.
 export function followFromLog(log, ref) {
   const m = new RegExp(
-    `^\\[review\\] follow ${ref.replace(".", "\\.")} candidates=(\\d+) changes=(\\d+) questions=(\\d+)$`,
+    `^\\[review\\] follow ${escapeRe(ref)} candidates=(\\d+) changes=(\\d+) questions=(\\d+)$`,
     "m",
   ).exec(String(log ?? ""));
   return m ? { candidates: Number(m[1]), changes: Number(m[2]), questions: Number(m[3]) } : null;
@@ -135,7 +136,7 @@ const REFUSALS = [
   ["NotAFollowPlace", "not a follow place", " paragraph="],
 ];
 export function refusalsFromLog(log, ref) {
-  const at = ref.replace(".", "\\.");
+  const at = escapeRe(ref);
   const out = {};
   for (const [code, words, next] of REFUSALS) {
     const n = (
@@ -291,20 +292,39 @@ export function limitStop(ref, kind, turn) {
   return m ? { ref, kind, resets: m[1] ?? null } : null;
 }
 
-// The entry of a turn that was tried more than once: that of the last try,
-// with the time of all of them and how each ended.
-export const mergeAttempts = (attempts) =>
-  attempts.length < 2
-    ? attempts[0]
-    : {
-        ...attempts.at(-1),
-        seconds: attempts.reduce((n, t) => n + (t.seconds ?? 0), 0),
-        attempts: attempts.map((t) => ({
-          outcome: t.outcome,
-          reason: t.reason ?? null,
-          seconds: t.seconds ?? 0,
-        })),
-      };
+// The final outcome and plan, with the time and recorded work of every try.
+export function mergeAttempts(attempts) {
+  if (attempts.length < 2) return attempts[0];
+  const merged = {
+    ...attempts.at(-1),
+    seconds: attempts.reduce((n, t) => n + (t.seconds ?? 0), 0),
+    attempts: attempts.map((t) => ({
+      outcome: t.outcome,
+      reason: t.reason ?? null,
+      seconds: t.seconds ?? 0,
+    })),
+  };
+  for (const field of ["fallbacks", "stays", "rewrites"]) {
+    if (attempts.some((t) => t[field])) merged[field] = attempts.flatMap((t) => t[field] ?? []);
+  }
+  if (attempts.some((t) => t.refused)) {
+    merged.refused = {};
+    for (const t of attempts) {
+      for (const [code, count] of Object.entries(t.refused ?? {})) {
+        merged.refused[code] = (merged.refused[code] ?? 0) + count;
+      }
+    }
+  }
+  const follows = attempts.map((t) => t.follow).filter(Boolean);
+  if (follows.length) {
+    merged.follow = {
+      ...follows.at(-1),
+      changes: follows.reduce((n, f) => n + f.changes, 0),
+      questions: follows.reduce((n, f) => n + f.questions, 0),
+    };
+  }
+  return merged;
+}
 
 // One comment of the run: { step, log, seconds } of its propose step.
 // outcome: "ok", "failed" (the turn ended with an error: limit, refusal,
@@ -560,6 +580,12 @@ export function summaryText(
   const answerTurns = report
     .filter((c) => c.answer_turn)
     .map((c) => ({ ref: c.ref, ...c.answer_turn }));
+  const allTurns = [
+    ...turns.map((c) => ({ ...c.turn, label: c.ref })),
+    ...answerTurns.map((t) => ({ ...t, label: `${t.ref} after answers` })),
+    ...followTurns.map((t) => ({ ...t, label: `${t.ref} follow-through` })),
+    ...rewriteTurns.map((t) => ({ ...t, label: `${t.ref} rewrite p${t.paragraph_index}` })),
+  ];
   const bad = [
     ...turns.filter((c) => c.turn.outcome !== "ok").map((c) => `${c.ref} ${c.turn.outcome}`),
     ...answerTurns
@@ -592,12 +618,21 @@ export function summaryText(
   ];
   for (const r of refused)
     for (const [code, n] of Object.entries(r)) codes[code] = (codes[code] ?? 0) + n;
-  const fallbacks = turns.filter((c) => c.turn.fallbacks?.length);
+  const fallbacks = allTurns.filter((t) => t.fallbacks?.length);
   const withRequests = report.filter((c) => c.requirements.length).length;
   const named = report.flatMap((c) => c.named_terms ?? []);
   const rewrites = report.flatMap((c) => c.rewrites ?? []);
-  const logged = [...turns.map((c) => c.turn), ...rewriteTurns].flatMap((t) => t.rewrites ?? []);
-  // The changes the follow-through turns added, and the paragraphs they are in.
+  const logged = allTurns.flatMap((t) => t.rewrites ?? []);
+  const followWork = followTurns.reduce(
+    (n, t) => ({
+      changes: n.changes + (t.follow?.changes ?? 0),
+      questions: n.questions + (t.follow?.questions ?? 0),
+    }),
+    { changes: 0, questions: 0 },
+  );
+  // The latest completed checks are durable state, not all work of this
+  // run. Failed attempts can record edits/questions without saving a check.
+  // Show their logged work separately; never add the same durable IDs twice.
   const followed = report.flatMap((c) =>
     c.changes.filter((x) => (c.follow?.changes ?? []).includes(x.change_id)),
   );
@@ -647,14 +682,15 @@ export function summaryText(
     `paragraphs written anew: ${rewrites.length} rewrites of ${new Set(rewrites.map((w) => w.paragraph_index)).size} paragraphs, ${rewrites.reduce((n, w) => n + w.change_ids.length, 0)} parts recorded; stopped: ${logged.filter((w) => w.stopped).length}`,
     `rewrite turns run: ${rewriteTurns.length}`,
     `follow-through turns run: ${followTurns.length}`,
-    `follow-through: changes ${followed.length} in ${new Set(followed.map((x) => x.paragraph_index)).size} paragraphs, questions ${sum((c) => c.follow?.questions ?? 0)}`,
+    `follow-through logged work (all attempts): changes ${followWork.changes}, questions ${followWork.questions}`,
+    `latest completed follow-through checks: changes ${followed.length} in ${new Set(followed.map((x) => x.paragraph_index)).size} paragraphs, questions ${sum((c) => c.follow?.questions ?? 0)}`,
     `edits a guard refused: ${list(codes) || "none"}`,
     `turns that did not end well: ${bad.length}${bad.length ? ` (${bad.join(", ")})` : ""}`,
     `turns run again after an API error: ${again.length}${again.length ? ` (${again.join(", ")})` : ""}`,
     `models asked for: edits ${asked.edits ?? "-"}, writing ${asked.writing ?? "(the pane's own)"}, judgments ${asked.judgments ?? "(the pane's own)"}`,
     `models that ran, as the pane says: ${models?.line || "-"}`,
     `models that ran, from the daemon log: ${[...new Set(turns.map((c) => c.turn.model).filter(Boolean))].join(", ") || "-"}`,
-    `model replaced after a refusal: ${sum((c) => c.turn?.fallbacks?.length ?? 0)} times in ${fallbacks.length} turns${fallbacks.length ? ` (${fallbacks.map((c) => c.ref).join(", ")})` : ""}; restored ${restored} times`,
+    `model replaced after a refusal: ${fallbacks.reduce((n, t) => n + t.fallbacks.length, 0)} times in ${fallbacks.length} turns${fallbacks.length ? ` (${fallbacks.map((t) => t.label).join(", ")})` : ""}; restored ${restored} times`,
     ...(stay ? [stay] : []),
     `turns on another model than asked: ${drifted.length}${drifted.length ? ` (${drifted.map((c) => c.ref).join(", ")})` : ""}`,
     `another model than asked: ${failures.length ? `FAILED (${failures.join("; ")})` : "no"}`,

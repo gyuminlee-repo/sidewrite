@@ -89,7 +89,7 @@ export function forbidBlockEvidence({
   rule = "L2",
   word_re = /\bnovel(?:ty)?\b/i,
 }) {
-  const at = ref.replace(".", "\\.");
+  const at = escapeRe(ref);
   const comment = (revision?.comments ?? []).find((c) => c.ref === ref);
   const holds = (b) => word_re.test(String(b.args?.replace ?? b.args?.insert_after ?? ""));
   const had = new Set(
@@ -2399,7 +2399,7 @@ export const JUDGES = {
   }),
   propose: (r, ctx) => {
     const re = new RegExp(
-      `^${ctx.ref.replace(".", "\\.")} running \\d+:\\d\\d\\. \\d+ of \\d+ comments not done\\.$`,
+      `^${escapeRe(ctx.ref)} running \\d+:\\d\\d\\. \\d+ of \\d+ comments not done\\.$`,
     );
     const ticks = r.progress_samples.filter((s) => re.test(s));
     return {

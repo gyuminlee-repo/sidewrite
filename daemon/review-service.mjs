@@ -924,19 +924,19 @@ export function createReviewService({
   }
 
   // The end of a follow-through turn: what it added under its comment (the
-  // changes and questions that were not there when it began) goes to the
+  // changes and questions recorded by its tool calls) goes to the
   // log as counts, and the comment is marked as checked. A turn that ended
   // with an error marks nothing, so the check can be run again. It is saved
   // to the document the turn began in (turn.follow.doc), whatever the pane
   // shows by now.
   async function followEnded(turn, failed) {
-    const { candidate_ids, answers, had, doc } = turn.follow;
+    const { candidate_ids, answers, had, recorded, doc } = turn.follow;
     let added = { changes: 0, questions: 0 };
     await update(doc, (rev) => {
       const c = findComment(rev, turn.ref);
       if (!c) return null;
-      const change_ids = c.changes.map((ch) => ch.id).filter((id) => !had.changes.includes(id));
-      const questions = (c.questions ?? []).filter((x) => !had.questions.includes(x.id)).length;
+      const change_ids = c.changes.map((ch) => ch.id).filter((id) => recorded.changes.includes(id));
+      const questions = (c.questions ?? []).filter((x) => recorded.questions.includes(x.id)).length;
       added = { changes: change_ids.length, questions };
       if (failed) return null;
       const answer_ids = answers
@@ -951,7 +951,12 @@ export function createReviewService({
         change_ids,
         questions,
         seen_change_ids: c.changes
-          .filter((ch) => ch.state !== "rejected" && ch.state !== "unlocated")
+          .filter(
+            (ch) =>
+              (had.changes.includes(ch.id) || change_ids.includes(ch.id)) &&
+              ch.state !== "rejected" &&
+              ch.state !== "unlocated",
+          )
           .map((ch) => ch.id),
         ...(seen_answer_ids.length ? { seen_answer_ids } : {}),
       });
@@ -1430,9 +1435,11 @@ export function createReviewService({
               .map(({ id, answer }) => ({ id, answer })),
             sources: plan.changes.flatMap((ch) => [ch.after, ch.before]).filter(Boolean),
             doc: d,
+            // Only this turn's tool receipts count. A concurrent approved
+            // exception uses a separate turn without this receipt list.
+            recorded: { changes: [], questions: [] },
             had: {
               changes: comment.changes.map((ch) => ch.id),
-              questions: (comment.questions ?? []).map((x) => x.id),
             },
           },
         }),

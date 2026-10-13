@@ -300,7 +300,7 @@ const openProfileDetails = (page) =>
 function card(page, ref) {
   return page.locator(".review-comment", {
     has: page.locator(".review-comment-head strong", {
-      hasText: new RegExp(`^${ref.replace(".", "\\.")}$`),
+      hasText: new RegExp(`^${escapeRe(ref)}$`),
     }),
   });
 }
