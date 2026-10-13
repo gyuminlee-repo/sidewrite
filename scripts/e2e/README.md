@@ -903,10 +903,10 @@ revision`): before the author's steps the runner puts a tracked insertion
   with its rationale comment resolved, while Word still lists the author's
   insertion as a revision. The paragraph's revision mark total used to
   decide, which kept such a change Pending.
-- The pane's reading of that insertion (row `word: tracked insertion seen
+- How the pane reads that insertion (row `word: tracked insertion seen
 by the pane`, pane step `probe-tracked-at` with `find_inside`,
-  `find_plain`): right after `Checked: ` is put in, the step calls the
-  pane's `insertionHolds` (`tools-word.js`) in the live Word on `Checked`
+  `find_plain`): right after `Checked: ` is put in, the step calls
+  `insertionHolds` of the pane (`tools-word.js`) in the live Word on `Checked`
   and on a plain word next to the R1.4 change (`plainWordOf`). PASS when
   the first is inside a tracked insertion (true) and the second is not
   (false); `got` lists the types and texts of the tracked changes Word
