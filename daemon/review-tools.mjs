@@ -381,7 +381,9 @@ export function ownInsertions(inserted, target, ids) {
 // the edit before Word is called (paragraph_ids: the task pane ids of the
 // snapshot paragraphs, for paragraph_hint; recent_changes: changes recorded
 // since that snapshot, oldest first; author_texts: what the author answered
-// to questions of this review, a source of numbers like the comment).
+// to questions of this review, a source of numbers like the comment;
+// inserted: what each recorded change not accepted or rejected put in, by
+// paragraph, for own_insertions).
 // turn: { ref } of the current review turn, or null. A follow-through turn
 // ("Check other places", review-service.mjs review_propose) also has
 // follow: { candidate_ids, sources }. candidate_ids: the paragraphs it was

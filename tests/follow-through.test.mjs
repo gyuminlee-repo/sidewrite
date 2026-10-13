@@ -1074,3 +1074,35 @@ test("answer batches: an oversized answer reaches the turn beside live-change co
     await t.cleanup();
   }
 });
+
+test("service: a deletion is sent with the texts the recorded changes put into its paragraph", async () => {
+  // The review file holds a replace in paragraph 1; a later deletion there
+  // carries its new words (own_insertions), so the task pane lets it take
+  // that insertion as a whole and no other (WholeAuthorInsertion).
+  const t = await setup();
+  try {
+    const first = await t.edit(...FIRST, { ref: "R1.1" });
+    assert.equal(first.ok, true, first.message);
+    const calls = [];
+    const refusal = {
+      ok: false,
+      code: "WholeAuthorInsertion",
+      applied: false,
+      paragraph_index: 1,
+      message: "refused",
+    };
+    const refused = await applyTrackedEdit(
+      { ...t.deps, call: async (name, args) => (calls.push(args), refusal) },
+      { comment_ref: "R1.1", find: FIRST[1], replace: "", rationale: R },
+      { ref: "R1.1" },
+    );
+    assert.deepEqual(calls[0].own_insertions, [FIRST[1]]);
+    assert.deepEqual([refused.ok, refused.code], [false, "WholeAuthorInsertion"]);
+    assert.ok(t.lines.includes("[review] whole author insertion R1.1 paragraph=1"));
+    // Nothing recorded for it: the replace is the one change on file.
+    const rev = await t.load();
+    assert.equal(rev.comments.flatMap((c) => c.changes).length, 1);
+  } finally {
+    await t.cleanup();
+  }
+});

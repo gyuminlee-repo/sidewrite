@@ -19,6 +19,7 @@ import { splitReviewRegex } from "../daemon/review-split.mjs";
 import { paragraphHash } from "../daemon/doc-diff.mjs";
 import { missing } from "./fixtures/py-packages.mjs";
 import * as J from "../scripts/e2e/judge.mjs";
+import { WHOLE_AUTHOR_INSERTION } from "../taskpane/shared/review-view.js";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 const FIXTURE = here("./fixtures/citation_manuscript.docx");
@@ -437,6 +438,11 @@ test("refusalCode: the messages of the two tools", () => {
   assert.equal(
     code("Not applied: the change puts a number into the manuscript (7) that ..."),
     "NumberNeedsAuthor",
+  );
+  assert.equal(code(WHOLE_AUTHOR_INSERTION), "WholeAuthorInsertion");
+  assert.equal(
+    code(`${WHOLE_AUTHOR_INSERTION} Paragraph: p3 (give it as paragraph_id).`),
+    "WholeAuthorInsertion",
   );
   assert.equal(code("something else"), "Refused");
 });
