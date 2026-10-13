@@ -14,6 +14,14 @@
 - 회귀 시험은 `tests/revision-classify-in-insertion.test.mjs`다. 재현 스크립트에도 값이 참인 경우 `pending` 단언을 더했다. 아래 「재현 출력」은 조사 당시 출력이다.
 - 값이 없는 옛 변경과 결과 불명 시도에서 복구한 변경은 예전처럼 `accepted`로 읽힌다.
 
+## 남은 한계의 처리 (분기 `fix/author-insertion-limits`)
+
+- 삽입 전체 삭제는 적용 전에 거절한다(`WholeAuthorInsertion`). 두 나머지가 모두 비면 Word에 아무 표식도 남지 않아 저자가 검토할 수 없기 때문이다. 예외는 도구가 그 문단에 기록한 변경의 삽입 텍스트와 같은 삽입뿐이다. 데몬이 그 텍스트를 `own_insertions`로 작업창에 보낸다(`daemon/review-tools.mjs` `ownInsertions`). 문단 재작성의 각 부분도 같은 경로를 지난다.
+- 거절은 다른 가드처럼 로그 한 줄(`[review] whole author insertion <ref> paragraph=<i>`)로 남고 변경으로 기록하지 않는다. 모델에게는 office_ask_author로 저자에게 묻고 문단 id를 대라고 알린다. 원고 텍스트는 로그에 쓰지 않는다.
+- 일부 삭제는 PR #45대로 `pending`이다. 나머지가 하나라도 남은 변경의 카드에는 Word가 미수락 삽입 안의 삭제를 표시하지 않으니 그 삽입을 거절하거나 단어를 다시 입력하라는 한 줄이 붙는다(`taskpane/shared/review-view.js` `changeFlags`).
+- Word가 삽입 하나를 맞닿은 Added 변경 여러 개로 나눠 두면 삭제 범위를 함께 덮는 연속 조각을 한 삽입으로 보고 텍스트를 문서 순서로 이어 나머지를 계산한다(`insertionAround` `splitPieces`). 맞닿음은 목록에서 이웃한 두 변경의 `compareLocationWith` 값으로 판정한다. 확인되지 않으면 예전처럼 담고 있지 않다고 본다.
+- 실제 Word에서 확인하지 않았다. 가짜 Word 시험만 통과했다.
+
 ## 결론과 범위
 
 - 기준: 2026-10-13 `main`의 `34a2a564e55bc54a860fe2639130fde825aac1d5`.
