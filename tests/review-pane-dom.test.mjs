@@ -3160,6 +3160,19 @@ test("a deletion inside the author's unaccepted insertion gets one line on its c
       insertion_right: "",
     },
     { ...base, id: "R1.1-5", find: "old " },
+    // A replace whose old words were part of the insertion: flagged too.
+    {
+      ...base,
+      id: "R1.1-6",
+      kind: "replace",
+      find: "steel",
+      text: "iron",
+      in_insertion: true,
+      insertion_left: "New ",
+      insertion_right: " plates.",
+    },
+    // A replace in plain text.
+    { ...base, id: "R1.1-7", kind: "replace", find: "deck", text: "span", in_insertion: false },
   ];
   const revision = {
     comments: [
@@ -3183,7 +3196,8 @@ test("a deletion inside the author's unaccepted insertion gets one line on its c
       (n) => n.textContent,
     ),
   );
-  assert.deepEqual(lines, [[IN_INSERTION_NOTE], [], [], [], []]);
+  assert.deepEqual(lines, [[IN_INSERTION_NOTE], [], [], [], [], [IN_INSERTION_NOTE], []]);
   assert.match(IN_INSERTION_NOTE, /no deletion mark inside an unaccepted insertion/);
-  assert.match(IN_INSERTION_NOTE, /reject that insertion or type the words again/);
+  // Said for a deletion and a replace alike: the removed words.
+  assert.match(IN_INSERTION_NOTE, /bring the removed words back, reject that insertion or type/);
 });

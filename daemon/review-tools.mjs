@@ -1335,13 +1335,16 @@ async function recordApplied(
       ? { comment_error: commentErrorWords(r.comment_errors.at(-1)) }
       : {}),
     duplicate_before: hasTwin(texts, r.before),
-    // A deletion inside a tracked insertion, when the task pane could tell
-    // (tools-word.js insertionHolds); left out when it could not.
-    ...(appliedKind === "delete" && typeof r.in_insertion === "boolean"
+    // A deletion or a replace whose old words lay inside a tracked
+    // insertion, when the task pane could tell (tools-word.js
+    // insertionAround); left out when it could not. Only a deletion is read
+    // with it (revision-classify.mjs inInsertion); a replace has its own
+    // tracked new words, and the flag is there for the note on its card.
+    ...(appliedKind !== "insert" && typeof r.in_insertion === "boolean"
       ? { in_insertion: r.in_insertion }
       : {}),
-    // What of that insertion stays on each side of the deleted words.
-    ...(appliedKind === "delete" &&
+    // What of that insertion stays on each side of the old words.
+    ...(appliedKind !== "insert" &&
     r.in_insertion === true &&
     typeof r.insertion_left === "string" &&
     typeof r.insertion_right === "string"

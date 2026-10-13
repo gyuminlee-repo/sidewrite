@@ -1886,17 +1886,16 @@ export async function toolTrackedEdit({
           detail:
             "A safe undo needs a paragraph with no pending tracked changes and a readable change collection",
         });
-      // A deletion (also a narrowed one): did a tracked insertion hold the
-      // range Word is about to delete? Read now, while the words are there.
-      // And what of it stays on each side (insertionAround).
-      const held =
-        !isInsert && editReplace === ""
-          ? await insertionAround(context, para, target, editFind)
-          : null;
-      // The deletion would take the whole of a pending insertion (nothing of
-      // it stays on either side). Word drops those words outright and keeps
-      // no mark, so the author could never see or reject the deletion.
-      // Refused, unless the insertion is one the tool made.
+      // A deletion or a replace (also a narrowed one): did a tracked
+      // insertion hold the old words Word is about to remove? Read now,
+      // while the words are there. And what of it stays on each side
+      // (insertionAround). Word drops such old words outright, for a
+      // replace too (only its new words are tracked).
+      const held = !isInsert ? await insertionAround(context, para, target, editFind) : null;
+      // The old words are the whole of a pending insertion (nothing of it
+      // stays on either side). Word drops them outright and keeps no mark,
+      // so the author could never see or reject their removal. Refused,
+      // unless the insertion is one the tool made.
       if (
         held?.held &&
         held.left === "" &&

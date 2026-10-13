@@ -597,12 +597,12 @@ export function ledgerItemFromForm({ kind, text, scope, checkType, pattern, flag
 // insertion the tool did not make (tools-word.js toolTrackedEdit). The
 // daemon adds the paragraph id (review-tools.mjs).
 export const WHOLE_AUTHOR_INSERTION =
-  "Not applied: the words to delete are the whole of a tracked insertion the author made and has not accepted yet. Word deletes such words without a deletion mark, so the author could neither see nor reject this change. Leave them as they are and ask the author with office_ask_author whether to remove them, naming the paragraph.";
+  "Not applied: the words to delete or replace are the whole of a tracked insertion the author made and has not accepted yet. Word removes such words without a deletion mark, so the author could neither see their removal nor get them back by rejecting this change. Leave them as they are and ask the author with office_ask_author whether to change them, naming the paragraph.";
 
-// The line on a change whose deleted words lay inside an unaccepted
+// The line on a change whose removed words lay inside an unaccepted
 // insertion (changeFlags).
 export const IN_INSERTION_NOTE =
-  "Word keeps no deletion mark inside an unaccepted insertion. To undo this deletion, reject that insertion or type the words again.";
+  "Word keeps no deletion mark inside an unaccepted insertion. To bring the removed words back, reject that insertion or type them again.";
 
 // ---- L1-L3 badges, L5 requirements, L6 ledger drafts, L7, L9 ----------------
 
@@ -633,9 +633,10 @@ export function changeFlags(ch) {
     });
   }
   if (ch?.rewrite_id) out.push({ kind: "narrowed", text: "Rewrite" });
-  // A deletion inside a pending insertion of the author, with part of that
-  // insertion left on a side (review-tools.mjs recordApplied): Word dropped
-  // the words and keeps no deletion mark to reject.
+  // A deletion or a replace whose old words lay inside a pending insertion
+  // of the author, with part of that insertion left on a side
+  // (review-tools.mjs recordApplied): Word dropped the old words and keeps
+  // no deletion mark to reject.
   if (
     ch?.in_insertion === true &&
     typeof ch.insertion_left === "string" &&

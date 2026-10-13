@@ -97,7 +97,9 @@ export const ChangeSchema = z.object({
   // insertionHolds). Word drops such words outright, so this is what tells
   // the deletion waiting on that insertion from an accepted one
   // (revision-classify.mjs inInsertion). Only when the task pane could say:
-  // a file without it saves as it was read.
+  // a file without it saves as it was read. A replace carries it too (its
+  // old words are dropped the same way); there it only puts a note on the
+  // card (review-view.js changeFlags), the classifier reads its new words.
   in_insertion: z.boolean().optional(),
   // With in_insertion true: the text of that insertion before and after the
   // deleted words, which stays tracked once they are gone. The classifier

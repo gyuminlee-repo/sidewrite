@@ -766,7 +766,12 @@ test("task pane: a field-breaking replacement cannot reject a preexisting overla
     pending: [{ type: "Added", text: "Samples were kept on ice" }],
     word: hollowing,
   });
-  const r = await call("Samples were kept on ice", "Samples on ice");
+  // The old words are that whole pending insertion: an earlier change of
+  // the tool (own_insertions), else the edit is refused before Word is
+  // touched (WholeAuthorInsertion, comment-anchor-dropped.test.mjs).
+  const r = await call("Samples were kept on ice", "Samples on ice", {
+    own_insertions: ["Samples were kept on ice"],
+  });
   assert.deepEqual([r.applied, r.code, s.rejected], [true, "FieldEditNotUndone", 0]);
   assert.ok(s.changes.some((c) => c.id === "prior-0"));
   assert.equal(s.mode, "Off");

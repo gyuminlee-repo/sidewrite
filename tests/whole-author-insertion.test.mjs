@@ -126,3 +126,38 @@ test("daemon: the part of a rewrite that would take the whole insertion stops th
     d.lines.join("\n"),
   );
 });
+
+test("daemon: a replace inside the author's insertion is recorded with the flag and remainders", async () => {
+  const applied = (extra) => ({
+    ok: true,
+    word_comment_id: 7,
+    paragraph_index: 1,
+    paragraph_id: "U1",
+    before: DOC[1],
+    after: "after",
+    target_checked: true,
+    ...extra,
+  });
+  const flag = { in_insertion: true, insertion_left: "New ", insertion_right: " were fitted." };
+  let d = deps(applied(flag));
+  let r = await applyTrackedEdit(d, edit("bearings", "pads"), TURN);
+  assert.equal(r.ok, true, r.message);
+  const e = d.edits[0];
+  assert.deepEqual(
+    [e.kind, e.in_insertion, e.insertion_left, e.insertion_right],
+    ["replace", true, "New ", " were fitted."],
+  );
+  // Plain text: the flag alone, false.
+  d = deps(applied({ in_insertion: false }));
+  r = await applyTrackedEdit(d, edit("bearings", "pads"), TURN);
+  assert.deepEqual([d.edits[0].in_insertion, "insertion_left" in d.edits[0]], [false, false]);
+  // An insertion never carries it.
+  d = deps(applied(flag));
+  r = await applyTrackedEdit(
+    d,
+    { comment_ref: "R2.1", find: "bearings", insert_after: " and pads", rationale: R },
+    TURN,
+  );
+  assert.equal(r.ok, true, r.message);
+  assert.equal("in_insertion" in d.edits[0], false);
+});

@@ -20,6 +20,7 @@
 - 거절은 다른 가드처럼 로그 한 줄(`[review] whole author insertion <ref> paragraph=<i>`)로 남고 변경으로 기록하지 않는다. 모델에게는 office_ask_author로 저자에게 묻고 문단 id를 대라고 알린다. 원고 텍스트는 로그에 쓰지 않는다.
 - 일부 삭제는 PR #45대로 `pending`이다. 나머지가 하나라도 남은 변경의 카드에는 Word가 미수락 삽입 안의 삭제를 표시하지 않으니 그 삽입을 거절하거나 단어를 다시 입력하라는 한 줄이 붙는다(`taskpane/shared/review-view.js` `changeFlags`).
 - Word가 삽입 하나를 맞닿은 Added 변경 여러 개로 나눠 두면 삭제 범위를 함께 덮는 연속 조각을 한 삽입으로 보고 텍스트를 문서 순서로 이어 나머지를 계산한다(`insertionAround` `splitPieces`). 맞닿음은 목록에서 이웃한 두 변경의 `compareLocationWith` 값으로 판정한다. 확인되지 않으면 예전처럼 담고 있지 않다고 본다.
+- 바꾸기도 같은 경로를 지난다. 옛 단어가 저자 삽입 전체이면 같은 코드로 거절한다. Word가 새 단어만 추적하고 옛 단어는 표식 없이 버리므로 변경을 거절해도 저자 삽입이 돌아오지 않는다. 옛 단어가 삽입 일부이면 예전처럼 적용하고 `in_insertion`과 두 나머지를 함께 저장해 같은 카드 줄을 붙인다. 바꾸기의 판정은 자기 새 단어의 추적 삽입으로 하므로 분류기는 바꾸지 않았다(`tests/revision-classify-in-insertion.test.mjs`가 플래그 유무와 무관함을 고정한다).
 - 실제 Word에서 확인하지 않았다. 가짜 Word 시험만 통과했다.
 
 ## 결론과 범위

@@ -536,7 +536,7 @@ test("in_insertion: plain text says false, also next to or across the insertion"
   assert.deepEqual([r.ok, r.in_insertion], [true, false]);
 });
 
-test("in_insertion: absent when Word cannot say, and on edits that are no deletion", async () => {
+test("in_insertion: absent when Word cannot say, and on an insertion", async () => {
   let { state, items } = fakeDoc(["Title", TEXT], { pending: INSERTION });
   state.api16 = false;
   let r = await toolTrackedEdit(edit("thick ", ""));
@@ -548,14 +548,11 @@ test("in_insertion: absent when Word cannot say, and on edits that are no deleti
   r = await toolTrackedEdit(edit("thick ", ""));
   assert.deepEqual([r.ok, "in_insertion" in r], [true, false]);
   fakeDoc(["Title", TEXT], { pending: INSERTION });
-  r = await toolTrackedEdit(edit("thick steel plates", "shims"));
-  assert.deepEqual([r.ok, "in_insertion" in r], [true, false]);
-  fakeDoc(["Title", TEXT], { pending: INSERTION });
   r = await toolTrackedEdit({ ...edit("thick ", ""), replace: undefined, insert_after: "new " });
   assert.deepEqual([r.ok, "in_insertion" in r], [true, false]);
 });
 
-test("in_insertion: two more Word round trips, only for a deletion", async () => {
+test("in_insertion: two more Word round trips for a deletion or a replace, none for an insertion", async () => {
   const count = async (api16, args) => {
     const { state } = fakeDoc(["Title", TEXT], { pending: INSERTION });
     state.api16 = api16;
@@ -576,7 +573,9 @@ test("in_insertion: two more Word round trips, only for a deletion", async () =>
   const del = edit("thick ", "");
   assert.equal((await count(true, del)) - (await count(false, del)), 2);
   const replace = edit("thick steel plates", "shims");
-  assert.equal(await count(true, replace), await count(false, replace));
+  assert.equal((await count(true, replace)) - (await count(false, replace)), 2);
+  const insert = { ...edit("thick ", ""), replace: undefined, insert_after: "new " };
+  assert.equal(await count(true, insert), await count(false, insert));
 });
 
 // WholeAuthorInsertion: a deletion that would take the whole of a pending
@@ -688,4 +687,69 @@ test("split insertion: two pieces that do not touch give no container", async ()
   const r = await toolTrackedEdit(edit("with thick ", ""));
   assert.deepEqual([r.ok, r.in_insertion], [true, false]);
   assert.equal("insertion_left" in r || "insertion_right" in r, false);
+});
+
+// A replace whose old words lie inside a pending insertion: Word drops the
+// old words outright too (only the new words are tracked), so rejecting the
+// change cannot bring them back. The same reading as for a deletion.
+test("replace: the old words are the whole of the author's insertion: refused, nothing applied", async () => {
+  const { state, items } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+  const r = await toolTrackedEdit(edit(I1, "Old bearings stayed."));
+  assert.deepEqual(
+    [r.ok, r.code, r.applied, r.paragraph_index],
+    [false, "WholeAuthorInsertion", false, 1],
+  );
+  assert.deepEqual([items[1].text, state.comments.length], [TEXT, 0]);
+});
+
+test("replace: a narrowed replace whose cut is the whole insertion is refused too", async () => {
+  const added = "Spare bolts";
+  const text = HEAD + added + " were stacked.";
+  fakeDoc(["Title", text], { pending: [HEAD.length, HEAD.length + added.length] });
+  const r = await toolTrackedEdit({
+    ...edit("daily. Spare bolts were", "daily. Spare nuts were", {
+      narrow: { find: "bolts", replace: "nuts" },
+    }),
+    expected_before_hash: paragraphHash(text),
+  });
+  // "bolts" is only part of the insertion: applied.
+  assert.deepEqual(
+    [r.ok, r.in_insertion, r.insertion_left, r.insertion_right],
+    [true, true, "Spare ", ""],
+  );
+  const { items } = fakeDoc(["Title", text], {
+    pending: [HEAD.length, HEAD.length + added.length],
+  });
+  const whole = await toolTrackedEdit({
+    ...edit("daily. Spare bolts were", "daily. Rivets were", {
+      narrow: { find: "Spare bolts", replace: "Rivets" },
+    }),
+    expected_before_hash: paragraphHash(text),
+  });
+  assert.deepEqual([whole.ok, whole.code], [false, "WholeAuthorInsertion"]);
+  assert.equal(items[1].text, text);
+});
+
+test("replace: the whole of an insertion the tool made is replaced as before", async () => {
+  const { items } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+  const r = await toolTrackedEdit(edit(I1, "Old bearings stayed.", { own_insertions: [I1] }));
+  assert.deepEqual(
+    [r.ok, r.in_insertion, r.insertion_left, r.insertion_right],
+    [true, true, "", ""],
+  );
+  assert.equal(items[1].text, HEAD + "Old bearings stayed.");
+});
+
+test("replace: part of the author's insertion is replaced as before, with the flag and remainders", async () => {
+  const { items } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+  const r = await toolTrackedEdit(edit("thick steel plates", "shims"));
+  assert.deepEqual(
+    [r.ok, r.in_insertion, r.insertion_left, r.insertion_right],
+    [true, true, "New bearings with ", " were fitted."],
+  );
+  assert.equal(items[1].text, HEAD + "New bearings with shims were fitted.");
+  // Plain text: false, no remainders.
+  fakeDoc(["Title", TEXT]);
+  const plain = await toolTrackedEdit(edit("thick steel plates", "shims"));
+  assert.deepEqual([plain.ok, plain.in_insertion, "insertion_left" in plain], [true, false, false]);
 });
