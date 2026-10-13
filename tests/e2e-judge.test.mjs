@@ -2239,19 +2239,40 @@ test("plainWordOf: a word next to the change, once in the paragraph, not the aut
 });
 
 test("trackedProbeMatch: inside true and plain false pass, anything else fails", async () => {
-  const { trackedProbeMatch } = await import("../scripts/e2e/judge.mjs");
+  const { trackedProbeMatch: match } = await import("../scripts/e2e/judge.mjs");
+  const HAND = "Checked: ";
+  const trackedProbeMatch = (r) => match(r, HAND);
   // around: insertionAround on "Checked" at the start of the insertion
   // "Checked: ": nothing of it left of the word, ": " right of it.
+  // whole: insertionAround on the whole insertion "Checked: ": held,
+  // nothing left on either side, its text the hand insertion (what the
+  // pane refuses a deletion of as WholeAuthorInsertion).
   const seen = {
     inside_hits: 1,
     plain_hits: 1,
     changes: [{ type: "Added", text: "Checked: " }],
     around: { held: true, left: "", right: ": " },
+    whole: { held: true, left: "", right: "", text: "Checked: " },
   };
   const ok = trackedProbeMatch({ ...seen, inside: true, plain: false });
   assert.equal(ok.pass, true);
   assert.match(ok.got, /Added:"Checked: "/);
   assert.match(ok.got, /left "" right ": "/);
+  assert.match(ok.got, /whole held true left "" right "" text "Checked: "/);
+  // The whole insertion not read as whole: held but with a remainder, not
+  // held, text another insertion, not read at all.
+  for (const whole of [
+    { held: true, left: "", right: " ", text: "Checked: " },
+    { held: false },
+    { held: true, left: "", right: "", text: "Checked twice: " },
+    { held: true, left: "", right: "" },
+    undefined,
+  ])
+    assert.equal(
+      trackedProbeMatch({ ...seen, whole, inside: true, plain: false }).pass,
+      false,
+      JSON.stringify(whole),
+    );
   // The remainders not told (the place in the text unknown), or told wrong.
   for (const around of [
     { held: true },
@@ -2289,4 +2310,22 @@ test("run-acceptance asks pane-driver only for steps it has", async () => {
   const asked = new Set([...runner.matchAll(/\bpane\(\s*"([a-z-]+)"/g)].map((m) => m[1]));
   assert.ok(asked.has("probe-tracked-at") && asked.has("refresh"));
   for (const s of asked) assert.equal(typeof steps[s], "function", `no pane step ${s}`);
+});
+
+// The probe also reads the whole of the author's insertion, and the judge
+// is given its text. Read only: the driver step searches and compares.
+test("probe-tracked-at reads the whole hand insertion and changes nothing", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+  const runner = read("../scripts/e2e/run-acceptance.mjs");
+  assert.ok(runner.includes("find_whole: HAND_INSERT"));
+  assert.ok(runner.includes("trackedProbeMatch(probe, HAND_INSERT)"));
+  const driver = read("../scripts/e2e/pane-driver.cjs");
+  const step = driver.slice(
+    driver.indexOf('async "probe-tracked-at"'),
+    driver.indexOf('async "clean-tool"'),
+  );
+  assert.match(step, /a\.find_whole/);
+  assert.match(step, /out\.whole = /);
+  assert.doesNotMatch(step, /insertText|\.delete\(|insertComment|toolTrackedEdit/);
 });

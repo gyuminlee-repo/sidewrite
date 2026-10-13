@@ -1096,10 +1096,11 @@ async function main() {
       ? pane("probe-tracked-at", {
           find_inside: HAND_INSERT.trim().replace(/:$/, ""),
           find_plain: plainWord,
+          find_whole: HAND_INSERT,
         })
       : { threw: hand.ok ? "no plain word next to the R1.4 change" : "no tracked insertion" };
   record.word.probe_tracked_at = probe;
-  const probed = trackedProbeMatch(probe);
+  const probed = trackedProbeMatch(probe, HAND_INSERT);
   rows.push({
     step: "word: tracked insertion seen by the pane",
     result: probed.pass ? "PASS" : "FAIL",
