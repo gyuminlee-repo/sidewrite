@@ -312,7 +312,7 @@ async function world() {
   const calls = [];
   const callTool = async (name, args) => (calls.push(args), toolTrackedEdit(args));
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool,
     pushTurn: () => {},
     sendEvent: (key, obj) => events.push(obj),
@@ -342,7 +342,10 @@ test("service: an undo that took more than the edit asks the pane of that docume
   const lines = [];
   try {
     const svc = createReviewService({
-      getContext: () => ({ activeDoc: join(dir, "paper.docx"), caps: ["target_hash"] }),
+      getContext: () => ({
+        activeDoc: join(dir, "paper.docx"),
+        caps: ["target_hash", "author_insertion_guard"],
+      }),
       callTool: async () => ({}),
       pushTurn: () => {},
       sendEvent: (key, obj) => events.push([key, obj]),

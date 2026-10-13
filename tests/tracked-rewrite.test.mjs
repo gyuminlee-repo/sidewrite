@@ -35,7 +35,7 @@ const COMMENT = {
 };
 
 async function world({
-  caps = ["target_hash", "tracked_rewrite"],
+  caps = ["target_hash", "author_insertion_guard", "tracked_rewrite"],
   failAt = null,
   notPlain = false,
 } = {}) {
@@ -340,7 +340,7 @@ test("a paragraph that is not plain text, and a task pane that cannot do it: not
   } finally {
     await t.cleanup();
   }
-  t = await world({ caps: ["target_hash"] });
+  t = await world({ caps: ["target_hash", "author_insertion_guard"] });
   try {
     const r = await applyTrackedRewrite(t.deps, ARGS, TURN);
     assert.deepEqual([r.ok, r.code], [false, "TaskPaneOutdated"]);

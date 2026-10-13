@@ -1223,7 +1223,7 @@ const REFUSAL_TEXTS = [
     "StaleTarget",
   ],
   [/puts a number into the manuscript/, "NumberNeedsAuthor"],
-  [/whole of a tracked insertion the author made/, "WholeAuthorInsertion"],
+  [/words of a tracked insertion the author made/, "WholeAuthorInsertion"],
   [/forbidden rule\(s\) .+ cannot be checked/, "ForbidRuleBroken"],
   [/matches forbidden rule\(s\)/, "ForbidBlocked"],
   [/task pane is older than the daemon/, "TaskPaneOutdated"],

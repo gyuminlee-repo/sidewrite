@@ -93,7 +93,7 @@ async function world() {
   const events = [];
   const svc = createReviewService({
     // A task pane of this build: it compares the paragraph before an edit.
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: (name, args) => callTaskpaneTool(name, args),
     pushTurn: () => {},
     getModel: () => "model-under-test",

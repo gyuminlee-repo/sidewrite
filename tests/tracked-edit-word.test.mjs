@@ -407,7 +407,12 @@ test("the second try does not take the comment of another change for its own", a
 
 test("the task pane names the capability a rewrite needs", async () => {
   const { PANE_CAPS } = await import("../taskpane/shared/tools-word.js");
-  assert.deepEqual(PANE_CAPS, ["target_hash", "tracked_rewrite", "field_guard"]);
+  assert.deepEqual(PANE_CAPS, [
+    "target_hash",
+    "tracked_rewrite",
+    "field_guard",
+    "author_insertion_guard",
+  ]);
 });
 
 test("no_comment: the edit is applied and no comment is added", async () => {

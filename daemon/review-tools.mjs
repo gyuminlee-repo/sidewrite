@@ -50,6 +50,11 @@ export const TARGET_HASH_CAP = "target_hash";
 // it (a whole sentence with its citation): it checks the fields of the
 // paragraph after the edit and takes the edit back when one is not whole.
 export const FIELD_CAP = "field_guard";
+// What a task pane must name to be sent a deletion or a replace: it refuses
+// an edit whose old words contain or take words of the author's pending
+// tracked insertion (tools-word.js insertionAround, WholeAuthorInsertion).
+// A pane loaded before that check would drop such words without a mark.
+export const AUTHOR_INSERTION_CAP = "author_insertion_guard";
 
 // Read-only Word tools stay available in a review turn.
 export const REVIEW_READ_TOOLS = new Set([
@@ -330,26 +335,39 @@ function fail(message, extra = {}) {
   return { ok: false, message, ...extra };
 }
 
-// The texts the recorded changes put into paragraph `target` (ctx.inserted:
-// { paragraph_index, paragraph_id, text } of each change of this file not
-// accepted or rejected). The task pane lets a deletion take a whole pending
-// insertion only when its text is one of these (tools-word.js
-// WholeAuthorInsertion). By paragraph id when both have one, else by index.
-export function ownInsertions(inserted, target, ids) {
+// The texts the tool put into paragraph `target` (inserted: { paragraph_index,
+// paragraph_id, text, after } of each recorded change of this file not
+// accepted or rejected, and of each edit of this turn: turnInserted). The
+// task pane lets an edit take a pending insertion only when its text is
+// one of these (tools-word.js insertionAround). By paragraph id when both
+// have one. A record without an id counts by its index only when the
+// paragraph still reads as it did after that change (now: its text here,
+// compared normalized); anything else is not counted, so the pane refuses
+// (the safe direction).
+export function ownInsertions(inserted, target, ids, now) {
   if (target === null || !Array.isArray(inserted)) return [];
   const id = ids?.[target] ?? null;
+  const same = (a, b) =>
+    typeof a === "string" &&
+    typeof b === "string" &&
+    normalizeParaText(a).trim() === normalizeParaText(b).trim();
   return [
     ...new Set(
       inserted
         .filter((c) =>
-          id !== null && c.paragraph_id != null
-            ? c.paragraph_id === id
-            : c.paragraph_index === target,
+          c.paragraph_id != null
+            ? id !== null && c.paragraph_id === id
+            : c.paragraph_index === target && same(c.after, now),
         )
         .map((c) => c.text),
     ),
   ];
 }
+
+// What the edits of a turn put in, by paragraph, kept on the turn: an
+// insertion made earlier in the turn is the tool's own before its record
+// reaches the review file (ownInsertions).
+const turnInserted = (turn) => (turn.inserted ??= []);
 
 // deps: { begin(), call(name, args), getLedger(), getReviewContext(ref),
 //         onAttempt({ref, args, attempt}) -> {id, end()}, onEdit({ref, change, attempt_id}),
@@ -661,6 +679,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
       { code: "TaskPaneOutdated" },
     );
   }
+  // A deletion or a replace goes only to a task pane that guards the
+  // author's pending insertions (AUTHOR_INSERTION_CAP).
+  if (kind !== "insert" && deps.paneCan && !deps.paneCan(AUTHOR_INSERTION_CAP, at)) {
+    deps.log?.(`[review] refused ${turn.ref}: task pane without ${AUTHOR_INSERTION_CAP}`);
+    return fail(
+      "Not applied: the task pane is older than the daemon (or not connected) and does not check whether an edit removes words the author inserted, so nothing was sent to Word. Tell the author to reload the task pane (close and reopen it); then propose the edit again.",
+      { code: "TaskPaneOutdated" },
+    );
+  }
   let pre;
   try {
     pre =
@@ -721,16 +748,16 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
           ).catch(() => {});
         }
       }
-      // The deletion would have taken the whole of an insertion the author
-      // made and has not accepted: Word keeps no mark of that. The model is
-      // told to ask, with the paragraph as it knows it.
+      // The old words contain or take words of an insertion the author
+      // made and has not accepted: Word keeps no mark of their removal. The
+      // model is told to ask, with the paragraph id it knows, or none.
       if (r.code === "WholeAuthorInsertion") {
         const index = r.paragraph_index ?? target;
-        deps.log?.(`[review] whole author insertion ${turn.ref} paragraph=${index ?? "?"}`);
+        deps.log?.(
+          `[review] whole author insertion ${turn.ref} paragraph=${index ?? "?"} why=${r.reason ?? "?"}`,
+        );
         const id =
-          index === null || index === undefined
-            ? null
-            : (ctx.paragraph_ids?.[index] ?? `p${index}`);
+          index === null || index === undefined ? null : (ctx.paragraph_ids?.[index] ?? null);
         return fail(
           `${WHOLE_AUTHOR_INSERTION}${id ? ` Paragraph: ${id} (give it as paragraph_id).` : ""}`,
           { code: "WholeAuthorInsertion", applied: false, paragraph_index: index ?? null },
@@ -753,6 +780,16 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
         { code: "StaleTarget", paragraph_index: r.paragraph_index ?? null },
       );
     }
+    // In the document now: what it put in is the tool's own for the rest
+    // of the turn, whether or not its record is saved.
+    const putIn = r.narrowed === true && narrow ? String(narrow.replace ?? "") : newText;
+    if (putIn)
+      turnInserted(turn).push({
+        paragraph_index: target,
+        paragraph_id: target === null ? null : (ctx.paragraph_ids?.[target] ?? null),
+        text: putIn,
+        after: r.after,
+      });
     const out = await recordApplied(deps, turn.ref, r, {
       at,
       attemptId,
@@ -784,7 +821,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     return out;
   };
 
-  const ownTexts = kind === "insert" ? [] : ownInsertions(ctx.inserted, target, ctx.paragraph_ids);
+  const ownTexts =
+    kind === "insert"
+      ? []
+      : ownInsertions(
+          [...(ctx.inserted ?? []), ...turnInserted(turn)],
+          target,
+          ctx.paragraph_ids,
+          target === null ? null : current[target],
+        );
   // The comment stays in the list until the answer is recorded (or handed
   // to onOutcomeUnknown, which holds it on its own).
   const release = deps.holdRef?.(turn.ref, at);

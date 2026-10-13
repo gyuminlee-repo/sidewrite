@@ -597,7 +597,7 @@ export function ledgerItemFromForm({ kind, text, scope, checkType, pattern, flag
 // insertion the tool did not make (tools-word.js toolTrackedEdit). The
 // daemon adds the paragraph id (review-tools.mjs).
 export const WHOLE_AUTHOR_INSERTION =
-  "Not applied: the words to delete or replace are the whole of a tracked insertion the author made and has not accepted yet. Word removes such words without a deletion mark, so the author could neither see their removal nor get them back by rejecting this change. Leave them as they are and ask the author with office_ask_author whether to change them, naming the paragraph.";
+  "Not applied: the words to delete or replace contain or take words of a tracked insertion the author made and has not accepted yet. Word removes such words without a deletion mark, so the author could neither see their removal nor get them back by rejecting this change. Leave those words as they are: change only words outside that insertion, or ask the author with office_ask_author whether to change them, naming the paragraph.";
 
 // The line on a change whose removed words lay inside an unaccepted
 // insertion (changeFlags).

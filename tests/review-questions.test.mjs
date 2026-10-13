@@ -285,7 +285,7 @@ async function service() {
   const events = [];
   const lines = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: async () => ({
       ok: true,
       word_comment_id: 5,

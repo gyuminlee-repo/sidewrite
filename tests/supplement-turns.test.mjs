@@ -370,7 +370,10 @@ async function world() {
   const pushed = [];
   const open = new Set(["paper.docx", "SI.docx"]);
   const service = createReviewService({
-    getContext: (key) => ({ activeDoc: docOf(key), caps: ["target_hash"] }),
+    getContext: (key) => ({
+      activeDoc: docOf(key),
+      caps: ["target_hash", "author_insertion_guard"],
+    }),
     sendEvent: (key, obj) => events.push({ key, ...obj }),
     callTool: async () => ({}),
     pushTurn: (key, host, text, turn) => pushed.push({ key, text, turn }),

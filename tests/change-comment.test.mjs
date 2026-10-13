@@ -197,7 +197,7 @@ test("service: the comment text of a change is the one its edit would have carri
   const doc = join(dir, "paper.docx");
   const lines = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: null,
     pushTurn: () => {},
     log: (s) => lines.push(s),

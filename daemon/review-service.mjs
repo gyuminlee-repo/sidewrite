@@ -665,6 +665,7 @@ export function createReviewService({
               paragraph_index: ch.paragraph_index,
               paragraph_id: ch.paragraph_id,
               text: ch.text,
+              after: ch.after,
             })),
           // What the author answered to questions of this review, in this
           // file and in the other files of its revision: a source of numbers

@@ -154,10 +154,21 @@ test("service: an older task pane (no caps in its hello) is sent no tracked edit
 });
 
 test("service: a task pane with the capability gets the edit", async () => {
-  const w = await world(["target_hash"]);
+  const w = await world(["target_hash", "author_insertion_guard"]);
   try {
     const r = await w.edit({ ...EDIT, replace: "the agar" });
     assert.deepEqual([r.ok, w.calls.length], [true, 1]);
+  } finally {
+    await w.cleanup();
+  }
+});
+
+test("service: a task pane without the author insertion guard is sent no replace", async () => {
+  const w = await world(["target_hash"]);
+  try {
+    const r = await w.edit({ ...EDIT, replace: "the agar" });
+    assert.deepEqual([r.ok, r.code, w.calls.length], [false, "TaskPaneOutdated", 0]);
+    assert.match(r.message, /reload the task pane/i);
   } finally {
     await w.cleanup();
   }

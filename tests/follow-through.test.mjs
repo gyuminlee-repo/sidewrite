@@ -242,7 +242,7 @@ async function setup(paragraphs = PARAGRAPHS) {
     target_checked: true,
   });
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: async () => wordResult(),
     pushTurn: (key, host, text, turn) => pushed.push({ key, host, text, turn }),
     oneshot: null,
@@ -1081,6 +1081,11 @@ test("service: a deletion is sent with the texts the recorded changes put into i
   // that insertion as a whole and no other (WholeAuthorInsertion).
   const t = await setup();
   try {
+    // Word answers with the paragraph as it reads before and after; the
+    // record has no paragraph id here, so it counts while the paragraph
+    // still reads as it did after the change.
+    t.word.before = PARAGRAPHS[1];
+    t.word.after = PARAGRAPHS[1].replace(...FIRST);
     const first = await t.edit(...FIRST, { ref: "R1.1" });
     assert.equal(first.ok, true, first.message);
     const calls = [];
@@ -1098,7 +1103,7 @@ test("service: a deletion is sent with the texts the recorded changes put into i
     );
     assert.deepEqual(calls[0].own_insertions, [FIRST[1]]);
     assert.deepEqual([refused.ok, refused.code], [false, "WholeAuthorInsertion"]);
-    assert.ok(t.lines.includes("[review] whole author insertion R1.1 paragraph=1"));
+    assert.ok(t.lines.includes("[review] whole author insertion R1.1 paragraph=1 why=?"));
     // Nothing recorded for it: the replace is the one change on file.
     const rev = await t.load();
     assert.equal(rev.comments.flatMap((c) => c.changes).length, 1);

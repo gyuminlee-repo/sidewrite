@@ -156,7 +156,10 @@ test("the review of the stage splits into its four comments without a model", ()
 // The review service with the document of the fixture and a Word that
 // answers `word(name, args)`. reviewed: what the pane read as the
 // reviewed text of each paragraph; caps: what the pane said it can do.
-async function service(word, { reviewed = TEXTS, caps = ["target_hash", "tracked_rewrite"] } = {}) {
+async function service(
+  word,
+  { reviewed = TEXTS, caps = ["target_hash", "author_insertion_guard", "tracked_rewrite"] } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), "cite-stage-"));
   const doc = join(dir, "paper.docx");
   const lines = [];
@@ -279,7 +282,10 @@ test("with the fields shown as Word shows them, every case of the run gets the a
       narrowed: !!args.narrow,
       target_checked: true,
     }),
-    { reviewed: REVIEWED, caps: ["target_hash", "tracked_rewrite", "field_guard"] },
+    {
+      reviewed: REVIEWED,
+      caps: ["target_hash", "author_insertion_guard", "tracked_rewrite", "field_guard"],
+    },
   );
   const why = {
     spans: "replace-across",

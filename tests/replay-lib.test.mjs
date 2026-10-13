@@ -409,10 +409,11 @@ test("the log lines read by the replay are the ones the daemon writes", () => {
     "`[review] rewrite ${turn.ref} paragraph=${index} parts=${parts.length} applied=${applied}`",
     '`${stopped ? ` stopped=${stopped.code ?? "refused"}` : ""}`',
     '`[review] not a follow place ${turn.ref} paragraph=${index ?? "?"}`',
-    '`[review] whole author insertion ${turn.ref} paragraph=${index ?? "?"}`',
+    '`[review] whole author insertion ${turn.ref} paragraph=${index ?? "?"} why=${r.reason ?? "?"}`',
+    "`[review] refused ${turn.ref}: task pane without ${AUTHOR_INSERTION_CAP}`",
   ])
     assert.ok(tools.includes(line), line);
-  assert.equal((tools.match(/`\[review\] refused /g) ?? []).length, 3);
+  assert.equal((tools.match(/`\[review\] refused /g) ?? []).length, 4);
   for (const code of [
     "NumberNeedsAuthor",
     "ForbidRuleBroken",
