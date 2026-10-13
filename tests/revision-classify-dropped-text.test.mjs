@@ -182,6 +182,28 @@ test("a deletion at the end of a sibling replace's inserted words stays pending"
   assert.equal(state(TAIL, p, [SIB, TAIL]), "pending");
 });
 
+for (const index of [null, undefined, "4", 4.5]) {
+  test(`unrelated paragraph IDs with non-integer indices (${index}) cannot prove dropped text`, () => {
+    const p = para(TAIL_NOW, [
+      ["ins", "is the likely main"],
+      ["del", SIB_D],
+    ]);
+    const deleted = { ...TAIL, paragraph_index: index };
+    const elsewhere = { ...SIB, paragraph_id: "P9", paragraph_index: index };
+    assert.equal(state(deleted, p, [elsewhere, deleted]), "accepted");
+  });
+}
+
+test("equal paragraph IDs or integer indices still prove a dropped sibling deletion", () => {
+  const p = para(TAIL_NOW, [
+    ["ins", "is the likely main"],
+    ["del", SIB_D],
+  ]);
+  const deleted = { ...TAIL, paragraph_index: null };
+  assert.equal(state(deleted, p, [{ ...SIB, paragraph_index: null }, deleted]), "pending");
+  assert.equal(state(TAIL, p, [{ ...SIB, paragraph_id: null }, TAIL]), "pending");
+});
+
 test("the same with the sibling's deleted words opening with a comma", () => {
   const before =
     "The cables were retensioned in spring rather than in autumn, combined with new dampers.";

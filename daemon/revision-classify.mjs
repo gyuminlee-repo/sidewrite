@@ -287,7 +287,9 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
   const sameParagraph = (s) =>
     s.id !== change.id &&
     ((s.paragraph_id != null && s.paragraph_id === change.paragraph_id) ||
-      s.paragraph_index === change.paragraph_index);
+      (Number.isInteger(s.paragraph_index) &&
+        Number.isInteger(change.paragraph_index) &&
+        s.paragraph_index === change.paragraph_index));
   // The form Word applied (find, text), which its tracked runs follow; a
   // narrowed sibling keeps the full call under narrowed_from, not matched.
   const newWords = (s) => normalizeParaText(s.text);

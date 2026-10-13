@@ -773,6 +773,10 @@ test("a listed place written anew in more than three parts goes in whole", async
     );
     assert.equal(r.ok, true, r.message);
     assert.ok(r.parts > 3 && r.change_ids.length === r.parts, JSON.stringify(r));
+    await t.turnDone(turn, { ok: true, text: "The coating report now agrees." });
+    const c = (await t.load()).comments[0];
+    assert.deepEqual(c.follow_through.change_ids, r.change_ids);
+    assert.deepEqual(c.follow_through.seen_change_ids, ["R1.1-1", ...r.change_ids]);
   } finally {
     await t.cleanup();
   }
@@ -824,6 +828,89 @@ test("an edit of a follow-through turn that a forbid rule blocked can be allowed
     await t.cleanup();
   }
 });
+
+for (const ownWork of [false, true]) {
+  test(`follow-through owns only its tool receipts during a concurrent override (${ownWork ? "with" : "without"} own work)`, async () => {
+    const t = await setup();
+    try {
+      assert.equal((await t.edit(...FIRST, { ref: "R1.1" })).ok, true);
+      await t.ask("ledger_add", {
+        item: {
+          kind: "forbid",
+          text: "Do not say novel",
+          check: { type: "regex", pattern: "novel", flags: "i" },
+        },
+      });
+      t.word.paragraph_index = 5;
+      const blocked = await t.edit("Tension stayed", "Novel tension stayed", { ref: "R1.1" });
+      assert.ok(blocked.blocked_id, blocked.message);
+      const turn = await startFollow(t);
+      // An exception first proposed by this follow-through turn has its
+      // candidate/source constraints, but still belongs to the author's
+      // separate approval request rather than the turn's tool receipts.
+      const followBlocked = await t.edit("The coating held", "The novel coating held", turn);
+      assert.ok(followBlocked.blocked_id, followBlocked.message);
+      let owned = [];
+      if (ownWork) {
+        t.word.paragraph_index = 3;
+        const changed = await t.edit(...CAPTION, turn);
+        assert.equal(changed.ok, true, changed.message);
+        owned = [changed.change_id];
+        const asked = await askAuthor(
+          t.deps,
+          {
+            comment_ref: "R1.1",
+            question: "Was the deck heading checked?",
+            why: "The library record is silent.",
+          },
+          turn,
+        );
+        assert.equal(asked.ok, true, asked.message);
+      }
+      // The author's exception belongs to a separate request even though
+      // it saves a new change under the same comment while this turn runs.
+      t.word.paragraph_index = 5;
+      const override = await t.ask("review_override", {
+        ref: "R1.1",
+        blocked_id: blocked.blocked_id,
+      });
+      assert.equal(override.applied, true, JSON.stringify(override));
+      const other = override.result.change_id;
+      t.word.paragraph_index = 2;
+      const followOverride = await t.ask("review_override", {
+        ref: "R1.1",
+        blocked_id: followBlocked.blocked_id,
+      });
+      assert.equal(followOverride.applied, true, JSON.stringify(followOverride));
+      const askedElsewhere = await askAuthor(
+        t.deps,
+        {
+          comment_ref: "R1.1",
+          question: "Which library keeps the plans?",
+          why: "The report does not say.",
+        },
+        { ref: "R1.1" },
+      );
+      assert.equal(askedElsewhere.ok, true, askedElsewhere.message);
+      await t.turnDone(turn, { ok: true, text: "Checked the listed places." });
+      const rev = await t.load();
+      const c = rev.comments[0];
+      assert.deepEqual(c.follow_through.change_ids, owned);
+      assert.equal(c.follow_through.questions, ownWork ? 1 : 0);
+      assert.deepEqual(c.follow_through.seen_change_ids, ["R1.1-1", ...owned]);
+      assert.ok(!c.follow_through.seen_change_ids.includes(other));
+      assert.ok(!c.follow_through.seen_change_ids.includes(followOverride.result.change_id));
+      assert.ok(followState(c, rev.snapshot).offer > 0, "the unrelated edit still needs checking");
+      assert.ok(
+        t.lines.includes(
+          `[review] follow R1.1 candidates=3 changes=${owned.length} questions=${ownWork ? 1 : 0}`,
+        ),
+      );
+    } finally {
+      await t.cleanup();
+    }
+  });
+}
 
 test("the end of a follow-through turn: one log line, and the comment says the check ran", async () => {
   const t = await setup();

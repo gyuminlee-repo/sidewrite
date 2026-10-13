@@ -247,6 +247,7 @@ export async function askAuthor(deps, args, turn) {
     },
     at: t.at,
   });
+  turn.follow?.recorded?.questions.push(saved.id);
   deps.log?.(
     `[review] question ${turn.ref} ${saved.id} requirement=${args.requirement_id ?? "-"}${place ? ` place=${place}` : ""}`,
   );
@@ -369,6 +370,8 @@ function fail(message, extra = {}) {
 // the heading, legend or methods paragraph that states the same thing; no
 // other guard reads it. An edit of such a turn that a forbid rule blocks
 // keeps both (onBlocked), for the exception the author may allow later.
+// recorded: optional in-memory receipt lists of this live turn. They are
+// never copied to a blocked item or to an author's later approval request.
 // override: set only by the daemon after the user approved an exception in
 // the task pane; it is not part of the tool schema the model sees.
 // part: set only by applyTrackedRewrite, for one edit of a paragraph that is
@@ -738,6 +741,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
         ).catch(() => {});
       },
     });
+    if (out.change_id) turn.follow?.recorded?.changes.push(out.change_id);
     return out;
   };
 
