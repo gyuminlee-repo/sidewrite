@@ -593,6 +593,17 @@ export function ledgerItemFromForm({ kind, text, scope, checkType, pattern, flag
   return { item: { kind, text: t, scope: scope || "manuscript", check: { type: "llm" } } };
 }
 
+// The refusal of a deletion that would take the whole of a pending tracked
+// insertion the tool did not make (tools-word.js toolTrackedEdit). The
+// daemon adds the paragraph id (review-tools.mjs).
+export const WHOLE_AUTHOR_INSERTION =
+  "Not applied: the words to delete are the whole of a tracked insertion the author made and has not accepted yet. Word deletes such words without a deletion mark, so the author could neither see nor reject this change. Leave them as they are and ask the author with office_ask_author whether to remove them, naming the paragraph.";
+
+// The line on a change whose deleted words lay inside an unaccepted
+// insertion (changeFlags).
+export const IN_INSERTION_NOTE =
+  "Word keeps no deletion mark inside an unaccepted insertion. To undo this deletion, reject that insertion or type the words again.";
+
 // ---- L1-L3 badges, L5 requirements, L6 ledger drafts, L7, L9 ----------------
 
 // Short labels shown on a change row (L1 lost facts, L2 unsourced, L3 narrowed)
@@ -622,6 +633,17 @@ export function changeFlags(ch) {
     });
   }
   if (ch?.rewrite_id) out.push({ kind: "narrowed", text: "Rewrite" });
+  // A deletion inside a pending insertion of the author, with part of that
+  // insertion left on a side (review-tools.mjs recordApplied): Word dropped
+  // the words and keeps no deletion mark to reject.
+  if (
+    ch?.in_insertion === true &&
+    typeof ch.insertion_left === "string" &&
+    typeof ch.insertion_right === "string" &&
+    (ch.insertion_left !== "" || ch.insertion_right !== "")
+  ) {
+    out.push({ kind: "in-insertion", text: IN_INSERTION_NOTE });
+  }
   return out;
 }
 

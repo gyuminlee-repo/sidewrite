@@ -18,6 +18,7 @@ import {
   factPresent,
 } from "./edit-facts.mjs";
 import { changeContext, normalizeParaText } from "./revision-classify.mjs";
+import { WHOLE_AUTHOR_INSERTION } from "../taskpane/shared/review-view.js";
 import { paragraphHash } from "./doc-diff.mjs";
 import { newNumbers } from "./number-guard.mjs";
 import { rewriteSegments } from "./word-diff.mjs";
@@ -327,6 +328,27 @@ const NO_ANSWER_CODES = new Set(["ToolTimeout", "TaskpaneDisconnected"]);
 
 function fail(message, extra = {}) {
   return { ok: false, message, ...extra };
+}
+
+// The texts the recorded changes put into paragraph `target` (ctx.inserted:
+// { paragraph_index, paragraph_id, text } of each change of this file not
+// accepted or rejected). The task pane lets a deletion take a whole pending
+// insertion only when its text is one of these (tools-word.js
+// WholeAuthorInsertion). By paragraph id when both have one, else by index.
+export function ownInsertions(inserted, target, ids) {
+  if (target === null || !Array.isArray(inserted)) return [];
+  const id = ids?.[target] ?? null;
+  return [
+    ...new Set(
+      inserted
+        .filter((c) =>
+          id !== null && c.paragraph_id != null
+            ? c.paragraph_id === id
+            : c.paragraph_index === target,
+        )
+        .map((c) => c.text),
+    ),
+  ];
 }
 
 // deps: { begin(), call(name, args), getLedger(), getReviewContext(ref),
@@ -697,6 +719,21 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
           ).catch(() => {});
         }
       }
+      // The deletion would have taken the whole of an insertion the author
+      // made and has not accepted: Word keeps no mark of that. The model is
+      // told to ask, with the paragraph as it knows it.
+      if (r.code === "WholeAuthorInsertion") {
+        const index = r.paragraph_index ?? target;
+        deps.log?.(`[review] whole author insertion ${turn.ref} paragraph=${index ?? "?"}`);
+        const id =
+          index === null || index === undefined
+            ? null
+            : (ctx.paragraph_ids?.[index] ?? `p${index}`);
+        return fail(
+          `${WHOLE_AUTHOR_INSERTION}${id ? ` Paragraph: ${id} (give it as paragraph_id).` : ""}`,
+          { code: "WholeAuthorInsertion", applied: false, paragraph_index: index ?? null },
+        );
+      }
       if (r.code !== "StaleTarget") return r;
       // The task pane found the paragraph not as it was judged here and
       // changed nothing. The judgement (forbid list, lost facts) was made
@@ -745,6 +782,7 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
     return out;
   };
 
+  const ownTexts = kind === "insert" ? [] : ownInsertions(ctx.inserted, target, ctx.paragraph_ids);
   // The comment stays in the list until the answer is recorded (or handed
   // to onOutcomeUnknown, which holds it on its own).
   const release = deps.holdRef?.(turn.ref, at);
@@ -770,6 +808,9 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
         // Comment ids already on record: the task pane's second try for the
         // comment reuses none of them (tools-word.js existingComment).
         ...(ctx.comment_ids?.length ? { known_comment_ids: ctx.comment_ids } : {}),
+        // What the tool itself put into the paragraph: a deletion may take
+        // such an insertion as a whole, and no other (WholeAuthorInsertion).
+        ...(ownTexts.length ? { own_insertions: ownTexts } : {}),
         ...(target === null
           ? {}
           : {

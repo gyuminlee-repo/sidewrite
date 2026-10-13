@@ -3126,3 +3126,64 @@ test("Check other places starts a follow-through turn of the comment and then sh
     await t.pane.reload();
   }
 });
+
+test("a deletion inside the author's unaccepted insertion gets one line on its card; others none", async () => {
+  const { IN_INSERTION_NOTE } = await import("../taskpane/shared/review-view.js");
+  const base = {
+    kind: "delete",
+    state: "pending",
+    text: "",
+    word_comment_id: "7",
+    rationale: { what: "w", why: "y", addresses: "a" },
+  };
+  const changes = [
+    // Part of the insertion stays: flagged.
+    {
+      ...base,
+      id: "R1.1-1",
+      find: "thick ",
+      in_insertion: true,
+      insertion_left: "New bearings with ",
+      insertion_right: "steel plates.",
+    },
+    // In an insertion, but its place there was not known: no remainders.
+    { ...base, id: "R1.1-2", find: "north ", in_insertion: true },
+    // Plain text.
+    { ...base, id: "R1.1-3", find: "daily ", in_insertion: false },
+    // The whole of an insertion the tool made: nothing of it is left.
+    {
+      ...base,
+      id: "R1.1-4",
+      find: "Spare bolts.",
+      in_insertion: true,
+      insertion_left: "",
+      insertion_right: "",
+    },
+    { ...base, id: "R1.1-5", find: "old " },
+  ];
+  const revision = {
+    comments: [
+      {
+        ref: "R1.1",
+        reviewer: 1,
+        text: "Shorten.",
+        requirements: [],
+        status: "in_progress",
+        changes,
+        blocked: [],
+      },
+    ],
+    ledger: [],
+  };
+  const t = await setup({ revision });
+  const wraps = findAll(t.$("review-comments"), (n) => n.attributes.class === "review-change-wrap");
+  assert.equal(wraps.length, changes.length);
+  const lines = wraps.map((w) =>
+    findAll(w, (n) => n.attributes.class === "review-flag review-flag-in-insertion").map(
+      (n) => n.textContent,
+    ),
+  );
+  assert.deepEqual(lines, [[IN_INSERTION_NOTE], [], [], [], []]);
+  assert.match(IN_INSERTION_NOTE, /no deletion mark inside an unaccepted insertion/);
+  assert.match(IN_INSERTION_NOTE, /reject that insertion or type the words again/);
+});

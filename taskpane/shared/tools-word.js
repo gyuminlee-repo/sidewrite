@@ -12,6 +12,7 @@ import {
   anchorQueries,
   COMMENT_WAITING,
   isCommentAccessDenied,
+  WHOLE_AUTHOR_INSERTION,
 } from "./review-view.js";
 import {
   FIELD_REFUSAL,
@@ -1749,6 +1750,10 @@ export async function toolTrackedEdit({
   // plain text (no field, picture, footnote, endnote or content control).
   no_comment,
   plain_only,
+  // The inserted texts of the changes the daemon recorded in this paragraph
+  // (review-tools.mjs ownInsertions): a pending insertion with one of these
+  // texts is the tool's own, which a deletion may take as a whole.
+  own_insertions,
 }) {
   if (typeof find !== "string" || !find) throw new Error("`find` is required");
   if (find.length > 255) throw new Error("`find` exceeds the 255-character limit of Word search");
@@ -1888,6 +1893,25 @@ export async function toolTrackedEdit({
         !isInsert && editReplace === ""
           ? await insertionAround(context, para, target, editFind)
           : null;
+      // The deletion would take the whole of a pending insertion (nothing of
+      // it stays on either side). Word drops those words outright and keeps
+      // no mark, so the author could never see or reject the deletion.
+      // Refused, unless the insertion is one the tool made.
+      if (
+        held?.held &&
+        held.left === "" &&
+        held.right === "" &&
+        !(Array.isArray(own_insertions) && own_insertions.includes(held.text))
+      ) {
+        return {
+          ok: false,
+          code: "WholeAuthorInsertion",
+          applied: false,
+          paragraph_index: paragraphIndex,
+          paragraph_id: idMode === "uniqueLocalId" ? para.uniqueLocalId : null,
+          message: WHOLE_AUTHOR_INSERTION,
+        };
+      }
       let inserted = null;
       if (isInsert) inserted = hit.insertText(insert_after, Word.InsertLocation.after);
       else if (takesField) target.delete();
@@ -2086,21 +2110,39 @@ async function trackedAt(context, para, place) {
 // (the list, then the comparisons; one when the list holds none of those
 // types). null when Word cannot say (the call threw). trackedAt and
 // insertionAround read Word through this one call.
+// withText also reads, in the same round trip, where each of them lies
+// against the next in the list (next: its LocationRelation to that one, or
+// undefined for the last), so that pieces of one insertion Word split can
+// be joined (insertionAround).
 async function trackedRelations(context, para, place, types, withText = false) {
   try {
     const changes = para.getTrackedChanges();
     changes.load(withText ? "items/type, items/text" : "items/type");
     await context.sync();
     const kept = changes.items.filter((c) => types.includes(c.type));
-    const where = kept.map((c) => c.getRange().compareLocationWith(place));
+    const ranges = kept.map((c) => c.getRange());
+    const where = ranges.map((r) => r.compareLocationWith(place));
+    const next = withText
+      ? ranges.slice(0, -1).map((r, k) => r.compareLocationWith(ranges[k + 1]))
+      : [];
     if (where.length) await context.sync();
-    return where.map((w, k) => ({ value: w.value, text: withText ? kept[k].text : undefined }));
+    return where.map((w, k) => ({
+      value: w.value,
+      text: withText ? kept[k].text : undefined,
+      ...(withText ? { next: next[k]?.value } : {}),
+    }));
   } catch {
     return null;
   }
 }
 
 const HOLDS = ["Equal", "Contains", "ContainsStart", "ContainsEnd"];
+
+// A tracked change against place, when its range runs from before place (or
+// its start) into it, lies inside it, or runs from inside it to its end or
+// past it: a piece of a run of insertions that together hold place.
+const FIRST = ["OverlapsBefore", "InsideStart"];
+const LAST = ["OverlapsAfter", "InsideEnd"];
 
 // Does one tracked insertion of the paragraph hold the whole of place (the
 // range a deletion is about to take)? Then Word drops those words outright
@@ -2118,14 +2160,61 @@ const HOLDS = ["Equal", "Contains", "ContainsStart", "ContainsEnd"];
 // at its start or end, as the relation says). null when Word cannot say
 // (no WordApi 1.6, or the call threw): the fields are then left out, never
 // written false.
+// text: the text of that insertion, when one holds place.
+// One insertion Word keeps as several Added changes next to each other
+// (splitPieces): a run of them that holds place together counts as one,
+// its text their texts joined in document order.
 export async function insertionAround(context, para, place, cut) {
   if (!canReject()) return null;
   const where = await trackedRelations(context, para, place, ["Added"], true);
   if (!where) return null;
   const holding = where.filter((w) => HOLDS.includes(w.value));
-  if (!holding.length) return { held: false };
+  if (!holding.length) {
+    const joined = splitPieces(where);
+    if (!joined) return { held: false };
+    const sides = remainders(joined, cut);
+    return { held: true, ...(sides ?? {}), text: joined.text };
+  }
   const sides = holding.length === 1 ? remainders(holding[0], cut) : null;
-  return { held: true, ...(sides ?? {}) };
+  return {
+    held: true,
+    ...(sides ?? {}),
+    ...(holding.length === 1 ? { text: holding[0].text } : {}),
+  };
+}
+
+// The Added changes that meet place (where: trackedRelations with text),
+// when they are pieces of one insertion that hold place together: next to
+// each other in the list, each adjacent to the next (AdjacentBefore; all
+// AdjacentAfter: the list runs backwards and is read the other way), the
+// first from before place or its start, the last to its end or past it, any
+// other inside it. Returns { value, text } for remainders: their texts
+// joined, value the relation of the whole run to place. null otherwise:
+// pieces that do not touch leave plain text between them, which a deletion
+// keeps as tracked deleted text.
+function splitPieces(where) {
+  const meets = where
+    .map((w, k) => k)
+    .filter(
+      (k) =>
+        !["Before", "After", "AdjacentBefore", "AdjacentAfter", "Unrelated"].includes(
+          where[k].value,
+        ),
+    );
+  if (meets.length < 2 || meets.some((k, i) => i && k !== meets[i - 1] + 1)) return null;
+  const links = meets.slice(0, -1).map((k) => where[k].next);
+  const forward = links.every((v) => v === "AdjacentBefore");
+  if (!forward && !links.every((v) => v === "AdjacentAfter")) return null;
+  const run = (forward ? meets : [...meets].reverse()).map((k) => where[k]);
+  const first = run[0].value;
+  const last = run.at(-1).value;
+  if (!FIRST.includes(first) || !LAST.includes(last)) return null;
+  if (run.slice(1, -1).some((w) => w.value !== "Inside")) return null;
+  if (run.some((w) => typeof w.text !== "string")) return null;
+  const start = first === "InsideStart";
+  const end = last === "InsideEnd";
+  const value = start && end ? "Equal" : start ? "ContainsStart" : end ? "ContainsEnd" : "Contains";
+  return { value, text: run.map((w) => w.text).join("") };
 }
 
 // The text of an insertion w ({ value, text }) on each side of cut inside

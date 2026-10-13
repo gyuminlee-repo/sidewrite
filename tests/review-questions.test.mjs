@@ -204,7 +204,7 @@ test("prompt: a question is listed with the paragraph its answer goes into; the 
   assert.ok(text.includes("- [R1.1 a1] (for [k4]) How many shelf marks? Answer: 412"), text);
   assert.ok(text.includes("- [a2] (for [k7]) Which year?\n- [a3] Who checked?"), text);
   // Appended: the rules before it keep their numbers (POLICY_PACKS).
-  assert.equal(REVIEW_RULES.length, 17);
+  assert.equal(REVIEW_RULES.length, 18);
   assert.match(REVIEW_RULES[16], /^When you ask the author \(office_ask_author\)/);
   assert.match(REVIEW_RULES[16], /paragraph_id/);
   assert.ok(text.includes(`17. ${REVIEW_RULES[16]}`));

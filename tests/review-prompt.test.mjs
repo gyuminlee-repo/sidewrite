@@ -168,7 +168,7 @@ test("without a profile every rule is in the prompt, numbered from 1", () => {
 
 test("the rule about citations and other fields is appended, in the prompt with and without the pack", () => {
   // Appended: the rules a pack names by index stay where they are.
-  assert.equal(REVIEW_RULES.length, 17);
+  assert.equal(REVIEW_RULES.length, 18);
   assert.match(REVIEW_RULES[1], /^Make only the changes this comment asks for/);
   assert.match(REVIEW_RULES[3], /^Base every change and every rationale/);
   const rule = REVIEW_RULES[15];
@@ -534,4 +534,10 @@ test("sameTermReport: the paragraph ids of the last such line that the manuscrip
     sameTermReport("Same term still at: 4A1B\nmore\nSame term still at: 77C0, 4A1B, 77C0", ids),
     ["77C0", "4A1B"],
   );
+});
+
+test("the rule to ask when a refusal says so is appended last", () => {
+  assert.equal(REVIEW_RULES.length, 18);
+  assert.match(REVIEW_RULES[17], /refused with a message that says to ask the author/);
+  assert.match(REVIEW_RULES[17], /office_ask_author/);
 });
