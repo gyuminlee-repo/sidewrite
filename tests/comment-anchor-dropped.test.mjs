@@ -863,6 +863,15 @@ test("fail-closed: the tool's own insertion is told apart with whitespace drift"
   );
 });
 
+test("fail-closed: a comment anchor in the tool's own insertion does not make it the author's", async () => {
+  // Word gives U+0005 where a comment is anchored; the record has none.
+  fakeDoc(["Title", MAY], { pending: MAY_INS });
+  const r = await toolTrackedEdit(
+    mayEdit("in May 2026 ", "", { own_insertions: ["in\u0005 May 2026"] }),
+  );
+  assert.deepEqual([r.ok, r.in_insertion], [true, true]);
+});
+
 test("fail-closed: edits that touch no tracked insertion behave as before", async () => {
   // No tracked change; an insertion elsewhere in the paragraph; one right
   // next to the old words. Deletions and replaces alike.

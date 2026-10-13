@@ -2208,9 +2208,10 @@ export async function insertionAround(context, para, place, cut, own = []) {
       g.push(k);
     else groups.push([k]);
   }
-  // The tool's own words. Compared without whitespace: Word may give the
-  // text of an insertion with other spacing than the record has.
-  const key = (t) => String(t).replace(/\s+/g, "");
+  // The tool's own words. Compared without whitespace and without U+0005
+  // comment anchors: Word may give the text of an insertion with other
+  // spacing than the record has, and with an anchor where a comment sits.
+  const key = (t) => String(t).replace(/[\s\u0005]+/g, "");
   const owns = [...new Set((Array.isArray(own) ? own : []).map(key).filter(Boolean))];
   // t is the tool's texts one after another (two edits side by side, which
   // Word may keep as one insertion).
