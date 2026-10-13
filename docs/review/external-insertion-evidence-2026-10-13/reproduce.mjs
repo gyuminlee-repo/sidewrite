@@ -71,7 +71,16 @@ assert.equal(classifyChange(deletion, authorSnapshot, [sibling, deletion]).state
 // a tracked insertion held when Word deleted it (tools-word.js
 // insertionHolds). With it the author-replace case reads pending; plain text
 // carries false or nothing, so the control stays accepted.
-assert.equal(classifyChange({ ...deletion, in_insertion: true }, authorSnapshot).state, "pending");
+// The flag carries what of the insertion stayed on each side of the deleted
+// words; only a tracked run there that still holds it is the insertion.
+const flagged = {
+  ...deletion,
+  in_insertion: true,
+  insertion_left: "new steel",
+  insertion_right: " ",
+};
+assert.equal(classifyChange(flagged, authorSnapshot).state, "pending");
+assert.equal(classifyChange({ ...deletion, in_insertion: true }, authorSnapshot).state, "accepted");
 assert.equal(
   classifyChange({ ...deletion, in_insertion: false }, unrelatedSnapshot).state,
   "accepted",

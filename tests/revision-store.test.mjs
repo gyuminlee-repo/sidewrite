@@ -769,7 +769,8 @@ test("a change with and without in_insertion saves and loads as it was", async (
   let rev = replaceComments(emptyRevision("bridge.docx", at), [
     { ref: "R1.1", reviewer: 1, text: "Shorten the bridge description." },
   ]);
-  rev = addChange(rev, "R1.1", change({ in_insertion: true }), at).revision;
+  const sides = { insertion_left: "new steel", insertion_right: "" };
+  rev = addChange(rev, "R1.1", change({ in_insertion: true, ...sides }), at).revision;
   rev = addChange(rev, "R1.1", change({ in_insertion: false }), at).revision;
   rev = addChange(rev, "R1.1", change({}), at).revision;
   const dir = await mkdtemp(join(tmpdir(), "in-insertion-"));
@@ -777,10 +778,10 @@ test("a change with and without in_insertion saves and loads as it was", async (
     const path = join(dir, "bridge.revision.json");
     await saveRevision(path, rev, at);
     const loaded = await loadRevision(path, "x");
-    assert.deepEqual(
-      loaded.comments[0].changes.map((c) => ("in_insertion" in c ? c.in_insertion : "absent")),
-      [true, false, "absent"],
-    );
+    const got = (k) => loaded.comments[0].changes.map((c) => (k in c ? c[k] : "absent"));
+    assert.deepEqual(got("in_insertion"), [true, false, "absent"]);
+    assert.deepEqual(got("insertion_left"), ["new steel", "absent", "absent"]);
+    assert.deepEqual(got("insertion_right"), ["", "absent", "absent"]);
     // A file as the daemon writes it saves again byte for byte.
     await saveRevision(path, loaded, at);
     const text = await readFile(path, "utf8");

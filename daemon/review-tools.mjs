@@ -1297,6 +1297,13 @@ async function recordApplied(
     ...(appliedKind === "delete" && typeof r.in_insertion === "boolean"
       ? { in_insertion: r.in_insertion }
       : {}),
+    // What of that insertion stays on each side of the deleted words.
+    ...(appliedKind === "delete" &&
+    r.in_insertion === true &&
+    typeof r.insertion_left === "string" &&
+    typeof r.insertion_right === "string"
+      ? { insertion_left: r.insertion_left, insertion_right: r.insertion_right }
+      : {}),
     // Words around the range the task pane changed (revision-classify.mjs).
     context: changeContext(r.before, find, {
       kind,

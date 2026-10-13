@@ -99,6 +99,13 @@ export const ChangeSchema = z.object({
   // (revision-classify.mjs inInsertion). Only when the task pane could say:
   // a file without it saves as it was read.
   in_insertion: z.boolean().optional(),
+  // With in_insertion true: the text of that insertion before and after the
+  // deleted words, which stays tracked once they are gone. The classifier
+  // takes the flag only where a tracked run next to the place still holds
+  // one of them: an independent insertion that comes to stand there proves
+  // nothing. Only together, and only when the task pane could tell them.
+  insertion_left: z.string().optional(),
+  insertion_right: z.string().optional(),
   // The edit was applied but its rationale comment was not anchored: the
   // task pane error code (CommentAnchorMissing, CommentInsertFailed, or
   // CommentWaitingForWord: Word refused the insert with AccessDenied while

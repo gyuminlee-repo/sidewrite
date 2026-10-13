@@ -60,8 +60,23 @@ const del = (s) =>
 // control below: an insertion "new steel " and a deletion "old piers".
 const snapshot = para(r(prefix) + ins("new steel ") + del(old) + r(suffix));
 
+// in_insertion with what was left of the carrying insertion on each side
+// of the deleted words, as the task pane read it (tools-word.js
+// insertionAround). Only a tracked run next to the place that still holds
+// that remainder is the carrying insertion.
+const held = (left, right) => ({
+  in_insertion: true,
+  insertion_left: left,
+  insertion_right: right,
+});
+
 test("author-replace tail deletion flagged in_insertion: pending", () => {
-  assert.equal(classifyChange(deletion({ in_insertion: true }), snapshot).state, "pending");
+  // "new steel supports " less " supports": "new steel" left, " " right.
+  assert.equal(classifyChange(deletion(held("new steel", " ")), snapshot).state, "pending");
+});
+
+test("the flag without the remainders proves nothing: accepted, as before", () => {
+  assert.equal(classifyChange(deletion({ in_insertion: true }), snapshot).state, "accepted");
 });
 
 test("the same deletion without the flag (an older task pane): accepted, as before", () => {
@@ -95,19 +110,19 @@ test("the flag opens the junction of two insertion runs too", () => {
   const input = prefix + "new steel supports and beams " + old + suffix;
   const d = (extra) => make("delete", " supports", "", input, "R1.1-3", extra);
   assert.equal(classifyChange(d(), two).state, "accepted");
-  assert.equal(classifyChange(d({ in_insertion: true }), two).state, "pending");
+  assert.equal(classifyChange(d(held("new steel", "")), two).state, "pending");
 });
 
 test("the flag needs a tracked insertion next to the place", () => {
   // The carrying insertion was accepted: nothing tracked is left of the
   // place, and the deletion is accepted with it.
   const accepted = para(r(prefix + "new steel ") + del(old) + r(suffix));
-  assert.equal(classifyChange(deletion({ in_insertion: true }), accepted).state, "accepted");
+  assert.equal(classifyChange(deletion(held("new steel", " ")), accepted).state, "accepted");
   // Plain text right of the place, the insertion on the left: the flag
   // proves the deletion took the end of that insertion; without it nothing
   // changes (an accepted deletion next to an insertion).
   const plainRight = para(r(prefix) + ins("new steel ") + r(old + suffix));
-  assert.equal(classifyChange(deletion({ in_insertion: true }), plainRight).state, "pending");
+  assert.equal(classifyChange(deletion(held("new steel", " ")), plainRight).state, "pending");
   assert.equal(classifyChange(deletion(), plainRight).state, "accepted");
   assert.equal(classifyChange(deletion({ in_insertion: false }), plainRight).state, "accepted");
 });
@@ -126,12 +141,12 @@ test("a deletion at the end, the start or across the whole of the author's inser
   };
   const cases = [
     // End: " and" leaves "fully checked " tracked on the left, plain right.
-    [" and", r(head) + ins("fully checked ") + r(tail)],
+    [" and", r(head) + ins("fully checked ") + r(tail), held("fully checked", " ")],
     // Start: "fully " leaves plain text left, "checked and " tracked right.
-    ["fully ", r(head) + ins("checked and ") + r(tail)],
+    ["fully ", r(head) + ins("checked and ") + r(tail), held("", "checked and ")],
   ];
-  for (const [find, body] of cases) {
-    assert.equal(read(find, body, { in_insertion: true }), "pending", find);
+  for (const [find, body, flag] of cases) {
+    assert.equal(read(find, body, flag), "pending", find);
     // Controls: no flag, or a pane that read plain text: as before.
     assert.equal(read(find, body), "accepted", find);
     assert.equal(read(find, body, { in_insertion: false }), "accepted", find);
@@ -141,8 +156,36 @@ test("a deletion at the end, the start or across the whole of the author's inser
   // reads exactly as an accepted deletion of plain text: accepted, flag or
   // not. Known limit, and the state Word itself is in.
   const whole = r(head + tail);
-  assert.equal(read(typed, whole, { in_insertion: true }), "accepted");
+  assert.equal(read(typed, whole, held("", "")), "accepted");
   assert.equal(read(typed, whole), "accepted");
+});
+
+// Codex review: the flag says the deleted words were in SOME insertion, not
+// that the insertion next to the place now is that one.
+test("an independent insertion next to the place is no proof", () => {
+  const head = "The deck was ";
+  const typed = "fully checked and ";
+  const tail = "painted after the repair.";
+  const input = head + typed + tail;
+  const read = (find, body, flag) => {
+    const text = input.replace(find, "");
+    return classifyChange(make("delete", find, "", input, "R2.3-1", flag), para(body, text, text))
+      .state;
+  };
+  // The whole insertion deleted; "painted" an independent pending insertion.
+  const painted = r(head) + ins("painted") + r(" after the repair.");
+  assert.equal(read(typed, painted, held("", "")), "accepted");
+  assert.equal(read(typed, painted, { in_insertion: true }), "accepted");
+  // " and" took the end of "fully checked and "; the author has since
+  // accepted that insertion ("fully checked" now plain) and "painted" is an
+  // independent insertion right of the place: its text is not the recorded
+  // remainder, so it proves nothing.
+  const since = r(head + "fully checked ") + ins("painted") + r(" after the repair.");
+  assert.equal(read(" and", since, held("fully checked", " ")), "accepted");
+  // The same on the left: "fully " took the start; an independent
+  // insertion "was " left of the place is not "checked and ".
+  const left = r("The deck ") + ins("was ") + r("checked and " + tail);
+  assert.equal(read("fully ", left, held("", "checked and ")), "accepted");
 });
 
 test("the start of the author's insertion at the start of the paragraph", () => {
@@ -151,7 +194,7 @@ test("the start of the author's insertion at the start of the paragraph", () => 
   const text = "twice: the deck was painted.";
   const d = (extra) => ({ ...make("delete", "Checked ", "", input, "R2.2-1"), ...extra });
   const snap = para(ins("twice: ") + r("the deck was painted."), text, text);
-  assert.equal(classifyChange(d({ in_insertion: true }), snap).state, "pending");
+  assert.equal(classifyChange(d(held("", "twice: ")), snap).state, "pending");
   assert.equal(classifyChange(d(), snap).state, "accepted");
 });
 
@@ -176,7 +219,7 @@ test("the author rejects the carrying insertion: the deletion's words are gone w
   // ("steel" on its left) is gone, and its own words never come back.
   const text = prefix + old + suffix;
   const rejected = para(r(text), text, text);
-  const got = classifyChange(deletion({ in_insertion: true }), rejected).state;
+  const got = classifyChange(deletion(held("new steel", " ")), rejected).state;
   assert.equal(got, classifyChange(deletion(), rejected).state, "the flag decides nothing here");
   assert.equal(got, "user_edited");
 });

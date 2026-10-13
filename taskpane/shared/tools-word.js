@@ -1883,8 +1883,11 @@ export async function toolTrackedEdit({
         });
       // A deletion (also a narrowed one): did a tracked insertion hold the
       // range Word is about to delete? Read now, while the words are there.
+      // And what of it stays on each side (insertionAround).
       const held =
-        !isInsert && editReplace === "" ? await insertionHolds(context, para, target) : null;
+        !isInsert && editReplace === ""
+          ? await insertionAround(context, para, target, editFind)
+          : null;
       let inserted = null;
       if (isInsert) inserted = hit.insertText(insert_after, Word.InsertLocation.after);
       else if (takesField) target.delete();
@@ -1904,8 +1907,12 @@ export async function toolTrackedEdit({
         // The paragraph was compared with expected_before_hash. The daemon
         // flags an applied result without this (an older task pane).
         target_checked: true,
-        // Only when Word could say (insertionHolds).
-        ...(held === null ? {} : { in_insertion: held }),
+        // Only when Word could say (insertionAround); the remainders only
+        // when their place is certain.
+        ...(held === null ? {} : { in_insertion: held.held }),
+        ...(held?.held && typeof held.left === "string"
+          ? { insertion_left: held.left, insertion_right: held.right }
+          : {}),
       };
       // The fields after the edit. A deletion whose place among the fields
       // could not be told beforehand may take fields with it, as a whole.
@@ -2069,29 +2076,31 @@ async function droppedDeletionAnchor(context, para, before, find, cut) {
 // when Word cannot say.
 async function trackedAt(context, para, place) {
   const where = await trackedRelations(context, para, place, ["Added", "Deleted"]);
-  return !!where?.some((w) => !["Before", "After", "Unrelated"].includes(w));
+  return !!where?.some((w) => !["Before", "After", "Unrelated"].includes(w.value));
 }
 
 // Where each tracked change of the paragraph whose type is in `types`
-// lies against place, as Word's LocationRelation of the change's range to
-// place (Equal, Contains, Inside, AdjacentBefore ...). Two round trips (the
-// list, then the comparisons; one when the list holds none of those types).
-// null when Word cannot say (the call threw). trackedAt and insertionHolds
-// read Word through this one call.
-async function trackedRelations(context, para, place, types) {
+// lies against place: [{ value, text }], value Word's LocationRelation of
+// the change's range to place (Equal, Contains, Inside, AdjacentBefore ...),
+// text the change's text when withText (else undefined). Two round trips
+// (the list, then the comparisons; one when the list holds none of those
+// types). null when Word cannot say (the call threw). trackedAt and
+// insertionAround read Word through this one call.
+async function trackedRelations(context, para, place, types, withText = false) {
   try {
     const changes = para.getTrackedChanges();
-    changes.load("items/type");
+    changes.load(withText ? "items/type, items/text" : "items/type");
     await context.sync();
-    const where = changes.items
-      .filter((c) => types.includes(c.type))
-      .map((c) => c.getRange().compareLocationWith(place));
+    const kept = changes.items.filter((c) => types.includes(c.type));
+    const where = kept.map((c) => c.getRange().compareLocationWith(place));
     if (where.length) await context.sync();
-    return where.map((w) => w.value);
+    return where.map((w, k) => ({ value: w.value, text: withText ? kept[k].text : undefined }));
   } catch {
     return null;
   }
 }
+
+const HOLDS = ["Equal", "Contains", "ContainsStart", "ContainsEnd"];
 
 // Does one tracked insertion of the paragraph hold the whole of place (the
 // range a deletion is about to take)? Then Word drops those words outright
@@ -2100,13 +2109,44 @@ async function trackedRelations(context, para, place, types) {
 // (revision-classify.mjs inInsertion). Only containment counts: an
 // insertion next to place, or one that shares a space with it, leaves the
 // words of place plain text that a deletion keeps as tracked deleted text.
-// null when Word cannot say (no WordApi 1.6, or the call threw): the field
-// is then left out, never written false.
-export async function insertionHolds(context, para, place) {
+// cut: the text of place. With it, { held, left, right }: left and right
+// the text of that insertion before and after place, which stays tracked
+// once the words are gone. They tell the carrying insertion from an
+// independent one that comes to stand next to the place (Codex review).
+// Left out when they cannot be told for sure: more than one insertion
+// holds place, or cut is not found exactly once in the insertion text (nor
+// at its start or end, as the relation says). null when Word cannot say
+// (no WordApi 1.6, or the call threw): the fields are then left out, never
+// written false.
+export async function insertionAround(context, para, place, cut) {
   if (!canReject()) return null;
-  const where = await trackedRelations(context, para, place, ["Added"]);
+  const where = await trackedRelations(context, para, place, ["Added"], true);
   if (!where) return null;
-  return where.some((w) => ["Equal", "Contains", "ContainsStart", "ContainsEnd"].includes(w));
+  const holding = where.filter((w) => HOLDS.includes(w.value));
+  if (!holding.length) return { held: false };
+  const sides = holding.length === 1 ? remainders(holding[0], cut) : null;
+  return { held: true, ...(sides ?? {}) };
+}
+
+// The text of an insertion w ({ value, text }) on each side of cut inside
+// it, or null when its place there is not certain.
+function remainders(w, cut) {
+  const text = w.text;
+  if (typeof text !== "string" || typeof cut !== "string" || !cut) return null;
+  if (w.value === "Equal") return { left: "", right: "" };
+  if (w.value === "ContainsStart")
+    return text.startsWith(cut) ? { left: "", right: text.slice(cut.length) } : null;
+  if (w.value === "ContainsEnd")
+    return text.endsWith(cut) ? { left: text.slice(0, text.length - cut.length), right: "" } : null;
+  const at = text.indexOf(cut);
+  if (at === -1 || text.indexOf(cut, at + 1) !== -1) return null;
+  return { left: text.slice(0, at), right: text.slice(at + cut.length) };
+}
+
+// insertionAround without the remainders: true, false, or null.
+export async function insertionHolds(context, para, place) {
+  const r = await insertionAround(context, para, place, null);
+  return r === null ? null : r.held;
 }
 
 // Review tab, "Add rationale comment": the comment of a change that was

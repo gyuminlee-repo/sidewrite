@@ -101,6 +101,8 @@ function fakeDoc(paras, { pending = null, denied = 0 } = {}) {
       coll(
         state.tracked.map((c) => ({
           type: c.type,
+          // TrackedChange.text: the text of the change as it reads now.
+          text: p.text.slice(c.start, c.end),
           getRange: () => ({
             compareLocationWith: (o) => ({ value: relation(c.start, c.end, o) }),
           }),
@@ -457,6 +459,11 @@ test("in_insertion: a deletion inside a pending insertion says true", async () =
   fakeDoc(["Title", TEXT], { pending: INSERTION });
   const r = await toolTrackedEdit(edit("thick ", ""));
   assert.deepEqual([r.ok, r.in_insertion], [true, true]);
+  // What is left of that insertion on each side of the deleted words.
+  assert.deepEqual(
+    [r.insertion_left, r.insertion_right],
+    ["New bearings with ", "steel plates were fitted."],
+  );
 });
 
 test("in_insertion: judged on the range Word deleted (a narrowed edit)", async () => {
@@ -468,7 +475,40 @@ test("in_insertion: judged on the range Word deleted (a narrowed edit)", async (
       narrow: { find: "bearings ", replace: "" },
     }),
   );
-  assert.deepEqual([r.ok, r.narrowed, r.in_insertion], [true, true, true]);
+  assert.deepEqual(
+    [r.ok, r.narrowed, r.in_insertion, r.insertion_left, r.insertion_right],
+    [true, true, true, "New ", "with thick steel plates were fitted."],
+  );
+});
+
+test("in_insertion: the remainders at the end, at the start and over the whole", async () => {
+  const cases = [
+    [" were fitted.", "New bearings with thick steel plates", ""],
+    ["New ", "", "bearings with thick steel plates were fitted."],
+    [I1, "", ""],
+  ];
+  for (const [find, left, right] of cases) {
+    fakeDoc(["Title", TEXT], { pending: INSERTION });
+    const r = await toolTrackedEdit(edit(find, ""));
+    assert.deepEqual(
+      [find, r.in_insertion, r.insertion_left, r.insertion_right],
+      [find, true, left, right],
+    );
+  }
+});
+
+test("in_insertion: the place of the words in the insertion not known, no remainders", async () => {
+  // The narrowed "thick " is once in the hit but twice in the insertion.
+  const text = HEAD + "Thick plates with thick steel were fitted, thick ones.";
+  fakeDoc(["Title", text], { pending: [HEAD.length, text.length] });
+  const r = await toolTrackedEdit({
+    ...edit("with thick steel", "with steel", { narrow: { find: "thick ", replace: "" } }),
+    expected_before_hash: paragraphHash(text),
+  });
+  assert.deepEqual(
+    [r.ok, r.narrowed, r.in_insertion, "insertion_left" in r, "insertion_right" in r],
+    [true, true, true, false, false],
+  );
 });
 
 test("in_insertion: plain text says false, also next to or across the insertion", async () => {
@@ -476,6 +516,7 @@ test("in_insertion: plain text says false, also next to or across the insertion"
     fakeDoc(["Title", TEXT], { pending: INSERTION });
     const r = await toolTrackedEdit(edit(find, ""));
     assert.deepEqual([find, r.ok, r.in_insertion], [find, true, false]);
+    assert.equal("insertion_left" in r || "insertion_right" in r, false, find);
   }
   // The shape of the PR #32 control: the insertion ends with the space the
   // deletion opens with (" thick" after an insertion "New bearings with ").
