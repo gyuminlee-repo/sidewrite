@@ -3199,5 +3199,8 @@ test("a deletion inside the author's unaccepted insertion gets one line on its c
   assert.deepEqual(lines, [[IN_INSERTION_NOTE], [], [], [], [], [IN_INSERTION_NOTE], []]);
   assert.match(IN_INSERTION_NOTE, /no deletion mark inside an unaccepted insertion/);
   // Said for a deletion and a replace alike: the removed words.
-  assert.match(IN_INSERTION_NOTE, /bring the removed words back, reject that insertion or type/);
+  // Only typing them again brings them back: rejecting the insertion takes
+  // the rest of it away too (Codex review).
+  assert.match(IN_INSERTION_NOTE, /To bring the removed words back, type them again\.$/);
+  assert.doesNotMatch(IN_INSERTION_NOTE, /reject/);
 });

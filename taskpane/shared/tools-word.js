@@ -2175,8 +2175,9 @@ const HOLDING = {
 // insertions: pieces next to each other in the list and adjacent to each
 // other (AdjacentBefore; all AdjacentAfter: the list runs backwards) are
 // one insertion Word split, their texts joined in document order. An
-// insertion whose text is one the tool put in (own: texts, compared
-// normalized) is the tool's own.
+// insertion is the tool's own when its whole chain of adjacent pieces is one
+// text the tool put in (own) or the pieces place meets are such texts one
+// after another, compared without whitespace; a mix of the two is refused.
 //   No insertion meets place: { held: false }.
 //   One insertion holds all of place: { held: true, left, right, text },
 //     left and right what of it stays on each side (the remainders a
@@ -2207,8 +2208,35 @@ export async function insertionAround(context, para, place, cut, own = []) {
       g.push(k);
     else groups.push([k]);
   }
-  const norm = (t) => normalizeParaText(String(t)).trim();
-  const mine = new Set((Array.isArray(own) ? own : []).map(norm));
+  // The tool's own words. Compared without whitespace: Word may give the
+  // text of an insertion with other spacing than the record has.
+  const key = (t) => String(t).replace(/\s+/g, "");
+  const owns = [...new Set((Array.isArray(own) ? own : []).map(key).filter(Boolean))];
+  // t is the tool's texts one after another (two edits side by side, which
+  // Word may keep as one insertion).
+  const covered = (t) => {
+    const s = key(t);
+    if (!s) return false;
+    const ok = [true];
+    for (let i = 1; i <= s.length; i++)
+      ok[i] = owns.some((o) => o.length <= i && ok[i - o.length] && s.endsWith(o, i));
+    return ok[s.length];
+  };
+  // The whole chain of adjacent pieces around a group, pieces that do not
+  // meet place included, in document order; null when it cannot be told.
+  const ADJ = ["AdjacentBefore", "AdjacentAfter"];
+  const chainText = (g) => {
+    let a = g[0];
+    let b = g.at(-1);
+    while (a > 0 && ADJ.includes(where[a - 1].next)) a--;
+    while (b < where.length - 1 && ADJ.includes(where[b].next)) b++;
+    const idx = Array.from({ length: b - a + 1 }, (_, i) => a + i);
+    const links = idx.slice(0, -1).map((k) => where[k].next);
+    const back = links.length > 0 && links.every((v) => v === "AdjacentAfter");
+    if (!back && !links.every((v) => v === "AdjacentBefore")) return null;
+    const run = (back ? idx.reverse() : idx).map((k) => where[k].text);
+    return run.every((t) => typeof t === "string") ? run.join("") : null;
+  };
   const containers = [];
   for (const g of groups) {
     const links = g.slice(0, -1).map((k) => where[k].next);
@@ -2222,7 +2250,14 @@ export async function insertionAround(context, para, place, cut, own = []) {
     const value =
       HOLDING[`${sideOf(STARTS, run[0].value)} ${sideOf(ENDS, run.at(-1).value)}`] ?? null;
     const text = run.map((w) => w.text).join("");
-    containers.push({ value, text, own: mine.has(norm(text)) });
+    // The tool's own: the whole chain is one text it put in, or the pieces
+    // place meets are its texts one after another.
+    const chain = chainText(g);
+    const own = covered(text) || (chain !== null && owns.includes(key(chain)));
+    // Some pieces the tool's, others not: words of the author's piece go
+    // with the tool's, refused.
+    if (!own && run.some((w) => covered(w.text))) return { held: false, refuse: "takes" };
+    containers.push({ value, text, own });
   }
   if (containers.length === 1 && containers[0].value) {
     const c = containers[0];

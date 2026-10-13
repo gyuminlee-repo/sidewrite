@@ -889,3 +889,39 @@ test("fail-closed: edits that touch no tracked insertion behave as before", asyn
       assert.equal(state.comments.length, 1, tag);
     }
 });
+
+// Who made an insertion Word split into pieces, or two insertions of the
+// tool next to each other (Codex review): the whole chain of adjacent pieces
+// matches one text the tool put in, or the pieces the cut touches are the
+// tool's texts one after another. Anything else stays refused.
+test("own insertion split by Word: a cut of one piece is the tool's own", async () => {
+  // The tool put in I1; Word keeps it as two adjacent pieces; the cut is
+  // the whole first piece only.
+  const { state } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+  split(state);
+  const r = await toolTrackedEdit(edit("New bearings with ", "", { own_insertions: [I1] }));
+  assert.deepEqual([r.ok, r.code, r.in_insertion], [true, undefined, true]);
+});
+
+test("two insertions of the tool side by side: a cut over both is the tool's own", async () => {
+  const own = { own_insertions: ["New bearings with ", "thick steel plates were fitted."] };
+  // Kept as two pieces by Word, and merged into one.
+  for (const pieces of [true, false]) {
+    const { state } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+    if (pieces) split(state);
+    const r = await toolTrackedEdit(edit(I1, "", own));
+    assert.deepEqual([pieces, r.ok, r.code], [pieces, true, undefined]);
+  }
+});
+
+test("an author piece next to a piece of the tool: a cut over both stays refused", async () => {
+  // "New bearings with " is the author's, the rest the tool's.
+  const own = { own_insertions: ["thick steel plates were fitted."] };
+  for (const find of ["with thick ", I1]) {
+    const { state, items } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+    split(state);
+    const r = await toolTrackedEdit(edit(find, "", own));
+    assert.deepEqual([find, r.ok, r.code], [find, false, "WholeAuthorInsertion"]);
+    assert.equal(items[1].text, TEXT, find);
+  }
+});

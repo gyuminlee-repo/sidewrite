@@ -602,7 +602,7 @@ export const WHOLE_AUTHOR_INSERTION =
 // The line on a change whose removed words lay inside an unaccepted
 // insertion (changeFlags).
 export const IN_INSERTION_NOTE =
-  "Word keeps no deletion mark inside an unaccepted insertion. To bring the removed words back, reject that insertion or type them again.";
+  "Word keeps no deletion mark inside an unaccepted insertion. To bring the removed words back, type them again.";
 
 // ---- L1-L3 badges, L5 requirements, L6 ledger drafts, L7, L9 ----------------
 
