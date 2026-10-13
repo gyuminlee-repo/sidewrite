@@ -1004,12 +1004,26 @@ test("restartSplitEvidence: after a daemon restart the split used the stored pro
   );
 });
 
+test("exitDecision: S2-31 is skipped when no pure deletion of R1.4 was recorded", async () => {
+  const { exitDecision } = await import("../scripts/e2e/judge.mjs");
+  const features = [{ id: "S2-31", exit: 1 }];
+  const rows = [{ step: "word: R1.4 next to a pending revision", result: "SKIP" }];
+  const logs = (kind) =>
+    `[agent] turn complete (stop)\n[review] change recorded R1.4-1 kind=${kind}\n`;
+  const skipped = exitDecision({ rows, features, conditional: ["S2-31"], logs: logs("replace") });
+  assert.equal(skipped.features[0].status, "SKIPPED-CONDITION-NOT-MET");
+  assert.equal(skipped.code, 0);
+  const counted = exitDecision({ rows, features, conditional: ["S2-31"], logs: logs("delete") });
+  assert.equal(counted.features[0].status, "FAIL");
+  assert.equal(counted.code, 1);
+});
+
 // Codex review 16: a change next to another tracked change in its paragraph.
 // The author rejects the R1.4 deletion while a tracked insertion of their own
 // is pending in the same paragraph; the change must read Rejected (not
 // Pending) and its rationale comment must be resolved.
 test("siblingMatch: the handled change shows its own state while a sibling revision is pending", async () => {
-  const { siblingMatch, DEFAULT_DECISIONS } = await import("../scripts/e2e/judge.mjs");
+  const { siblingMatch, demoChange, DEFAULT_DECISIONS } = await import("../scripts/e2e/judge.mjs");
   assert.equal(DEFAULT_DECISIONS["R1.4"], "reject");
   const HAND = "Checked: ";
   const ch = change("R1.4-1", { kind: "delete", state: "rejected", text: "" });
@@ -1043,12 +1057,33 @@ test("siblingMatch: the handled change shows its own state while a sibling revis
     siblingMatch(revision, view("Rejected"), word(true, []), { ref: "R1.4", hand: HAND }).pass,
     false,
   );
-  // A replace is judged by its text anyway: the case was not shown either.
+  // Only a replace: the demonstration case was not shown, the row is skipped.
   const replace = { comments: [{ ref: "R1.4", changes: [{ ...ch, kind: "replace" }] }] };
-  assert.equal(
-    siblingMatch(replace, view("Rejected"), word(true, pending), { ref: "R1.4", hand: HAND }).pass,
-    false,
+  const notShown = siblingMatch(replace, view("Rejected"), word(true, pending), {
+    ref: "R1.4",
+    hand: HAND,
+  });
+  assert.equal(notShown.shown, false);
+  assert.equal(notShown.pass, false);
+  assert.match(notShown.got, /no pure deletion or insertion: replace/);
+  // A replace first and a delete second: demoChange picks the delete, the
+  // delete is judged, and it passes when right.
+  const del = change("R1.4-2", { kind: "delete", state: "rejected", text: "" });
+  const two = { comments: [{ ref: "R1.4", changes: [{ ...ch, kind: "replace" }, del] }] };
+  assert.equal(demoChange(two, "R1.4"), del);
+  const textDel = formatRationaleComment("R1.4", del.rationale, { lost: [] });
+  // The pane lists the badges in change order: the delete's is the second.
+  const views = {
+    comments: [{ ref: "R1.4", changes: [{ badge: "Pending" }, { badge: "Rejected" }] }],
+  };
+  const judged = siblingMatch(
+    two,
+    views,
+    { comments: [{ text: textDel, done: true }], revisions: pending },
+    { ref: "R1.4", hand: HAND },
   );
+  assert.equal(judged.shown, true);
+  assert.equal(judged.pass, true, judged.got);
 });
 
 // Follow-up review: every tracked run the pane reads from the OOXML must be

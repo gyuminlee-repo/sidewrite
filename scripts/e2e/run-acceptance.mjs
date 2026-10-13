@@ -89,6 +89,7 @@ import {
   secondReader,
   selectionEvidence,
   siblingMatch,
+  demoChange,
   stageOf,
   staleEvidence,
   staleMarkers,
@@ -1055,7 +1056,12 @@ async function main() {
   record.word.state_before = com("state");
   // A tracked insertion of the author in the paragraph of the R1.4 change,
   // left pending: R1.4 must then show its own state, not the paragraph's.
-  const r14 = plan.ops.find((o) => o.ref === "R1.4");
+  // It goes next to the change siblingMatch judges (the first pure
+  // deletion or insertion of R1.4); the row says when the plan could not
+  // target that change and the first R1.4 op was used instead.
+  const demo = demoChange(revision, "R1.4");
+  const demoOp = demo ? plan.ops.find((o) => o.change_id === demo.id) : null;
+  const r14 = demoOp ?? plan.ops.find((o) => o.ref === "R1.4");
   const hand = r14
     ? com("hand-insert", [
         "-PlanJson",
@@ -1070,7 +1076,11 @@ async function main() {
   rows.push({
     step: "word: tracked insertion next to R1.4",
     result: hand.ok ? "PASS" : "FAIL",
-    got: hand.ok ? `revisions in the paragraph: ${hand.revisions_in_paragraph}` : hand.error,
+    got:
+      (hand.ok ? `revisions in the paragraph: ${hand.revisions_in_paragraph}` : hand.error) +
+      (demoOp || !r14
+        ? ""
+        : `; plan has no op for ${demo ? demo.id : "a pure R1.4 deletion/insertion"}, targeted ${r14.change_id}`),
   });
   const applied = com("apply", ["-PlanJson", winPath(planFile)]);
   record.word.apply = applied;
@@ -1120,7 +1130,7 @@ async function main() {
   record.word.sibling = sibling;
   rows.push({
     step: "word: R1.4 next to a pending revision",
-    result: sibling.pass ? "PASS" : "FAIL",
+    result: sibling.shown === false ? "SKIP" : sibling.pass ? "PASS" : "FAIL",
     got: sibling.got,
   });
   save();
