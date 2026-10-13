@@ -239,7 +239,7 @@ test("service: review_check_paragraphs asks the model of the edits, saves what i
   const jobs = [];
   const shots = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: async () => ({
       ok: true,
       word_comment_id: 5,

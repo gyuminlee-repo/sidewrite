@@ -375,7 +375,10 @@ async function world({ review = true } = {}) {
   const waiters = new Map();
   const open = new Set(["paper.docx", "SI.docx"]);
   const deps = {
-    getContext: (key) => ({ activeDoc: docOf(key), caps: ["target_hash"] }),
+    getContext: (key) => ({
+      activeDoc: docOf(key),
+      caps: ["target_hash", "author_insertion_guard"],
+    }),
     sendEvent: (key, obj) => {
       events.push({ key, ...obj });
       if (obj.event === "job_done") waiters.get(obj.job_id)?.(obj);

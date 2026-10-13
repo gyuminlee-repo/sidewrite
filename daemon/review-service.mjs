@@ -655,6 +655,18 @@ export function createReviewService({
             unknown: !!rev.snapshot && !Array.isArray(rev.snapshot.unreviewed),
           },
           comment_ids: recordedCommentIds(rev),
+          // The texts the recorded changes of this file put in, by paragraph
+          // (review-tools.mjs ownInsertions). Accepted and rejected changes
+          // left no tracked insertion behind.
+          inserted: rev.comments
+            .flatMap((x) => x.changes)
+            .filter((ch) => ch.text && ch.state !== "accepted" && ch.state !== "rejected")
+            .map((ch) => ({
+              paragraph_index: ch.paragraph_index,
+              paragraph_id: ch.paragraph_id,
+              text: ch.text,
+              after: ch.after,
+            })),
           // What the author answered to questions of this review, in this
           // file and in the other files of its revision: a source of numbers
           // for an edit, like the comment.

@@ -152,7 +152,7 @@ test("service: ledger_add and ledger_update refuse a broken regex; a stored one 
   const doc = join(dir, "paper.docx");
   const calls = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: null,
     pushTurn: () => {},
     log: () => {},
@@ -258,7 +258,7 @@ test("ledger import: a file with a regex that does not compile is refused as a w
   const dir = await mkdtemp(join(tmpdir(), "broken-rule-import-"));
   const doc = join(dir, "paper.docx");
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: null,
     pushTurn: () => {},
     log: () => {},
@@ -306,7 +306,7 @@ test("service: review_propose is refused while a stored forbid rule does not com
   const doc = join(dir, "paper.docx");
   const pushed = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: null,
     pushTurn: (...a) => pushed.push(a),
     log: () => {},

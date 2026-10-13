@@ -141,8 +141,9 @@ test("the rule about what is not in this file is swapped at its index; the appen
   assert.doesNotMatch(swapped, /a figure file, the supplementary material,/);
   assert.match(swapped, /office_requirement_outside/);
   assert.match(swapped, /office_ask_author/);
-  assert.match(rules.at(-2), /^Citations and other fields/);
-  assert.match(rules.at(-1), /^When you ask the author \(office_ask_author\)/);
+  assert.match(rules.at(-3), /^Citations and other fields/);
+  assert.match(rules.at(-2), /^When you ask the author \(office_ask_author\)/);
+  assert.match(rules.at(-1), /^When an edit is refused with a message that says to ask the author/);
   // In the prompt: the same number, the swapped text.
   const lines = prompt({ part: PART }).text.split("\n");
   assert.equal(
@@ -150,14 +151,14 @@ test("the rule about what is not in this file is swapped at its index; the appen
     `${OUTSIDE_RULE + 1}. ${swapped}`,
   );
   assert.match(
-    lines[lines.indexOf("Rules:") + REVIEW_RULES.length - 1],
+    lines[lines.indexOf("Rules:") + REVIEW_RULES.length - 2],
     /^\d+\. Citations and other fields/,
   );
   // A policy pack that is off takes its rules out by index, in a part too.
   const off = rulesFor({ policy_packs: { review_scope: false } }, PART);
   assert.equal(off.length, REVIEW_RULES.length - POLICY_PACKS.review_scope.length);
   assert.ok(off.includes(swapped));
-  assert.match(off.at(-2), /^Citations and other fields/);
+  assert.match(off.at(-3), /^Citations and other fields/);
 });
 
 test("author answers of the other files go into the prompt, named with their file", () => {
@@ -369,7 +370,10 @@ async function world() {
   const pushed = [];
   const open = new Set(["paper.docx", "SI.docx"]);
   const service = createReviewService({
-    getContext: (key) => ({ activeDoc: docOf(key), caps: ["target_hash"] }),
+    getContext: (key) => ({
+      activeDoc: docOf(key),
+      caps: ["target_hash", "author_insertion_guard"],
+    }),
     sendEvent: (key, obj) => events.push({ key, ...obj }),
     callTool: async () => ({}),
     pushTurn: (key, host, text, turn) => pushed.push({ key, text, turn }),

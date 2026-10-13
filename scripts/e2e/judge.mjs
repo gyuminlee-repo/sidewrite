@@ -897,8 +897,11 @@ export function plainWordOf(change, avoid = "") {
 // The probe-tracked-at step (pane-driver.cjs): the pane's insertionHolds
 // read a word inside the author's pending tracked insertion as inside it
 // (true) and a plain word of the same paragraph as not (false). Any other
-// answer, null (Word could not say) included, fails.
-export function trackedProbeMatch(result) {
+// answer, null (Word could not say) included, fails. hand: the author's
+// insertion; insertionAround on the whole of it must read held with nothing
+// left on either side and its text (result.whole): the condition on which
+// the pane refuses a deletion of it (WholeAuthorInsertion).
+export function trackedProbeMatch(result, hand) {
   const changes = (result?.changes ?? []).map((c) => `${c.type}:${JSON.stringify(c.text)}`);
   // insertionAround on "Checked", the start of the insertion "Checked: ":
   // held, nothing left of it, ": " right of it (ContainsStart and the
@@ -909,15 +912,24 @@ export function trackedProbeMatch(result) {
     a.left === "" &&
     typeof a.right === "string" &&
     normalizeParaText(a.right).trim() === ":";
+  const w = result?.whole;
+  const norm = (s) => normalizeParaText(String(s)).trim();
+  const wholeOk =
+    w?.held === true &&
+    w.left === "" &&
+    w.right === "" &&
+    typeof w.text === "string" &&
+    typeof hand === "string" &&
+    norm(w.text) === norm(hand);
   const side = (s) => (typeof s === "string" ? JSON.stringify(s) : "-");
   return {
-    pass: result?.inside === true && result?.plain === false && aroundOk,
+    pass: result?.inside === true && result?.plain === false && aroundOk && wholeOk,
     expect:
-      'inside the author\'s tracked insertion true with nothing of it left and ":" right of the word, a plain word of its paragraph false',
+      'inside the author\'s tracked insertion true with nothing of it left and ":" right of the word, the whole insertion held with nothing left on either side, a plain word of its paragraph false',
     got:
       (result?.threw ?? result?.error)
         ? `threw ${result.threw ?? result.error}`
-        : `inside ${result?.inside ?? "-"} (hits ${result?.inside_hits ?? "-"}); around held ${a?.held ?? "-"} left ${side(a?.left)} right ${side(a?.right)}; plain ${result?.plain ?? "-"} (hits ${result?.plain_hits ?? "-"}); changes ${changes.join(", ") || "-"}`,
+        : `inside ${result?.inside ?? "-"} (hits ${result?.inside_hits ?? "-"}); around held ${a?.held ?? "-"} left ${side(a?.left)} right ${side(a?.right)}; whole held ${w?.held ?? "-"} left ${side(w?.left)} right ${side(w?.right)} text ${side(w?.text)} (hits ${result?.whole_hits ?? "-"}); plain ${result?.plain ?? "-"} (hits ${result?.plain_hits ?? "-"}); changes ${changes.join(", ") || "-"}`,
   };
 }
 
@@ -1211,6 +1223,7 @@ const REFUSAL_TEXTS = [
     "StaleTarget",
   ],
   [/puts a number into the manuscript/, "NumberNeedsAuthor"],
+  [/words of a tracked insertion the author made/, "WholeAuthorInsertion"],
   [/forbidden rule\(s\) .+ cannot be checked/, "ForbidRuleBroken"],
   [/matches forbidden rule\(s\)/, "ForbidBlocked"],
   [/task pane is older than the daemon/, "TaskPaneOutdated"],

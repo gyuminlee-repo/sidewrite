@@ -341,7 +341,7 @@ test("L3 narrowed range: recorded find, text and kind follow what the task pane 
 // in_insertion (tools-word.js insertionHolds): kept on a deletion when the
 // task pane reported it, true or false; left out when it did not (an older
 // task pane, a Word without WordApi 1.6), and never put on another kind.
-test("in_insertion of a deletion is recorded only as the task pane reported it", async () => {
+test("in_insertion of a deletion or a replace is recorded only as the task pane reported it", async () => {
   const del = { comment_ref: "R1.2", find: "red ", replace: "", rationale: R };
   const run = async (result, args = del) => {
     const d = deps({ before: "the red big dog", after: "the big dog", ...result });
@@ -358,12 +358,18 @@ test("in_insertion of a deletion is recorded only as the task pane reported it",
     { comment_ref: "R1.2", find: "the red big dog", replace: "the big dog", rationale: R },
   );
   assert.deepEqual([ch.kind, ch.in_insertion], ["delete", true]);
-  // Not a deletion: nothing to say, whatever came back.
+  // A replace: its old words are dropped the same way (the note on its card).
   ch = await run(
     { in_insertion: true },
     { comment_ref: "R1.2", find: "red", replace: "blue", rationale: R },
   );
-  assert.deepEqual([ch.kind, "in_insertion" in ch], ["replace", false]);
+  assert.deepEqual([ch.kind, ch.in_insertion], ["replace", true]);
+  // An insertion: nothing to say, whatever came back.
+  ch = await run(
+    { in_insertion: true },
+    { comment_ref: "R1.2", find: "red", insert_after: " blue", rationale: R },
+  );
+  assert.deepEqual([ch.kind, "in_insertion" in ch], ["insert", false]);
 });
 
 // insertion_left / insertion_right: what was left of the carrying insertion

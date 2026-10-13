@@ -26,7 +26,7 @@ async function setup() {
   const lines = [];
   const calls = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: async (name, args) => {
       calls.push([name, args]);
       return { ok: true, word_comment_id: 5, paragraph_index: 2, before: "b", after: "a" };

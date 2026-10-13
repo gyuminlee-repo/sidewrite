@@ -43,7 +43,8 @@ function deps(ctx = {}) {
     getLedger: async () => [],
     getReviewContext: async () => ({ paragraphs: DOC, paragraph_ids: IDS, ...ctx }),
     paneChecksTarget: () => true,
-    paneCan: (cap) => ["target_hash", "tracked_rewrite", FIELD_CAP].includes(cap),
+    paneCan: (cap) =>
+      ["target_hash", "author_insertion_guard", "tracked_rewrite", FIELD_CAP].includes(cap),
     onAttempt: async () => ((d.attempts += 1), { id: "R1.2-b1" }),
     call: async (name, args) => {
       d.calls.push(args);
@@ -259,7 +260,10 @@ async function world() {
     };
   };
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "tracked_rewrite", FIELD_CAP] }),
+    getContext: () => ({
+      activeDoc: doc,
+      caps: ["target_hash", "author_insertion_guard", "tracked_rewrite", FIELD_CAP],
+    }),
     callTool,
     pushTurn: () => {},
     sendEvent: () => {},

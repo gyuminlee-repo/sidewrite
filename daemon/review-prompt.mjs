@@ -47,6 +47,7 @@ export const REVIEW_RULES = [
   'Before you end the turn, check: every request has a change, a question or a note; no changed paragraph states a claim and its denial together; the term you changed is not left elsewhere without being named. End your answer with the line "Same term still at: " followed by the ids of the paragraphs where it is left, or "none".',
   "Citations and other fields (cross-references, the reference list) are not edited: they are written by the reference manager. When you reword, keep each one where it is and change only the words around it. To remove one, delete its whole sentence in ONE office_tracked_edit, never the citation text on its own. `find` takes the text as Word shows it, without the instruction of the field.",
   "When you ask the author (office_ask_author) and the answer would go into one paragraph of the manuscript, name that paragraph: give its id as paragraph_id. Leave paragraph_id out when the answer has no one place.",
+  "When an edit is refused with a message that says to ask the author, do not make the same change another way: ask with office_ask_author as the message says.",
 ];
 
 // The rule that tells what is not in this file from what only the author

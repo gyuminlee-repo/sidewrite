@@ -120,6 +120,7 @@ export function followFromLog(log, ref) {
 //   [review] field edit refused <ref> why=<reason> ...    FieldNotEditable
 //   [review] fields unread <ref> paragraph=<i> ...        FieldsUnread
 //   [review] not a follow place <ref> paragraph=<i>       NotAFollowPlace
+//   [review] whole author insertion <ref> paragraph=<i>   WholeAuthorInsertion
 //   [review] rewrite <ref> ... applied=0 stopped=<code>   <code> (ParagraphNotPlain, ...)
 //   [review] rewrite <ref> ... applied=<k> stopped=...    RewriteStopped
 // A rewrite that cannot be written as tracked changes (RewriteNotExpressible)
@@ -134,6 +135,7 @@ const REFUSALS = [
   ["FieldNotEditable", "field edit refused", " why="],
   ["FieldsUnread", "fields unread", " paragraph="],
   ["NotAFollowPlace", "not a follow place", " paragraph="],
+  ["WholeAuthorInsertion", "whole author insertion", " paragraph="],
 ];
 export function refusalsFromLog(log, ref) {
   const at = escapeRe(ref);

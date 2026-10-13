@@ -699,7 +699,10 @@ async function world() {
     else done.set(e.job_id, e.result);
   };
   const deps = {
-    getContext: (key) => ({ activeDoc: docOf(key), caps: ["target_hash"] }),
+    getContext: (key) => ({
+      activeDoc: docOf(key),
+      caps: ["target_hash", "author_insertion_guard"],
+    }),
     sendEvent,
     log: () => {},
     env: ENV,

@@ -61,7 +61,10 @@ const edit = (find, replace, extra = {}) => ({
   ...extra,
 });
 const TURN = { ref: "R1.2" };
-function deps(result, { caps = ["target_hash", "tracked_rewrite", FIELD_CAP], ctx = {} } = {}) {
+function deps(
+  result,
+  { caps = ["target_hash", "author_insertion_guard", "tracked_rewrite", FIELD_CAP], ctx = {} } = {},
+) {
   const d = {
     calls: [],
     edits: [],
@@ -192,7 +195,7 @@ test("daemon: a whole sentence with its citation, deleted in one edit, is sent t
   assert.equal(d.edits[0].kind, "delete");
   // A task pane loaded before the daemon was updated checks no fields: it
   // is not sent a deletion over one.
-  d = deps(applied(2), { caps: ["target_hash", "tracked_rewrite"] });
+  d = deps(applied(2), { caps: ["target_hash", "author_insertion_guard", "tracked_rewrite"] });
   r = await applyTrackedEdit(d, edit(SENTENCE, ""), TURN);
   assert.deepEqual(
     [r.ok, r.code, r.reason, d.calls.length],
@@ -766,7 +769,12 @@ test("task pane: a field-breaking replacement cannot reject a preexisting overla
     pending: [{ type: "Added", text: "Samples were kept on ice" }],
     word: hollowing,
   });
-  const r = await call("Samples were kept on ice", "Samples on ice");
+  // The old words are that whole pending insertion: an earlier change of
+  // the tool (own_insertions), else the edit is refused before Word is
+  // touched (WholeAuthorInsertion, comment-anchor-dropped.test.mjs).
+  const r = await call("Samples were kept on ice", "Samples on ice", {
+    own_insertions: ["Samples were kept on ice"],
+  });
   assert.deepEqual([r.applied, r.code, s.rejected], [true, "FieldEditNotUndone", 0]);
   assert.ok(s.changes.some((c) => c.id === "prior-0"));
   assert.equal(s.mode, "Off");

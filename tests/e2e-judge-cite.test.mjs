@@ -19,6 +19,7 @@ import { splitReviewRegex } from "../daemon/review-split.mjs";
 import { paragraphHash } from "../daemon/doc-diff.mjs";
 import { missing } from "./fixtures/py-packages.mjs";
 import * as J from "../scripts/e2e/judge.mjs";
+import { WHOLE_AUTHOR_INSERTION } from "../taskpane/shared/review-view.js";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 const FIXTURE = here("./fixtures/citation_manuscript.docx");
@@ -155,7 +156,10 @@ test("the review of the stage splits into its four comments without a model", ()
 // The review service with the document of the fixture and a Word that
 // answers `word(name, args)`. reviewed: what the pane read as the
 // reviewed text of each paragraph; caps: what the pane said it can do.
-async function service(word, { reviewed = TEXTS, caps = ["target_hash", "tracked_rewrite"] } = {}) {
+async function service(
+  word,
+  { reviewed = TEXTS, caps = ["target_hash", "author_insertion_guard", "tracked_rewrite"] } = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), "cite-stage-"));
   const doc = join(dir, "paper.docx");
   const lines = [];
@@ -278,7 +282,10 @@ test("with the fields shown as Word shows them, every case of the run gets the a
       narrowed: !!args.narrow,
       target_checked: true,
     }),
-    { reviewed: REVIEWED, caps: ["target_hash", "tracked_rewrite", "field_guard"] },
+    {
+      reviewed: REVIEWED,
+      caps: ["target_hash", "author_insertion_guard", "tracked_rewrite", "field_guard"],
+    },
   );
   const why = {
     spans: "replace-across",
@@ -437,6 +444,11 @@ test("refusalCode: the messages of the two tools", () => {
   assert.equal(
     code("Not applied: the change puts a number into the manuscript (7) that ..."),
     "NumberNeedsAuthor",
+  );
+  assert.equal(code(WHOLE_AUTHOR_INSERTION), "WholeAuthorInsertion");
+  assert.equal(
+    code(`${WHOLE_AUTHOR_INSERTION} Paragraph: p3 (give it as paragraph_id).`),
+    "WholeAuthorInsertion",
   );
   assert.equal(code("something else"), "Refused");
 });

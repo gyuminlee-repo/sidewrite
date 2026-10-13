@@ -223,3 +223,35 @@ test("the author rejects the carrying insertion: the deletion's words are gone w
   assert.equal(got, classifyChange(deletion(), rejected).state, "the flag decides nothing here");
   assert.equal(got, "user_edited");
 });
+
+// A replace whose old words lay inside the author's insertion now carries
+// the flag and remainders too (for the note on its card). Its state is read
+// from its own tracked new words, as before: the flag changes nothing.
+test("a replace inside the author's insertion: the same state with and without the flag", () => {
+  const head = "The deck was ";
+  const typed = "fully checked and ";
+  const tail = "painted after the repair.";
+  const input = head + typed + tail;
+  const change = (extra) => make("replace", "checked", "inspected", input, "R2.4-1", extra);
+  const flag = held("fully ", " and ");
+  const after = head + "fully inspected and " + tail;
+  const shapes = [
+    // Pending: the author's insertion and the tool's new words, all tracked.
+    [para(r(head) + ins("fully inspected and ") + r(tail), after, after), "pending"],
+    // Accepted: all plain.
+    [para(r(head + "fully inspected and " + tail), after, after), "accepted"],
+  ];
+  for (const [snap, state] of shapes) {
+    assert.equal(classifyChange(change(), snap).state, state);
+    assert.equal(classifyChange(change(flag), snap).state, state);
+    assert.equal(classifyChange(change({ in_insertion: false }), snap).state, state);
+  }
+  // The new words rejected: neither form stands; whatever it reads, the
+  // flag does not change it.
+  const gone = head + "fully  and " + tail;
+  const rejected = para(r(head) + ins("fully  and ") + r(tail), gone, gone);
+  assert.equal(
+    classifyChange(change(flag), rejected).state,
+    classifyChange(change(), rejected).state,
+  );
+});

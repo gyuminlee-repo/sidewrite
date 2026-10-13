@@ -1301,10 +1301,14 @@ const steps = {
   // unit tests only see through a fake Word. `changes`: the type and text
   // of every tracked change Word lists for that paragraph. `around`: what
   // insertionAround tells for find_inside ({ held, left, right }), the
-  // remainders a deletion's in_insertion carries.
+  // remainders a deletion's in_insertion carries. `whole`: what it tells for
+  // a.find_whole (the whole author insertion, searched in that paragraph,
+  // once): { held, left, right, text }, held with nothing left on either
+  // side being what the pane refuses a deletion of (WholeAuthorInsertion).
+  // Read only: nothing here edits the document.
   async "probe-tracked-at"(page, a) {
     return page.evaluate(
-      async ([origin, inside, plain]) => {
+      async ([origin, inside, plain, whole]) => {
         const m = await import(`${origin}/shared/tools-word.js`);
         try {
           return await Word.run(async (context) => {
@@ -1316,6 +1320,8 @@ const steps = {
             const para = hits.items[0].paragraphs.getFirst();
             const plains = para.search(plain, { matchCase: true, matchWholeWord: true });
             plains.load("items");
+            const wholes = whole ? para.search(whole, { matchCase: true }) : null;
+            wholes?.load("items");
             const changes = para.getTrackedChanges();
             changes.load("items/type, items/text");
             await context.sync();
@@ -1326,13 +1332,25 @@ const steps = {
             out.around = await m.insertionAround(context, para, hits.items[0], inside);
             if (plains.items.length === 1)
               out.plain = await m.insertionHolds(context, para, plains.items[0]);
+            if (wholes) {
+              out.whole_hits = wholes.items.length;
+              if (wholes.items.length === 1) {
+                const w = await m.insertionAround(context, para, wholes.items[0], whole);
+                out.whole = w && {
+                  held: w.held,
+                  left: w.left,
+                  right: w.right,
+                  text: w.text,
+                };
+              }
+            }
             return out;
           });
         } catch (e) {
           return { threw: String(e?.message ?? e), code: e?.code ?? null };
         }
       },
-      [ORIGIN, a.find_inside, a.find_plain],
+      [ORIGIN, a.find_inside, a.find_plain, a.find_whole ?? null],
     );
   },
 

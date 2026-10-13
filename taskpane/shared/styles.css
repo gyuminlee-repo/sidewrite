@@ -1245,6 +1245,10 @@ body {
   border-color: #c62828;
   color: #c62828;
 }
+.review-flag-in-insertion {
+  border-color: #ef6c00;
+  color: #ef6c00;
+}
 .review-reqs,
 .review-answer {
   flex: 1 1 100%;

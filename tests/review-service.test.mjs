@@ -21,7 +21,7 @@ async function setup({ env = ENV, oneshot = null, callResult, callImpl = null, .
   const pushed = [];
   const calls = [];
   const svc = createReviewService({
-    getContext: () => ({ activeDoc: doc, caps: ["target_hash"] }),
+    getContext: () => ({ activeDoc: doc, caps: ["target_hash", "author_insertion_guard"] }),
     callTool: async (name, args) => {
       calls.push([name, args]);
       if (callImpl) return callImpl(name, args, calls.length);
@@ -969,7 +969,7 @@ test("an applying item left by a stopped daemon becomes outcome_unknown on load 
     assert.equal(stuck.state, "applying"); // this daemon is still applying it
 
     const next = createReviewService({
-      getContext: () => ({ activeDoc: t.doc, caps: ["target_hash"] }),
+      getContext: () => ({ activeDoc: t.doc, caps: ["target_hash", "author_insertion_guard"] }),
       callTool: async () => ({ ok: true }),
       pushTurn: () => {},
       log: () => {},
@@ -2082,7 +2082,7 @@ test("a daemon that restarted reconciles the unanswered edit it finds in the fil
       await unansweredEdit(t);
       // A second service on the same folder: nothing of the first in memory.
       const svc2 = createReviewService({
-        getContext: () => ({ activeDoc: t.doc, caps: ["target_hash"] }),
+        getContext: () => ({ activeDoc: t.doc, caps: ["target_hash", "author_insertion_guard"] }),
         callTool: async () => ({ ok: true }),
         pushTurn: () => {},
         sendEvent: () => {},
@@ -2187,7 +2187,7 @@ test("an unanswered normal edit can be applied again from the Review tab (force)
 // answer of Word, a queued turn) must not read the context again: the pane
 // may be gone by then, or its document saved under another name.
 test("no handler reads the pane's document again after its first await", async () => {
-  const ctx = { activeDoc: null, caps: ["target_hash"] };
+  const ctx = { activeDoc: null, caps: ["target_hash", "author_insertion_guard"] };
   const hooks = { oneshot: null, call: null, push: null };
   const t = await setup({
     getContext: () => ({ ...ctx }),
