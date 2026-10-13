@@ -1881,6 +1881,10 @@ export async function toolTrackedEdit({
           detail:
             "A safe undo needs a paragraph with no pending tracked changes and a readable change collection",
         });
+      // A deletion (also a narrowed one): did a tracked insertion hold the
+      // range Word is about to delete? Read now, while the words are there.
+      const held =
+        !isInsert && editReplace === "" ? await insertionHolds(context, para, target) : null;
       let inserted = null;
       if (isInsert) inserted = hit.insertText(insert_after, Word.InsertLocation.after);
       else if (takesField) target.delete();
@@ -1900,6 +1904,8 @@ export async function toolTrackedEdit({
         // The paragraph was compared with expected_before_hash. The daemon
         // flags an applied result without this (an older task pane).
         target_checked: true,
+        // Only when Word could say (insertionHolds).
+        ...(held === null ? {} : { in_insertion: held }),
       };
       // The fields after the edit. A deletion whose place among the fields
       // could not be told beforehand may take fields with it, as a whole.
@@ -2062,19 +2068,45 @@ async function droppedDeletionAnchor(context, para, before, find, cut) {
 // ranges are read (office-js#5188 empties the text of a deletion). false
 // when Word cannot say.
 async function trackedAt(context, para, place) {
+  const where = await trackedRelations(context, para, place, ["Added", "Deleted"]);
+  return !!where?.some((w) => !["Before", "After", "Unrelated"].includes(w));
+}
+
+// Where each tracked change of the paragraph whose type is in `types`
+// lies against place, as Word's LocationRelation of the change's range to
+// place (Equal, Contains, Inside, AdjacentBefore ...). Two round trips (the
+// list, then the comparisons; one when the list holds none of those types).
+// null when Word cannot say (the call threw). trackedAt and insertionHolds
+// read Word through this one call.
+async function trackedRelations(context, para, place, types) {
   try {
     const changes = para.getTrackedChanges();
     changes.load("items/type");
     await context.sync();
     const where = changes.items
-      .filter((c) => c.type === "Added" || c.type === "Deleted")
+      .filter((c) => types.includes(c.type))
       .map((c) => c.getRange().compareLocationWith(place));
-    if (!where.length) return false;
-    await context.sync();
-    return where.some((w) => !["Before", "After", "Unrelated"].includes(w.value));
+    if (where.length) await context.sync();
+    return where.map((w) => w.value);
   } catch {
-    return false;
+    return null;
   }
+}
+
+// Does one tracked insertion of the paragraph hold the whole of place (the
+// range a deletion is about to take)? Then Word drops those words outright
+// and the deletion leaves nothing tracked of its own: the daemon records
+// this as in_insertion, the proof that the deletion waits on that insertion
+// (revision-classify.mjs inInsertion). Only containment counts: an
+// insertion next to place, or one that shares a space with it, leaves the
+// words of place plain text that a deletion keeps as tracked deleted text.
+// null when Word cannot say (no WordApi 1.6, or the call threw): the field
+// is then left out, never written false.
+export async function insertionHolds(context, para, place) {
+  if (!canReject()) return null;
+  const where = await trackedRelations(context, para, place, ["Added"]);
+  if (!where) return null;
+  return where.some((w) => ["Equal", "Contains", "ContainsStart", "ContainsEnd"].includes(w));
 }
 
 // Review tab, "Add rationale comment": the comment of a change that was

@@ -92,6 +92,13 @@ export const ChangeSchema = z.object({
   // made: the old text alone then does not say which of them this is
   // (revision-classify.mjs locateParagraph).
   duplicate_before: z.boolean().default(false),
+  // A deletion: whether one tracked insertion held the whole range Word
+  // deleted, as the task pane read it right before the edit (tools-word.js
+  // insertionHolds). Word drops such words outright, so this is what tells
+  // the deletion waiting on that insertion from an accepted one
+  // (revision-classify.mjs inInsertion). Only when the task pane could say:
+  // a file without it saves as it was read.
+  in_insertion: z.boolean().optional(),
   // The edit was applied but its rationale comment was not anchored: the
   // task pane error code (CommentAnchorMissing, CommentInsertFailed, or
   // CommentWaitingForWord: Word refused the insert with AccessDenied while

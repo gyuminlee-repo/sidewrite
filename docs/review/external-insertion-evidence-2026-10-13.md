@@ -1,5 +1,18 @@
 # 외부 추적 replace 끝 삭제의 판정 증거 조사
 
+## 후속 해결 (분기 `fix/deletion-inside-insertion`)
+
+아래 본문은 조사 당시 기록이다. 그 뒤 P2는 아래 경로로 해결했다.
+
+- 작업창은 삭제를 적용하기 직전에 지울 범위를 추적 삽입 하나가 통째로 담고 있는지 읽는다(`taskpane/shared/tools-word.js` `insertionHolds`). 범위는 Word가 실제로 지우는 범위다. 좁힌 편집이면 좁힌 범위다.
+- 포함(`Equal`, `Contains`, `ContainsStart`, `ContainsEnd`)만 참이다. 맞닿거나 공백 한 글자를 공유하는 겹침은 거짓이다. 이 문서의 대조군 ` supports`는 삽입 `new steel `과 공백 하나가 겹치므로 겹침을 참으로 두면 PR #32 회귀가 다시 생긴다.
+- WordApi 1.6이 없거나 호출이 실패하면 값을 쓰지 않는다. 거짓으로 채우지 않는다.
+- 데몬은 그 값을 삭제 변경의 `in_insertion`에 저장한다(`daemon/review-tools.mjs` `recordApplied`). 기본값이 없는 선택 필드라 이전 파일은 바이트 그대로 다시 저장된다.
+- 분류기는 기록된 형제가 없을 때 `in_insertion === true`를 형제 대신 증거로 받는다(`daemon/revision-classify.mjs` `inInsertion`). 왼쪽 삽입과 오른쪽 삭제 사이, 그리고 두 삽입 run 사이의 경우에만 적용한다. 일반 글자 삭제에는 이 값이 없거나 거짓이므로 대조군은 그대로 `accepted`다.
+- 작성자·시각·변경 ID는 여전히 쓰지 않는다.
+- 회귀 시험은 `tests/revision-classify-in-insertion.test.mjs`다. 재현 스크립트에도 값이 참인 경우 `pending` 단언을 더했다. 아래 「재현 출력」은 조사 당시 출력이다.
+- 값이 없는 옛 변경과 결과 불명 시도에서 복구한 변경은 예전처럼 `accepted`로 읽힌다.
+
 ## 결론과 범위
 
 - 기준: 2026-10-13 `main`의 `34a2a564e55bc54a860fe2639130fde825aac1d5`.

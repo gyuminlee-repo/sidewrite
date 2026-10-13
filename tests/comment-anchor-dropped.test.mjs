@@ -444,3 +444,89 @@ test("controls: a waiting deletion too long to search keeps the old rule", async
   const r = await addChangeComment(recorded({ find, before: long }));
   assert.deepEqual([r.ok, r.code, state.comments.length], [false, "CommentAnchorMissing", 0]);
 });
+
+// in_insertion: whether the range a deletion took lay inside a tracked
+// insertion when Word was asked to delete it (insertionHolds). The words of
+// such a deletion leave no trace, so the classifier needs this to tell it
+// from an accepted deletion (revision-classify-in-insertion.test.mjs). Only
+// a tracked insertion that holds the whole range counts: one that merely
+// touches or overlaps it does not (a deletion of " supports" right after an
+// insertion "new steel " shares one space with it and is plain text).
+// Absent, never false, when Word cannot say.
+test("in_insertion: a deletion inside a pending insertion says true", async () => {
+  fakeDoc(["Title", TEXT], { pending: INSERTION });
+  const r = await toolTrackedEdit(edit("thick ", ""));
+  assert.deepEqual([r.ok, r.in_insertion], [true, true]);
+});
+
+test("in_insertion: judged on the range Word deleted (a narrowed edit)", async () => {
+  // The full find runs over the start of the insertion; the narrowed part
+  // Word deletes lies inside it.
+  fakeDoc(["Title", TEXT], { pending: INSERTION });
+  const r = await toolTrackedEdit(
+    edit("daily. New bearings with", "daily. New with", {
+      narrow: { find: "bearings ", replace: "" },
+    }),
+  );
+  assert.deepEqual([r.ok, r.narrowed, r.in_insertion], [true, true, true]);
+});
+
+test("in_insertion: plain text says false, also next to or across the insertion", async () => {
+  for (const find of ["north ", "daily. ", "daily. New "]) {
+    fakeDoc(["Title", TEXT], { pending: INSERTION });
+    const r = await toolTrackedEdit(edit(find, ""));
+    assert.deepEqual([find, r.ok, r.in_insertion], [find, true, false]);
+  }
+  // The shape of the PR #32 control: the insertion ends with the space the
+  // deletion opens with (" thick" after an insertion "New bearings with ").
+  fakeDoc(["Title", TEXT], { pending: [HEAD.length, TEXT.indexOf("thick")] });
+  let r = await toolTrackedEdit(edit(" thick", ""));
+  assert.deepEqual([r.ok, r.in_insertion], [true, false]);
+  // A paragraph with no tracked change at all.
+  fakeDoc(["Title", TEXT]);
+  r = await toolTrackedEdit(edit("thick ", ""));
+  assert.deepEqual([r.ok, r.in_insertion], [true, false]);
+});
+
+test("in_insertion: absent when Word cannot say, and on edits that are no deletion", async () => {
+  let { state, items } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+  state.api16 = false;
+  let r = await toolTrackedEdit(edit("thick ", ""));
+  assert.deepEqual([r.ok, "in_insertion" in r], [true, false]);
+  ({ items } = fakeDoc(["Title", TEXT], { pending: INSERTION }));
+  items[1].getTrackedChanges = () => {
+    throw new Error("GeneralException");
+  };
+  r = await toolTrackedEdit(edit("thick ", ""));
+  assert.deepEqual([r.ok, "in_insertion" in r], [true, false]);
+  fakeDoc(["Title", TEXT], { pending: INSERTION });
+  r = await toolTrackedEdit(edit("thick steel plates", "shims"));
+  assert.deepEqual([r.ok, "in_insertion" in r], [true, false]);
+  fakeDoc(["Title", TEXT], { pending: INSERTION });
+  r = await toolTrackedEdit({ ...edit("thick ", ""), replace: undefined, insert_after: "new " });
+  assert.deepEqual([r.ok, "in_insertion" in r], [true, false]);
+});
+
+test("in_insertion: two more Word round trips, only for a deletion", async () => {
+  const count = async (api16, args) => {
+    const { state } = fakeDoc(["Title", TEXT], { pending: INSERTION });
+    state.api16 = api16;
+    const run = globalThis.Word.run;
+    let syncs = 0;
+    globalThis.Word.run = (fn) =>
+      run((ctx) =>
+        fn({
+          ...ctx,
+          sync: async () => {
+            syncs++;
+          },
+        }),
+      );
+    await toolTrackedEdit(args);
+    return syncs;
+  };
+  const del = edit("thick ", "");
+  assert.equal((await count(true, del)) - (await count(false, del)), 2);
+  const replace = edit("thick steel plates", "shims");
+  assert.equal(await count(true, replace), await count(false, replace));
+});

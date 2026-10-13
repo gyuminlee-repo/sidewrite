@@ -749,3 +749,44 @@ test("setRender and setExport record the PDF the lines came from and the last ex
   assert.equal(setRender(rev, null).response_render, null);
   assert.equal(base().response_render, null);
 });
+
+// in_insertion is optional with no default: a change saved with it loads
+// with it, one saved without it saves without it (an older file reads and
+// writes as it was; revision-roundtrip.test.mjs).
+test("a change with and without in_insertion saves and loads as it was", async () => {
+  const at = new Date("2026-10-13T00:00:00.000Z");
+  const change = (extra) => ({
+    word_comment_id: null,
+    paragraph_index: 1,
+    kind: "delete",
+    find: " supports",
+    text: "",
+    before: "new steel supports",
+    after: "new steel",
+    rationale: { what: "w", why: "y", addresses: "a" },
+    ...extra,
+  });
+  let rev = replaceComments(emptyRevision("bridge.docx", at), [
+    { ref: "R1.1", reviewer: 1, text: "Shorten the bridge description." },
+  ]);
+  rev = addChange(rev, "R1.1", change({ in_insertion: true }), at).revision;
+  rev = addChange(rev, "R1.1", change({ in_insertion: false }), at).revision;
+  rev = addChange(rev, "R1.1", change({}), at).revision;
+  const dir = await mkdtemp(join(tmpdir(), "in-insertion-"));
+  try {
+    const path = join(dir, "bridge.revision.json");
+    await saveRevision(path, rev, at);
+    const loaded = await loadRevision(path, "x");
+    assert.deepEqual(
+      loaded.comments[0].changes.map((c) => ("in_insertion" in c ? c.in_insertion : "absent")),
+      [true, false, "absent"],
+    );
+    // A file as the daemon writes it saves again byte for byte.
+    await saveRevision(path, loaded, at);
+    const text = await readFile(path, "utf8");
+    await saveRevision(path, await loadRevision(path, "x"), at);
+    assert.equal(await readFile(path, "utf8"), text);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

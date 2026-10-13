@@ -282,7 +282,12 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
   // The two sides are one change when one insertion run spans the place, or
   // when a sibling of the same paragraph inserted the dropped words: for a
   // deletion on the right, a replace whose new words end with them and
-  // whose old words stand right of the place.
+  // whose old words stand right of the place. An insertion the author typed
+  // in Word is no recorded change. For it the task pane's own reading at
+  // apply time stands in for the sibling: in_insertion (tools-word.js
+  // insertionHolds) is true when one tracked insertion held the whole range
+  // Word deleted. Plain text never carries it, so the shapes above stay
+  // accepted without a sibling.
   const own = normalizeParaText(change.find).trim();
   const sameParagraph = (s) =>
     s.id !== change.id &&
@@ -309,6 +314,7 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
     while (j < t.length && t[j] === " ") j++;
     if (i < 0 || j >= t.length || !own || !inRun("ins", i)) return false;
     const mates = siblings.filter(sameParagraph);
+    const held = change.in_insertion === true;
     if (inRun("ins", j)) {
       if (placed.runs.some((r) => r.kind === "ins" && r.start <= i && j < r.end)) return true;
       // Two runs: a sibling whose new words hold the dropped words and the
@@ -318,9 +324,9 @@ function classifyByContext(change, t, revisions, placed = null, siblings = []) {
         return t.slice(r.start, r.end);
       };
       const sides = [runAt(i), runAt(j)];
-      return mates.some((s) => inserted(s) && sides.every((x) => newWords(s).includes(x)));
+      return held || mates.some((s) => inserted(s) && sides.every((x) => newWords(s).includes(x)));
     }
-    return inRun("del", j) && mates.some((s) => replacedBefore(s, j));
+    return inRun("del", j) && (held || mates.some((s) => replacedBefore(s, j)));
   };
   for (let k = CONTEXT_WORDS; k >= 0; k--) {
     const L = tailWords(left, k);

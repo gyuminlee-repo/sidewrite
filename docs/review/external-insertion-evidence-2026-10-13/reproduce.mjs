@@ -67,12 +67,22 @@ assert.deepEqual(authorSnapshot, unrelatedSnapshot);
 assert.equal(classifyChange(deletion, authorSnapshot).state, "accepted");
 assert.equal(classifyChange(deletion, unrelatedSnapshot).state, "accepted");
 assert.equal(classifyChange(deletion, authorSnapshot, [sibling, deletion]).state, "pending");
+// Resolved: the task pane now records in_insertion on a deletion whose range
+// a tracked insertion held when Word deleted it (tools-word.js
+// insertionHolds). With it the author-replace case reads pending; plain text
+// carries false or nothing, so the control stays accepted.
+assert.equal(classifyChange({ ...deletion, in_insertion: true }, authorSnapshot).state, "pending");
+assert.equal(
+  classifyChange({ ...deletion, in_insertion: false }, unrelatedSnapshot).state,
+  "accepted",
+);
 console.log(
   "Equal classifier inputs after author/date/revision-ID differences are discarded: true",
 );
 console.log(
-  "Author-replace tail deletion without recorded sibling: accepted (known limitation; desired pending)",
+  "Author-replace tail deletion without recorded sibling or in_insertion: accepted (a change recorded before the flag)",
 );
+console.log("Author-replace tail deletion with in_insertion true: pending (resolved)");
 console.log("Independent ins/del with accepted deletion: accepted (control)");
 console.log("Recorded same-paragraph replace sibling: pending (control)");
 console.log("Tracked runs: " + JSON.stringify(authorSnapshot.paragraphs[0].tracked));
