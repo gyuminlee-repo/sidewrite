@@ -2423,6 +2423,16 @@ test("trackedCutsMatch: every cut refused and the deletion not applied pass, any
   ])
     assert.equal(bad(over).pass, false, JSON.stringify(over));
   assert.match(bad(apply({ after: { ...seen.apply.after, text: applied } })).got, /text CHANGED/);
+  // Word could not give the reviewed text, before or after: the plain text
+  // decides. Read on one side only, it is not known to be the same.
+  const blind = { reviewed: null, ...apply({ after: { ...seen.apply.after, reviewed: null } }) };
+  assert.equal(bad(blind).pass, true);
+  assert.equal(
+    bad({ ...blind, ...apply({ after: { ...seen.apply.after, text: applied, reviewed: null } }) })
+      .pass,
+    false,
+  );
+  assert.equal(bad({ reviewed: null }).pass, false);
   const threw = trackedCutsMatch({ threw: "no plain pair of words" });
   assert.deepEqual([threw.pass, threw.got], [false, "threw no plain pair of words"]);
 });

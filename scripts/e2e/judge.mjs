@@ -1023,9 +1023,13 @@ export function trackedCutsMatch(result) {
   const a = result?.apply;
   const r = a?.result;
   const same = (k) => typeof result?.[k] === "string" && result[k] === a?.after?.[k];
+  // Word could not give the reviewed text, before or after: the plain text
+  // decides. Read on one side only, it is not known to be the same.
+  const sameText =
+    same("text") &&
+    (result?.reviewed == null && a?.after?.reviewed == null ? true : same("reviewed"));
   const n = (x) => (Array.isArray(x?.changes) ? x.changes.length : null);
-  const unchanged =
-    same("text") && same("reviewed") && n(result) !== null && n(result) === n(a?.after);
+  const unchanged = sameText && n(result) !== null && n(result) === n(a?.after);
   const notApplied =
     r?.ok === false && r.code === "WholeAuthorInsertion" && r.applied === false && unchanged;
   return {
@@ -1036,7 +1040,7 @@ export function trackedCutsMatch(result) {
       a?.threw
         ? `threw ${a.threw}`
         : `ok ${r?.ok ?? "-"} code ${r?.code ?? "-"} (${r?.reason ?? "-"}) applied ${r?.applied ?? "-"}`
-    }; text ${same("text") && same("reviewed") ? "same" : "CHANGED"}; tracked changes ${n(result) ?? "-"} -> ${n(a?.after) ?? "-"}; second insertion ${
+    }; text ${sameText ? "same" : "CHANGED"}; tracked changes ${n(result) ?? "-"} -> ${n(a?.after) ?? "-"}; second insertion ${
       result?.undone?.ok === true
         ? "taken out"
         : `NOT taken out (${result?.undone?.error ?? `rejected ${result?.undone?.rejected ?? "-"}`})`
