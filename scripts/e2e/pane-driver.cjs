@@ -1354,6 +1354,88 @@ const steps = {
     );
   },
 
+  // What insertionAround (tools-word.js) answers in this Word for cuts that
+  // contain or cross a tracked insertion of the author, as the tool calls it
+  // for a deletion with no insertion of its own (own []). a.find_inside
+  // names the paragraph, as in probe-tracked-at; a.cuts is { name: text },
+  // each searched in that paragraph, case kept, once. Per cut: `around`
+  // ({ held, refuse, left, right, text }) and `raw`, what Word's
+  // compareLocationWith gave for each Added change of the paragraph against
+  // the cut ({ text, value }, the change against the cut, as
+  // trackedRelations asks). Of the paragraph: `text`, `changes` (type and
+  // text of every tracked change) and `reviewed`, the text the pane hashes
+  // before an edit (getReviewedText scrolls to the change, office-js#3691:
+  // the selection is put back; null when Word cannot give it). Without
+  // a.cuts only the paragraph is read. Read only: nothing here edits the
+  // document.
+  async "probe-tracked-cuts"(page, a) {
+    return page.evaluate(
+      async ([origin, inside, cuts]) => {
+        const m = await import(`${origin}/shared/tools-word.js`);
+        try {
+          return await Word.run(async (context) => {
+            const hits = context.document.body.search(inside, { matchCase: true });
+            hits.load("items");
+            await context.sync();
+            const out = { inside_hits: hits.items.length };
+            if (hits.items.length !== 1) return out;
+            const para = hits.items[0].paragraphs.getFirst();
+            para.load("text");
+            const changes = para.getTrackedChanges();
+            changes.load("items/type, items/text");
+            const found = Object.entries(cuts ?? {}).map(([name, find]) => {
+              const ranges = para.search(find, { matchCase: true });
+              ranges.load("items");
+              return { name, find, ranges };
+            });
+            await context.sync();
+            out.text = para.text;
+            out.changes = changes.items.map((c) => ({ type: c.type, text: c.text }));
+            const added = changes.items.filter((c) => c.type === "Added");
+            out.cuts = {};
+            for (const { name, find, ranges } of found) {
+              const cut = (out.cuts[name] = { find, hits: ranges.items.length });
+              if (ranges.items.length !== 1) continue;
+              const place = ranges.items[0];
+              const w = await m.insertionAround(context, para, place, find, []);
+              cut.around = w && {
+                held: w.held,
+                refuse: w.refuse ?? null,
+                left: w.left,
+                right: w.right,
+                text: w.text,
+              };
+              const where = added.map((c) => c.getRange().compareLocationWith(place));
+              await context.sync();
+              cut.raw = added.map((c, k) => ({ text: c.text, value: where[k].value }));
+            }
+            out.reviewed = null;
+            const saved = context.document.getSelection();
+            try {
+              const reviewed = para
+                .getRange("Whole")
+                .getReviewedText(Word.ChangeTrackingVersion.current);
+              await context.sync();
+              out.reviewed = reviewed.value;
+            } catch {
+              /* as the pane: the raw text is hashed then */
+            }
+            try {
+              saved.select();
+              await context.sync();
+            } catch {
+              /* best effort */
+            }
+            return out;
+          });
+        } catch (e) {
+          return { threw: String(e?.message ?? e), code: e?.code ?? null };
+        }
+      },
+      [ORIGIN, a.find_inside, a.cuts ?? null],
+    );
+  },
+
   async "clean-tool"(page) {
     await openFold(page, "review-submit-box");
     await clearMessage(page);

@@ -933,6 +933,121 @@ export function trackedProbeMatch(result, hand) {
   };
 }
 
+// Two plain words of the paragraph of `change`, one after the other with a
+// space between them, for the probe-tracked-cuts step: a second tracked
+// insertion of the author goes between them. Neither is a word of the
+// change, of the words around it or of `avoid` (the author's insertions),
+// and the left one with its space is in the paragraph once, as it read
+// before the change (what word-com.ps1 hand-insert -After searches for).
+// The first such pair; null when there is none.
+export function plainPairOf(change, avoid = "") {
+  const words = (s) => String(s ?? "").match(/[A-Za-z]{3,}/g) ?? [];
+  const before = String(change?.before ?? "");
+  const shun = new Set(
+    words(
+      `${avoid} ${change?.find ?? ""} ${change?.text ?? ""} ${change?.context?.left ?? ""} ${change?.context?.right ?? ""}`,
+    ).map((w) => w.toLowerCase()),
+  );
+  for (const m of before.matchAll(/\b([A-Za-z]{3,}) (?=([A-Za-z]{3,})\b)/g)) {
+    const [left, right] = [m[1], m[2]];
+    if (shun.has(left.toLowerCase()) || shun.has(right.toLowerCase())) continue;
+    if (before.split(`${left} `).length === 2) return { left, right };
+  }
+  return null;
+}
+
+// The cuts probe-tracked-cuts reads, with the insertion `mid` ("Proofread ")
+// between the two words of `pair`: one that contains it with a plain word on
+// each side, one that starts in the plain word before it and ends inside
+// it, one that starts inside it and ends in the plain word after it.
+export function trackedCuts(pair, mid) {
+  const half = Math.ceil(mid.trim().length / 2);
+  return {
+    contains: `${pair.left} ${mid}${pair.right}`,
+    ends_inside: `${pair.left} ${mid.slice(0, half)}`,
+    starts_inside: `${mid.slice(half)}${pair.right}`,
+  };
+}
+
+// The deletion of `find` (the containing cut) as the daemon sends a
+// deletion to the pane (review-tools.mjs applyTrackedEdit), without
+// own_insertions: no insertion of the paragraph is the tool's. read: what
+// probe-tracked-cuts read of the paragraph just before; the hash is of the
+// text the pane itself hashes (the reviewed text, else the raw text).
+export function trackedCutApply(change, find, read) {
+  return {
+    find,
+    replace: "",
+    comment_text: formatRationaleComment("R1.4", {
+      what: "Acceptance run: words around the author's own tracked insertion deleted.",
+      why: "Sent by the acceptance run to see whether the deletion is refused; no model wrote it.",
+      addresses: "the author's pending insertion",
+    }),
+    expected_before_hash: paragraphHash(read?.reviewed ?? read?.text ?? ""),
+    expected_paragraph: {
+      index: change?.paragraph_index ?? null,
+      id: change?.paragraph_id ?? null,
+    },
+  };
+}
+
+// The probe-tracked-cuts step (pane-driver.cjs) and the deletion sent after
+// it: every cut that contains or crosses the author's second tracked
+// insertion must be refused by insertionAround (`refuse` set, whatever the
+// reason), and the deletion of the containing cut must come back
+// WholeAuthorInsertion, not applied, with the paragraph as it was: its text,
+// its reviewed text and the number of its tracked changes, read before and
+// after. `got` carries what Word's compareLocationWith gave for each Added
+// change of the paragraph against the cut (the insertion against the cut,
+// as tools-word.js trackedRelations asks).
+//   result: the answer of probe-tracked-cuts, with
+//     apply: { result, threw, after } (tracked-edit-direct, and the step
+//       once more without cuts), undone: word-com.ps1 hand-reject.
+export function trackedCutsMatch(result) {
+  const expect =
+    "a cut that contains the author's second tracked insertion, one that ends inside it and one that starts inside it are each refused; the deletion of the first is refused as WholeAuthorInsertion, not applied, the paragraph text and its tracked changes as before; the second insertion is taken out again";
+  if (result?.threw ?? result?.error)
+    return { pass: false, expect, got: `threw ${result.threw ?? result.error}` };
+  const show = (s) => (typeof s === "string" ? JSON.stringify(s) : "-");
+  const names = ["contains", "ends_inside", "starts_inside"];
+  const refused = (c) => c?.hits === 1 && typeof c.around?.refuse === "string" && !!c.around.refuse;
+  const cuts = names.map((n) => {
+    const c = result?.cuts?.[n];
+    const raw = (c?.raw ?? []).map((w) => `${show(w.text)} ${w.value}`).join(", ");
+    return `${n.replace("_", " ")} ${show(c?.find)}: ${
+      c?.hits === 1
+        ? `refuse ${c.around?.refuse ?? "-"} held ${c.around?.held ?? "-"}, insertion vs cut [${raw || "-"}]`
+        : `hits ${c?.hits ?? "-"}`
+    }`;
+  });
+  const a = result?.apply;
+  const r = a?.result;
+  const same = (k) => typeof result?.[k] === "string" && result[k] === a?.after?.[k];
+  // Word could not give the reviewed text, before or after: the plain text
+  // decides. Read on one side only, it is not known to be the same.
+  const sameText =
+    same("text") &&
+    (result?.reviewed == null && a?.after?.reviewed == null ? true : same("reviewed"));
+  const n = (x) => (Array.isArray(x?.changes) ? x.changes.length : null);
+  const unchanged = sameText && n(result) !== null && n(result) === n(a?.after);
+  const notApplied =
+    r?.ok === false && r.code === "WholeAuthorInsertion" && r.applied === false && unchanged;
+  return {
+    pass:
+      names.every((k) => refused(result?.cuts?.[k])) && notApplied && result?.undone?.ok === true,
+    expect,
+    got: `${cuts.join("; ")}; deletion of the first: ${
+      a?.threw
+        ? `threw ${a.threw}`
+        : `ok ${r?.ok ?? "-"} code ${r?.code ?? "-"} (${r?.reason ?? "-"}) applied ${r?.applied ?? "-"}`
+    }; text ${sameText ? "same" : "CHANGED"}; tracked changes ${n(result) ?? "-"} -> ${n(a?.after) ?? "-"}; second insertion ${
+      result?.undone?.ok === true
+        ? "taken out"
+        : `NOT taken out (${result?.undone?.error ?? `rejected ${result?.undone?.rejected ?? "-"}`})`
+    }`,
+  };
+}
+
 // The change of `ref` the pending-sibling case is demonstrated on: the
 // FIRST pure deletion or insertion, or null when the ref has none (a
 // replace carries no single author handling to read).
@@ -2373,6 +2488,52 @@ export function foreignLogLines(lines, own, names = []) {
     )
     .filter((l) => !onlyOwnNames(l, names))
     .filter((l) => !/^\[bridge\] hello received|^\[diag\] hello /.test(l));
+}
+
+// A foreign line that is only a tab of an earlier run loading its page
+// again: the figures button (stage 3, --figures-button) opens the page in
+// the user's browser, where the tab stays (it is closed only when the
+// window is surely the run's own, browserCloseDecision) and asks the daemon
+// for its page whenever the browser loads it anew. Such a line is the whole
+// page-load line of figure-http.mjs and nothing else, and its document lies
+// in ANOTHER run folder (e2e-* of run-acceptance.mjs, replay-* of
+// replay.mjs) of the folder that holds this run's own. The name of that
+// folder, or null: any other line, a page load of a document elsewhere
+// included, stays foreign.
+export function earlierRunTab(line, own) {
+  const get = figuresPageGets(line);
+  if (get.length !== 1 || `${line}`.includes("\n") || typeof get[0].doc !== "string") return null;
+  const parts = (p) => String(p).split(/[\\/]/);
+  const doc = parts(get[0].doc);
+  if (doc.some((s) => s === ".." || s === ".")) return null;
+  for (const p of own) {
+    const run = parts(p);
+    const at = run.length - 1;
+    if (doc.length < at + 2 || run.slice(0, at).some((s, k) => s !== doc[k])) continue;
+    if (/^(e2e|replay)-./.test(doc[at]) && doc[at] !== run[at]) return doc[at];
+  }
+  return null;
+}
+
+// The row of the isolation check: FAIL on the first foreign line that is
+// not such a tab; the page loads of tabs of earlier runs are counted and
+// their run folders named, and do not fail it.
+export function isolationRow(lines, own, names = []) {
+  const all = foreignLogLines(lines, own, names);
+  const stale = all.filter((l) => earlierRunTab(l, own));
+  const foreign = all.filter((l) => !earlierRunTab(l, own));
+  const folders = [...new Set(stale.map((l) => earlierRunTab(l, own)))];
+  return {
+    foreign,
+    stale,
+    result: foreign.length ? "FAIL" : "PASS",
+    got: foreign.length
+      ? foreign[0]
+      : "only hello lines name other documents" +
+        (stale.length
+          ? `; ${stale.length} page load${stale.length === 1 ? "" : "s"} from tabs of earlier runs (${folders.join(", ")})`
+          : ""),
+  };
 }
 
 export const JUDGES = {

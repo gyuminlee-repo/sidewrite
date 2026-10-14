@@ -9,9 +9,14 @@
 #                   document, and saved (Document.Saved, read only)
 #   apply           -PlanJson <file>: accept or reject the tracked changes of
 #                   each rationale comment, optionally edit one inserted word
-#   hand-insert     -PlanJson <file> -ChangeId <id> -Text <s>: a tracked
-#                   insertion by the author at the start of the paragraph
-#                   that holds this change, left pending
+#   hand-insert     -PlanJson <file> -ChangeId <id> -Text <s> [-After <s>]:
+#                   a tracked insertion by the author at the start of the
+#                   paragraph that holds this change, left pending; with
+#                   -After right behind the first occurrence of that text in
+#                   the paragraph instead
+#   hand-reject     -Text <s>: reject the one tracked insertion whose text is
+#                   exactly this (a hand-insert taken out again); nothing is
+#                   rejected when there is none or more than one
 #   delete-text     -Text <s>: delete its first occurrence, track changes off
 #   add-comment     -Text <s> [-Paragraph <n>]: a comment by the Word user
 #   insert-paragraph -Text <s> -Paragraph <n>: a new paragraph with this text
@@ -40,6 +45,7 @@ param(
   [string]$Text,
   [string]$ChangeId,
   [string]$With,
+  [string]$After,
   [string]$Other,
   [int]$Paragraph = 2,
   [string]$AllowDir,
@@ -170,11 +176,30 @@ switch ($Action) {
     $c = @(CommentList | Where-Object { $_.text -eq $want }) | Select-Object -First 1
     if (-not $c) { Out ([ordered]@{ ok = $false; error = "rationale comment not found" }); break }
     $para = $c.com.Scope.Paragraphs.Item(1).Range
+    $at = $para.Start
+    if ($After) {
+      $r = $c.com.Scope.Paragraphs.Item(1).Range
+      $f = $r.Find
+      $f.ClearFormatting()
+      $f.MatchCase = $true
+      $f.Forward = $true
+      $f.Wrap = 0
+      if (-not $f.Execute($After) -or $r.Start -lt $para.Start -or $r.End -gt $para.End) {
+        Out ([ordered]@{ ok = $false; error = "text not found in the paragraph" }); break
+      }
+      $at = $r.End
+    }
     $was = $d.TrackRevisions
     $d.TrackRevisions = $true
-    try { $d.Range($para.Start, $para.Start).InsertBefore($Text) } finally { $d.TrackRevisions = $was }
+    try { $d.Range($at, $at).InsertBefore($Text) } finally { $d.TrackRevisions = $was }
     $inPara = @(RevList | Where-Object { $_.start -ge $para.Start -and $_.end -le $c.com.Scope.Paragraphs.Item(1).Range.End })
     Out ([ordered]@{ ok = $true; change_id = $ChangeId; inserted = $Text; revisions_in_paragraph = $inPara.Count })
+  }
+  "hand-reject" {
+    $revs = @(RevList | Where-Object { $_.type -eq 1 -and $_.text -eq $Text })
+    if ($revs.Count -ne 1) { Out ([ordered]@{ ok = $false; rejected = 0; error = "$($revs.Count) tracked insertions with this text" }); break }
+    $revs[0].rev.Reject()
+    Out ([ordered]@{ ok = $true; rejected = 1; revisions = $d.Revisions.Count })
   }
   "delete-text" {
     $r = $d.Content

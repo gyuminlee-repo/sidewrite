@@ -301,6 +301,17 @@ opened` says `left open: <why>`. With a browser of the user already running
 (Edge keeps background processes for startup boost) the page opens as a tab
 of the user's own window, and it is always left open.
 
+Such a tab asks the daemon for its page again whenever the browser loads it
+anew, also during a later run, and the daemon logs `[figures] page GET doc="...\\e2e-<earlier>\\..."`.
+The row `no tool call on other documents` does not fail on these lines: a
+line that is nothing but the page-load line, for a document in another
+`e2e-*` or `replay-*` folder next to the run's own, is counted and its run
+folder named in `got` (`N page loads from tabs of earlier runs (...)`,
+`isolationRow` in `judge.mjs`). Every other line that names another document
+fails the row as before: a tool call, a turn, a figure written, and a page
+load of a document outside that folder. The runner closes no tab of the
+user's browser.
+
 What these two steps assume, and what the run shows when it is wrong:
 
 | Assumed                                                                                                                                                                | When it is wrong                                                                                                                                                                             |
@@ -799,14 +810,14 @@ run started. The daemon's lines are not in the journal, which holds only the
 messages of systemd itself; `journalctl --user -u sidewrite-daemon.service
 --since @<start>` is read instead only when the unit names no file. The rows:
 
-| Row                                                                | Passes when                                                                                                                      |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| `open-review`, `view (the Review tab read again)`                  | the pane answered with the review file of the run folder, and read the tab again without an error                                |
-| `no tool call on other documents`                                  | no line of the unit's log since the start names a `.docx` outside the run folder (hello lines aside)                             |
-| `resident: serving`                                                | before Word started: the unit is active and its `MainPID` holds both ports (`ss -ltnp`)                                          |
-| `resident: not restarted`                                          | after Word was closed: the same `MainPID`, and `uptime_s` of `GET /health` grew by the time between the two reads (5 s of slack) |
-| `resident: still serving`                                          | after Word was closed: active, both ports held by `MainPID`                                                                      |
-| `resident: the Word of the run closed, other Word processes alive` | the cleanup of every stage                                                                                                       |
+| Row                                                                | Passes when                                                                                                                                                     |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `open-review`, `view (the Review tab read again)`                  | the pane answered with the review file of the run folder, and read the tab again without an error                                                               |
+| `no tool call on other documents`                                  | no line of the unit's log since the start names a `.docx` outside the run folder (hello lines aside; page loads from tabs of earlier runs are counted in `got`) |
+| `resident: serving`                                                | before Word started: the unit is active and its `MainPID` holds both ports (`ss -ltnp`)                                                                         |
+| `resident: not restarted`                                          | after Word was closed: the same `MainPID`, and `uptime_s` of `GET /health` grew by the time between the two reads (5 s of slack)                                |
+| `resident: still serving`                                          | after Word was closed: active, both ports held by `MainPID`                                                                                                     |
+| `resident: the Word of the run closed, other Word processes alive` | the cleanup of every stage                                                                                                                                      |
 
 | Assumed                                                                                                                     | When it is wrong                                                                                                                            |
 | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -914,6 +925,28 @@ by the pane`, pane step `probe-tracked-at` with `find_inside`,
   returned for the paragraph. These are the `Range.getTrackedChanges` and
   `compareLocationWith` calls behind `trackedAt` and the `in_insertion`
   flag of a deletion, which the unit tests see only through a fake Word.
+- Cuts that contain or cross an insertion of the author (same row, pane
+  step `probe-tracked-cuts`, then `tracked-edit-direct`): `Checked: ` stands
+  at the start of its paragraph, so no cut can begin in plain words before
+  it. The runner therefore puts a second tracked insertion (`Proofread `)
+  between two plain words of that paragraph (`plainPairOf`; `word-com.ps1
+hand-insert -After`) and has `insertionAround` read three cuts over it as
+  the tool calls it, with no insertion of its own: one that contains it with
+  a plain word on each side, one that begins in the word before it and ends
+  inside it, one that begins inside it and ends in the word after it
+  (`trackedCuts`). Then the deletion of the first cut is sent through
+  `toolTrackedEdit` as the daemon sends a deletion (`trackedCutApply`), the
+  paragraph is read before and after, and `word-com.ps1 hand-reject` takes
+  the second insertion out again, so the steps that follow find the
+  paragraph as before. The row fails unless every cut is refused (`refuse`
+  set), the deletion comes back `WholeAuthorInsertion` with `applied:false`,
+  the paragraph text, its reviewed text and the number of its tracked
+  changes are the same before and after, and the second insertion is out
+  again (`trackedCutsMatch`). `got` shows, per cut, what Word's
+  `compareLocationWith` gave for each Added change against the cut
+  (`insertion vs cut [...]`): the direction `insertionAround` rests on,
+  which the unit tests know only from a fake Word. No model turn and no
+  other Word.
 - Tracked special characters (row `special: tracked runs found in Word's
 paragraph text`, files under `special/`): `make_tracked_special.py` builds
   a document whose tracked insertions and deletions hold a no-break hyphen,

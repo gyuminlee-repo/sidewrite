@@ -2300,6 +2300,161 @@ test("trackedProbeMatch: inside true and plain false pass, anything else fails",
   assert.equal(trackedProbeMatch({ ok: false, error: "no answer" }).got, "threw no answer");
 });
 
+// probe-tracked-cuts (pane-driver.cjs): cuts that contain or cross a second
+// tracked insertion of the author ("Proofread ", put between two plain
+// words), and one deletion sent through toolTrackedEdit.
+test("plainPairOf, trackedCuts: two plain words away from the change, and the cuts over an insertion between them", async () => {
+  const { plainPairOf, trackedCuts } = await import("../scripts/e2e/judge.mjs");
+  const change = {
+    kind: "delete",
+    find: " The crane was sold.",
+    text: "",
+    before: "The old steel deck of this bridge was checked. The crane was sold.",
+    context: { left: "was checked.", right: "" },
+  };
+  // "The old": a word of the change; "old steel": the first plain pair.
+  assert.deepEqual(plainPairOf(change, "Checked: Proofread "), { left: "old", right: "steel" });
+  // The left word with its space must be in the paragraph once (it is what
+  // word-com.ps1 hand-insert -After searches for).
+  assert.deepEqual(plainPairOf({ ...change, before: `Sold out. ${change.before}` }, ""), {
+    left: "steel",
+    right: "deck",
+  });
+  assert.equal(plainPairOf({ ...change, before: "The crane was sold." }), null);
+  assert.equal(plainPairOf(null), null);
+  assert.deepEqual(trackedCuts({ left: "old", right: "steel" }, "Proofread "), {
+    contains: "old Proofread steel",
+    ends_inside: "old Proof",
+    starts_inside: "read steel",
+  });
+});
+
+test("trackedCutApply: the deletion of the containing cut as the daemon sends one", async () => {
+  const { trackedCutApply } = await import("../scripts/e2e/judge.mjs");
+  const { paragraphHash } = await import("../daemon/doc-diff.mjs");
+  const change = { paragraph_index: 4, paragraph_id: "p-4" };
+  const read = { text: "raw text", reviewed: "The old Proofread steel deck." };
+  const args = trackedCutApply(change, "old Proofread steel", read);
+  assert.equal(args.find, "old Proofread steel");
+  assert.equal(args.replace, "");
+  assert.match(args.comment_text, /^\[R1\.4\]/);
+  assert.equal(args.expected_before_hash, paragraphHash(read.reviewed));
+  assert.deepEqual(args.expected_paragraph, { index: 4, id: "p-4" });
+  assert.equal("own_insertions" in args, false);
+  // No reviewed text (Word could not give it): the raw text, as the pane.
+  assert.equal(
+    trackedCutApply(change, "x", { text: "raw text", reviewed: null }).expected_before_hash,
+    paragraphHash("raw text"),
+  );
+});
+
+test("trackedCutsMatch: every cut refused and the deletion not applied pass, anything else fails", async () => {
+  const { trackedCutsMatch } = await import("../scripts/e2e/judge.mjs");
+  const text = "Checked: The old Proofread steel deck. The crane was sold.";
+  const raw = (value) => [
+    { text: "Checked: ", value: "Before" },
+    { text: "Proofread ", value },
+  ];
+  const cut = (find, value) => ({
+    find,
+    hits: 1,
+    around: { held: false, refuse: "takes" },
+    raw: raw(value),
+  });
+  const seen = {
+    inside_hits: 1,
+    text,
+    reviewed: text,
+    changes: [
+      { type: "Added", text: "Checked: " },
+      { type: "Added", text: "Proofread " },
+      { type: "Deleted", text: " The crane was sold." },
+    ],
+    cuts: {
+      contains: cut("old Proofread steel", "Inside"),
+      ends_inside: cut("old Proof", "OverlapsAfter"),
+      starts_inside: cut("read steel", "OverlapsBefore"),
+    },
+    apply: {
+      result: { ok: false, code: "WholeAuthorInsertion", reason: "takes", applied: false },
+      after: { inside_hits: 1, text, reviewed: text, changes: [{}, {}, {}] },
+    },
+    undone: { ok: true, rejected: 1 },
+  };
+  const ok = trackedCutsMatch(seen);
+  assert.equal(ok.pass, true, ok.got);
+  // What Word gave for each Added piece is in the row.
+  assert.match(ok.got, /contains "old Proofread steel": refuse takes held false/);
+  assert.match(ok.got, /"Checked: " Before, "Proofread " Inside/);
+  assert.match(ok.got, /"Proofread " OverlapsAfter/);
+  assert.match(ok.got, /"Proofread " OverlapsBefore/);
+  assert.match(ok.got, /code WholeAuthorInsertion \(takes\) applied false/);
+  assert.match(ok.got, /text same; tracked changes 3 -> 3/);
+  const bad = (over) => trackedCutsMatch({ ...seen, ...over });
+  const cuts = (name, c) => ({ cuts: { ...seen.cuts, [name]: c } });
+  // A cut not refused: held with remainders and no refuse, not held, null
+  // (Word could not say), not found once, not probed.
+  for (const name of ["contains", "ends_inside", "starts_inside"])
+    for (const c of [
+      { ...seen.cuts[name], around: { held: true, left: "", right: "read " } },
+      { ...seen.cuts[name], around: { held: false, refuse: null } },
+      { ...seen.cuts[name], around: null },
+      { find: "x", hits: 2 },
+      undefined,
+    ])
+      assert.equal(bad(cuts(name, c)).pass, false, `${name} ${JSON.stringify(c)}`);
+  // The deletion applied, or refused for another reason, or it threw.
+  const applied = "Checked: The deck. The crane was sold.";
+  const apply = (over) => ({ apply: { ...seen.apply, ...over } });
+  for (const over of [
+    apply({ result: { ok: true, applied: true } }),
+    apply({ result: { ok: false, code: "FieldEditNotUndone", applied: true } }),
+    apply({ result: { ok: false, code: "StaleTarget" } }),
+    apply({ result: { ok: false, code: "WholeAuthorInsertion", applied: true } }),
+    apply({ result: null, threw: "GeneralException" }),
+    // Refused by its answer, and the document reads otherwise all the same.
+    apply({ after: { ...seen.apply.after, text: applied, reviewed: applied } }),
+    apply({ after: { ...seen.apply.after, reviewed: applied } }),
+    apply({ after: { ...seen.apply.after, changes: [{}, {}] } }),
+    apply({ after: { inside_hits: 0 } }),
+    { apply: undefined },
+    // The second insertion was not taken out again.
+    { undone: { ok: false, rejected: 0 } },
+  ])
+    assert.equal(bad(over).pass, false, JSON.stringify(over));
+  assert.match(bad(apply({ after: { ...seen.apply.after, text: applied } })).got, /text CHANGED/);
+  // Word could not give the reviewed text, before or after: the plain text
+  // decides. Read on one side only, it is not known to be the same.
+  const blind = { reviewed: null, ...apply({ after: { ...seen.apply.after, reviewed: null } }) };
+  assert.equal(bad(blind).pass, true);
+  assert.equal(
+    bad({ ...blind, ...apply({ after: { ...seen.apply.after, text: applied, reviewed: null } }) })
+      .pass,
+    false,
+  );
+  assert.equal(bad({ reviewed: null }).pass, false);
+  const threw = trackedCutsMatch({ threw: "no plain pair of words" });
+  assert.deepEqual([threw.pass, threw.got], [false, "threw no plain pair of words"]);
+});
+
+test("the cuts are probed read only; the deletion goes through tracked-edit-direct", async () => {
+  const { readFileSync } = await import("node:fs");
+  const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
+  const runner = read("../scripts/e2e/run-acceptance.mjs");
+  assert.ok(runner.includes('"-After"') && runner.includes('com("hand-reject"'));
+  assert.ok(runner.includes("const args = trackedCutApply(r14Change, cuts.contains, cut);"));
+  const driver = read("../scripts/e2e/pane-driver.cjs");
+  const step = driver.slice(
+    driver.indexOf('async "probe-tracked-cuts"'),
+    driver.indexOf('async "clean-tool"'),
+  );
+  assert.match(step, /insertionAround\(context, para, place, find, \[\]\)/);
+  assert.match(step, /compareLocationWith\(place\)/);
+  assert.doesNotMatch(step, /insertText|\.delete\(|insertComment|toolTrackedEdit/);
+  const com = read("../scripts/e2e/word-com.ps1");
+  for (const s of ["[string]$After", '\n  "hand-reject" {']) assert.ok(com.includes(s), s);
+});
+
 // Every step the runner asks the pane driver for is a step of the driver
 // (a misspelt step fails only in Word, after minutes of a run).
 test("run-acceptance asks pane-driver only for steps it has", async () => {
