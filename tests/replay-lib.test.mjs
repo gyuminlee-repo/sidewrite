@@ -283,6 +283,39 @@ test("how a turn ended: ok, failed, timeout, or no turn at all", () => {
   assert.equal(none.outcome, "no_turn");
 });
 
+test("a pane error explains a failed turn even when the driver step succeeded", () => {
+  const message = 'Request "review_refresh" timed out';
+  const failed = turnResult("R1.1", {
+    step: { ok: true, message_error: true, message },
+    log: "",
+    seconds: 10,
+  });
+  assert.deepEqual([failed.outcome, failed.reason], ["failed", message]);
+  const normal = turnResult("R1.1", {
+    step: { ok: true, message_error: false, message: "Ready" },
+    log: "",
+    seconds: 1,
+  });
+  assert.equal(normal.outcome, "no_turn");
+});
+
+test("summary includes the pane error reason without changing the failure count key", () => {
+  const message = 'Request "review_refresh" timed out';
+  const turn = turnResult("R1.1", {
+    step: { ok: true, message_error: true, message },
+    log: "",
+    seconds: 10,
+  });
+  const report = changesReport(
+    { comments: [{ ref: "R1.1", reviewer: 1, text: "Clarify the cart.", changes: [] }] },
+    [],
+    { "R1.1": turn },
+  );
+  const text = summaryText(report, { seconds: 10, saved: true, models: {} });
+  assert.match(text, /^turns that did not end well: 1 \(R1\.1 failed\)$/m);
+  assert.ok(text.includes(message));
+});
+
 test("what the guards refused, the rewrites and a model replaced after a refusal are read from the log of the turn", () => {
   const log = [
     "[review] number needs author R1.1 count=2",
@@ -927,6 +960,7 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "latest completed follow-through checks: changes 0 in 0 paragraphs, questions 0",
       "edits a guard refused: NumberNeedsAuthor 2, ForbidBlocked 1",
       "turns that did not end well: 1 (R1.2 timeout)",
+      "  R1.2 timeout: x",
       "turns run again after an API error: 0",
       "models asked for: edits opus, writing (the pane's own), judgments haiku",
       `models that ran, as the pane says: ${LINE}`,

@@ -340,7 +340,7 @@ export function keepLines(fresh, old = []) {
 // a part makes its citations change_state. null: the parts are not known to
 // this caller, and citations with a doc are not judged at all (the citations
 // a pane says it showed, response_save).
-export function staleReasons(comment, snapshot, render, parts = []) {
+export function staleReasons(comment, snapshot, render, parts = [], prepared = {}) {
   const r = comment?.response;
   if (!r) return [];
   const out = new Set();
@@ -360,7 +360,11 @@ export function staleReasons(comment, snapshot, render, parts = []) {
       if (cited.size !== now.size || [...cited].some((id) => !now.has(id))) out.add("change_state");
     }
   }
-  const texts = new Map((snapshot?.paragraphs ?? []).map((p) => [p.index, viewText(p)]));
+  // One refresh checks every saved response against the same snapshot.
+  // Share its normalized text and hash within that batch, never across requests.
+  const texts = (prepared.texts ??= new Map(
+    (snapshot?.paragraphs ?? []).map((p) => [p.index, viewText(p)]),
+  ));
   const changes = new Map((comment.changes ?? []).map((ch) => [ch.id, ch]));
   for (const c of cits) {
     if (c.kind !== "revised" || !c.quote) continue;
@@ -382,7 +386,7 @@ export function staleReasons(comment, snapshot, render, parts = []) {
       out.add("change_state");
   }
   // (cits: the citations of the manuscript itself; a supplement has no lines.)
-  if (cits.length && render && render.snapshot_hash !== snapshotHash(snapshot))
+  if (cits.length && render && render.snapshot_hash !== (prepared.hash ??= snapshotHash(snapshot)))
     out.add("lines_old");
   return ["quote_changed", "change_state", "lines_old"].filter((x) => out.has(x));
 }
@@ -426,10 +430,11 @@ export function staleReasons(comment, snapshot, render, parts = []) {
 export const STALE_ORDER = ["quote_changed", "change_state", "lines_old"];
 export function markStale(rev, snapshot, parts = []) {
   const next = structuredClone(rev);
+  const prepared = {};
   let text = null; // snapshotHash, when a reason is found
   for (const c of next.comments ?? []) {
     if (!c.response) continue;
-    const now = staleReasons(c, snapshot, next.response_render, parts);
+    const now = staleReasons(c, snapshot, next.response_render, parts, prepared);
     const kept = c.response.stale ?? [];
     const hasText = !!c.response.text?.trim();
     c.response.stale = STALE_ORDER.filter((s) =>
@@ -439,7 +444,7 @@ export function markStale(rev, snapshot, parts = []) {
     // the saved citations were found not to fit is kept with each reason.
     const found = now.filter((s) => s !== "lines_old");
     if (found.length) {
-      text ??= snapshotHash(snapshot);
+      text ??= prepared.hash ??= snapshotHash(snapshot);
       c.response.stale_at = {
         ...c.response.stale_at,
         ...Object.fromEntries(found.map((s) => [s, text])),

@@ -330,7 +330,7 @@ export function mergeAttempts(attempts) {
 
 // One comment of the run: { step, log, seconds } of its propose step.
 // outcome: "ok", "failed" (the turn ended with an error: limit, refusal,
-// crash), "timeout" (the pane step gave up), "no_turn" (no turn was seen).
+// crash, or a pane error), "timeout" (the pane step gave up), "no_turn" (no turn was seen).
 // line: the pane's model line right after the turn (readModelLine).
 export function turnResult(ref, { step, log, seconds, model = null, line = null }) {
   const t = turnFromLog(log, ref);
@@ -339,6 +339,9 @@ export function turnResult(ref, { step, log, seconds, model = null, line = null 
   if (step?.ok === false) {
     outcome = /still running after/.test(step.error ?? "") ? "timeout" : "failed";
     reason = step.error ?? null;
+  } else if (step?.message_error === true && step.message) {
+    outcome = "failed";
+    reason = step.message;
   }
   if (t.ended && !t.ok) {
     outcome = "failed";
@@ -688,6 +691,9 @@ export function summaryText(
     `latest completed follow-through checks: changes ${followed.length} in ${new Set(followed.map((x) => x.paragraph_index)).size} paragraphs, questions ${sum((c) => c.follow?.questions ?? 0)}`,
     `edits a guard refused: ${list(codes) || "none"}`,
     `turns that did not end well: ${bad.length}${bad.length ? ` (${bad.join(", ")})` : ""}`,
+    ...allTurns
+      .filter((t) => t.outcome !== "ok" && t.reason)
+      .map((t) => `  ${t.label} ${t.outcome}: ${String(t.reason).replace(/\s+/g, " ").trim()}`),
     `turns run again after an API error: ${again.length}${again.length ? ` (${again.join(", ")})` : ""}`,
     `models asked for: edits ${asked.edits ?? "-"}, writing ${asked.writing ?? "(the pane's own)"}, judgments ${asked.judgments ?? "(the pane's own)"}`,
     `models that ran, as the pane says: ${models?.line || "-"}`,

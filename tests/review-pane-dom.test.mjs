@@ -89,6 +89,29 @@ const comment = (id, content, extra = {}) => ({
   ...extra,
 });
 
+test("review file requests wait 120 seconds before timing out", async () => {
+  const revision = { comments: [], ledger: [] };
+  const t = await setup({
+    revision,
+    word: { collectReviewSnapshot: async () => ({ paragraphs: [], comments: [] }) },
+    respond: {
+      review_refresh: () => ({
+        ok: true,
+        revision,
+        rows: [],
+        counts: { accepted: 0, rejected: 0, user_edited: 0, pending: 0, unlocated: 0 },
+        external: [],
+      }),
+    },
+  });
+  await t.$("review-refresh").click();
+  for (const type of ["review_refresh", "review_load"]) {
+    const request = t.requests.find((r) => r.type === type);
+    assert.ok(request, `${type} was sent`);
+    assert.equal(request.opts?.timeoutMs, 120_000, type);
+  }
+});
+
 test("Delete ALL: a comment added after the first press is not deleted unseen", async () => {
   const s = fakeCommentStore([comment("1", "Check units"), comment("2", "[R1.1] a / b / c")]);
   const backups = [];

@@ -9,6 +9,7 @@ import { applyTrackedEdit } from "../daemon/review-tools.mjs";
 import { loadRevision, saveRevision } from "../daemon/revision-store.mjs";
 import { REQUIREMENT_SYSTEM } from "../daemon/review-split.mjs";
 import { ledgerReply } from "./fixtures/ledger-reply.mjs";
+import { largeRevision } from "./fixtures/large-revision.mjs";
 
 const ENV = { CC_OFFICE_WSL_PATHS: "0" };
 
@@ -370,6 +371,26 @@ test("refresh classifies, stores states, and logs counts", async () => {
         "[review] refresh changes=1 tool_comments=1 user_comments=1 states=pending:0,accepted:1,rejected:0,user_edited:0,unlocated:0 external=0",
       ),
     );
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("refresh persists all 120 synthetic changes and saved response states", async () => {
+  const t = await setup({ afterRefresh: markStale });
+  try {
+    const { revision, snapshot } = largeRevision(t.doc);
+    const path = join(t.dir, "paper.revision.json");
+    await saveRevision(path, revision);
+    const r = await t.ask("review_refresh", { snapshot, saved: false });
+    assert.equal(r.ok, true);
+    assert.equal(r.rows.length, 120);
+    assert.equal(r.counts.pending, 120);
+    const stored = await loadRevision(path, t.doc);
+    assert.equal(stored.snapshot.paragraphs.length, 150);
+    assert.ok(stored.comments.every((c) => c.changes.every((ch) => ch.state === "pending")));
+    assert.ok(stored.comments.every((c) => c.response.stale.includes("change_state")));
+    assert.equal(stored.doc_state.saved, false);
   } finally {
     await t.cleanup();
   }

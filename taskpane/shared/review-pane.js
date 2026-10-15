@@ -73,6 +73,10 @@ const UNKNOWN_HINT =
 // tool timeout (bridge.mjs TOOL_TIMEOUT_MS). A split or a ledger check is a
 // job instead (askJob): no request timeout covers its model calls.
 const OVERRIDE_WAIT = 120_000;
+// Review-file reads and serialized writes can wait behind a refresh on slow
+// filesystems (including WSL drvfs). Match the override's 120 s allowance;
+// the 10 s bridge default must not discard successful work before a turn.
+const REVIEW_FILE_WAIT_MS = 120_000;
 const CONNECTION_LOST =
   "The connection to the daemon was lost before the result came. Run it again.";
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
@@ -242,7 +246,7 @@ export function initReviewPane({
     );
     return b;
   }
-  async function ask(type, payload = {}, timeoutMs) {
+  async function ask(type, payload = {}, timeoutMs = REVIEW_FILE_WAIT_MS) {
     const r = await sendRequest(type, payload, timeoutMs ? { timeoutMs } : undefined);
     if (!r.ok) throw new Error(r.error || `${type} failed`);
     if (r.revision) state.revision = r.revision;
@@ -251,7 +255,9 @@ export function initReviewPane({
   // review_split and ledger_check answer { accepted, job_id } at once; the
   // result comes in a job_done review_event, possibly before the answer.
   async function askJob(type, payload) {
-    const { job_id } = await ask(type, payload);
+    // Only the immediate acknowledgement uses the bridge default, not the
+    // file work or model calls that finish through job_done.
+    const { job_id } = await ask(type, payload, null);
     let result = state.jobsDone.get(job_id);
     state.jobsDone.delete(job_id);
     result ??= await new Promise((resolve, reject) => state.jobs.set(job_id, { resolve, reject }));
@@ -1727,7 +1733,7 @@ export function initReviewPane({
     // daemon keeps it with the state of the document at this refresh.
     const saved = await documentSaved();
     const snapshot = await word.collectReviewSnapshot();
-    const r = await ask("review_refresh", { snapshot, saved });
+    const r = await ask("review_refresh", { snapshot, saved }, REVIEW_FILE_WAIT_MS);
     // A supplementary file: the citations of its accepted changes (section
     // and quote) go into its own review file after every refresh, from the
     // same snapshot. The response letter of the manuscript reads them from
