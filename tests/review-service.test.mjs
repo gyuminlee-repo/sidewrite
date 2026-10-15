@@ -366,11 +366,35 @@ test("refresh classifies, stores states, and logs counts", async () => {
       [["R1.1-1", "accepted"]],
     );
     assert.equal(r.revision.comments[0].changes[0].state, "accepted");
-    assert.ok(
-      t.lines.includes(
-        "[review] refresh changes=1 tool_comments=1 user_comments=1 states=pending:0,accepted:1,rejected:0,user_edited:0,unlocated:0 external=0",
-      ),
+    const prefix =
+      "[review] refresh changes=1 tool_comments=1 user_comments=1 states=pending:0,accepted:1,rejected:0,user_edited:0,unlocated:0 external=0";
+    const line = t.lines.find((l) => l.startsWith(prefix));
+    assert.ok(line);
+    assert.match(line.slice(prefix.length), /^ ms=\d+ wait=\d+ bytes=\d+$/);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("refresh timing logs handler duration, callback wait and snapshot length", async () => {
+  const ticks = [1_000, 1_037, 1_091];
+  const t = await setup({ clock: () => ticks.shift() });
+  try {
+    const snapshot = {
+      paragraphs: [para(0, "The blue cart crossed the square.")],
+      comments: [],
+      has_fields: false,
+    };
+    const r = await t.ask("review_refresh", { snapshot });
+    assert.equal(r.ok, true);
+    const line = t.lines.find((l) => l.startsWith("[review] refresh changes="));
+    assert.equal(
+      line,
+      "[review] refresh changes=0 tool_comments=0 user_comments=0 " +
+        "states=pending:0,accepted:0,rejected:0,user_edited:0,unlocated:0 external=0 " +
+        `ms=91 wait=37 bytes=${JSON.stringify(snapshot).length}`,
     );
+    assert.deepEqual(ticks, []);
   } finally {
     await t.cleanup();
   }
@@ -532,8 +556,8 @@ test("L4 refresh stores a snapshot; the next refresh records outside changes", a
       t.lines.includes("[review] external X1 kind=modified paragraph=1 lost=1 facts=20 mL"),
     );
     assert.match(
-      t.lines.find((l) => l.startsWith("[review] refresh ") && l.endsWith("external=1")),
-      /external=1$/,
+      t.lines.find((l) => l.startsWith("[review] refresh ") && l.includes(" external=1 ")),
+      /external=1 ms=\d+ wait=\d+ bytes=\d+$/,
     );
     assert.deepEqual(r.revision.snapshot.paragraphs, edited);
     const d = await t.ask("review_external_dismiss", { id: "X1" });

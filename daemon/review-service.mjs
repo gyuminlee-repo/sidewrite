@@ -1477,9 +1477,12 @@ export function createReviewService({
       return { started: true, ref: msg.ref, started_at: new Date().toISOString(), revision };
     },
     async review_refresh(msg, key) {
+      const started = clock();
       const d = at(key);
       const snapshot = msg.snapshot ?? { paragraphs: [], comments: [] };
+      const bytes = JSON.stringify(snapshot).length;
       const texts = snapshotTexts(snapshot);
+      let waitMs = 0;
       let rows = [];
       let external = [];
       let resolved = [];
@@ -1507,6 +1510,8 @@ export function createReviewService({
         log(`[review] linked files not read: ${e?.message ?? e}`);
       }
       const revision = await update(d, (file) => {
+        // Includes pre-chain reads and the chain's queued load, not just queue time.
+        waitMs = clock() - started;
         // What this daemon knows Word applied goes in first, as it was applied.
         const u = recordUnsaved(d, file);
         done = u.done;
@@ -1562,19 +1567,20 @@ export function createReviewService({
         TOOL_COMMENT_PREFIX.test(String(c.content ?? "")),
       ).length;
       const userComments = (snapshot.comments ?? []).length - toolComments;
-      log(
-        `[review] refresh changes=${rows.length} tool_comments=${toolComments} user_comments=${userComments} ` +
-          `states=${Object.entries(counts)
-            .map(([k, v]) => `${k}:${v}`)
-            .join(",")}` +
-          ` external=${external.length}`,
-      );
       for (const x of external) {
         log(
           `[review] external ${x.id} kind=${x.kind} paragraph=${x.paragraph_index ?? x.old_index} lost=${x.lost_facts.length}` +
             (x.lost_facts.length ? ` facts=${x.lost_facts.join("; ")}` : ""),
         );
       }
+      // Handler completion, just before returning the reply; excludes socket transit.
+      log(
+        `[review] refresh changes=${rows.length} tool_comments=${toolComments} user_comments=${userComments} ` +
+          `states=${Object.entries(counts)
+            .map(([k, v]) => `${k}:${v}`)
+            .join(",")}` +
+          ` external=${external.length} ms=${clock() - started} wait=${waitMs} bytes=${bytes}`,
+      );
       return { rows, counts, external, revision };
     },
     async review_external_dismiss(msg, key) {
