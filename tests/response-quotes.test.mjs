@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { largeRevision } from "./fixtures/large-revision.mjs";
 import {
   citationsFor,
   sectionOf,
@@ -459,6 +460,51 @@ test("snapshotHash follows the accepted text and ignores spacing", () => {
 
 // ---- markStale: one rule for the Review refresh and the Response tab -----------
 import { markStale } from "../daemon/response-quotes.mjs";
+
+test("large refresh reads snapshot text once per batch, not once per response", () => {
+  const { revision, snapshot } = largeRevision("workshop.docx");
+  const expected = revision.comments.map((c) => staleReasons(c, snapshot, null));
+  let reads = 0;
+  for (const p of snapshot.paragraphs) {
+    const text = p.reviewed_text;
+    Object.defineProperty(p, "reviewed_text", {
+      get() {
+        reads++;
+        return text;
+      },
+    });
+  }
+  const out = markStale(revision, snapshot);
+  assert.deepEqual(
+    out.comments.map((c) => c.response.stale),
+    expected,
+  );
+  // One normalized text map and one hash for newly stale citations.
+  assert.equal(reads, snapshot.paragraphs.length * 2);
+});
+
+test("large refresh shares the PDF snapshot hash and never reuses a previous batch", () => {
+  const { revision, snapshot } = largeRevision("workshop.docx");
+  revision.response_render = { snapshot_hash: snapshotHash(snapshot) };
+  let reads = 0;
+  for (const p of snapshot.paragraphs) {
+    const text = p.reviewed_text;
+    Object.defineProperty(p, "reviewed_text", {
+      configurable: true,
+      get() {
+        reads++;
+        return text;
+      },
+    });
+  }
+  const first = markStale(revision, snapshot);
+  assert.ok(first.comments.every((c) => !c.response.stale.includes("lines_old")));
+  assert.equal(reads, snapshot.paragraphs.length * 2);
+  Object.defineProperty(snapshot.paragraphs[0], "reviewed_text", { value: "The cart stopped." });
+  const second = markStale(first, snapshot);
+  assert.ok(second.comments.every((c) => c.response.stale.includes("lines_old")));
+  assert.ok(second.comments[0].response.stale.includes("quote_changed"));
+});
 
 const staleRev = (
   response,
