@@ -21,7 +21,7 @@
 
 import { currentTexts } from "./review-tools.mjs";
 import { byCreated } from "./revision-store.mjs";
-import { commentFence } from "./review-prompt.mjs";
+import { CLAIM_RETRACTION_RULE, commentFence } from "./review-prompt.mjs";
 import { changedIndexes, followPlaces, liveChanges } from "../taskpane/shared/follow-places.js";
 
 export const CHECK_KINDS = [
@@ -242,6 +242,7 @@ export function followNote(rev, ref, fence, plan = followPlan(rev, ref)) {
       `[Other places of ${ref}]`,
       `This turn does one thing. No change made for ${ref} is in the document. The place${n === 1 ? "" : "s"} below ${n === 1 ? "is" : "are"} given as [paragraph id] (what it is; why it is listed) and its text as it stands now.`,
       ...answered,
+      CLAIM_RETRACTION_RULE,
       "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
       `<<<${f}`,
       ...plan.candidates.map((p) => `[${p.id}] (${p.kind}; ${p.why}) ${one(p.text)}`),
@@ -254,6 +255,7 @@ export function followNote(rev, ref, fence, plan = followPlan(rev, ref)) {
     ...plan.changes.map(followChangeLine),
     ...answered,
     `The ${n} place${n === 1 ? "" : "s"} below ${n === 1 ? "is a candidate" : "are candidates"} to check. Each is given as [paragraph id] (what it is; why it is listed) and its text as it stands now. Most listed places need no change: a place is listed for where it stands, which is no sign of a problem. For each place decide whether it still states what these changes withdrew, weakened or made conditional, or still uses the name of a quantity or a method that they changed. Where it does, change it so that it agrees with them: office_tracked_edit or office_tracked_rewrite, comment_ref "${ref}", with the requirement_ids of the change it follows. Where agreeing takes data, a number, an analysis or a citation the manuscript does not have, ask with office_ask_author and name the place. Where it already agrees, leave it.`,
+    CLAIM_RETRACTION_RULE,
     "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
     `<<<${f}`,
     ...plan.candidates.map((p) => `[${p.id}] (${p.kind}; ${p.why}) ${one(p.text)}`),
