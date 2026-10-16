@@ -228,3 +228,155 @@ test("own history: unrecorded author text still refuses whole, takes and unplace
     assert.equal(around.refuse, why);
   }
 });
+
+test("author protection: a rejected record never owns the author's matching insertion", async (t) => {
+  const { result } = await editFromFile(t, {
+    comments: [[change(ADDED, { state: "rejected" })], []],
+    spans: [[HEAD.length, TEXT.length]],
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+});
+
+for (const [recorded, after, text, span] of [
+  ["the ", "the ", "Together.", [4, 7]],
+  ["a n", "Use a n mark.", "Banana.", [1, 3]],
+]) {
+  test(`author protection: ${JSON.stringify(recorded)} cannot match across word boundaries`, async (t) => {
+    const { result } = await editFromFile(t, {
+      comments: [[change(recorded, { after, paragraph_id: "old-session" })], []],
+      text,
+      spans: [span],
+      find: text,
+    });
+    assert.deepEqual(
+      [result.ok, result.code, result.applied],
+      [false, "WholeAuthorInsertion", false],
+    );
+  });
+}
+
+test("author protection: an index-shifted short record needs its recorded neighbours", async (t) => {
+  const text = "We crossed the bridge.";
+  const start = text.indexOf("the ");
+  const { result } = await editFromFile(t, {
+    comments: [
+      [change("the ", { after: "We opened the gate.", paragraph_id: "other-paragraph" })],
+      [],
+    ],
+    text,
+    spans: [[start, start + "the ".length]],
+    find: "the ",
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+});
+
+test("author protection: a changed paragraph with the same id needs recorded context", async (t) => {
+  const text = "A different crew reported: " + ADDED;
+  const { result } = await editFromFile(t, {
+    comments: [[change(ADDED)], []],
+    text,
+    spans: [[text.indexOf(ADDED), text.length]],
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+});
+
+test("author protection: a short context-free record cannot identify an insertion", async (t) => {
+  const text = "We crossed the bridge.";
+  const start = text.indexOf("the ");
+  const { result } = await editFromFile(t, {
+    comments: [[change("the ", { after: "the ", paragraph_id: null })], []],
+    text,
+    spans: [[start, start + "the ".length]],
+    find: "the ",
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+});
+
+test("author protection: a context-free word is not enough evidence even with the same id", async (t) => {
+  const text = "Crews stacked steel.";
+  const start = text.indexOf("steel");
+  for (const paragraph_id of ["old-session", "U1"]) {
+    const { result } = await editFromFile(t, {
+      comments: [[change("steel", { after: "steel", paragraph_id })], []],
+      text,
+      spans: [[start, start + "steel".length]],
+      find: "steel",
+    });
+    assert.deepEqual(
+      [result.ok, result.code, result.applied],
+      [false, "WholeAuthorInsertion", false],
+    );
+  }
+});
+
+test("author protection: a longer author insertion cannot repeat a recorded piece to gain ownership", async (t) => {
+  const phrase = "New pads.";
+  const text = HEAD + phrase + " " + phrase;
+  const { result } = await editFromFile(t, {
+    comments: [[change(phrase, { after: HEAD + phrase })], []],
+    text,
+    spans: [[HEAD.length, text.length]],
+    find: phrase + " " + phrase,
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+});
+
+test("author protection: extra author words around a recorded phrase stay protected", async (t) => {
+  const longer = ADDED + " Additional details follow.";
+  const text = HEAD + longer;
+  const { result } = await editFromFile(t, {
+    comments: [[change(ADDED)], []],
+    text,
+    spans: [[HEAD.length, text.length]],
+    find: longer,
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+});
+
+test("author protection: re-inserting an accepted phrase elsewhere is not the old tool insertion", async (t) => {
+  const text = TEXT + " Another crew wrote: " + ADDED;
+  const { result } = await editFromFile(t, {
+    comments: [[change(ADDED, { state: "accepted" })], []],
+    text,
+    spans: [[text.lastIndexOf(ADDED), text.length]],
+    find: "Another crew wrote: " + ADDED,
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+});
+
+test("author protection: adjacent tool and author pieces still refuse takes", async (t) => {
+  const joint = HEAD.length + FIRST.length;
+  const { result, around } = await editFromFile(t, {
+    comments: [[change(FIRST)], []],
+    spans: [
+      [HEAD.length, joint],
+      [joint, TEXT.length],
+    ],
+  });
+  assert.deepEqual(
+    [result.ok, result.code, result.applied],
+    [false, "WholeAuthorInsertion", false],
+  );
+  assert.equal(around.refuse, "takes");
+});

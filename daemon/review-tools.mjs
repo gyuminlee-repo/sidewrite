@@ -336,16 +336,16 @@ function fail(message, extra = {}) {
 }
 
 // The texts the tool put into paragraph `target` (inserted: { paragraph_index,
-// paragraph_id, text, after } of every recorded change of this file,
-// and of each edit of this turn: turnInserted). The
-// task pane lets an edit take a pending insertion only when its text is
-// one of these (tools-word.js insertionAround). By paragraph id when both
-// have the same one. With an old session id or no recorded id, use the index
-// only with text evidence: the paragraph still reads as it did after that
-// change, or still holds the
-// recorded inserted text that its after held. Later tool edits need not
-// leave the whole paragraph unchanged. The pane still requires an entire
-// tracked insertion (or adjacent chain) to be covered by recorded texts.
+// paragraph_id, text, after, state } of recorded changes and turnInserted).
+// Rejected records never count. A paragraph id identifies a paragraph, not
+// an insertion: its recorded text must occur once, on word boundaries.
+// Keep the unchanged-after path; otherwise require the recorded neighbours
+// (up to three words on either side). A context-free pending record needs
+// at least twelve characters. Older callers without after need the same id
+// and a unique whole word of at least five characters; stored changes always
+// have after. Accepted records have no context-free fallback. Identical text
+// reinserted at the identical recorded place cannot be distinguished from a stale
+// accepted state by this text-only protocol.
 export function ownInsertions(inserted, target, ids, now) {
   if (target === null || !Array.isArray(inserted)) return [];
   const id = ids?.[target] ?? null;
@@ -354,23 +354,49 @@ export function ownInsertions(inserted, target, ids, now) {
     typeof b === "string" &&
     normalizeParaText(a).trim() === normalizeParaText(b).trim();
   const has = (paragraph, text) => {
-    const key = (s) => s.replace(/[\s\u0005]+/g, "");
-    return (
-      typeof paragraph === "string" &&
-      typeof text === "string" &&
-      key(text) !== "" &&
-      key(paragraph).includes(key(text))
-    );
+    // Unlike insertionAround's key in tools-word.js, keep normalized spaces:
+    // this finds a recorded place, not coverage of already-identified pieces.
+    const key = normalizeParaText;
+    if (typeof paragraph !== "string" || typeof text !== "string") return null;
+    const p = key(paragraph);
+    const t = key(text);
+    const at = p.indexOf(t);
+    const word = (s) => /[\p{L}\p{N}_]/u.test(s ?? "");
+    if (
+      !t ||
+      at < 0 ||
+      p.indexOf(t, at + 1) !== -1 ||
+      (word(t[0]) && word(p[at - 1])) ||
+      (word(t.at(-1)) && word(p[at + t.length]))
+    )
+      return null;
+    return {
+      text: t,
+      left: (p.slice(0, at).match(/\S+/g) ?? []).slice(-3).join(" "),
+      right: (p.slice(at + t.length).match(/\S+/g) ?? []).slice(0, 3).join(" "),
+    };
   };
-  const stillHere = (c) => c.paragraph_index === target && has(c.after, c.text) && has(now, c.text);
   return [
     ...new Set(
       inserted
-        .filter((c) =>
-          c.paragraph_id != null
-            ? id !== null && (c.paragraph_id === id || stillHere(c))
-            : c.paragraph_index === target && (same(c.after, now) || stillHere(c)),
-        )
+        .filter((c) => {
+          if (c.state === "rejected") return false;
+          const sameId = c.paragraph_id != null && id !== null && c.paragraph_id === id;
+          if ((c.paragraph_id != null && id === null) || (!sameId && c.paragraph_index !== target))
+            return false;
+          const current = has(now, c.text);
+          if (!current) return false;
+          if (same(c.after, now)) return true;
+          const previous = has(c.after, c.text);
+          if (!previous)
+            return c.after == null && sameId && c.state !== "accepted" && current.text.length >= 5;
+          if (!previous.left && !previous.right)
+            return c.state !== "accepted" && current.text.length >= 12;
+          return (
+            (!previous.left || ` ${current.left}`.endsWith(` ${previous.left}`)) &&
+            (!previous.right || `${current.right} `.startsWith(`${previous.right} `))
+          );
+        })
         .map((c) => c.text),
     ),
   ];
@@ -800,7 +826,15 @@ export async function applyTrackedEdit(deps, args, turn, { override = null, part
         paragraph_index: target,
         paragraph_id: target === null ? null : (ctx.paragraph_ids?.[target] ?? null),
         text: putIn,
-        after: r.after,
+        // Context of the acknowledged edit, including a narrowed part.
+        after: currentTexts(shown, [
+          {
+            paragraph_index: target,
+            kind,
+            find: r.narrowed === true && narrow ? narrow.find : args.find,
+            text: putIn,
+          },
+        ])[target],
       });
     const out = await recordApplied(deps, turn.ref, r, {
       at,
