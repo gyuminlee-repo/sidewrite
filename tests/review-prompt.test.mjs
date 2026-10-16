@@ -28,6 +28,16 @@ test("the comment goes in verbatim with its ref", () => {
   assert.ok(text.includes('Call office_tracked_edit with comment_ref "R1.3".'));
 });
 
+test("review turns carry the unsupported-claim retraction policy", () => {
+  for (const profile of [{}, { policy_packs: { review_scope: false } }]) {
+    const { text } = buildReviewPrompt({
+      comment: { ref: "R1.1", reviewer: 1, text: "The seal claim is not supported." },
+      profile,
+    });
+    assert.ok(text.includes("[Unsupported claims: retract-or-observe]"));
+  }
+});
+
 test("every manuscript instruction and forbid item is in the prompt; response-scope items are not", () => {
   const b = buildReviewPrompt({ comment, ledger });
   for (const i of ledger.slice(0, 3)) assert.ok(b.text.includes(`- [${i.id}] ${i.text}`), i.id);

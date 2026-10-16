@@ -35,6 +35,9 @@
 //            it and the next caption or heading when they are at most
 //            CONTINUATION: a legend often goes on there; a longer run is
 //            body text that follows a caption.
+//            Uncited legends that hold a named or removed claim term are
+//            also eligible, after methods and reports and within the same
+//            legend cap. The word filters below apply to them too.
 //   methods  the methods paragraphs that hold a term the comment names
 //            (named-terms.js), a removed word that the comment and the
 //            reason of its change both name (residue.js claimTerms; not one
@@ -292,13 +295,14 @@ export function followPlaces(
     changed.flatMap((i) => figurePointers(texts[i])).filter((k) => !named.has(k)),
   );
   let legends = 0;
+  const legendRows = new Map();
   for (const [keys, most] of [
     [named, Infinity],
     [cited, LEGEND_PLACES],
   ]) {
     texts.forEach((t, i) => {
       const k = kinds[i] === "caption" ? captionKey(t) : null;
-      if (!k || !keys.has(k)) return;
+      if (!k) return;
       const run = [];
       for (let j = i + 1; j < texts.length && kinds[j] !== "caption" && !heading(j); j++)
         if (words[j]) run.push(j);
@@ -309,6 +313,8 @@ export function followPlaces(
           `continues the legend of ${keyName(k)}`,
         ]),
       ];
+      for (const [j, why] of rows) legendRows.set(j, why);
+      if (!keys.has(k)) return;
       for (const [j, why] of rows) if (legends < most && add(j, why)) legends++;
     });
   }
@@ -316,6 +322,11 @@ export function followPlaces(
   const inMethods = (re) =>
     texts.flatMap((t, i) => (kinds[i] === "methods" && re.test(t) ? [i] : []));
   const also = (i, word) => add(i, `methods; also has "${word}"`);
+  const termLegends = new Map();
+  const legendMatches = (re, word) => {
+    for (const i of legendRows.keys())
+      if (re.test(texts[i]) && !termLegends.has(i)) termLegends.set(i, word);
+  };
   // The body paragraphs that hold a word of the comment, with that word:
   // listed below when a methods paragraph was changed.
   const reports = new Map();
@@ -325,6 +336,7 @@ export function followPlaces(
   for (const row of termPlaces(comment, texts, ids))
     for (const p of row.places) {
       if (p.kind === "methods") also(p.index, row.term);
+      if (legendRows.has(p.index) && !termLegends.has(p.index)) termLegends.set(p.index, row.term);
       report(p.index, row.term);
     }
   const claimed = new Set(changes.flatMap((ch) => claimTerms(ch, comment?.text)));
@@ -336,20 +348,32 @@ export function followPlaces(
     const re = wordRe(word);
     if (prose.filter((t) => re.test(t)).length > vocabulary) continue;
     for (const i of inMethods(re).slice(0, METHOD_PLACES)) also(i, word);
+    legendMatches(re, word);
     texts.forEach((t, i) => re.test(t) && report(i, word));
   }
   const most = Math.min(5, Math.max(2, Math.ceil(prose.length * 0.02)));
-  [...new Set(changes.flatMap(removedTerms))]
+  const removed = [...new Set(changes.flatMap(removedTerms))]
     .filter((w) => !claimed.has(w) && !COMMON.has(w))
     .filter((w) => w.length >= 6 || technical(w, changes))
     .map((word) => {
       const re = wordRe(word);
-      return { word, n: prose.filter((t) => re.test(t)).length, at: inMethods(re) };
+      return {
+        word,
+        n: prose.filter((t) => re.test(t)).length,
+        at: inMethods(re),
+        legends: [...legendRows.keys()].filter((i) => re.test(texts[i])),
+      };
     })
-    .filter((r) => r.at.length && r.n <= most)
-    .sort((a, b) => a.n - b.n)
+    .filter((r) => r.n <= most)
+    .sort((a, b) => a.n - b.n);
+  removed
+    .filter((r) => r.at.length)
     .slice(0, METHOD_WORDS)
     .forEach((r) => r.at.slice(0, METHOD_PLACES).forEach((i) => also(i, r.word)));
+  removed
+    .filter((r) => r.legends.length)
+    .slice(0, METHOD_WORDS)
+    .forEach((r) => legendMatches(wordRe(r.word), r.word));
 
   if (changed.some((i) => kinds[i] === "methods")) {
     const pointed = new Set([
@@ -373,6 +397,9 @@ export function followPlaces(
     let listed = 0;
     for (const [i, why] of rows) if (listed < REPORT_PLACES && add(i, why)) listed++;
   }
+
+  for (const [i, word] of termLegends)
+    if (legends < LEGEND_PLACES && add(i, `${legendRows.get(i)}; also has "${word}"`)) legends++;
 
   for (const h of heads)
     for (let i = h + 1; i < texts.length && !heading(i); i++)

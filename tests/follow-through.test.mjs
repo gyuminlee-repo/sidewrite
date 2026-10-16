@@ -8,6 +8,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { followNote, followPlan } from "../daemon/paragraph-check.mjs";
+import { CLAIM_RETRACTION_RULE } from "../daemon/review-prompt.mjs";
 import { followState, MAX_CHARS } from "../taskpane/shared/follow-places.js";
 import { createReviewService } from "../daemon/review-service.mjs";
 import { applyTrackedEdit, applyTrackedRewrite, askAuthor } from "../daemon/review-tools.mjs";
@@ -99,6 +100,21 @@ test("followPlan: the changes of the comment, their paragraphs as they read now,
   assert.deepEqual(followPlan(REV, "R1.2").candidates, []);
 });
 
+test("follow-through turns carry the unsupported-claim retraction policy", () => {
+  assert.ok(followNote(REV, "R1.1").includes("[Unsupported claims: retract-or-observe]"));
+  const answered = structuredClone(REV);
+  answered.comments[1].questions = [
+    {
+      id: "a1",
+      question: "Which supplier?",
+      why: "Missing record.",
+      answer: "Harbour Coatings.",
+      paragraph_id: "k2",
+    },
+  ];
+  assert.ok(followNote(answered, "R1.2").includes("[Unsupported claims: retract-or-observe]"));
+});
+
 test("followNote: the instruction a follow-through turn carries", () => {
   const note = followNote(REV, "R1.1", "F1");
   assert.equal(
@@ -108,6 +124,7 @@ test("followNote: the instruction a follow-through turn carries", () => {
       "This turn does one thing. The changes made for R1.1 so far:",
       '- R1.1-1 (q1): "was eliminated" → "was reduced"',
       'The 2 places below are candidates to check. Each is given as [paragraph id] (what it is; why it is listed) and its text as it stands now. Most listed places need no change: a place is listed for where it stands, which is no sign of a problem. For each place decide whether it still states what these changes withdrew, weakened or made conditional, or still uses the name of a quantity or a method that they changed. Where it does, change it so that it agrees with them: office_tracked_edit or office_tracked_rewrite, comment_ref "R1.1", with the requirement_ids of the change it follows. Where agreeing takes data, a number, an analysis or a citation the manuscript does not have, ask with office_ask_author and name the place. Where it already agrees, leave it.',
+      CLAIM_RETRACTION_RULE,
       "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
       "<<<F1",
       "[k0] (heading; heading above a changed paragraph) Deck survey",
@@ -165,6 +182,7 @@ test("followNote: the instruction a follow-through turn carries", () => {
       "[Other places of R1.2]",
       "This turn does one thing. No change made for R1.2 is in the document. The place below is given as [paragraph id] (what it is; why it is listed) and its text as it stands now.",
       'The author answered question a1 of this comment (the answer stands under "Author answers" above), and the answer goes into [k2]. Write it in there as far as the comment asks for it: office_tracked_edit or office_tracked_rewrite, comment_ref "R1.2". Where the place already says it, leave it.',
+      CLAIM_RETRACTION_RULE,
       "Only the listed places may be changed in this turn: an edit of any other paragraph is refused. The general rules above about changing a claim everywhere it is made, finishing every request and going to every place of a term do not apply in this turn.",
       "<<<F1",
       "[k2] (body; the author's answer to a1 goes here) The coating held through the winter.",
@@ -182,7 +200,7 @@ test("followNote: the instruction a follow-through turn carries", () => {
   );
   assert.match(withBoth[4], /^The 3 places below are candidates to check\./);
   assert.equal(
-    withBoth[7],
+    withBoth[8],
     "[k5] (body; the author's answer to a1 goes here) Tension stayed within limits.",
   );
   const alone = structuredClone(REV);
