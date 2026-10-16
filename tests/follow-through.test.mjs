@@ -102,6 +102,7 @@ test("followPlan: the changes of the comment, their paragraphs as they read now,
 
 test("follow-through turns carry the unsupported-claim retraction policy", () => {
   assert.ok(followNote(REV, "R1.1").includes("[Unsupported claims: retract-or-observe]"));
+  assert.ok(followNote(REV, "R1.1").includes("[Evidence: manuscript-or-author-answer]"));
   const answered = structuredClone(REV);
   answered.comments[1].questions = [
     {
@@ -113,6 +114,8 @@ test("follow-through turns carry the unsupported-claim retraction policy", () =>
     },
   ];
   assert.ok(followNote(answered, "R1.2").includes("[Unsupported claims: retract-or-observe]"));
+  assert.ok(followNote(answered, "R1.2").includes("[Evidence: manuscript-or-author-answer]"));
+  assert.ok(CLAIM_RETRACTION_RULE.endsWith("[Unsupported claims: retract-or-observe]"));
 });
 
 test("followNote: the instruction a follow-through turn carries", () => {

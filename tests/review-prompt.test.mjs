@@ -35,6 +35,7 @@ test("review turns carry the unsupported-claim retraction policy", () => {
       profile,
     });
     assert.ok(text.includes("[Unsupported claims: retract-or-observe]"));
+    assert.ok(text.includes("[Evidence: manuscript-or-author-answer]"));
   }
 });
 

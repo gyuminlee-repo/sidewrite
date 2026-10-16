@@ -346,7 +346,10 @@ test("followPlaces: term legends keep the legend cap and do not displace Methods
     "Methods",
     "A permanent seal was applied around each joint.",
     "Figure legends",
-    ...Array.from({ length: 12 }, (_, i) => `Figure ${i + 1}. Permanent sealing at a joint.`),
+    ...Array.from({ length: 12 }, (_, i) => [
+      `Figure ${i + 1}. Permanent sealing at a joint.`,
+      `The permanent seal at joint ${i + 1} prevented leaks.`,
+    ]).flat(),
   ];
   const c = {
     ref: "R1.1",
@@ -354,8 +357,60 @@ test("followPlaces: term legends keep the legend cap and do not displace Methods
     changes: [change("R1.1-1", 1, "The permanent seal prevents leaks.", texts[1])],
   };
   const places = followPlaces(c, texts);
-  assert.equal(places.filter((p) => p.kind === "caption").length, 8);
+  const legends = places.filter((p) => /legend/.test(p.why));
+  assert.deepEqual(indexes(legends), [5, 6, 7, 8, 9, 10, 11, 12]);
+  assert.equal(legends.filter((p) => p.kind === "caption").length, 4);
+  assert.equal(legends.filter((p) => p.kind === "body").length, 4);
   assert.ok(places.some((p) => p.index === 3 && p.kind === "methods"));
+});
+
+for (const count of [15, 20]) {
+  test(`followPlaces: uncited term legends never displace ${count} same-section paragraphs`, () => {
+    const texts = [
+      "Deck survey",
+      "The seal held during the inspection.",
+      ...Array.from({ length: count }, (_, i) => `Joint ${i + 1} was inspected from below.`),
+      "Figure legends",
+      ...Array.from({ length: 8 }, (_, i) => `Figure ${i + 1}. Permanent sealing at a joint.`),
+    ];
+    const c = {
+      ref: "R1.1",
+      text: "The term “permanent” is not supported.",
+      changes: [change("R1.1-1", 1, "The permanent seal prevents leaks.", texts[1])],
+    };
+    // Without term-only legends this is the original section-only selection.
+    const baseline = followPlaces(
+      {
+        ...c,
+        text: "The claim is not supported.",
+        changes: [change("R1.1-1", 1, "The seal prevents leaks.", texts[1])],
+      },
+      texts,
+    );
+    const expected = [0, ...Array.from({ length: count }, (_, i) => i + 2)].slice(0, MAX_PLACES);
+    assert.deepEqual(indexes(baseline), expected);
+    const places = followPlaces(c, texts);
+    assert.deepEqual(indexes(places).slice(0, expected.length), expected);
+    assert.equal(places.length, MAX_PLACES);
+  });
+}
+
+test("followPlaces: uncited term legends use document order instead of term order", () => {
+  const texts = [
+    "Deck survey",
+    "The seal held during the inspection.",
+    "Figure legends",
+    "Figure 1. Watertight sealing at the west joint.",
+    "The watertight seal prevented leaks.",
+    "Figure 2. Permanent sealing at the east joint.",
+    "The permanent seal prevented leaks.",
+  ];
+  const c = {
+    ref: "R1.1",
+    text: "The terms “permanent” and “watertight” are not supported.",
+    changes: [change("R1.1-1", 1, "The permanent watertight seal prevents leaks.", texts[1])],
+  };
+  assert.deepEqual(indexes(followPlaces(c, texts)), [0, 3, 4, 5, 6]);
 });
 
 test("followPlaces: which removed words bring a methods paragraph", () => {

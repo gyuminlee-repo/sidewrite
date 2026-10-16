@@ -36,8 +36,8 @@
 //            CONTINUATION: a legend often goes on there; a longer run is
 //            body text that follows a caption.
 //            Uncited legends that hold a named or removed claim term are
-//            also eligible, after methods and reports and within the same
-//            legend cap. The word filters below apply to them too.
+//            also eligible, after section paragraphs and in document order,
+//            within the same legend cap. The word filters below apply too.
 //   methods  the methods paragraphs that hold a term the comment names
 //            (named-terms.js), a removed word that the comment and the
 //            reason of its change both name (residue.js claimTerms; not one
@@ -398,12 +398,12 @@ export function followPlaces(
     for (const [i, why] of rows) if (listed < REPORT_PLACES && add(i, why)) listed++;
   }
 
-  for (const [i, word] of termLegends)
-    if (legends < LEGEND_PLACES && add(i, `${legendRows.get(i)}; also has "${word}"`)) legends++;
-
   for (const h of heads)
     for (let i = h + 1; i < texts.length && !heading(i); i++)
       if (kinds[i] !== "caption") add(i, "same section as a changed paragraph");
+
+  for (const [i, word] of [...termLegends].sort(([a], [b]) => a - b))
+    if (legends < LEGEND_PLACES && add(i, `${legendRows.get(i)}; also has "${word}"`)) legends++;
 
   return listed();
 }
