@@ -2175,8 +2175,8 @@ const HOLDING = {
 // insertions: pieces next to each other in the list and adjacent to each
 // other (AdjacentBefore; all AdjacentAfter: the list runs backwards) are
 // one insertion Word split, their texts joined in document order. An
-// insertion is the tool's own when its whole chain of adjacent pieces is one
-// text the tool put in (own) or the pieces place meets are such texts one
+// insertion is the tool's own when its whole chain of adjacent pieces is
+// texts the tool put in (own) or the pieces place meets are such texts one
 // after another, compared without whitespace; a mix of the two is refused.
 //   No insertion meets place: { held: false }.
 //   One insertion holds all of place: { held: true, left, right, text },
@@ -2251,10 +2251,10 @@ export async function insertionAround(context, para, place, cut, own = []) {
     const value =
       HOLDING[`${sideOf(STARTS, run[0].value)} ${sideOf(ENDS, run.at(-1).value)}`] ?? null;
     const text = run.map((w) => w.text).join("");
-    // The tool's own: the whole chain is one text it put in, or the pieces
+    // The tool's own: the whole chain is texts it put in, or the pieces
     // place meets are its texts one after another.
     const chain = chainText(g);
-    const own = covered(text) || (chain !== null && owns.includes(key(chain)));
+    const own = covered(text) || (chain !== null && covered(chain));
     // Some pieces the tool's, others not: words of the author's piece go
     // with the tool's, refused.
     if (!own && run.some((w) => covered(w.text))) return { held: false, refuse: "takes" };

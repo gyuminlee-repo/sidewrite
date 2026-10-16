@@ -656,11 +656,12 @@ export function createReviewService({
           },
           comment_ids: recordedCommentIds(rev),
           // The texts the recorded changes of this file put in, by paragraph
-          // (review-tools.mjs ownInsertions). Accepted and rejected changes
-          // left no tracked insertion behind.
+          // (review-tools.mjs ownInsertions). State describes the last refresh,
+          // not provenance: even an accepted record can still have pending
+          // words in Word. Keep every comment's history, including rewrite parts.
           inserted: rev.comments
             .flatMap((x) => x.changes)
-            .filter((ch) => ch.text && ch.state !== "accepted" && ch.state !== "rejected")
+            .filter((ch) => ch.text)
             .map((ch) => ({
               paragraph_index: ch.paragraph_index,
               paragraph_id: ch.paragraph_id,

@@ -336,14 +336,16 @@ function fail(message, extra = {}) {
 }
 
 // The texts the tool put into paragraph `target` (inserted: { paragraph_index,
-// paragraph_id, text, after } of each recorded change of this file not
-// accepted or rejected, and of each edit of this turn: turnInserted). The
+// paragraph_id, text, after } of every recorded change of this file,
+// and of each edit of this turn: turnInserted). The
 // task pane lets an edit take a pending insertion only when its text is
 // one of these (tools-word.js insertionAround). By paragraph id when both
-// have one. A record without an id counts by its index only when the
-// paragraph still reads as it did after that change (now: its text here,
-// compared normalized); anything else is not counted, so the pane refuses
-// (the safe direction).
+// have the same one. With an old session id or no recorded id, use the index
+// only with text evidence: the paragraph still reads as it did after that
+// change, or still holds the
+// recorded inserted text that its after held. Later tool edits need not
+// leave the whole paragraph unchanged. The pane still requires an entire
+// tracked insertion (or adjacent chain) to be covered by recorded texts.
 export function ownInsertions(inserted, target, ids, now) {
   if (target === null || !Array.isArray(inserted)) return [];
   const id = ids?.[target] ?? null;
@@ -351,13 +353,23 @@ export function ownInsertions(inserted, target, ids, now) {
     typeof a === "string" &&
     typeof b === "string" &&
     normalizeParaText(a).trim() === normalizeParaText(b).trim();
+  const has = (paragraph, text) => {
+    const key = (s) => s.replace(/[\s\u0005]+/g, "");
+    return (
+      typeof paragraph === "string" &&
+      typeof text === "string" &&
+      key(text) !== "" &&
+      key(paragraph).includes(key(text))
+    );
+  };
+  const stillHere = (c) => c.paragraph_index === target && has(c.after, c.text) && has(now, c.text);
   return [
     ...new Set(
       inserted
         .filter((c) =>
           c.paragraph_id != null
-            ? id !== null && c.paragraph_id === id
-            : c.paragraph_index === target && same(c.after, now),
+            ? id !== null && (c.paragraph_id === id || stillHere(c))
+            : c.paragraph_index === target && (same(c.after, now) || stillHere(c)),
         )
         .map((c) => c.text),
     ),
@@ -400,7 +412,7 @@ const turnInserted = (turn) => (turn.inserted ??= []);
 // snapshot paragraphs, for paragraph_hint; recent_changes: changes recorded
 // since that snapshot, oldest first; author_texts: what the author answered
 // to questions of this review, a source of numbers like the comment;
-// inserted: what each recorded change not accepted or rejected put in, by
+// inserted: what every recorded change put in, by
 // paragraph, for own_insertions).
 // turn: { ref } of the current review turn, or null. A follow-through turn
 // ("Check other places", review-service.mjs review_propose) also has
