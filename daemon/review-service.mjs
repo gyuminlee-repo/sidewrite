@@ -656,16 +656,18 @@ export function createReviewService({
           },
           comment_ids: recordedCommentIds(rev),
           // The texts the recorded changes of this file put in, by paragraph
-          // (review-tools.mjs ownInsertions). Accepted and rejected changes
-          // left no tracked insertion behind.
+          // (review-tools.mjs ownInsertions). Rejected words are no longer a
+          // tool insertion. Accepted records need text/context evidence, not
+          // just a matching paragraph id, before the pane can use them.
           inserted: rev.comments
             .flatMap((x) => x.changes)
-            .filter((ch) => ch.text && ch.state !== "accepted" && ch.state !== "rejected")
+            .filter((ch) => ch.text && ch.state !== "rejected")
             .map((ch) => ({
               paragraph_index: ch.paragraph_index,
               paragraph_id: ch.paragraph_id,
               text: ch.text,
               after: ch.after,
+              state: ch.state,
             })),
           // What the author answered to questions of this review, in this
           // file and in the other files of its revision: a source of numbers
