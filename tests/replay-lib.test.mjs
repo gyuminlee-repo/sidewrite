@@ -2000,10 +2000,16 @@ test(
   () => {
     // powershell.exe started from WSL can fail to start under load
     // (UtilAcceptVsock accept4 failed 110): tried once more (wsl-interop.mjs).
+    // Bypass as every real caller passes it: under RemoteSigned a script on
+    // \\wsl.localhost is remote and unsigned, so dot-sourcing it is refused.
     const ps = (command) =>
       execWithInteropRetry(
         () =>
-          execFileSync("powershell.exe", ["-NoProfile", "-Command", command], { encoding: "utf8" }),
+          execFileSync(
+            "powershell.exe",
+            ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            { encoding: "utf8" },
+          ),
         { what: "powershell.exe", log: () => {} },
       ).trim();
     const win = (name) =>
