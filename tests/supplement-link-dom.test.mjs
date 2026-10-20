@@ -514,8 +514,8 @@ test("Propose changes in a supplementary file starts a turn for this file, after
   for (const type of ["review_load", "review_refresh", "response_state"]) {
     assert.equal(t.sent(type)[0].opts.timeoutMs, 120_000, type);
   }
-  assert.equal(t.sent("review_propose")[0].opts.timeoutMs, 10_000);
-  assert.equal(t.sent("review_propose")[0].payload.wait_ms, 10_000);
+  assert.equal(t.sent("review_propose")[0].opts.timeoutMs, 120_000);
+  assert.equal(t.sent("review_propose")[0].payload.wait_ms, 120_000);
   // The turn ends: the clock of the card stops.
   t.pane.onEvent({ type: "review_event", event: "turn_done", ref: "R1.2", ok: true });
   await new Promise((r) => setTimeout(r, 5));

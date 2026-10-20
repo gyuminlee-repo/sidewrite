@@ -1383,17 +1383,24 @@ export function createReviewService({
     async review_propose(msg, key, host) {
       const asked = clock();
       await turnGate(key);
+      const gated = clock();
       // The pane waits wait_ms for this answer and then shows the request as
       // failed. A turn started after that would run behind the author's
-      // back, so a request that was held longer starts nothing.
+      // back, so a request that was held longer starts nothing: checked after
+      // the gate and again after the prompt is built (review file reads can
+      // be slow on a loaded WSL drive), right before the turn is queued.
       const waitMs = Number(msg.wait_ms);
-      if (waitMs > 0 && clock() - asked >= waitMs) {
-        throw new Error(
-          `The task pane stopped waiting for this request after ${Math.round(waitMs / 1000)} s, so no turn was started. Press Propose changes again.`,
-        );
-      }
+      const refuseIfGivenUp = (now) => {
+        if (waitMs > 0 && now - asked >= waitMs) {
+          throw new Error(
+            `The task pane stopped waiting for this request after ${Math.round(waitMs / 1000)} s, so no turn was started. Press Propose changes again.`,
+          );
+        }
+      };
+      refuseIfGivenUp(gated);
       const d = at(key);
       const { built, comment, rev } = await buildFor(d, msg.ref, msg.paragraphs, key);
+      const builtAt = clock();
       // A turn in which no edit can be applied is not started: every
       // office_tracked_edit of it would be refused (review-tools.mjs
       // applyTrackedEdit: TaskPaneOutdated, ForbidRuleBroken), the turn
@@ -1438,6 +1445,7 @@ export function createReviewService({
       const plan = msg.follow_through === true ? followPlan(rev, msg.ref) : null;
       const follow = plan ? followNote(rev, msg.ref, undefined, plan) : null;
       const note = rewrite ?? follow;
+      refuseIfGivenUp(builtAt);
       pushTurn(key, host, note ? `${built.text}\n\n${note}` : built.text, {
         ref: msg.ref,
         ...(plan && {
@@ -1475,6 +1483,11 @@ export function createReviewService({
         findComment(rev, msg.ref).status === "pending"
           ? setCommentStatus(rev, msg.ref, "in_progress")
           : null,
+      );
+      // Where the wait of the pane (wait_ms) went: provider gate, prompt
+      // build (review file reads), status save.
+      log(
+        `[review] propose ${msg.ref} gate_ms=${gated - asked} build_ms=${builtAt - gated} save_ms=${clock() - builtAt} wait_ms=${Number(msg.wait_ms) || "-"}`,
       );
       return { started: true, ref: msg.ref, started_at: new Date().toISOString(), revision };
     },
