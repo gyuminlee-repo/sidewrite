@@ -329,7 +329,7 @@ export function createBridge({
             JSON.stringify({
               type: "welcome",
               session_id: randomUUID(),
-              server_version: "0.1.0",
+              server_version: "1.0.0",
             }),
           );
           console.log(

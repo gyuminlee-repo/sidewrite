@@ -965,7 +965,7 @@ export function createOfficeBridgeMcp(bridge, host = null, paneKey = null, opts 
 
   return createSdkMcpServer({
     name: "office",
-    version: "0.1.0",
+    version: "1.0.0",
     // alwaysLoad: ensure these tools are in the initial prompt, not deferred
     // behind tool-search. They are the only sanctioned editing path for the
     // active Office document.
