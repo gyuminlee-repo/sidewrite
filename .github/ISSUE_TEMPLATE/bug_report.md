@@ -21,7 +21,7 @@ labels: bug
 **Environment**
 
 - Host + version (Word / Excel; Microsoft 365 / 2019 / 2021):
-- OS (macOS / Windows-via-Parallels):
+- OS (macOS / Windows, native or via WSL):
 - Node version (`node -v`):
 - Launched via: `npm start` / `npm run dev`
 
