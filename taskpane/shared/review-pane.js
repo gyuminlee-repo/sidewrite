@@ -82,9 +82,12 @@ const CONNECTION_LOST =
 const APPLYING_HINT = "Applying this exception in Word. Wait for it to finish.";
 // "Propose all": the longest wait for the end of one review turn.
 const TURN_WAIT_MS = 30 * 60_000;
-// How long the pane waits for the answer of review_propose (taskpane.js
-// sendRequest waits as long by default); the request says so (wait_ms).
-const PROPOSE_WAIT_MS = 10_000;
+// How long the pane waits for the answer of review_propose; the request says
+// so (wait_ms). Before it answers, the daemon reads the review file to build
+// the prompt and saves the comment status: on a loaded WSL drive that took
+// 11 s once, past the old 10 s, while the turn ran on. Same allowance as the
+// other review-file requests.
+const PROPOSE_WAIT_MS = REVIEW_FILE_WAIT_MS;
 const PROVIDER_WAIT = "Waiting for the daemon to confirm the stored provider choice...";
 const FIGURES_LABEL = "Figures and other files";
 

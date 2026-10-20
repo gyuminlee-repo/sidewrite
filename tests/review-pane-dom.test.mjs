@@ -2019,8 +2019,8 @@ test("review_propose carries the time the pane waits for its answer", async () =
     const [first] = findAll(t.$("review-comments"), (n) => n.textContent === "Propose changes");
     await first.click();
     const [, payload, opts] = t.sent.find(([type]) => type === "review_propose");
-    assert.equal(payload.wait_ms, 10_000);
-    assert.deepEqual(opts, { timeoutMs: 10_000 });
+    assert.equal(payload.wait_ms, 120_000);
+    assert.deepEqual(opts, { timeoutMs: 120_000 });
     t.endTurn("R1.1");
     await t.wait();
   } finally {

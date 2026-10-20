@@ -2721,6 +2721,43 @@ test("review_propose: a request the pane has given up starts no turn", async () 
   }
 });
 
+// The gate let it through in time, but building the prompt (review file
+// reads) used up the rest of the wait: the turn must not start either.
+test("review_propose: a request the pane gave up while its prompt was built starts no turn", async () => {
+  let now = 1_000;
+  let afterGate = false;
+  const t = await setup({
+    // Every reading after the gate is 2 s later than the one before.
+    clock: () => {
+      const v = now;
+      if (afterGate) now += 2_000;
+      return v;
+    },
+    turnGate: async () => {
+      now += 9_000;
+      afterGate = true;
+    },
+  });
+  try {
+    await t.ask("review_save_comments", { comments: COMMENTS });
+    afterGate = false;
+    now = 1_000;
+    const late = await t.ask("review_propose", { ref: "R1.1", wait_ms: 10_000 });
+    assert.deepEqual(
+      [late.ok, late.error],
+      [
+        false,
+        "The task pane stopped waiting for this request after 10 s, so no turn was started. Press Propose changes again.",
+      ],
+    );
+    assert.deepEqual(t.pushed, [], "no turn was queued");
+    const rev = await loadRevision(join(t.dir, "paper.revision.json"), t.doc);
+    assert.equal(rev.comments.find((c) => c.ref === "R1.1").status, "pending");
+  } finally {
+    await t.cleanup();
+  }
+});
+
 // H4 with the job pin of stage 2.5: the second request for a batch whose
 // reply was in the wrong form goes to the provider and model the check
 // started with, also when the pane's choice changed in between.
