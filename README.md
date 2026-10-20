@@ -54,7 +54,7 @@ Two snapshots below — but the side pane is a full conversational agent, so wha
 
 ## Status
 
-Single-user tool you run on your own machine — intentionally scoped, not a hardened multi-tenant service (see [Security & privacy](#security--privacy)). Development was done on a Mac; Windows has had only limited testing in a Parallels VM. macOS is the primary, most-polished platform; Windows works but is less exercised.
+Single-user tool you run on your own machine — intentionally scoped, not a hardened multi-tenant service (see [Security & privacy](#security--privacy)). Version 1.0.0. Development started on a Mac. The 1.0.0 release was checked end to end in Windows Word (Office 16, driven from WSL): every stage of the hands-free acceptance run ([`scripts/e2e/README.md`](scripts/e2e/README.md)) and one replay of a real journal revision. macOS was not checked again for this release.
 
 - **Word** — the more mature surface.
 - **Excel** — newer; the tools work, the UX trails Word slightly.

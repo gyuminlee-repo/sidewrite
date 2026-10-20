@@ -1,6 +1,6 @@
 {
   "name": "sidewrite",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Sidewrite — Microsoft Office (Word + Excel) add-ins that bring your local Claude Code into Office. Powered by Claude.",
   "private": true,
   "repository": {
