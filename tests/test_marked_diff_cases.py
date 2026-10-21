@@ -217,6 +217,35 @@ class TableText(Case):
                 body = Document(out).element.body
                 self.assertEqual([x.tag.split("}")[1] for x in body][:4], ["p", "p", "tbl", "p"])
 
+    def test_a_deleted_table_with_paragraphless_cells_keeps_one_empty_paragraph(self):
+        def edit(d):
+            t = d.add_table(rows=1, cols=2)
+            for tc in t._tbl.iter(qn("w:tc")):
+                for p in list(tc.findall(qn("w:p"))):
+                    tc.remove(p)
+
+        base = self.doc([P1, P2], edit)
+        clean = self.doc([P1, P2])
+        for mode in self.MODES:
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                assert summary is not None
+                self.assertEqual(summary["failures"], 0)
+                tree = Document(str(out)).element
+                cells = list(tree.iter(qn("w:tc")))
+                self.assertEqual(len(cells), 2)
+                self.assertEqual([len(tc.findall(qn("w:p"))) for tc in cells], [1, 1])
+                self.assertEqual(self.accept_reject(out), ([P1, P2], [P1, P2]))
+                # Normalizing a missing paragraph must not hide a real extra paragraph.
+                cells[0].append(el("w:p"))
+                tool = tool_module()
+                setattr(tool, "MODE", mode)
+                check = tool.verify(
+                    tool.etree.tostring(tree), doc_xml(base).encode(), doc_xml(clean).encode(),
+                )
+                self.assertTrue(check["structure_reject"], check)
+
     def test_text_behind_a_last_table_where_the_clean_document_has_no_paragraph_is_refused(self):
         # python-docx leaves no paragraph behind a last table. The clean document then has a paragraph there
         # (the last one) where the baseline has none after its table: no paragraph mark can show that.
@@ -230,6 +259,23 @@ class TableText(Case):
         self.assertEqual(code, 2, log)
         self.assertIn("a paragraph mark cannot show that", log)
         self.assertFalse(out.exists())
+
+
+class JoinedInsertionChecks(Case):
+    def test_insertions_across_a_joined_paragraph_are_counted_per_output_paragraph(self):
+        before = ["The first old phrase is shared. ", "Original second phrase is shared."]
+        after = ["The first new phrase is shared. Revised second phrase is shared."]
+        base = self.doc(before)
+        clean = self.doc(after)
+        for mode in ("color", "track_changes"):
+            with self.subTest(mode=mode):
+                code, out, summary, log = self.run_tool(base, clean, "--mode", mode)
+                self.assertEqual(code, 0, log)
+                assert summary is not None
+                self.assertEqual(summary["failures"], 0)
+                accepted, rejected = self.accept_reject(out)
+                self.assertEqual("".join(accepted), "".join(after))
+                self.assertEqual("".join(rejected), "".join(before))
 
 
 def tool_module():
