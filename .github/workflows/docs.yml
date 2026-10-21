@@ -1,0 +1,23 @@
+name: Docs
+
+# The user guide (mkdocs.yml, docs/) goes to GitHub Pages on a release tag,
+# or by hand from the Actions tab. No run on ordinary pushes.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-docs.txt
+      - run: mkdocs gh-deploy --force --strict

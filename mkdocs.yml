@@ -1,0 +1,86 @@
+site_name: Sidewrite 사용 가이드
+site_url: https://gyuminlee-repo.github.io/sidewrite/
+repo_url: https://github.com/gyuminlee-repo/sidewrite
+repo_name: gyuminlee-repo/sidewrite
+docs_dir: docs
+
+# docs/review holds internal review evidence, not guide pages.
+exclude_docs: |
+  review/
+
+theme:
+  name: material
+  language: ko
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: 다크 모드
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 라이트 모드
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - toc.integrate
+    - content.code.copy
+
+nav:
+  - 시작하기:
+      - index.md
+      - 요구 사항: getting-started/requirements.md
+      - 설치: getting-started/install.md
+      - 처음 열기: getting-started/first-run.md
+  - 원고 리비전:
+      - 개요: revision/index.md
+      - 1. Reviewer comments: revision/01-split.md
+      - 2. Instructions and forbidden wording: revision/02-ledger.md
+      - 3. Propose changes: revision/03-propose.md
+      - 4. Word에서 결정: revision/04-decide.md
+      - 5. Check revised paragraphs: revision/05-check.md
+      - 6. Supplementary files: revision/06-supplements.md
+  - 응답서:
+      - 개요: response/index.md
+      - 1. Responses: response/01-responses.md
+      - 2. Line numbers and checks: response/02-lines-checks.md
+      - 3. Export: response/03-export.md
+      - Profile and language: response/profile.md
+  - 제출 준비:
+      - 개요: submission/index.md
+      - Selection: submission/selection.md
+      - Journal guideline: submission/guideline.md
+      - Format and count checks: submission/format-checks.md
+      - Marked copy: submission/marked-copy.md
+      - Anonymized copy: submission/anonymized-copy.md
+      - Before submission: submission/before-submission.md
+      - Figures and other files: submission/figures.md
+  - 채팅과 Excel:
+      - Chat: chat/index.md
+      - Presets: chat/presets.md
+      - Excel: chat/excel.md
+  - 설정:
+      - Providers: settings/providers.md
+      - Workspace and Context files: settings/workspace.md
+      - Preferences: settings/preferences.md
+  - 트러블슈팅:
+      - 개요: troubleshooting/index.md
+  - 참고:
+      - 환경 변수: reference/environment.md
+      - 원고 옆에 생기는 파일: reference/files.md
+      - 보안과 개인 정보: reference/security.md
+      - Changelog: reference/changelog.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
+  - tables
+  - toc:
+      permalink: true
