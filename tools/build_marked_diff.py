@@ -1329,8 +1329,10 @@ def rebuild_para(p, b, c, styles, stats, segs=None, ppr_of=None):
     for e in build_children(cur, styles):
         p.append(e)
     stats['marked'].append((b if isinstance(b, str) else b.text, c.text, marked_string(segs)))
-    stats['exp_ins'].append(''.join(t for k, t, *_ in segs if k == 'ins'))
-    stats['exp_del'].append(''.join(t for k, t, *_ in segs if k == 'del'))
+    # The writer split at baseline paragraph boundaries: keep those word boundaries in the expected text too.
+    for part in [part for part, _ in pieces] + [cur]:
+        stats['exp_ins'].append(''.join(t for k, t, *_ in part if k == 'ins'))
+        stats['exp_del'].append(''.join(t for k, t, *_ in part if k == 'del'))
     return new
 
 
@@ -2379,8 +2381,9 @@ def structure(root, baseline=False):
         elif not in_box(e) and not any(a.tag == q('tbl') for a in e.iterancestors()):
             flow.append('p')
             body.append(read(e))
+    # A source cell without a paragraph means one empty paragraph; the output must still contain that w:p.
     tables = [[len(t.findall(q('tblGrid') + '/' + q('gridCol'))),
-               [[cell_layout(tc) + [[read(x) for x in tc.iter(q('p')) if not in_box(x)]] for tc in tr.findall(q('tc'))]
+               [[cell_layout(tc) + [[read(x) for x in tc.iter(q('p')) if not in_box(x)] or [['', []]]] for tc in tr.findall(q('tc'))]
                 + [row_skips(tr)] for tr in t.findall(q('tr'))]] for t in held]
     opened, marks = {}, {}
     for e in root.iter(q('bookmarkStart'), q('bookmarkEnd'), q('r')):
