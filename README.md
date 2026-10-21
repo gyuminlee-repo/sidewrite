@@ -5,6 +5,8 @@
 [![CI](https://github.com/gyuminlee-repo/sidewrite/actions/workflows/ci.yml/badge.svg)](https://github.com/gyuminlee-repo/sidewrite/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+**User guide (Korean):** https://gyuminlee-repo.github.io/sidewrite/
+
 Open Word or Excel, click a button, and chat with **your own local Claude Code** — the same agent you already use in the terminal — now able to read and edit the active document, leave comments, and write cells and formulas. By default a session loads only the workspace's own `CLAUDE.md` and `.claude/settings.json`; your user-level MCP servers, subagents, skills, hooks, and `~/.claude/CLAUDE.md` are opt-in (see [Configuration](#configuration)).
 
 **The point of difference: local context.** Point Claude at any folders or files on your machine — a notes folder, prior drafts, a vendor's spec PDF, last quarter's data export, a code repo — and they become background it reads on demand while it works in your document. It's your real Claude Code, and your own user-level configuration can be switched on too.
