@@ -52,6 +52,7 @@ import { initProvidersPane } from "./providers-pane.js";
 import { declinedNote, fallbackNotice, modelLabel, modelLineText, turnUsed } from "./model-line.js";
 import { createTurnState, TURN_END_EVENTS } from "./turn-state.js";
 import { createResultQueue } from "./result-queue.js";
+import { createPendingRequests } from "./pending-requests.js";
 import {
   toolExcelGetSelectedRange,
   toolExcelListSheets,
@@ -758,6 +759,9 @@ function wsConnect() {
   ws.onclose = () => {
     wsReady = false;
     setConnectionStatus("err", "Disconnected — retrying…");
+    // No answer comes over a closed socket: every request still waiting ends
+    // now with an error, not after its own (up to 120 s) time.
+    pendingRequests.rejectAll(new Error(CONNECTION_LOST));
     // Release the composer if a turn was mid-flight when the connection
     // dropped — otherwise the user is stuck waiting for a turn_complete
     // that will never arrive.
@@ -958,19 +962,17 @@ async function handleServerMessage(msg) {
       // Request/response messages keyed by request_id end in "_result".
       // Resolve the matching pending request.
       if (typeof msg.type === "string" && msg.type.endsWith("_result") && msg.request_id) {
-        const pending = pendingRequests.get(msg.request_id);
-        if (pending) {
-          pendingRequests.delete(msg.request_id);
-          pending.resolve(msg);
-        }
+        pendingRequests.resolve(msg.request_id, msg);
       }
       break;
   }
 }
 
 // ---- Request/response helper (for non-tool round-trips) -------------------
-const pendingRequests = new Map();
+const pendingRequests = createPendingRequests();
 const REQUEST_TIMEOUT_MS = 10_000;
+const CONNECTION_LOST =
+  "The connection to the daemon was lost before the answer came. Run it again.";
 
 function sendRequest(type, payload = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
@@ -979,14 +981,8 @@ function sendRequest(type, payload = {}, { timeoutMs = REQUEST_TIMEOUT_MS } = {}
       return;
     }
     const request_id = uuid();
-    pendingRequests.set(request_id, { resolve, reject });
+    pendingRequests.add(request_id, type, timeoutMs).then(resolve, reject);
     wsSend({ type, request_id, ...payload });
-    setTimeout(() => {
-      if (pendingRequests.has(request_id)) {
-        pendingRequests.delete(request_id);
-        reject(new Error(`Request "${type}" timed out`));
-      }
-    }, timeoutMs);
   });
 }
 
@@ -1353,6 +1349,7 @@ Office.onReady((info) => {
   if (HOST === "word") {
     reviewPane = initReviewPane({
       sendRequest,
+      onDisconnect: pendingRequests.onClose,
       usedLabel,
       // For the link to the figures page of this manuscript.
       docUrl: () => activeDocUrl,
@@ -1405,6 +1402,7 @@ Office.onReady((info) => {
     // Response tab: the response letter. It reads Word and never writes to it.
     responsePane = initResponsePane({
       sendRequest,
+      onDisconnect: pendingRequests.onClose,
       usedLabel,
       providersReady: () => providersPane?.whenRestored() ?? null,
       beforeExport: () => reviewPane?.addWaitingComments?.(),
@@ -1413,6 +1411,7 @@ Office.onReady((info) => {
     // Tools tab: it reads Word and never writes to it.
     toolsPane = initToolsPane({
       sendRequest,
+      onDisconnect: pendingRequests.onClose,
       usedLabel,
       providersReady: () => providersPane?.whenRestored() ?? null,
       settings,

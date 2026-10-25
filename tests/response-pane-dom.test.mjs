@@ -166,8 +166,10 @@ async function setup({
     else setTimeout(deliver, 0);
     return { ok: true, accepted: true, job_id };
   };
+  const closers = [];
   pane = initResponsePane({
     sendRequest,
+    onDisconnect: (fn) => closers.push(fn),
     providersReady,
     usedLabel,
     beforeExport,
@@ -196,6 +198,8 @@ async function setup({
       ),
     message: () => $("response-message").textContent,
     finish: (type) => held.get(type)(),
+    // The socket closed (taskpane.js ws.onclose).
+    close: () => closers.forEach((fn) => fn()),
   };
 }
 
@@ -769,6 +773,47 @@ test("reconnect while a job runs: the wait ends with a message, the buttons work
   assert.equal(t.$("response-check").disabled, false);
   assert.equal(button(t.card("R1.1"), "Draft").disabled, false);
   assert.equal(byClass(t.card("R1.1"), "response-text")[0].value, "We now state the unit.");
+});
+
+test("a closed socket ends a waiting job at once; the welcome after it still asks for the state", async () => {
+  const drafted = revisionOf([
+    C1({ response: { text: "We now state the unit.", stale: [], citations: [] } }),
+    C2(),
+  ]);
+  let revision = revisionOf([C1(), C2()]);
+  const t = await setup({
+    hold: ["response_draft"],
+    respond: {
+      review_load: () => ({ ok: true, revision }),
+      response_state: () => ({ ok: true, revision }),
+      response_draft: () => ({ ok: true, revision: drafted }),
+    },
+  });
+  const clicked = button(t.card("R1.1"), "Draft").click();
+  await tick();
+  assert.equal(t.$("response-check").disabled, true);
+  t.close(); // no welcome yet
+  await clicked;
+  assert.match(t.message(), /connection to the daemon was lost/);
+  assert.equal(t.$("response-check").disabled, false);
+  assert.equal(button(t.card("R1.1"), "Draft").disabled, false);
+  // The daemon comes back; what the cut-off job saved is asked for.
+  revision = drafted;
+  const before = t.requests.length;
+  await t.pane.reload();
+  assert.deepEqual(
+    t.requests.slice(before).map((r) => r.type),
+    ["profile_get", "review_load", "response_state"],
+  );
+  assert.match(t.message(), /connection to the daemon was lost/);
+  assert.equal(byClass(t.card("R1.1"), "response-text")[0].value, "We now state the unit.");
+  // Once told, a second welcome does not ask again.
+  const again = t.requests.length;
+  await t.pane.reload();
+  assert.deepEqual(
+    t.requests.slice(again).map((r) => r.type),
+    ["profile_get", "review_load"],
+  );
 });
 
 test("a job that ends after the reconnect is not lost: its result is shown", async () => {

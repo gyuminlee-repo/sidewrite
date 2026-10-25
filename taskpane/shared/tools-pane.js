@@ -24,6 +24,9 @@ const CONNECTION_LOST =
 
 export function initToolsPane({
   sendRequest,
+  // (fn) => fn is called when the socket to the daemon closes
+  // (taskpane.js pendingRequests.onClose).
+  onDisconnect = () => {},
   word,
   // The pane's stored settings (taskpane.js): toolsLang is kept there.
   settings = {},
@@ -101,6 +104,9 @@ export function initToolsPane({
     state.jobs.clear();
     state.jobsDone.clear();
   }
+  // A closed socket never brings them either: they end at once, not at the
+  // next welcome (the daemon may not come back).
+  onDisconnect(() => dropJobs());
 
   // Every action of the tab goes through guard(): one at a time, in the order
   // pressed, and only once the daemon has confirmed the stored provider.

@@ -105,8 +105,10 @@ async function setup({
     return { ok: true, accepted: true, job_id };
   };
   const saved = [];
+  const closers = [];
   pane = initToolsPane({
     sendRequest,
+    onDisconnect: (fn) => closers.push(fn),
     usedLabel,
     settings,
     saveSettings: (s) => saved.push({ ...s }),
@@ -124,6 +126,8 @@ async function setup({
     $,
     of: (type) => requests.filter((r) => r.type === type),
     deliver: (type) => held.get(type)(),
+    // The socket closed (taskpane.js ws.onclose).
+    close: () => closers.forEach((fn) => fn()),
     message: () => $("tools-message").textContent,
   };
 }
@@ -229,6 +233,35 @@ test("a new connection ends a job that was waiting, with an error, and the butto
   assert.match(t.message(), /connection to the daemon was lost/);
   assert.equal(t.$("tools-ask").disabled, false);
   assert.equal(t.$("tools-translate").disabled, false);
+});
+
+test("a closed socket ends a waiting job at once, with an error, and the buttons come back", async () => {
+  const t = await setup({ hold: ["selection_ask"] });
+  t.$("tools-question").value = "Why?";
+  const pressed = t.$("tools-ask").click();
+  await tick();
+  assert.equal(t.$("tools-ask").disabled, true);
+  t.close(); // no welcome follows: the daemon does not come back
+  await pressed;
+  await tick();
+  assert.match(t.message(), /connection to the daemon was lost/);
+  assert.equal(t.$("tools-ask").disabled, false);
+  assert.equal(t.$("tools-translate").disabled, false);
+});
+
+test("a job whose job_done comes while the socket is open still ends with its answer", async () => {
+  const t = await setup({
+    hold: ["selection_ask"],
+    respond: { selection_ask: () => ({ ok: true, answer: "Because of the heat." }) },
+  });
+  t.$("tools-question").value = "Why?";
+  const pressed = t.$("tools-ask").click();
+  await tick();
+  t.deliver("selection_ask");
+  await pressed;
+  await tick();
+  assert.doesNotMatch(t.message(), /connection to the daemon was lost/);
+  assert.equal(t.$("tools-ask").disabled, false);
 });
 
 // ---- journal guideline -------------------------------------------------------

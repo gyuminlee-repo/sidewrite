@@ -109,6 +109,9 @@ export function openInBrowser(url, office = globalThis.Office) {
 
 export function initReviewPane({
   sendRequest,
+  // (fn) => fn is called when the socket to the daemon closes
+  // (taskpane.js pendingRequests.onClose).
+  onDisconnect = () => {},
   word,
   onTurnStarted,
   isTurnInFlight,
@@ -280,6 +283,9 @@ export function initReviewPane({
     state.jobs.clear();
     state.jobsDone.clear();
   }
+  // A closed socket never brings them either: they end at once, not at the
+  // next welcome (the daemon may not come back).
+  onDisconnect(() => dropJobs());
   const guard =
     (fn) =>
     async (...a) => {
