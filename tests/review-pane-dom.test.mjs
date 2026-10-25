@@ -62,6 +62,7 @@ async function setup({ revision, word = {}, respond = {}, providersReady, option
   globalThis.document = fakeDocument();
   const { initReviewPane } = await import("../taskpane/shared/review-pane.js");
   const requests = [];
+  const closers = [];
   const sendRequest = async (type, payload, opts) => {
     requests.push({ type, payload, opts });
     if (respond[type]) return respond[type](payload);
@@ -73,10 +74,17 @@ async function setup({ revision, word = {}, respond = {}, providersReady, option
     onTurnStarted() {},
     isTurnInFlight: () => false,
     providersReady,
+    onDisconnect: (fn) => closers.push(fn),
     ...options,
   });
   await pane.reload();
-  return { pane, requests, $: (id) => document.getElementById(id) };
+  return {
+    pane,
+    requests,
+    $: (id) => document.getElementById(id),
+    // The socket closed (taskpane.js ws.onclose).
+    close: () => closers.forEach((fn) => fn()),
+  };
 }
 
 const comment = (id, content, extra = {}) => ({
@@ -454,6 +462,64 @@ test("Propose changes follows the running turn: chat re-render disables, chat en
   assert.deepEqual(states(), [true, true], "a new turn disables without a re-render");
   turn.end(); // connection dropped (ws.onclose)
   assert.deepEqual(states(), [false, false]);
+});
+
+test("a closed socket ends a waiting split at once with an error; a split answered in time is shown", async () => {
+  const revision = { comments: [], ledger: [] };
+  const lost = await setup({
+    revision,
+    respond: { review_split: () => ({ ok: true, accepted: true, job_id: "j1" }) },
+  });
+  const pressed = lost.$("review-split").click();
+  await new Promise((r) => setTimeout(r, 5));
+  lost.close(); // no welcome follows
+  await pressed;
+  assert.match(lost.$("review-message").textContent, /connection to the daemon was lost/);
+  // A job_done of the old connection finds no wait and is kept for nobody.
+  lost.pane.onEvent({
+    type: "review_event",
+    event: "job_done",
+    job_id: "j1",
+    result: { ok: true, method: "regex", warnings: [], comments: [] },
+  });
+
+  let t = null;
+  t = await setup({
+    revision,
+    respond: {
+      review_split: () => {
+        setTimeout(() =>
+          t.pane.onEvent({
+            type: "review_event",
+            event: "job_done",
+            job_id: "j2",
+            result: {
+              ok: true,
+              method: "regex",
+              warnings: [],
+              comments: [{ ref: "R1.1", reviewer: 1, text: "Rename it." }],
+            },
+          }),
+        );
+        return { ok: true, accepted: true, job_id: "j2" };
+      },
+    },
+  });
+  await t.$("review-split").click();
+  assert.match(t.$("review-message").textContent, /^Split into 1 comment /);
+});
+
+test("the welcome after a closed socket still ends a job left waiting", async () => {
+  const revision = { comments: [], ledger: [] };
+  const t = await setup({
+    revision,
+    respond: { review_split: () => ({ ok: true, accepted: true, job_id: "j1" }) },
+  });
+  const pressed = t.$("review-split").click();
+  await new Promise((r) => setTimeout(r, 5));
+  await t.pane.reload(); // welcome of a new connection, no close seen before it
+  await pressed;
+  assert.match(t.$("review-message").textContent, /connection to the daemon was lost/);
 });
 
 test("Save shows the daemon's warning about comments it kept", async () => {

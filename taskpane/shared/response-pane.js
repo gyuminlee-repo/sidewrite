@@ -36,6 +36,9 @@ const withModel = (label) => (label ? ` with ${label}` : "");
 
 export function initResponsePane({
   sendRequest,
+  // (fn) => fn is called when the socket to the daemon closes
+  // (taskpane.js pendingRequests.onClose).
+  onDisconnect = () => {},
   word,
   // () => the request that confirms the stored providers while it is under
   // way (providers-pane.js whenRestored), else null.
@@ -142,6 +145,11 @@ export function initResponsePane({
     state.jobsDone.clear();
     return n;
   }
+  // A closed socket never brings them either: they end at once, not at the
+  // next welcome (the daemon may not come back). How many ended is kept, so
+  // the welcome still asks for what a cut-off job saved.
+  let lostOnClose = 0;
+  onDisconnect(() => (lostOnClose += dropJobs()));
 
   // Every action of the tab goes through guard(): one at a time, in the order
   // pressed, and only once the daemon has confirmed the stored provider (right
@@ -674,7 +682,8 @@ export function initResponsePane({
     // also asked for against the manuscript, because what that job saved is
     // not known here.
     async reload() {
-      const lost = dropJobs();
+      const lost = dropJobs() + lostOnClose;
+      lostOnClose = 0;
       try {
         await load();
         if (lost && comments().length && !state.partOf) await ask("response_state", await docNow());

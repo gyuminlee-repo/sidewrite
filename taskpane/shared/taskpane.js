@@ -1349,6 +1349,7 @@ Office.onReady((info) => {
   if (HOST === "word") {
     reviewPane = initReviewPane({
       sendRequest,
+      onDisconnect: pendingRequests.onClose,
       usedLabel,
       // For the link to the figures page of this manuscript.
       docUrl: () => activeDocUrl,
@@ -1401,6 +1402,7 @@ Office.onReady((info) => {
     // Response tab: the response letter. It reads Word and never writes to it.
     responsePane = initResponsePane({
       sendRequest,
+      onDisconnect: pendingRequests.onClose,
       usedLabel,
       providersReady: () => providersPane?.whenRestored() ?? null,
       beforeExport: () => reviewPane?.addWaitingComments?.(),
@@ -1409,6 +1411,7 @@ Office.onReady((info) => {
     // Tools tab: it reads Word and never writes to it.
     toolsPane = initToolsPane({
       sendRequest,
+      onDisconnect: pendingRequests.onClose,
       usedLabel,
       providersReady: () => providersPane?.whenRestored() ?? null,
       settings,

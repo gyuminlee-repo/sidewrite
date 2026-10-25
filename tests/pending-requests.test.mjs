@@ -76,3 +76,49 @@ test("taskpane.js ends the waiting requests when the socket closes", async () =>
   assert.match(src, /pendingRequests\.resolve\(msg\.request_id, msg\)/);
   assert.match(src, /pendingRequests\.add\(request_id, type, timeoutMs\)/);
 });
+
+test("the close listeners hear every close, after the requests are rejected", async () => {
+  const pending = createPendingRequests();
+  const p = pending.add("a", "ledger_check", 10_000);
+  p.catch(() => {});
+  const heard = [];
+  pending.onClose((e) => heard.push([e.message, pending.size]));
+  pending.onClose(() => {
+    throw new Error("a broken listener does not stop the others");
+  });
+  pending.onClose(() => heard.push(["second"]));
+  pending.rejectAll(new Error("lost"));
+  await assert.rejects(p, /lost/);
+  assert.deepEqual(heard, [["lost", 0], ["second"]]);
+});
+
+// A pane that waits for job_done keeps a table of jobs no request covers. A
+// closed socket never brings their job_done: each such pane must end its
+// table on close, through the onDisconnect that taskpane.js gives it. A pane
+// added later is held to the same rule.
+test("every pane that waits for job_done ends its jobs when the socket closes", async () => {
+  const { readFile, readdir } = await import("node:fs/promises");
+  const dir = new URL("../taskpane/shared/", import.meta.url);
+  const main = await readFile(new URL("taskpane.js", dir), "utf8");
+  const found = [];
+  for (const f of (await readdir(dir)).filter((x) => x.endsWith(".js"))) {
+    if (f === "taskpane.js" || f === "pending-requests.js") continue; // the mechanism itself
+    const src = await readFile(new URL(f, dir), "utf8");
+    if (!/job_done|\bjobs:\s*new Map\(/.test(src)) continue;
+    found.push(f);
+    assert.match(src, /\bonDisconnect = \(\) => \{\}/, `${f}: takes no onDisconnect`);
+    assert.match(
+      src,
+      /\bonDisconnect\(\(\) => [^\n]*dropJobs\(\)/,
+      `${f}: its jobs are not ended on close`,
+    );
+    const init = /export function (init\w+)\(/.exec(src)?.[1];
+    assert.ok(init, `${f}: no init function`);
+    const call = new RegExp(`= ${init}\\(\\{[\\s\\S]*?\\n {4}\\}\\);`).exec(main)?.[0];
+    assert.ok(call, `taskpane.js does not call ${init}`);
+    assert.match(call, /onDisconnect: pendingRequests\.onClose/, `${init}: no onDisconnect`);
+  }
+  // The check finds the panes it is about (a check that finds none passes on anything).
+  for (const f of ["review-pane.js", "response-pane.js", "tools-pane.js"])
+    assert.ok(found.includes(f), f);
+});
