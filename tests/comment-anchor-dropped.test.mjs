@@ -934,3 +934,54 @@ test("an author piece next to a piece of the tool: a cut over both stays refused
     assert.equal(items[1].text, TEXT, find);
   }
 });
+
+// Repeated fragments (PR #49 review follow-up): the pieces a cut meets are
+// the tool's own only when they are its texts one after another, each text
+// once. The daemon sends one entry per distinct text and drops a text found
+// more than once in the paragraph (review-tools.mjs ownInsertions has()),
+// but it compares with word spaces kept, the pane without: own "a b" is
+// found once in "a b ab" there, and "abab" here. An own text used again,
+// or a short own text repeated inside a longer insertion, is the author's.
+const frag = (ins) => {
+  const lead = "Crews logged ";
+  const text = `${lead}${ins} span.`;
+  return {
+    text,
+    pending: [lead.length, lead.length + ins.length],
+    cut: (find, own) => ({
+      ...edit(find, "", { own_insertions: own }),
+      expected_before_hash: paragraphHash(text),
+    }),
+  };
+};
+
+test("repeated fragments: an own text that covers an insertion only by repeating is refused", async () => {
+  for (const [ins, own] of [
+    ["the cat the ", ["the "]],
+    ["the the ", ["the "]],
+    ["abab", ["ab"]],
+    // Spacing differs: the daemon finds "a b" once, the pane reads "abab".
+    ["a b ab", ["a b"]],
+    // Two records of one text: one entry, as the daemon sends it.
+    ["abab", ["ab", "ab"]],
+  ]) {
+    const f = frag(ins);
+    const { items, state } = fakeDoc(["Title", f.text], { pending: f.pending });
+    const r = await toolTrackedEdit(f.cut(ins, own));
+    assert.deepEqual([ins, r.ok, r.code, r.applied], [ins, false, "WholeAuthorInsertion", false]);
+    assert.deepEqual([items[1].text, state.comments.length], [f.text, 0], ins);
+  }
+});
+
+test("repeated fragments: each own text once still covers, alone or side by side", async () => {
+  for (const [ins, own] of [
+    ["ab", ["ab"]],
+    ["ab cd", ["ab", " cd"]],
+  ]) {
+    const f = frag(ins);
+    const { items } = fakeDoc(["Title", f.text], { pending: f.pending });
+    const r = await toolTrackedEdit(f.cut(ins, own));
+    assert.deepEqual([ins, r.ok, r.code], [ins, true, undefined]);
+    assert.equal(items[1].text, "Crews logged  span.", ins);
+  }
+});

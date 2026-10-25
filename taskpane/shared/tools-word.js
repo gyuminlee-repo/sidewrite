@@ -2216,14 +2216,17 @@ export async function insertionAround(context, para, place, cut, own = []) {
   const key = (t) => String(t).replace(/[\s\u0005]+/g, "");
   const owns = [...new Set((Array.isArray(own) ? own : []).map(key).filter(Boolean))];
   // t is the tool's texts one after another (two edits side by side, which
-  // Word may keep as one insertion).
+  // Word may keep as one insertion), each text at most once: the daemon
+  // sends one entry per text and only texts found once in the paragraph,
+  // so a text that covers t by repeating is the author's words.
   const covered = (t) => {
     const s = key(t);
-    if (!s) return false;
-    const ok = [true];
-    for (let i = 1; i <= s.length; i++)
-      ok[i] = owns.some((o) => o.length <= i && ok[i - o.length] && s.endsWith(o, i));
-    return ok[s.length];
+    const from = (i, used) =>
+      i === s.length ||
+      owns.some(
+        (o, n) => !used.has(n) && s.startsWith(o, i) && from(i + o.length, new Set(used).add(n)),
+      );
+    return Boolean(s) && from(0, new Set());
   };
   // The whole chain of adjacent pieces around a group, pieces that do not
   // meet place included, in document order; null when it cannot be told.
