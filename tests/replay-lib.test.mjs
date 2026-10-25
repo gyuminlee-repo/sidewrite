@@ -230,6 +230,7 @@ test("how a turn ended: ok, failed, timeout, or no turn at all", () => {
   assert.deepEqual(ok, {
     outcome: "ok",
     reason: null,
+    reason_kind: null,
     seconds: 41,
     model: "m1",
     model_line: null,
@@ -299,7 +300,7 @@ test("a pane error explains a failed turn even when the driver step succeeded", 
   assert.equal(normal.outcome, "no_turn");
 });
 
-test("summary includes the pane error reason without changing the failure count key", () => {
+test("summary gives the class of a pane error, not its text, without changing the failure count key", () => {
   const message = 'Request "review_refresh" timed out';
   const turn = turnResult("R1.1", {
     step: { ok: true, message_error: true, message },
@@ -313,7 +314,107 @@ test("summary includes the pane error reason without changing the failure count 
   );
   const text = summaryText(report, { seconds: 10, saved: true, models: {} });
   assert.match(text, /^turns that did not end well: 1 \(R1\.1 failed\)$/m);
-  assert.ok(text.includes(message));
+  assert.match(text, /^ {2}R1\.1 failed: pane error$/m);
+  assert.ok(!text.includes(message));
+  // The text stays with the turn (changes.json).
+  assert.equal(report[0].turn.reason, message);
+});
+
+test("a pane error after a turn the daemon ended well keeps the turn ok, apart", () => {
+  const message = 'Request "ledger_add" timed out';
+  const t = turnResult("R1.1", {
+    step: { ok: true, message_error: true, message },
+    log: "[review] turn done R1.1",
+    seconds: 10,
+  });
+  assert.deepEqual(
+    [t.outcome, t.reason, t.reason_kind, t.pane_message],
+    ["ok", null, null, message],
+  );
+  // A retry or a stop of the run cannot be read from the pane's line.
+  assert.equal(retryTurn([t]), false);
+  assert.equal(limitStop("R1.1", "ordinary", t), null);
+  const report = changesReport(
+    { comments: [{ ref: "R1.1", reviewer: 1, text: "Clarify the cart.", changes: [] }] },
+    [],
+    { "R1.1": t },
+  );
+  const text = summaryText(report, { seconds: 10, saved: true, models: {} });
+  assert.match(text, /^turns that did not end well: 0$/m);
+  assert.match(text, /^turns that ended well with a pane error shown: 1 \(R1\.1\)$/m);
+  assert.ok(!text.includes(message));
+  assert.equal(report[0].turn.pane_message, message);
+  // A turn the daemon ended with an error stays failed on the daemon reason.
+  const bad = turnResult("R1.2", {
+    step: { ok: true, message_error: true, message },
+    log: "[review] turn done R1.2 failed: The model declined this request.",
+    seconds: 10,
+  });
+  assert.deepEqual(
+    [bad.outcome, bad.reason, bad.reason_kind, bad.pane_message],
+    ["failed", "The model declined this request.", "daemon", undefined],
+  );
+});
+
+test("summary.txt: a reason that is a sentence of the manuscript gives only its class", () => {
+  const sentence = "The cart flux rose 12 mM once more in the second assay.";
+  const report = changesReport(
+    { comments: [{ ref: "R1.1", reviewer: 1, text: "Clarify the cart.", changes: [] }] },
+    [],
+    {
+      "R1.1": turnResult("R1.1", {
+        step: { ok: true },
+        log: `[review] turn done R1.1 failed: one-shot ended with error_during_execution: ${sentence}`,
+        seconds: 3,
+      }),
+    },
+    [
+      {
+        ref: "R1.1",
+        paragraph_index: 2,
+        ...turnResult("R1.1", {
+          step: { ok: false, error: `locator.click: ${sentence}` },
+          log: "",
+          seconds: 3,
+        }),
+      },
+    ],
+    [
+      {
+        ref: "R1.1",
+        ...turnResult("R1.1", {
+          step: { ok: true },
+          log: `[review] turn done R1.1 failed: Claude usage limit reached. ${sentence}`,
+          seconds: 3,
+        }),
+      },
+    ],
+  );
+  const text = summaryText(report, {
+    seconds: 9,
+    saved: true,
+    models: {},
+    extraction: [
+      {
+        batch: 1,
+        of: 1,
+        comments: 1,
+        sentences: 1,
+        ok: false,
+        error: `The model declined this request. ${sentence}`,
+        labelled: null,
+        unlabelled: [],
+      },
+    ],
+  });
+  for (const line of [
+    "  R1.1 failed: daemon error",
+    "  R1.1 follow-through failed: usage stop",
+    "  R1.1 rewrite p2 failed: driver error",
+    "  batch 1/1: 1 comments, 1 sentences, FAILED: refusal",
+  ])
+    assert.ok(text.includes(`\n${line}\n`), line);
+  for (const word of ["cart flux", "12 mM", "second assay"]) assert.ok(!text.includes(word), word);
 });
 
 test("what the guards refused, the rewrites and a model replaced after a refusal are read from the log of the turn", () => {
@@ -960,7 +1061,8 @@ test("summary.txt: counts, states, refusals, models and times; no text of the ma
       "latest completed follow-through checks: changes 0 in 0 paragraphs, questions 0",
       "edits a guard refused: NumberNeedsAuthor 2, ForbidBlocked 1",
       "turns that did not end well: 1 (R1.2 timeout)",
-      "  R1.2 timeout: x",
+      "  R1.2 timeout: timeout",
+      "turns that ended well with a pane error shown: 0",
       "turns run again after an API error: 0",
       "models asked for: edits opus, writing (the pane's own), judgments haiku",
       `models that ran, as the pane says: ${LINE}`,
@@ -1073,7 +1175,7 @@ test("summary.txt: the batches of the extraction, named terms, rewrites and the 
   for (const line of [
     "request extraction: 2 batches, ok 1, failed 1",
     "  batch 1/2: 7 comments, 38 sentences, labelled 6/7, unlabelled R2.1",
-    "  batch 2/2: 2 comments, 9 sentences, FAILED: timed out",
+    "  batch 2/2: 2 comments, 9 sentences, FAILED: timeout",
     "terms the reviewers named: 1 in 1 comments; still in the text: 1",
     "changes with words from the review: 1",
     "paragraphs written anew: 1 rewrites of 1 paragraphs, 2 parts recorded; stopped: 1",

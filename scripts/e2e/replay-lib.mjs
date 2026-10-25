@@ -274,10 +274,12 @@ export function replyRow(ref, kind, step) {
 // the model declined, one that ran out of time and one no end was seen of
 // are not tried again: the same request would end the same way, or a turn
 // may still be running.
+const API_ERROR = /^The turn ended on an API error/;
+const USAGE_LIMIT = /^Claude usage limit reached\.?(?: resets at (\S+))?/;
 export const retryTurn = (attempts) =>
   attempts.length === 1 &&
   attempts[0].outcome === "failed" &&
-  /^The turn ended on an API error/.test(attempts[0].reason ?? "");
+  API_ERROR.test(attempts[0].reason ?? "");
 
 // Whether a turn ends the run: it failed on the usage limit of the account
 // (daemon/limit-detect.mjs: "Claude usage limit reached." and, when the
@@ -287,10 +289,7 @@ export const retryTurn = (attempts) =>
 // or null for any other end: an API error is run again (retryTurn), a
 // refusal and a turn out of time say nothing about the next comment.
 export function limitStop(ref, kind, turn) {
-  const m =
-    turn?.outcome === "failed"
-      ? /^Claude usage limit reached\.?(?: resets at (\S+))?/.exec(turn.reason ?? "")
-      : null;
+  const m = turn?.outcome === "failed" ? USAGE_LIMIT.exec(turn.reason ?? "") : null;
   return m ? { ref, kind, resets: m[1] ?? null } : null;
 }
 
@@ -328,33 +327,70 @@ export function mergeAttempts(attempts) {
   return merged;
 }
 
+// The fixed class of an error text, or null when it is none of these. Only
+// the class goes into summary.txt: the text itself may quote the manuscript
+// or the answer of the model (daemon/oneshot.mjs puts both in its errors).
+export function errorClass(text) {
+  const s = String(text ?? "");
+  if (USAGE_LIMIT.test(s)) return "usage stop";
+  if (API_ERROR.test(s)) return "api error";
+  if (/^The model declined/.test(s)) return "refusal";
+  if (/^timed out\b|still running after/.test(s)) return "timeout";
+  return null;
+}
+
+// Why a turn did not end well, as one of a fixed set: timeout, no turn end,
+// pane error, driver error, usage stop, api error, refusal, daemon error.
+// reason_kind (turnResult) says where the reason came from.
+export function reasonClass(turn) {
+  if (turn?.outcome === "timeout") return "timeout";
+  if (turn?.outcome === "no_turn") return "no turn end";
+  if (turn?.reason_kind === "pane") return "pane error";
+  if (turn?.reason_kind === "driver") return "driver error";
+  return errorClass(turn?.reason) ?? "daemon error";
+}
+
 // One comment of the run: { step, log, seconds } of its propose step.
 // outcome: "ok", "failed" (the turn ended with an error: limit, refusal,
-// crash, or a pane error), "timeout" (the pane step gave up), "no_turn" (no turn was seen).
+// crash, or a pane error when the daemon logged no end of the turn),
+// "timeout" (the pane step gave up), "no_turn" (no turn was seen).
+// reason_kind: where the reason came from ("driver": the pane step,
+// "pane": the message line of the Review tab, "daemon": the daemon log).
+// pane_message: the error the message line showed. The line is shared by
+// every request of the tab, so after a turn the daemon logged as ended
+// well it does not fail the turn; it is kept here apart (changes.json).
 // line: the pane's model line right after the turn (readModelLine).
 export function turnResult(ref, { step, log, seconds, model = null, line = null }) {
   const t = turnFromLog(log, ref);
   let outcome = "ok";
   let reason = null;
+  let reason_kind = null;
+  const pane_message = step?.message_error === true && step.message ? step.message : null;
   if (step?.ok === false) {
     outcome = /still running after/.test(step.error ?? "") ? "timeout" : "failed";
     reason = step.error ?? null;
-  } else if (step?.message_error === true && step.message) {
+    reason_kind = "driver";
+  } else if (pane_message && !(t.ended && t.ok)) {
     outcome = "failed";
-    reason = step.message;
+    reason = pane_message;
+    reason_kind = "pane";
   }
   if (t.ended && !t.ok) {
     outcome = "failed";
     reason = t.error;
+    reason_kind = "daemon";
   } else if (!t.ended && outcome === "ok") {
     outcome = "no_turn";
     reason = "the daemon logged no end of a review turn for this comment";
+    reason_kind = "daemon";
   }
   const edits = line === null ? null : (readModelLine(line).edits ?? null);
   const follow = followFromLog(log, ref);
   return {
     outcome,
     reason,
+    reason_kind,
+    ...(pane_message && outcome === "ok" ? { pane_message } : {}),
     seconds,
     model: t.model ?? model,
     model_line: edits?.text ?? null,
@@ -558,7 +594,9 @@ export function responsesReport(revision) {
     }));
 }
 
-// summary.txt: counts and times only, no text of the manuscript.
+// summary.txt: counts and times only, no text of the manuscript. Why a turn
+// or a batch failed is written as a fixed class (reasonClass, errorClass);
+// the text of the reason stays in changes.json and the daemon log.
 //   models: { asked: { edits, writing, judgments }, line } (line: the pane's
 //   own line at the end of the run); source: how the manuscript was opened;
 //   paragraphCheck: revision.consistency after "Check revised paragraphs".
@@ -608,6 +646,7 @@ export function summaryText(
     ...answerTurns.filter((t) => t.attempts).map((t) => `${t.ref} after answers`),
     ...followTurns.filter((t) => t.attempts).map((t) => `${t.ref} follow-through`),
   ];
+  const paneErrors = allTurns.filter((t) => t.outcome === "ok" && t.pane_message);
   const asked = models?.asked ?? {};
   const failures = modelFailures(models?.line, lastTurn);
   const drifted = turns.filter((c) => c.turn.other_model);
@@ -667,7 +706,7 @@ export function summaryText(
         `  batch ${b.batch}/${b.of}: ${b.comments} comments, ${b.sentences} sentences, ${
           b.ok
             ? `labelled ${b.labelled}/${b.comments}${b.unlabelled.length ? `, unlabelled ${b.unlabelled.join(",")}` : ""}`
-            : `FAILED: ${b.error.slice(0, 200)}`
+            : `FAILED: ${errorClass(b.error) ?? "error"}`
         }`,
     ),
     `comments with extracted requests: ${withRequests}; without: ${report.length - withRequests}`,
@@ -692,8 +731,9 @@ export function summaryText(
     `edits a guard refused: ${list(codes) || "none"}`,
     `turns that did not end well: ${bad.length}${bad.length ? ` (${bad.join(", ")})` : ""}`,
     ...allTurns
-      .filter((t) => t.outcome !== "ok" && t.reason)
-      .map((t) => `  ${t.label} ${t.outcome}: ${String(t.reason).replace(/\s+/g, " ").trim()}`),
+      .filter((t) => t.outcome !== "ok")
+      .map((t) => `  ${t.label} ${t.outcome}: ${reasonClass(t)}`),
+    `turns that ended well with a pane error shown: ${paneErrors.length}${paneErrors.length ? ` (${paneErrors.map((t) => t.label).join(", ")})` : ""}`,
     `turns run again after an API error: ${again.length}${again.length ? ` (${again.join(", ")})` : ""}`,
     `models asked for: edits ${asked.edits ?? "-"}, writing ${asked.writing ?? "(the pane's own)"}, judgments ${asked.judgments ?? "(the pane's own)"}`,
     `models that ran, as the pane says: ${models?.line || "-"}`,
