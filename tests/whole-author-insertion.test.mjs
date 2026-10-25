@@ -85,6 +85,17 @@ test("ownInsertions: the texts recorded in that paragraph, by id; by index only 
   assert.deepEqual(ownInsertions(undefined, 1, IDS, now), []);
 });
 
+test("ownInsertions: one entry per text, none for a text found twice in the paragraph", () => {
+  // The pane lets each entry cover one piece (tools-word.js insertionAround
+  // covered); a text the tool put in twice is not told apart, so neither is
+  // sent and the cut is refused as the author's.
+  const now = "Crews fitted bolts bolts here.";
+  const twice = { paragraph_index: 1, paragraph_id: "U1", text: "bolts ", after: now };
+  assert.deepEqual(ownInsertions([twice, twice], 1, IDS, now), []);
+  const once = { ...twice, text: "fitted", after: now };
+  assert.deepEqual(ownInsertions([once, once], 1, IDS, now), ["fitted"]);
+});
+
 test("daemon: a deletion carries the texts the tool put into its paragraph; none goes out when there are none", async () => {
   const inserted = [
     { paragraph_index: 1, paragraph_id: "U1", text: "New bearings were fitted." },
